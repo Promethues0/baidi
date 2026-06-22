@@ -10,6 +10,9 @@ type Store interface {
 	PolicyBundle(ctx context.Context) (PolicyBundle, error)
 	Apps(ctx context.Context) (AppBundle, error)
 	Users(ctx context.Context) (UserDirBundle, error)
+	Devices(ctx context.Context) (DeviceBundle, error)
+	Audit(ctx context.Context) (AuditBundle, error)
+	Gateway(ctx context.Context) (GatewayBundle, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

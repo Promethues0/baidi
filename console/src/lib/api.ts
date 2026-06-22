@@ -66,3 +66,28 @@ export interface DirUser {
   roles: string[];
 }
 export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; users: DirUser[] }
+
+/* ── 终端管理（store.DeviceBundle）── */
+export interface DeviceTrustSetting { enabled: boolean; bindMethod: 'auto' | 'approval'; perUserQuota: number }
+export interface Device {
+  id: string; name: string; fingerprint: string; user: string;
+  assetClass: 'enterprise' | 'personal' | 'managed'; os: string; clientVersion: string;
+  online: boolean; tags: string[];
+}
+export interface ApprovalEvent { time: string; kind: 'submit' | 'login' | 'review' | 'notify' | 'risk'; title: string; detail: string }
+export interface TrustApproval {
+  id: string; user: string; device: string; fingerprint: string; submittedAt: string;
+  reason: string; status: 'pending' | 'approved' | 'rejected'; timeline: ApprovalEvent[];
+}
+export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[]; approvals: TrustApproval[] }
+
+/* ── 审计中心（store.AuditBundle）── */
+export interface DiskStat { usedPct: number; totalGB: number; retainDays: number }
+export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail' }
+export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
+
+/* ── 网关与隐身（store.GatewayBundle）── */
+export interface GwNode { name: string; ip: string; role: 'primary' | 'backup'; status: string; loadPct: number }
+export interface GwZone { key: string; name: string; status: 'healthy' | 'degraded' | 'down'; apps: number; clients: number; nodes: GwNode[] }
+export interface SpaStatus { generation: string; authMode: string; protectedPorts: string[]; hidden: boolean; knockOk: boolean }
+export interface GatewayBundle { zones: GwZone[]; spa: SpaStatus }

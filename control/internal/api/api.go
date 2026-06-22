@@ -54,7 +54,41 @@ func (s *Server) Routes() http.Handler {
 	// 访问者目录：身份源 + 组织树 + 用户清单
 	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
 
+	// 终端管理：信任设置 + 设备清单 + 绑定审批
+	mux.HandleFunc("GET /api/v1/devices", s.handleDevices)
+	// 审计中心：分类聚合 + 磁盘水位 + 日志
+	mux.HandleFunc("GET /api/v1/audit", s.handleAudit)
+	// 网关与隐身：区域/节点拓扑 + SPA
+	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
+
 	return mux
+}
+
+func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Devices(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load devices")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Audit(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load audit")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Gateway(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load gateway")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
 }
 
 func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {

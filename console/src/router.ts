@@ -7,7 +7,10 @@ const BUILT: Record<string, () => Promise<unknown>> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
   '/business/policy': () => import('@/views/Policy.vue'),
   '/business/apps': () => import('@/views/Apps.vue'),
-  '/business/users': () => import('@/views/Users.vue')
+  '/business/users': () => import('@/views/Users.vue'),
+  '/business/devices': () => import('@/views/Devices.vue'),
+  '/security/audit': () => import('@/views/Audit.vue'),
+  '/security/gateway': () => import('@/views/Gateway.vue')
 };
 
 const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>

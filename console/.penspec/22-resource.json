@@ -1,0 +1,56 @@
+{
+  "route": "/resource/objects",
+  "file": "ResourceObjects.vue",
+  "title": "统一资源对象",
+  "centerKey": "resource",
+  "sub": "所有\"能被访问的东西\"归一为资源对象 · 带接入形态属性（ZL-FR-102）",
+  "headControls": ["badge:idle:mock（起 control 连真实）", "+ 新建资源"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "filter",
+            "controls": [
+              { "kind": "search", "text": "搜索资源 / 地址" },
+              { "kind": "select", "text": "类型" },
+              { "kind": "select", "text": "接入形态" },
+              { "kind": "select", "text": "健康" }
+            ],
+            "count": "6 / 6"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "资源", "width": 160 },
+              { "title": "类型", "align": "center", "width": 84 },
+              { "title": "分级", "align": "center", "width": 76 },
+              { "title": "地址" },
+              { "title": "接入形态", "align": "center", "width": 84 },
+              { "title": "被授权", "align": "center", "width": 80 },
+              { "title": "二次鉴权", "align": "center", "width": 80 },
+              { "title": "健康", "align": "center", "width": 76 },
+              { "title": "", "align": "center", "width": 60 }
+            ],
+            "rows": [
+              ["OA 办公系统", "应用", "—", "https://oa.corp", "pill:ssl:ssl", "0 策略", "—", "badge:ok:可达", "详情"],
+              ["GitLab", "应用", "—", "https://gitlab.corp", "badge:accent:auto", "1 策略", "—", "badge:ok:可达", "详情"],
+              ["核心数据库", "服务", "—", "db.corp:5432", "badge:accent:auto", "1 策略", "🔒", "badge:ok:可达", "详情"],
+              ["财务系统", "应用", "—", "https://finance.corp", "pill:ssl:ssl", "1 策略", "🔒", "badge:ok:可达", "详情"],
+              ["上海分支网段", "网段", "—", "10.20.0.0/16", "pill:ipsec:ipsec", "0 策略", "—", "badge:idle:未知", "详情"],
+              ["堡垒机 SSH", "服务", "—", "bastion.corp:22", "pill:mesh:mesh", "0 策略", "🔒", "badge:danger:不可达", "详情"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

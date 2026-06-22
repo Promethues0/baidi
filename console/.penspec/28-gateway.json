@@ -1,0 +1,92 @@
+{
+  "route": "/gateway/mesh",
+  "file": "GatewayMesh.vue",
+  "title": "Mesh 中继/连接器",
+  "centerKey": "gateway",
+  "sub": "P2P 直连优先，NAT 难穿透时经 derp 中继兜底 · 子网路由暴露内网（DP-01 路径B / 差异化支柱）",
+  "headControls": [
+    "82% P2P 直连率",
+    "6 在网节点",
+    "2 中继回退",
+    "3/3 可达服务·张伟"
+  ],
+  "sections": [
+    {
+      "cols": "1.6fr 1fr",
+      "cards": [
+        {
+          "title": "Mesh 网络拓扑",
+          "sub": "点节点查看其对等连接 · 星型网关产品画不出这张图",
+          "body": {
+            "kind": "chart",
+            "chartType": "bar",
+            "legend": [
+              "P2P 直连（WireGuard）",
+              "中继回退（derp）",
+              "子网路由",
+              "策略阻断（实时求值）"
+            ],
+            "note": "网络拓扑图：网关 zl-gw-hq-01（derp 中继+连接器）居中，设备节点 MBP-7F2A·张伟 / WS-330·王强 / ci-runner-01 / Pad-1180·陈静 / SRV-OPS·王强，子网 10.20.0.0/16 上海，服务节点 GitLab/核心数据库/堡垒机 SSH 按张伟视角策略实时放行或阻断；边标注 RTT（8ms~46ms），对称 NAT 节点走中继回退。"
+          }
+        },
+        {
+          "title": "derp 中继",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "区域" },
+              { "title": "中继会话", "align": "right", "width": 80 },
+              { "title": "状态", "align": "center", "width": 64 }
+            ],
+            "rows": [
+              ["华东(总部)", "2", "badge:ok:up"],
+              ["华南(DMZ)", "0", "badge:ok:up"],
+              ["内置兜底", "0", "badge:ok:up"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1.6fr 1fr",
+      "cards": [
+        {
+          "title": "控制面在网节点",
+          "sub": "未连控制面",
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "控制面暂无在网节点（起 zhulong-control + mesh 节点注册到 /ctl/mesh/peers 后，实时显示真实组网：节点公网候选与子网路由）。"
+          }
+        },
+        {
+          "title": "连接器 · 子网路由",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "连接器" },
+              { "title": "发布路由" },
+              { "title": "状态", "align": "center", "width": 64 }
+            ],
+            "rows": [
+              ["conn-sh-01", "10.20.0.0/16", "badge:ok:在线"],
+              ["conn-hq-01", "10.8.0.0/16、192.168.1.0/24", "badge:ok:在线"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "子网路由让 Mesh 节点直达内网网段，无需在每台内网主机装客户端（连接器 advertise，控制台审批生效）。"
+          }
+        }
+      ]
+    }
+  ]
+}

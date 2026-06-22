@@ -1,0 +1,128 @@
+{
+  "route": "/identity/pwd-policy",
+  "file": "IdentityPwdPolicy.vue",
+  "title": "口令策略",
+  "centerKey": "identity",
+  "sub": "本地账号库口令的复杂度 / 有效期 / 历史 / 锁定 · 仅对 source=local 账号生效 · 外部目录（LDAP/AD/OIDC）口令由源系统管理",
+  "headControls": ["badge:idle:mock"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "适用范围与复杂度",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "适用范围",
+                "kind": "select",
+                "value": "本地账号（source=local）",
+                "options": ["本地账号（source=local）", "全部账号"]
+              },
+              {
+                "label": "最小长度",
+                "kind": "input",
+                "value": "8 位"
+              },
+              {
+                "label": "包含小写字母 a-z",
+                "kind": "switch",
+                "value": "开"
+              },
+              {
+                "label": "包含大写字母 A-Z",
+                "kind": "switch",
+                "value": "开"
+              },
+              {
+                "label": "包含数字 0-9",
+                "kind": "switch",
+                "value": "开"
+              },
+              {
+                "label": "包含特殊字符 !@#$…",
+                "kind": "switch",
+                "value": "关"
+              },
+              {
+                "label": "禁止空口令",
+                "kind": "switch",
+                "value": "开"
+              },
+              {
+                "label": "弱口令黑名单",
+                "kind": "input",
+                "value": "12345678 · password · admin@123"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "有效期与历史",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "有效期",
+                "kind": "input",
+                "value": "90 天"
+              },
+              {
+                "label": "到期前提醒",
+                "kind": "input",
+                "value": "7 天"
+              },
+              {
+                "label": "禁止重复使用",
+                "kind": "input",
+                "value": "3 次"
+              },
+              {
+                "label": "最小修改间隔",
+                "kind": "input",
+                "value": "0 小时"
+              },
+              {
+                "label": "首次登录强制改密",
+                "kind": "switch",
+                "value": "开"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "当前策略摘要",
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "≥8 位 · 需含 小写/大写/数字 · 90 天有效 · 禁复用前 3 次 · 首登强制改密 · 适用 本地账号"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "操作",
+          "sub": "改动 ≤60s 下发在线端点 · 写审计（mock 降级，重启丢失）",
+          "body": {
+            "kind": "toolbar",
+            "items": ["恢复默认", "保存策略"]
+          }
+        }
+      ]
+    }
+  ]
+}

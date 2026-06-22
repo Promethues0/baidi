@@ -1,0 +1,35 @@
+{
+  "route": "/gateway",
+  "file": "Gateways.vue",
+  "title": "网关清单",
+  "centerKey": "gateway",
+  "sub": "同一镜像按角色裁剪启用 · 资源水位实时（ZL-FR-406）",
+  "headControls": ["纳管网关"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "网关" },
+              { "title": "角色", "width": 120 },
+              { "title": "能力", "width": 160 },
+              { "title": "CPU", "width": 120 },
+              { "title": "内存", "width": 120 },
+              { "title": "会话", "align": "right", "width": 80 },
+              { "title": "状态", "align": "center", "width": 90 }
+            ],
+            "rows": [
+              ["zl-gw-hq-01", "ALL-IN-ONE", "pill:ssl:SSL pill:mesh:Mesh pill:ipsec:IPSec", "41%", "63%", "612", "badge:ok:在线"],
+              ["zl-gw-dmz-02", "接入网关", "pill:ssl:SSL pill:mesh:Mesh", "58%", "71%", "330", "badge:ok:在线"],
+              ["zl-gw-branch-sh", "站点网关", "pill:ipsec:IPSec pill:mesh:Mesh", "22%", "49%", "0", "badge:warn:降级"],
+              ["zl-gw-branch-gz", "站点网关", "pill:ipsec:IPSec", "0%", "0%", "0", "badge:danger:离线"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

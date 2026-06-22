@@ -1,0 +1,28 @@
+{
+  "name": "baidi-console",
+  "version": "0.1.0",
+  "private": true,
+  "description": "白帝 · 零信任访问控制系统 — 控制台（Vue3 + Arco Design Vue）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4193",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@arco-design/web-vue": "^2.57.0",
+    "echarts": "^5.5.1",
+    "pinia": "^3.0.1",
+    "vue": "^3.4.38",
+    "vue-echarts": "^7.0.3",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}

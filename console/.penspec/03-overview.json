@@ -1,0 +1,116 @@
+{
+  "route": "/monitor/dashboard",
+  "file": "MonitorDashboard.vue",
+  "title": "安全监控大屏",
+  "centerKey": "overview",
+  "sub": "聚合自统一审计流 + 设备 / 用户库 · 实时只读",
+  "headControls": ["badge:idle:mock", "刷新"],
+  "sections": [
+    {
+      "cols": "repeat(4, 1fr)",
+      "cards": [
+        {
+          "body": {
+            "kind": "stat",
+            "label": "在线设备",
+            "value": "186",
+            "unit": "/ 240",
+            "trend": "在线率 78%",
+            "tone": "ok"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "用户总数",
+            "value": "312",
+            "trend": "纳管账号 · 含禁用"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "锁定 / 禁用",
+            "value": "4",
+            "trend": "需关注账号状态",
+            "tone": "warn"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "威胁事件",
+            "value": "288",
+            "trend": "拒绝 / 失败 / 二次鉴权聚合",
+            "tone": "danger"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(2, 1fr)",
+      "cards": [
+        {
+          "title": "审计类别分布",
+          "sub": "按事件类别聚合的统一审计流计数",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "访问决策", "val": "1284", "pct": 100 },
+              { "label": "登录认证", "val": "642", "pct": 50 },
+              { "label": "策略变更", "val": "73", "pct": 6 },
+              { "label": "配置变更", "val": "41", "pct": 3 }
+            ]
+          }
+        },
+        {
+          "title": "判定分布",
+          "sub": "放行 / 拒绝 / 二次鉴权 / 成功 / 失败 占比",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "允许", "val": "1106", "pct": 100, "tone": "ok" },
+              { "label": "二次鉴权", "val": "138", "pct": 12, "tone": "warn" },
+              { "label": "拒绝", "val": "96", "pct": 9, "tone": "danger" },
+              { "label": "成功", "val": "588", "pct": 53, "tone": "ok" },
+              { "label": "失败", "val": "54", "pct": 5, "tone": "danger" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(2, 1fr)",
+      "cards": [
+        {
+          "title": "风险用户 TOP",
+          "sub": "按累计风险分排序的高风险账号",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "1  wang.lei@flk", "right": "82", "badge": { "tone": "danger", "text": "82" } },
+              { "main": "2  contractor.zhao", "right": "67", "badge": { "tone": "warn", "text": "67" } },
+              { "main": "3  li.fang@flk", "right": "51", "badge": { "tone": "warn", "text": "51" } },
+              { "main": "4  svc-backup", "right": "38", "badge": { "tone": "accent", "text": "38" } },
+              { "main": "5  chen.bo@flk", "right": "22", "badge": { "tone": "accent", "text": "22" } }
+            ]
+          }
+        },
+        {
+          "title": "最近威胁事件",
+          "sub": "命中拒绝 / 失败 / 二次鉴权的最近审计事件",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "访问内网财务系统", "sub": "contractor.zhao · 设备未越狱检测失败 · 拒绝接入", "badge": { "tone": "danger", "text": "拒绝" } },
+              { "main": "账号密码登录", "sub": "wang.lei@flk · 连续 6 次密码错误 · 触发防爆破", "badge": { "tone": "danger", "text": "失败" } },
+              { "main": "访问运维堡垒机", "sub": "li.fang@flk · 异地登录 · 要求短信二次鉴权", "badge": { "tone": "warn", "text": "二次鉴权" } },
+              { "main": "访问对象存储", "sub": "svc-backup · 非工作时段 · 时段策略拒绝", "badge": { "tone": "danger", "text": "拒绝" } },
+              { "main": "OTP 二次校验", "sub": "chen.bo@flk · TOTP 校验失败", "badge": { "tone": "danger", "text": "失败" } }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

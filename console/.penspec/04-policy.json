@@ -1,0 +1,70 @@
+{
+  "route": "/policy",
+  "file": "Policy.vue",
+  "title": "统一策略",
+  "centerKey": "policy",
+  "sub": "一份策略，三个执行点 · 编译器翻译到 Mesh / SSL / IPSec 数据面（ZL-FR-104）· 求值序：deny > allow > 默认拒绝",
+  "headControls": ["新建策略"],
+  "sections": [
+    {
+      "cols": "1.6fr 1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "策略 ID" },
+              { "title": "动作", "align": "center", "width": 70 },
+              { "title": "条件", "align": "center", "width": 64 },
+              { "title": "模式", "align": "center", "width": 74 },
+              { "title": "命中", "align": "right", "width": 72 },
+              { "title": "启用", "align": "center", "width": 56 },
+              { "title": "", "align": "center", "width": 92 }
+            ],
+            "rows": [
+              ["pol-rd-database\ngroup:研发-动态，tag:ci-runner → service:db.corp:5432，app:gitlab", "badge:ok:允许", "badge:accent:2", "pill:mesh:auto", "4,210", "开", "编辑 删除"],
+              ["pol-oa-all\ngroup:全体员工 → app:oa.corp", "badge:ok:允许", "—", "pill:ssl:ssl", "12,880", "开", "编辑 删除"],
+              ["pol-branch-erp\nsite:上海分支 → subnet:10.20.0.0/16", "badge:ok:允许", "—", "pill:ipsec:ipsec", "1,340", "开", "编辑 删除"],
+              ["pol-finance-deny-byod\ngroup:BYOD → app:finance", "badge:danger:拒绝", "—", "pill:mesh:auto", "96", "开", "编辑 删除"],
+              ["pol-finance-fin\ngroup:财务 → app:finance", "badge:ok:允许", "badge:accent:1", "pill:ssl:ssl", "870", "开", "编辑 删除"],
+              ["pol-ops-ssh\ngroup:运维 → service:*.corp:22", "badge:ok:允许", "badge:accent:2", "pill:mesh:mesh", "220", "关", "编辑 删除"]
+            ]
+          }
+        },
+        {
+          "title": "编译预览 · pol-rd-database",
+          "body": {
+            "kind": "text",
+            "lines": [
+              "主体    group:研发-动态，tag:ci-runner",
+              "客体    service:db.corp:5432，app:gitlab",
+              "条件    posture: disk_encrypted；auth: mfa",
+              "",
+              "[CEL]",
+              "allow if subject in [\"group:研发-动态\", \"tag:ci-runner\"]",
+              "  access resource in [\"service:db.corp:5432\", \"app:gitlab\"]",
+              "  when device.posture.compliant &&",
+              "       auth.strength >= mfa",
+              "",
+              "↓ 编译器 · 默认拒绝优先",
+              "",
+              "[pill:mesh:mesh] Mesh 执行点 · netmap + 包过滤          已下发",
+              "# netmap ACL (端侧执行)",
+              "allow group:研发-动态,tag:ci-runner",
+              "  -> service:db.corp:5432,app:gitlab",
+              "",
+              "[pill:ssl:ssl] SSL 执行点 · 代理授权表 + SPA           已下发",
+              "# proxy_acl + spa_allow",
+              "rule { allow",
+              "  who: group:研发-动态, tag:ci-runner",
+              "  res: service:db.corp:5432, app:gitlab }",
+              "",
+              "[pill:ipsec:ipsec] IPSec 执行点 · selector / SA（站点粒度）   不适用",
+              "（无 subnet 客体，IPSec 站点粒度不适用 · 取交集后为空）"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,92 @@
+{
+  "route": "/identity/auth",
+  "file": "IdentityAuth.vue",
+  "title": "认证方式与 MFA",
+  "centerKey": "identity",
+  "sub": "主认证 → MFA 判定 → 令牌签发（ZL-FR-501..506）· 每种方式可独立配置 · 管理员强制 MFA 为安全门禁（REQ-SEC-007）",
+  "headControls": ["badge:idle:mock", "5/10 主认证", "2/4 二次认证"],
+  "sections": [
+    {
+      "cols": "360px 1fr",
+      "cards": [
+        {
+          "title": "认证方式",
+          "sub": "主认证第一因子 · 高敏/首登 step-up",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "主认证方式", "sub": "登录第一因子" },
+              { "main": "账号密码", "sub": "argon2 · 强度策略", "right": "开" },
+              { "main": "域账号（LDAP/AD）", "sub": "企业目录对接", "right": "关" },
+              { "main": "短信验证码", "sub": "系统级自动填充", "right": "开" },
+              { "main": "邮箱验证码", "sub": "SMTP 一次性码", "right": "关" },
+              { "main": "扫码登录", "sub": "已登录端扫码", "right": "开" },
+              { "main": "第三方扫码", "sub": "企微/钉钉/飞书", "right": "关" },
+              { "main": "国密证书（SM2）", "sub": "SM2 双证 · CA 信任", "badge": { "tone": "accent", "text": "选中" }, "right": "开" },
+              { "main": "国密 UKey", "sub": "智能密码钥匙", "right": "关" },
+              { "main": "生物识别", "sub": "端侧 · 模板不出设备", "right": "开" },
+              { "main": "RADIUS", "sub": "对接既有认证", "right": "关" },
+              { "main": "二次认证（MFA）", "sub": "高敏 / 首登 step-up" },
+              { "main": "TOTP 动态令牌", "sub": "管理员 MFA 保底", "badge": { "tone": "warn", "text": "锁定" }, "right": "开" },
+              { "main": "WebAuthn / FIDO2", "sub": "无密码 Passkey", "right": "开" },
+              { "main": "推送确认", "sub": "App 一键确认", "right": "关" },
+              { "main": "硬件令牌 OTP", "sub": "OATH 离线令牌", "right": "关" }
+            ]
+          }
+        },
+        {
+          "title": "国密证书（SM2）",
+          "sub": "国密 SM2 数字证书认证，服务账号 / 无人值守节点主认证方式，绑定信任 CA。",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "信任 CA", "kind": "input", "value": "Zhulong GM Root CA" },
+              { "label": "撤销检查", "kind": "select", "value": "OCSP 实时", "options": ["OCSP 实时", "CRL 列表", "关闭（演示）"] },
+              { "label": "OCSP 地址", "kind": "input", "value": "http://ocsp.corp.com" },
+              { "label": "主体匹配字段", "kind": "select", "value": "CN（通用名）", "options": ["CN（通用名）", "SAN（备用名）", "OU（组织单元）"] },
+              { "label": "要求双证（签名+加密）", "kind": "switch", "value": "开" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(3, 1fr)",
+      "cards": [
+        {
+          "title": "MFA 策略（DP-05 / DP-14）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "强制范围", "sub": "首次登录与高敏资源强制", "right": "首次登录 + 高敏资源" },
+              { "main": "二次鉴权方式", "sub": "生物优先，回退 OTP", "right": "生物优先 → OTP 回退" },
+              { "main": "管理员强制 MFA", "sub": "REQ-SEC-007 · 关闭需二次确认", "right": "开" }
+            ]
+          }
+        },
+        {
+          "title": "令牌签发（ZL-FR-504/505）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "默认签名", "sub": "EdDSA (Ed25519) · DP-14", "badge": { "tone": "ok", "text": "启用" } },
+              { "main": "国密双轨", "sub": "SM2 签名套件 · 信创随策略下发", "right": "关" },
+              { "main": "JWKS 轮换", "sub": "kid 轮换 · 旧 key 宽限 7 天", "right": "上次 2026-06-03" }
+            ]
+          }
+        },
+        {
+          "title": "账号保护（REQ-SEC-012/013）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "失败锁定", "sub": "连续失败锁定账户", "right": "5 次 / 锁 15 分钟" },
+              { "main": "密码强度", "sub": "argon2 存储 · 复杂度策略", "right": "≥10 位 · 4 类取 3" },
+              { "main": "API Token", "sub": "仅创建时展示一次", "badge": { "tone": "ok", "text": "已生效" } }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

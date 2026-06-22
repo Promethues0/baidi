@@ -1,0 +1,46 @@
+{
+  "route": "/system/rbac",
+  "file": "IdentityRBAC.vue",
+  "title": "管理员权限",
+  "centerKey": "system",
+  "sub": "在三员（系统 / 安全 / 审计管理员）之上叠加细粒度权限点与数据范围 · 权限沿管理组上级链取交集",
+  "headControls": ["mock", "新建管理组"],
+  "tabs": ["管理组", "账号绑定", "权限速览"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "未绑定管理组的管理账号退回三员角色（向后兼容）。绑定管理组后，账号的有效权限 = 本组权限点 ∩ 上级链各组权限点（沿上级链取交集）；数据范围未开「全范围」时受组织树限制。"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "管理组名称", "width": 200 },
+              { "title": "上级组", "width": 160 },
+              { "title": "权限点", "align": "center", "width": 100 },
+              { "title": "数据范围", "align": "center", "width": 120 },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["安全管理组 · sec-admin", "—（顶级）", "6 项", "badge:accent:全范围", "开", "编辑 / 删除"],
+              ["华东安全运维组 · sec-ops-east", "安全管理组", "3 项", "badge:idle:受限 · 2 个组织", "开", "编辑 / 删除"],
+              ["审计管理组 · audit-admin", "—（顶级）", "3 项", "badge:accent:全范围", "开", "编辑 / 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

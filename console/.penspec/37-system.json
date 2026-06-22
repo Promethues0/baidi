@@ -1,0 +1,107 @@
+{
+  "route": "/system/report",
+  "file": "SystemReport.vue",
+  "title": "运营报表",
+  "centerKey": "system",
+  "sub": "报表为只读聚合（审计 / 用户）；定时订阅由网关内置调度按周期经 webhook / 钉钉渠道真发（邮件 / 厂商短信待外部网关）",
+  "headControls": ["badge:idle:mock", "刷新报表"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "报表查看",
+          "sub": "切换报表即时聚合 · 数据来自统一审计流与用户库",
+          "body": {
+            "kind": "toolbar",
+            "items": ["安全概览", "实体风险", "用户状态"]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(3, 1fr)",
+      "cards": [
+        {
+          "body": {
+            "kind": "stat",
+            "label": "审计事件总数",
+            "value": "2040",
+            "trend": "入 HMAC-SM3 审计链的全量事件"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "事件类别数",
+            "value": "4",
+            "trend": "登录 / 策略 / 配置 / 访问决策"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "拒绝 + 失败",
+            "value": "150",
+            "tone": "danger",
+            "trend": "命中拒绝 / 登录失败判定"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(2, 1fr)",
+      "cards": [
+        {
+          "title": "审计类别分布",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "访问决策", "val": "1284", "pct": 100 },
+              { "label": "登录认证", "val": "642", "pct": 50 },
+              { "label": "策略变更", "val": "73", "pct": 6 },
+              { "label": "配置变更", "val": "41", "pct": 3 }
+            ]
+          }
+        },
+        {
+          "title": "判定分布",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "允许", "val": "1106", "pct": 100, "tone": "ok" },
+              { "label": "二次鉴权", "val": "138", "pct": 12, "tone": "warn" },
+              { "label": "拒绝", "val": "96", "pct": 9, "tone": "danger" },
+              { "label": "成功", "val": "588", "pct": 53, "tone": "ok" },
+              { "label": "失败", "val": "54", "pct": 5, "tone": "danger" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "定时订阅",
+          "sub": "按周期生成报表并经通知渠道自动推送 · enabled=false 或空订阅 = 不推送（旧行为）",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "订阅标识", "width": 180 },
+              { "title": "报表", "width": 160 },
+              { "title": "推送周期", "align": "center", "width": 120 },
+              { "title": "通知渠道", "width": 180 },
+              { "title": "上次推送", "width": 150 },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["rs-daily-sec", "安全概览", "每 24 小时", "badge:accent:SOC Webhook", "从未推送", "关", "编辑 · 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

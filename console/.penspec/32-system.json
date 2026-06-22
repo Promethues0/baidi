@@ -1,0 +1,70 @@
+{
+  "route": "/system/certs",
+  "file": "SystemCerts.vue",
+  "title": "证书与密钥",
+  "centerKey": "system",
+  "sub": "国密 SM2 双证 / TLCP 服务证书 / CA 信任库 / 设备证书签发 · 到期前 30 天预警 · 吊销 ≤10s 经控制面下发（ZL-FR-105）",
+  "headControls": ["badge:idle:mock", "1 有效", "1 即将到期", "0 已过期"],
+  "sections": [
+    {
+      "cols": "1fr 360px",
+      "cards": [
+        {
+          "title": "证书清单",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "证书" },
+              { "title": "用途" },
+              { "title": "算法" },
+              { "title": "有效期" },
+              { "title": "状态" },
+              { "title": "操作", "align": "right" }
+            ],
+            "rows": [
+              ["网关签名证书 / CN=zl-gw-hq-01,O=ACME,C=CN", "签名", "SM2", "2026-09-01", "badge:ok:有效", "导出 · 续期 · 吊销"],
+              ["TLCP 服务证书 / CN=*.corp,O=ACME,C=CN", "服务端", "SM2", "2026-07-10", "badge:warn:即将到期", "导出 · 续期 · 吊销"]
+            ]
+          }
+        },
+        {
+          "title": "证书详情",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "名称", "v": "网关签名证书" },
+              { "k": "主体 DN", "v": "CN=zl-gw-hq-01,O=ACME,C=CN" },
+              { "k": "颁发者", "v": "Zhulong GM Root CA" },
+              { "k": "序列号", "v": "3A:F1:08:2C:9E" },
+              { "k": "生效", "v": "2025-09-01" },
+              { "k": "到期", "v": "2026-09-01" },
+              { "k": "状态", "v": "", "badge": { "tone": "ok", "text": "有效" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 360px",
+      "cards": [
+        {
+          "title": "",
+          "body": { "kind": "text", "lines": [] }
+        },
+        {
+          "title": "密钥与信任策略",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "默认密码套件", "kind": "input", "value": "TLCP · ECC-SM2-SM4-GCM-SM3" },
+              { "label": "抗量子混合（经典 + PQC 混合密钥交换）", "kind": "switch", "value": "开" },
+              { "label": "要求双证（签名证书 + 加密证书 GM/T 0024）", "kind": "switch", "value": "开" },
+              { "label": "吊销检查（OCSP 实时 / CRL）", "kind": "select", "value": "OCSP 实时", "options": ["OCSP 实时", "CRL 列表", "关闭"] },
+              { "label": "私钥保护（HSM / 软件密钥库）", "kind": "select", "value": "国密 HSM", "options": ["国密 HSM", "软件密钥库"] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

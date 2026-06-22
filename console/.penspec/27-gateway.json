@@ -1,0 +1,75 @@
+{
+  "route": "/gateway/ssl",
+  "file": "GatewaySsl.vue",
+  "title": "SSL 接入点",
+  "centerKey": "gateway",
+  "sub": "自有 TLS/TLCP 隧道 · 流量形态与正常 HTTPS 不可区分（ZL-NFR-004 / PDP-10）· SPA 先敲门后可见",
+  "headControls": ["badge:idle:mock", "select:zl-gw-hq-01（总部）"],
+  "sections": [
+    {
+      "cols": "1fr 1.5fr",
+      "cards": [
+        {
+          "title": "监听与承载（DTLS→TLS→443 降级链）",
+          "body": {
+            "kind": "steps",
+            "items": [
+              { "label": "DTLS（UDP 443）", "desc": "首选承载：低时延，UDP 通畅网络直接使用", "state": "active" },
+              { "label": "TLS（TCP 443）", "desc": "UDP 受限自动降级；与 HTTPS 同握手外观", "state": "active" },
+              { "label": "443 伪装兜底", "desc": "深度受限网络（酒店/咖啡厅/运营商 DPI）最后兜底，流量形态不可区分（锁定不可关闭）", "state": "active" }
+            ]
+          }
+        },
+        {
+          "title": "在线会话 · zl-gw-hq-01",
+          "sub": "4 条 · 吊销传播 ≤10s（ZL-FR-105）",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "用户 / 设备" },
+              { "title": "承载", "align": "center", "width": 92 },
+              { "title": "套件", "width": 120 },
+              { "title": "时长", "align": "right", "width": 80 },
+              { "title": "", "align": "center", "width": 80 }
+            ],
+            "rows": [
+              ["zhang.wei · MBP-7F2A · 10.8.3.142", "badge:ok:DTLS", "TLS1.3 X25519", "02:14:08", "吊销"],
+              ["li.na · iPhone-92 · 10.8.7.21", "badge:accent:TLS", "TLCP SM2/SM4", "00:48:33", "吊销"],
+              ["chen.jing · Pad-1180 · 10.8.9.77", "badge:warn:443伪装", "TLS1.3 X25519", "00:12:51", "吊销"],
+              ["svc.ci · ci-runner-01 · 10.8.0.55", "badge:ok:DTLS", "TLS1.3 X25519", "6天12h", "吊销"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1.5fr",
+      "cards": [
+        {
+          "title": "密码套件（Tongsuo 单一底座）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "TLS 1.3", "sub": "默认 · X25519 / AES-GCM", "badge": { "tone": "ok", "text": "启用" } },
+              { "main": "国密 TLCP", "sub": "SM2 双证 + SM4-GCM · 策略下发门控（PDP-07）", "right": "开关：开" },
+              { "main": "抗量子 PQC", "sub": "混合密钥交换（X25519 + ML-KEM）· Standard 档（PDP-12）", "right": "开关：关" },
+              { "main": "SPA 单包授权", "sub": "未授权探测 0 响应（服务隐身）", "badge": { "tone": "ok", "text": "强制" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "443 兜底不可关闭——运营商抗识别是产品核心承诺（M1 出口门禁：UDP 封锁网络实测可用）。"
+          }
+        }
+      ]
+    }
+  ]
+}

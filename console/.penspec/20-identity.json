@@ -1,0 +1,48 @@
+{
+  "route": "/identity/compliance",
+  "file": "IdentityCompliance.vue",
+  "title": "终端合规基线",
+  "sub": "合规检测项 → 不达标扣信任分 → 处置建议 · 空基线 = 不影响信任分（旧行为）",
+  "centerKey": "identity",
+  "headControls": ["badge:idle:mock", "+ 新建检测项"],
+  "tabs": ["检测项基线", "处置映射"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "ⓘ 检测项 weight=0 为纯告警不扣分；处置动作仅为建议，自动收权待与策略引擎联动。条件按检测维度逐项判定，不达标即触发对应处置建议。"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "检测项名称", "width": 200 },
+              { "title": "分类", "width": 110 },
+              { "title": "检测维度", "width": 130 },
+              { "title": "期望", "align": "center", "width": 110 },
+              { "title": "扣分", "align": "center", "width": 86 },
+              { "title": "严重级", "align": "center", "width": 96 },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["安全软件在运行 · av-present", "端点防护", "安全软件", "badge:ok:应满足", "-20", "badge:warn:高", "开", "编辑 删除"],
+              ["磁盘已加密 · disk-enc", "数据安全", "磁盘加密", "badge:ok:应满足", "-15", "badge:accent:中", "开", "编辑 删除"],
+              ["设备未越狱 / Root · no-jailbreak", "设备完整性", "越狱 / Root", "badge:idle:应不存在", "-40", "badge:danger:严重", "开", "编辑 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,72 @@
+{
+  "route": "/system/notify",
+  "file": "SystemNotify.vue",
+  "title": "告警通知",
+  "centerKey": "system",
+  "sub": "审计事件命中规则 → 去重 → 投递 · webhook / 钉钉真发，邮件 / 短信 / 企业微信待外部网关",
+  "headControls": ["badge:idle:mock"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "通知渠道",
+          "sub": "告警最终投递的出口。webhook / 钉钉为 HTTP POST 真发可测；邮件 / 短信 / 企业微信仅落配置占位，待外部网关对接。",
+          "body": {
+            "kind": "toolbar",
+            "items": ["+ 新建渠道"]
+          }
+        },
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "渠道名称", "width": 200 },
+              { "title": "类型", "align": "center", "width": 110 },
+              { "title": "投递地址" },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "操作", "align": "center", "width": 190 }
+            ],
+            "rows": [
+              ["运维 Webhook  ·  ops-webhook", "badge:accent:Webhook", "https://hook.corp.example/zhulong", "开", "编辑 / 测试 / 删除"],
+              ["SOC 钉钉群机器人  ·  soc-dingtalk", "badge:ok:钉钉", "https://oapi.dingtalk.com/robot/send?access_token=***", "开", "编辑 / 测试 / 删除"],
+              ["管理员短信  ·  admin-sms", "badge:idle:短信", "待外部网关 · 无需地址", "关", "编辑 / 测试 / 删除"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "告警规则",
+          "sub": "审计事件按「匹配类别 + 匹配判定」命中规则，经去重窗口抑制重复后，投递到选中的通知渠道。类别 / 判定留空 = 任意匹配。",
+          "body": {
+            "kind": "toolbar",
+            "items": ["+ 新建规则"]
+          }
+        },
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "规则名称", "width": 180 },
+              { "title": "匹配类别", "align": "center", "width": 110 },
+              { "title": "匹配判定", "width": 180 },
+              { "title": "投递渠道" },
+              { "title": "去重", "align": "center", "width": 92 },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "操作", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["拒绝 / 失败即告警  ·  rule-deny-fail", "任意", "tags:拒绝,失败", "tags:运维 Webhook,SOC 钉钉群机器人", "5 分钟", "开", "编辑 / 删除"],
+              ["主动防御处置告警  ·  rule-defense", "badge:danger:主动防御", "tags:锁定", "tags:SOC 钉钉群机器人", "10 分钟", "开", "编辑 / 删除"],
+              ["配置变更留痕  ·  rule-config", "badge:idle:配置变更", "任意", "tags:运维 Webhook", "不去重", "关", "编辑 / 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,47 @@
+{
+  "route": "/identity/groups",
+  "file": "IdentityGroups.vue",
+  "title": "用户组（动态组）",
+  "centerKey": "identity",
+  "sub": "动态组是 ABAC 的载体 · CEL 表达式与策略条件共用一套引擎（ZL-FR-106）",
+  "headControls": ["badge:idle:mock", "+ 新建用户组"],
+  "sections": [
+    {
+      "cols": "1.4fr 1fr",
+      "cards": [
+        {
+          "title": "用户组",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "用户组" },
+              { "title": "类型", "align": "center", "width": 86 },
+              { "title": "成员", "align": "right", "width": 80 },
+              { "title": "被策略引用", "align": "right", "width": 100 }
+            ],
+            "rows": [
+              ["研发-动态", "badge:accent:动态", "386", "1"],
+              ["全体员工", "badge:accent:动态", "1496", "1"],
+              ["BYOD", "badge:accent:动态", "217", "1"],
+              ["运维", "badge:idle:静态", "24", "1"],
+              ["财务", "badge:idle:静态", "41", "1"]
+            ]
+          }
+        },
+        {
+          "title": "研发-动态  badge:accent:动态组",
+          "sub": "编辑 · 删除",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "CEL 表达式（成员实时求值）", "v": "user.org_path.startsWith(\"/acme/研发中心\")\n  && user.mfa_enrolled" },
+              { "k": "求值说明", "v": "组织树研发子树 + 已注册 MFA；入职当天自动入组，吊销 MFA 即时出组（≤10s 传播）。" },
+              { "k": "成员抽样（386 人）", "v": "tags:张伟,陈静,+384" },
+              { "k": "被以下策略引用", "v": "pol-rd-database" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

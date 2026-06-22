@@ -1,0 +1,50 @@
+{
+  "route": "/system/backup",
+  "file": "SystemBackup.vue",
+  "title": "备份与恢复",
+  "centerKey": "system",
+  "sub": "配置 + 审计数据定时备份 · SM4 加密 · 升级 / 迁移 / 灾备前必做 · 支持本地与远程目标",
+  "headControls": ["badge:idle:mock", "从文件恢复", "立即备份"],
+  "sections": [
+    {
+      "cols": "380px 1fr",
+      "cards": [
+        {
+          "title": "自动备份策略",
+          "sub": "开关：开启",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "频率", "kind": "select", "value": "每天", "options": ["每小时", "每天", "每周"] },
+              { "label": "执行时刻", "kind": "input", "value": "03:00" },
+              { "label": "保留份数", "kind": "input", "value": "14 份" },
+              { "label": "备份目标", "kind": "select", "value": "本地磁盘", "options": ["本地磁盘", "远程 SFTP", "对象存储 S3"] },
+              { "label": "SM4 加密", "kind": "switch", "value": "开 · 国密对称加密备份文件" },
+              { "label": "含审计数据", "kind": "switch", "value": "开 · 审计链 + 事件日志" },
+              { "label": "含证书私钥", "kind": "switch", "value": "开 · 需 HSM 导出授权" }
+            ]
+          }
+        },
+        {
+          "title": "备份历史",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "时间" },
+              { "title": "类型" },
+              { "title": "范围" },
+              { "title": "大小" },
+              { "title": "加密" },
+              { "title": "结果" },
+              { "title": "操作", "align": "right" }
+            ],
+            "rows": [
+              ["2026-06-13 03:00:02", "pill:accent:自动", "全量配置 + 审计", "4.2 MB", "SM4", "badge:ok:成功", "下载 · 恢复"],
+              ["2026-06-12 03:00:01", "pill:accent:自动", "全量配置 + 审计", "4.1 MB", "SM4", "badge:ok:成功", "下载 · 恢复"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

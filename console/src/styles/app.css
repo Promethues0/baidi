@@ -1,0 +1,60 @@
+/* 白帝控制台 · 通用版式 */
+.zl-page { padding: 22px 24px; }
+.zl-page__head { display: flex; align-items: flex-end; justify-content: space-between; margin-bottom: 18px; }
+.zl-page__title { font-size: 20px; font-weight: 650; color: var(--ink); margin: 0; letter-spacing: -0.018em; }
+.zl-page__sub { font-size: 13px; color: var(--ink-3); margin-top: 4px; }
+
+.zl-card {
+  background: var(--surface);
+  border: 1px solid var(--line);
+  border-radius: var(--r-card);
+  box-shadow: var(--shadow-sm);
+  transition: box-shadow .16s ease, border-color .16s ease, transform .16s ease;
+}
+.zl-card__pad { padding: 18px 20px; }
+.zl-card__title { font-size: 14px; font-weight: 650; color: var(--ink); display: flex; align-items: center; gap: 8px; }
+
+.zl-grid { display: grid; gap: 16px; }
+.zl-stat { display: flex; flex-direction: column; gap: 6px; }
+.zl-stat__label { font-size: 12.5px; color: var(--ink-3); }
+.zl-stat__value { font-size: 26px; font-weight: 700; color: var(--ink); line-height: 1.1; letter-spacing: -0.02em; }
+/* 统计卡 hover 轻微上浮 */
+.zl-card.zl-stat-card:hover,
+.zl-card:has(.zl-stat):hover { transform: translateY(-1px); box-shadow: var(--shadow-md); }
+
+/* 表格行过渡（Arco 表格行 / 通用行）*/
+.arco-table-tr,
+.arco-table-td { transition: background-color .14s ease; }
+.zl-row { transition: background-color .14s ease; }
+.zl-stat__value .unit { font-size: 13px; font-weight: 500; color: var(--ink-3); margin-left: 4px; }
+
+.zl-badge {
+  display: inline-flex; align-items: center; gap: 5px; white-space: nowrap;
+  font-size: 11.5px; font-weight: 650; padding: 2px 9px; border-radius: var(--r-pill);
+  letter-spacing: .02em;
+}
+.zl-badge .dot { width: 7px; height: 7px; border-radius: 50%; }
+.zl-badge--ok { background: var(--ok-soft); color: var(--ok); }
+.zl-badge--warn { background: var(--warn-soft); color: var(--warn); }
+.zl-badge--danger { background: var(--danger-soft); color: var(--danger); }
+.zl-badge--accent { background: var(--accent-soft); color: var(--accent-2); }
+.zl-badge--idle { color: var(--ink-3); border: 1px solid var(--line-2); }
+
+.zl-mode-pill {
+  display: inline-block; white-space: nowrap;
+  font-family: var(--font-ui); font-size: 11px; font-weight: 700; letter-spacing: .04em;
+  padding: 2px 8px; border-radius: 6px; text-transform: uppercase;
+}
+/* 数据数字与策略 ID 不换行 */
+.data { white-space: nowrap; }
+.zl-mode--ssl { background: var(--warn-soft); color: var(--warn); }
+.zl-mode--mesh { background: var(--accent-soft); color: var(--accent-2); }
+.zl-mode--ipsec { background: color-mix(in oklab, var(--ink-3) 16%, transparent); color: var(--ink-2); }
+.zl-mode--auto { background: transparent; color: var(--ink-3); box-shadow: inset 0 0 0 1px var(--line-2); }
+.zl-page__sub a { color: var(--accent-2); text-decoration: none; }
+.zl-page__sub a:hover { text-decoration: underline; }
+
+.zl-soon {
+  display: inline-flex; align-items: center; justify-content: center;
+  min-height: 360px; flex-direction: column; gap: 10px; color: var(--ink-3);
+}

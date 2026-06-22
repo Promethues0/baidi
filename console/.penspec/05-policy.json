@@ -1,0 +1,156 @@
+{
+  "route": "/policy/simulator",
+  "file": "PolicySimulator.vue",
+  "title": "策略仿真器",
+  "centerKey": "policy",
+  "sub": "改策略前预演：输入（主体, 资源, 环境）→ 三执行点判定（ZL-FR-108 / ZL-FR-104 一致性）",
+  "headControls": ["badge:idle:本地引擎（降级）"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "toolbar",
+            "items": [
+              "预置场景：",
+              "健康设备 · 办公网 → GitLab（ALLOW）",
+              "不可信网络 → 风险触发 STEP-UP",
+              "越狱设备 → 信任跌破阈值 DENY",
+              "研发 → 核心数据库（高敏 STEP-UP）",
+              "BYOD → 财务系统（显式拒绝）"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1.5fr",
+      "cards": [
+        {
+          "title": "仿真输入",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "主体",
+                "kind": "select",
+                "value": "张伟 · 研发",
+                "options": ["张伟 · 研发", "李娜 · 财务", "王强 · 运维", "BYOD 平板（陈静）", "CI Runner（服务账号）", "上海分支（站点）"]
+              },
+              {
+                "label": "展开 → user:zhang.wei · group:研发-动态 · group:全体员工",
+                "kind": "input",
+                "value": ""
+              },
+              {
+                "label": "资源",
+                "kind": "select",
+                "value": "GitLab（app:gitlab）",
+                "options": ["OA 办公系统（app:oa.corp）", "GitLab（app:gitlab）", "核心数据库（service:db.corp:5432）", "财务系统（app:finance）", "上海分支网段（subnet:10.20.0.0/16）", "堡垒机 SSH（service:bastion.corp:22）"]
+              },
+              { "label": "已完成 MFA（auth_strength）", "kind": "switch", "value": "on" },
+              { "label": "终端基线通过（posture）", "kind": "switch", "value": "on" },
+              { "label": "工作时间内（time）", "kind": "switch", "value": "on" },
+              {
+                "label": "来源网络",
+                "kind": "select",
+                "value": "办公网 · 可信",
+                "options": ["办公网 · 可信", "VPN", "家庭网", "不可信 / 公网"]
+              },
+              { "label": "磁盘加密", "kind": "switch", "value": "on" },
+              { "label": "系统版本达标", "kind": "switch", "value": "on" },
+              { "label": "EDR 安全软件在位", "kind": "switch", "value": "on" },
+              { "label": "越狱 / Root（风险）", "kind": "switch", "value": "off" }
+            ]
+          }
+        },
+        {
+          "title": "仿真结果",
+          "body": {
+            "kind": "text",
+            "lines": ["（下方四张结果卡自上而下排列）"]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "ok",
+            "text": "✓ 放行 ALLOW · 命中放行策略，条件谓词全部满足 · pol-rd-database"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "求值轨迹（deny > allow > 默认拒绝）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              {
+                "main": "主体展开：user:zhang.wei、group:研发-动态、group:全体员工 · 设备 MBP-7F2A",
+                "badge": { "tone": "accent", "text": "ⅰ" }
+              },
+              {
+                "main": "pol-rd-database 命中且全部条件满足 → ALLOW",
+                "badge": { "tone": "ok", "text": "✓" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "repeat(3, 1fr)",
+      "cards": [
+        {
+          "title": "三执行点编译预览　判定一致 ✓ ZL-FR-104",
+          "sub": "pill:ssl:SSL",
+          "body": {
+            "kind": "kv",
+            "items": [
+              {
+                "k": "SSL",
+                "v": "授权表 + (app:gitlab, MBP-7F2A) → gitlab · SPA 放行 zl-gw-hq-01",
+                "badge": { "tone": "ok", "text": "ALLOW" }
+              }
+            ]
+          }
+        },
+        {
+          "sub": "pill:mesh:Mesh",
+          "body": {
+            "kind": "kv",
+            "items": [
+              {
+                "k": "Mesh",
+                "v": "netmap + MBP-7F2A → gitlab ACCEPT · v218 下发 ≤60s",
+                "badge": { "tone": "ok", "text": "ALLOW" }
+              }
+            ]
+          }
+        },
+        {
+          "sub": "pill:ipsec:IPSEC",
+          "body": {
+            "kind": "kv",
+            "items": [
+              {
+                "k": "IPSEC",
+                "v": "用户级主体不在本执行点求值（站点/子网粒度）；与用户级策略冲突时取交集，不放大权限（ZL-FR-107）",
+                "badge": { "tone": "idle", "text": "不适用" }
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,100 @@
+{
+  "route": "/system/logging",
+  "file": "SystemLogging.vue",
+  "title": "日志外发（Syslog/SNMP）",
+  "centerKey": "system",
+  "sub": "审计日志外发至 SIEM / 日志中心 · 等保合规要求（日志留存 ≥180 天 + 异地备份）· RFC5424 / SNMP Trap",
+  "headControls": ["badge:idle:mock", "保存配置"],
+  "sections": [
+    {
+      "cols": "1fr 1fr",
+      "cards": [
+        {
+          "title": "Syslog 外发",
+          "sub": "badge:accent:已启用",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "传输协议",
+                "kind": "select",
+                "value": "TCP + TLS（加密）",
+                "options": ["UDP（不可靠）", "TCP", "TCP + TLS（加密）"]
+              },
+              { "label": "服务器地址", "kind": "input", "value": "10.8.0.30" },
+              { "label": "端口", "kind": "input", "value": "6514" },
+              {
+                "label": "消息格式",
+                "kind": "select",
+                "value": "RFC 5424（推荐）",
+                "options": ["RFC 5424（推荐）", "RFC 3164（BSD）", "CEF（ArcSight）", "LEEF（QRadar）"]
+              },
+              {
+                "label": "Facility",
+                "kind": "select",
+                "value": "local0",
+                "options": ["local0", "local1", "local2", "local3", "local4", "local5"]
+              }
+            ]
+          }
+        },
+        {
+          "title": "SNMP Trap",
+          "sub": "badge:idle:未启用",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "版本",
+                "kind": "select",
+                "value": "v3（推荐，认证加密）",
+                "options": ["v2c", "v3（推荐，认证加密）"]
+              },
+              { "label": "Trap 接收地址", "kind": "input", "value": "10.8.0.31" },
+              { "label": "Community / 用户", "kind": "input", "value": "v3 填用户名" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "审计事件外发",
+          "sub": "badge:accent:已启用",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "外发类别",
+                "kind": "checkbox",
+                "options": ["登录认证", "策略变更", "配置变更", "会话审计", "管理操作", "系统告警"],
+                "value": "登录认证,策略变更,配置变更,会话审计"
+              },
+              {
+                "label": "日志级别",
+                "kind": "select",
+                "value": "info",
+                "options": ["debug", "info", "warn", "error"]
+              },
+              { "label": "本地留存天数", "kind": "input", "value": "90 天" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "等保三级要求审计日志留存 ≥180 天；外发至独立日志中心可满足异地备份。"
+          }
+        }
+      ]
+    }
+  ]
+}

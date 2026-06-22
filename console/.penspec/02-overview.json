@@ -1,0 +1,66 @@
+{
+  "route": "/control-live",
+  "file": "ControlPlaneLive.vue",
+  "title": "控制面实时",
+  "centerKey": "overview",
+  "sub": "真实控制面：持久化策略 + 三员 RBAC（JWT）+ SSE 主动推送（生产化三件）",
+  "headControls": ["badge:idle:未连（起 control + /ctl 反代）"],
+  "sections": [
+    {
+      "cols": "0.9fr 1.5fr",
+      "cards": [
+        {
+          "title": "身份 · 三员 RBAC",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "账号", "kind": "select", "value": "sysadmin · 系统管理员（可改策略）", "options": ["sysadmin · 系统管理员（可改策略）", "auditor · 审计管理员（只读）"] },
+              { "label": "口令", "kind": "input", "value": "••••••••" }
+            ]
+          }
+        },
+        {
+          "title": "控制面策略（持久化 · 改动需系统管理员）",
+          "sub": "改策略→持久化(sqlite/pg)版本+1→SSE 主动 push 给所有客户端(免重连，G3)。审计管理员点操作返回 403。",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "策略" },
+              { "title": "动作", "align": "center", "width": 70 },
+              { "title": "状态", "align": "center", "width": 84 },
+              { "title": "操作", "align": "center", "width": 92 }
+            ],
+            "rows": [
+              ["pol-rd-database", "allow", "badge:ok:启用", "停用"],
+              ["pol-oa-all", "allow", "badge:ok:启用", "停用"],
+              ["pol-branch-erp", "allow", "badge:ok:启用", "停用"],
+              ["pol-finance-deny-byod", "deny", "badge:ok:启用", "停用"],
+              ["pol-ops-ssh", "allow", "badge:idle:停用", "启用"]
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1fr",
+      "cards": [
+        {
+          "title": "SSE 推送事件流  badge:idle:未订阅",
+          "sub": "控制面主动推送（替代轮询）· 每次策略变更触发一次 netmap 重编译下发",
+          "body": {
+            "kind": "text",
+            "lines": ["登录后订阅 SSE，实时显示推送"]
+          }
+        },
+        {
+          "title": "当前 netmap 投影",
+          "sub": "最新一次推送的可达资源（zhang.wei）· 客户端据此更新可达性，免重连",
+          "body": {
+            "kind": "text",
+            "lines": ["尚无 netmap（登录订阅后随首次推送显示）"]
+          }
+        }
+      ]
+    }
+  ]
+}

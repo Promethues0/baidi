@@ -1,0 +1,35 @@
+{
+  "route": "/resource/library",
+  "file": "ResourceLibrary.vue",
+  "title": "对象库",
+  "centerKey": "resource",
+  "sub": "对象先定义、策略只引用（ZL-FR-601，习自在用防火墙走查）· 对象变更自动传播到全部引用方",
+  "headControls": ["badge:idle:mock", "新建对象"],
+  "tabs": ["地址（4）", "服务（3）", "时间（2）", "URL（2）"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "地址（4）",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "对象", "width": 180 },
+              { "title": "定义" },
+              { "title": "说明" },
+              { "title": "被引用", "align": "center", "width": 100 },
+              { "title": "", "align": "center", "width": 80 }
+            ],
+            "rows": [
+              ["总部办公网", "10.8.0.0/16", "连接器 conn-hq-01 发布", "badge:accent:2 处", "删除"],
+              ["上海分支网段", "10.20.0.0/16", "IPSec selector 引用", "badge:accent:2 处", "删除"],
+              ["DMZ 段", "192.168.1.0/24", "", "badge:accent:1 处", "删除"],
+              ["合作方放行段", "192.168.77.0/24", "仅 tun-sh-partner 使用", "badge:accent:1 处", "删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

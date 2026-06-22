@@ -1,0 +1,62 @@
+{
+  "route": "/resource/approval",
+  "file": "ResourceApproval.vue",
+  "title": "资源审批",
+  "centerKey": "resource",
+  "sub": "自助申请 → 安全管理员审批 → 自动限时授权（到期前 3 天提醒）",
+  "headControls": ["badge:idle:mock"],
+  "tabs": ["待审批 (2)", "我的申请 (3)"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "ⓘ 申请 / 撤回为用户自助操作；通过 / 驳回需安全管理员令牌。审批通过后自动生成限时授权（按申请时效），到期自动失效、到期前 3 天提醒续期。"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "审批身份",
+          "sub": "通过/驳回为受控操作，需安全管理员显式验证身份换取令牌（不硬编码口令）",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "安全管理员账号", "kind": "input", "value": "安全管理员账号" },
+              { "label": "口令", "kind": "input", "value": "口令" },
+              { "label": "", "kind": "input", "value": "[按钮] 验证身份" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "申请人", "width": 140 },
+              { "title": "申请资源", "width": 180 },
+              { "title": "申请事由" },
+              { "title": "时效", "align": "center", "width": 92 },
+              { "title": "提交时间", "width": 150 },
+              { "title": "", "align": "center", "width": 150 }
+            ],
+            "rows": [
+              ["li.qiang / 新授权 new", "核心数据库 db.corp:5432", "数据迁移项目需读写权限，工期约一个月", "30 天", "2026-06-14 09:21", "通过 / 驳回"],
+              ["wang.fang / 新授权 new", "财务系统 finance", "季度对账临时取数", "7 天", "2026-06-14 14:05", "通过 / 驳回"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

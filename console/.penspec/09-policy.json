@@ -1,0 +1,75 @@
+{
+  "route": "/defense/correlate",
+  "file": "DefenseCorrelate.vue",
+  "title": "关联规则",
+  "centerKey": "policy",
+  "sub": "在单会话检测之上做跨事件时间窗聚合（N 次失败 + M 个新设备 = 高风险），命中按处置动作 + 投递告警渠道",
+  "headControls": ["badge:idle:mock", "新建关联规则"],
+  "tabs": ["关联规则", "触发历史"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "关联引擎在统一审计流上按聚合维度分组、按时间窗滑窗计数；同一维度内命中事件数 ≥ 阈值即触发处置动作并投递告警渠道，冷却期内不重复触发。处置当前为建议，自动收权待与策略引擎联动。"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "规则名称", "width": 190 },
+              { "title": "匹配条件" },
+              { "title": "窗口", "align": "center", "width": 84 },
+              { "title": "阈值", "align": "center", "width": 76 },
+              { "title": "聚合维度", "align": "center", "width": 92 },
+              { "title": "处置", "align": "center", "width": 100 },
+              { "title": "启用", "align": "center", "width": 74 },
+              { "title": "操作", "align": "center", "width": 116 }
+            ],
+            "rows": [
+              [
+                "暴力破解关联告警\ncr-bruteforce",
+                "badge:idle:登录认证 命中 fail",
+                "5 分钟",
+                "≥5 次",
+                "主体",
+                "badge:warn:lock 锁定",
+                "开",
+                "编辑 / 删除"
+              ],
+              [
+                "异地多源高频访问\ncr-impossible-travel",
+                "badge:idle:访问决策 命中 deny step-up",
+                "10 分钟",
+                "≥8 次",
+                "主体",
+                "badge:accent:stepup 二次鉴权",
+                "开",
+                "编辑 / 删除"
+              ],
+              [
+                "新设备态势异常聚集\ncr-new-device-burst",
+                "badge:idle:设备态势 命中 任意判定",
+                "30 分钟",
+                "≥3 次",
+                "来源",
+                "badge:ok:alert 告警",
+                "关",
+                "编辑 / 删除"
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

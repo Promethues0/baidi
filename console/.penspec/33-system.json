@@ -1,0 +1,59 @@
+{
+  "route": "/system/license",
+  "file": "SystemLicense.vue",
+  "title": "License 与容量",
+  "centerKey": "system",
+  "sub": "授权版本 / 容量上限 / 功能开关 · 容量标定 8C16G ≥1000 SSL · ≥2000 Mesh · ≥50 IPSEC（charter 容量起点）",
+  "headControls": ["badge:idle:mock", "更新授权"],
+  "sections": [
+    {
+      "cols": "380px 1fr",
+      "cards": [
+        {
+          "title": "Standard 标准版",
+          "sub": "剩余 216 天",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "授权方", "v": "ACME 集团" },
+              { "k": "授权编号", "v": "ZL-STD-2026-0042" },
+              { "k": "签发日期", "v": "2026-01-15" },
+              { "k": "到期日期", "v": "2027-01-15" },
+              { "k": "状态", "v": "正常", "badge": { "tone": "ok", "text": "正常" } }
+            ]
+          }
+        },
+        {
+          "title": "容量用量（当前 / 授权上限）",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "SSL / SDP 隧道", "val": "312 / 1000 (31%)", "pct": 31, "tone": "ok" },
+              { "label": "Mesh 设备", "val": "486 / 2000 (24%)", "pct": 24, "tone": "ok" },
+              { "label": "IPSEC 站点隧道", "val": "7 / 50 (14%)", "pct": 14, "tone": "ok" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "380px 1fr",
+      "cards": [
+        {
+          "title": "功能授权",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "国密套件", "sub": "TLCP · SM2/SM3/SM4", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "抗量子 PQC", "sub": "混合密钥交换", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "Mesh 组网", "sub": "P2P + DERP 中继", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "IPSEC 站点", "sub": "strongSwan + 国密", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "VPP 高性能数据面", "sub": "需性能档授权", "badge": { "tone": "idle", "text": "—" } },
+              { "main": "高可用集群", "sub": "主备 / 双活", "badge": { "tone": "ok", "text": "✓" } }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,112 @@
+{
+  "route": "/identity/sec-policy",
+  "file": "IdentitySecPolicy.vue",
+  "title": "账号安全",
+  "centerKey": "identity",
+  "sub": "会话 / 时段 / 并发 / 防爆破 / 上线通知 · 所有「0 / 关闭」=不启用，等价旧行为，向后兼容",
+  "headControls": ["badge:idle:mock", "恢复默认", "保存策略"],
+  "sections": [
+    {
+      "cols": "repeat(2, 1fr)",
+      "cards": [
+        {
+          "title": "并发控制",
+          "sub": "同一账号允许的并发在线数（烛龙语义：0 = 不限制并发，并非禁止登录）",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "最大并发数（0=不限制）", "kind": "input", "value": "0 端" },
+              { "label": "分平台限制（PC 与移动端各自计数）", "kind": "switch", "value": "关" }
+            ]
+          }
+        },
+        {
+          "title": "会话超时",
+          "sub": "空闲与无操作自动注销，降低会话被劫持的窗口期",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "会话空闲注销（0=不启用）", "kind": "input", "value": "0 分钟" },
+              { "label": "PC 无操作注销（0=不启用）", "kind": "input", "value": "0 分钟" }
+            ]
+          }
+        },
+        {
+          "title": "闲置账号扫描",
+          "sub": "超过阈值未登录的账号判定为「闲置」，此值驱动用户列表的「闲置」徽标显示",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "闲置判定阈值（0=不扫描）", "kind": "input", "value": "90 天" },
+              { "label": "自动处置扫描周期（0=不启用内置定时扫描）", "kind": "input", "value": "12 小时" },
+              { "label": "闲置账号自动禁用", "kind": "switch", "value": "关" },
+              { "label": "过期账号自动禁用", "kind": "switch", "value": "关" }
+            ]
+          }
+        },
+        {
+          "title": "访问时段",
+          "sub": "限制账号仅在指定星期与时间段内可登录（关闭=全天不限）",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "启用时段限制（关闭=不限制）", "kind": "switch", "value": "关" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "防爆破（暴力破解防护）",
+          "sub": "连续登录失败时按来源 IP / 账号维度锁定，可叠加图形验证码（REQ-SEC-012）",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "按 IP 锁定（同源 IP 失败计数）", "kind": "switch", "value": "开" },
+              { "label": "IP · 失败阈值", "kind": "input", "value": "10 次" },
+              { "label": "IP · 锁定时长", "kind": "input", "value": "30 分钟" },
+              { "label": "按账号锁定（单账号失败计数）", "kind": "switch", "value": "开" },
+              { "label": "账号 · 失败阈值", "kind": "input", "value": "5 次" },
+              { "label": "账号 · 锁定时长（0=需管理员解锁）", "kind": "input", "value": "15 分钟" },
+              { "label": "触发后要求图形验证码（达阈值前先弹验证码缓冲）", "kind": "switch", "value": "关" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "风险通知（上线 / 异常提醒）",
+          "sub": "命中以下场景时向账号本人推送提醒（全部关闭=不通知）",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "首次登录提醒（账号首次成功登录）", "kind": "switch", "value": "关" },
+              { "label": "新设备登录提醒（未见过的设备指纹）", "kind": "switch", "value": "开" },
+              { "label": "异地登录提醒（常用地之外的登录地）", "kind": "switch", "value": "开" },
+              { "label": "爆破锁定提醒（触发防爆破锁定时）", "kind": "switch", "value": "开" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "",
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "改动保存后 ≤60s 下发并写审计 · 当前 mock 演示    [恢复默认]  [保存策略]"
+          }
+        }
+      ]
+    }
+  ]
+}

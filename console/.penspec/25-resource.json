@@ -1,0 +1,66 @@
+{
+  "route": "/resource/portal",
+  "file": "ResourcePortal.vue",
+  "title": "应用门户编排",
+  "centerKey": "resource",
+  "sub": "门户入口 = 被授权资源的用户可见投影（ZL-FR-103/603）· 可见性由策略推导，此处只编排呈现",
+  "headControls": ["badge:idle:mock", "+ 新建门户分组"],
+  "sections": [
+    {
+      "cols": "1.5fr 1fr",
+      "cards": [
+        {
+          "title": "办公协同",
+          "sub": "2 项 · 可见范围：全体员工 · 加应用 / 删除",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "OA 办公系统", "sub": "oa.corp", "right": "WEB · ↑ ↓ ● 开 ✕", "badge": { "tone": "accent", "text": "WEB" } },
+              { "main": "财务系统 🔒", "sub": "finance.corp", "right": "WEB · ↑ ↓ ● 开 ✕", "badge": { "tone": "accent", "text": "WEB" } }
+            ]
+          }
+        },
+        {
+          "title": "研发工具",
+          "sub": "3 项 · 可见范围：研发-动态 · 加应用 / 删除",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "GitLab", "sub": "gitlab.corp", "right": "WEB · ↑ ↓ ● 开 ✕", "badge": { "tone": "accent", "text": "WEB" } },
+              { "main": "核心数据库 🔒", "sub": "db.corp:5432", "right": "TCP · ↑ ↓ ● 开 ✕", "badge": { "tone": "ok", "text": "TCP" } },
+              { "main": "堡垒机 🔒", "sub": "bastion.corp:22", "right": "SSH · ↑ ↓ ○ 隐藏 ✕", "badge": { "tone": "warn", "text": "SSH" } }
+            ]
+          }
+        },
+        {
+          "title": "分支业务",
+          "sub": "1 项 · 可见范围：上海分支 · 加应用 / 删除",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "上海分支 ERP", "sub": "erp.sh.corp", "right": "WEB · ↑ ↓ ● 开 ✕", "badge": { "tone": "accent", "text": "WEB" } }
+            ]
+          }
+        },
+        {
+          "title": "客户端门户预览",
+          "sub": "以 张伟（研发-动态）视角 · 隐藏项与未授权项不出现",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "烛龙 · 应用门户", "sub": "—— 手机门户预览 ——" },
+              { "main": "办公协同", "sub": "分组" },
+              { "main": "OA 办公系统", "badge": { "tone": "accent", "text": "WEB" } },
+              { "main": "财务系统 🔒", "badge": { "tone": "accent", "text": "WEB" } },
+              { "main": "研发工具", "sub": "分组" },
+              { "main": "GitLab", "badge": { "tone": "accent", "text": "WEB" } },
+              { "main": "核心数据库 🔒", "badge": { "tone": "ok", "text": "TCP" } },
+              { "main": "分支业务", "sub": "分组" },
+              { "main": "上海分支 ERP", "badge": { "tone": "accent", "text": "WEB" } }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

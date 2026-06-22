@@ -1,0 +1,32 @@
+{
+  "route": "/identity/auth-policy",
+  "file": "IdentityAuthPolicy.vue",
+  "title": "认证策略",
+  "centerKey": "identity",
+  "sub": "按范围匹配主认证 / 二次认证（MFA）与自适应触发 · mfaRequired:false + 触发位全 false = 不强制（旧行为）",
+  "headControls": ["badge:idle:mock", "新建策略"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "策略名" },
+              { "title": "范围" },
+              { "title": "主认证 / MFA" },
+              { "title": "强制 MFA", "align": "center", "width": 110 },
+              { "title": "启用", "align": "center", "width": 90 },
+              { "title": "操作", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["全部主体 · 默认  ap-default", "badge:accent:全部主体", "密码 / TOTP", "badge:idle:自适应", "开", "编辑 · 删除"],
+              ["财务中心 · 强制 MFA  ap-finance", "组织  /acme/财务中心", "密码+证书 / TOTP+WebAuthn", "badge:warn:强制", "开", "编辑 · 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

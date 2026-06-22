@@ -1,0 +1,56 @@
+{
+  "route": "/policy/iprep",
+  "file": "IdentityIPRep.vue",
+  "title": "IP 信誉名单",
+  "centerKey": "policy",
+  "head": {
+    "title": "IP 信誉与黑白名单",
+    "sub": "本地 IP 信誉 / 名单 + CIDR 地理映射，编织进登录门（黑名单硬拒 / 异地判定）与主动防御（自动加黑）",
+    "badges": ["badge:idle:mock"],
+    "controls": ["新建名单条目"]
+  },
+  "tabs": ["IP 名单", "地理库"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "即时反查",
+          "sub": "输入 IP → GET /ctl/api/iprep/lookup?ip=X",
+          "body": {
+            "kind": "filter",
+            "controls": [
+              { "kind": "search", "text": "输入 IP 即时反查名单 / 归属地（如 203.0.113.7）" },
+              { "kind": "button", "text": "反查" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "IP 名单",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "CIDR / IP 段", "width": 180 },
+              { "title": "名单", "align": "center", "width": 100 },
+              { "title": "地理", "width": 140 },
+              { "title": "原因" },
+              { "title": "来源", "align": "center", "width": 100 },
+              { "title": "启用", "align": "center", "width": 80 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["198.51.100.0/24  deny-c2-intel", "badge:danger:黑名单", "俄罗斯 · 莫斯科", "威胁情报标记 C2 控制端", "badge:accent:情报", "开", "编辑 · 删除"],
+              ["203.0.113.7/32  deny-auto-203.0.113.7", "badge:danger:黑名单", "美国 · 弗吉尼亚", "主动防御检出端口扫描自动加黑", "badge:warn:自动", "开", "编辑 · 删除"],
+              ["36.152.44.0/24  allow-office-egress", "badge:ok:白名单", "中国 · 浙江 · 杭州", "总部办公网出口豁免", "badge:idle:手工", "开", "编辑 · 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

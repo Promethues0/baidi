@@ -1,0 +1,43 @@
+{
+  "route": "/system/time",
+  "file": "SystemTime.vue",
+  "title": "时间与 NTP",
+  "centerKey": "system",
+  "sub": "系统时间直接影响证书校验、令牌有效期、审计时序与 HMAC 哈希链——时间不同步会导致大面积接入失败",
+  "headControls": ["badge:idle:mock", "保存配置"],
+  "sections": [
+    {
+      "cols": "360px 1fr",
+      "cards": [
+        {
+          "title": "同步状态",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "当前时间", "v": "2026-06-15 15:02:47" },
+              { "k": "时区", "v": "Asia/Shanghai" },
+              { "k": "同步状态", "v": "NTP 已同步", "badge": { "tone": "ok", "text": "已同步" } },
+              { "k": "时间源", "v": "ntp.aliyun.com" },
+              { "k": "上次同步", "v": "2026-06-13 09:32:11" },
+              { "k": "时钟偏移", "v": "-3 ms" }
+            ]
+          }
+        },
+        {
+          "title": "NTP 客户端",
+          "sub": "NTP 客户端 · 开启",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "NTP 客户端", "kind": "switch", "value": "开启" },
+              { "label": "NTP 服务器", "kind": "input", "value": "ntp.aliyun.com" },
+              { "label": "NTP 服务器", "kind": "input", "value": "cn.pool.ntp.org" },
+              { "label": "同步间隔", "kind": "select", "value": "1 小时", "options": ["10 分钟", "1 小时", "6 小时", "1 天"] },
+              { "label": "时区", "kind": "select", "value": "Asia/Shanghai", "options": ["Asia/Shanghai", "Asia/Urumqi", "Asia/Hong_Kong", "UTC", "America/New_York", "Europe/London"] }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "route": "/system/diag",
+  "file": "SystemDiag.vue",
+  "title": "系统诊断",
+  "centerKey": "system",
+  "sub": "控制面真实运行态 · 服务健康 · 连通性探测（真实 TCP）· 数据来自 zhulong-control 进程 runtime",
+  "headControls": ["badge:ok:● 实时", "自动刷新 开关", "刷新"],
+  "sections": [
+    {
+      "cols": "repeat(6, 1fr)",
+      "cards": [
+        { "body": { "kind": "stat", "label": "主机名", "value": "zhulong-gw-01" } },
+        { "body": { "kind": "stat", "label": "运行时长", "value": "76时 12分" } },
+        { "body": { "kind": "stat", "label": "CPU 核心", "value": "8" } },
+        { "body": { "kind": "stat", "label": "Goroutine", "value": "142" } },
+        { "body": { "kind": "stat", "label": "内存占用", "value": "38.6", "unit": "/ 96.4 MB" } },
+        { "body": { "kind": "stat", "label": "运行环境", "value": "go1.22.3 · linux/amd64" } }
+      ]
+    },
+    {
+      "cols": "minmax(0,1fr) 360px",
+      "cards": [
+        {
+          "title": "服务健康（systemd 单元 + 内置子系统）",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "服务" },
+              { "title": "单元" },
+              { "title": "状态" },
+              { "title": "详情" }
+            ],
+            "rows": [
+              ["控制面 API", "zhulong-control.service", "badge:ok:运行中", "active (running) · :5273"],
+              ["SSL 网关", "zhulong-ssl-gw.service", "badge:ok:运行中", "active (running) · :8443"],
+              ["策略引擎", "policy-engine", "badge:ok:运行中", "已加载 4 条策略"],
+              ["审计采集", "audit-collector", "badge:ok:运行中", "缓冲 0 · 已落盘"],
+              ["IPSec 网关", "zhulong-ipsec.service", "badge:idle:空闲", "loaded · 无活跃 SA"],
+              ["Mesh 协调器", "zhulong-mesh.service", "badge:danger:已停止", "inactive (dead)"]
+            ]
+          }
+        },
+        {
+          "title": "连通性探测  真实 TCP DialTimeout",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "目标地址", "kind": "input", "value": "host:port，如 oa.corp:443" },
+              { "label": "操作", "kind": "input", "value": "[探测]" },
+              { "label": "快捷", "kind": "radio", "options": ["oa.corp:443", "gitlab.corp:443", "127.0.0.1:5273"] },
+              { "label": "探测结果", "kind": "textarea", "value": "输入目标地址，对网关 / 上游资源做真实 TCP 连通性探测。" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

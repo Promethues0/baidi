@@ -1,0 +1,99 @@
+{
+  "route": "/policy/login-sim",
+  "file": "LoginFlowSim.vue",
+  "title": "登录流仿真",
+  "centerKey": "policy",
+  "sub": "把口令策略 / 认证策略 / 账号安全 / 认证豁免 / IP 信誉 / 账号生命周期编织成统一登录判定（S8）。控制面不可达时本地给静态演示结果。",
+  "headControls": ["badge:idle:本地演示（降级）"],
+  "sections": [
+    {
+      "cols": "auto",
+      "cards": [
+        {
+          "title": "预置场景",
+          "body": {
+            "kind": "toolbar",
+            "items": [
+              "办公网 · 已过 MFA（放行）",
+              "弱口令命中（强制改密）",
+              "未过 MFA（需多因子）",
+              "新设备 + 非常用时段（二次鉴权）",
+              "不可信公网 IP（拒绝）"
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1.4fr",
+      "cards": [
+        {
+          "title": "登录上下文",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "账号（account）", "kind": "input", "value": "zhang.wei" },
+              { "label": "来源网络（network）", "kind": "select", "value": "办公网 · 可信", "options": ["办公网 · 可信", "可信网络", "VPN", "家庭网", "不可信 / 公网"] },
+              { "label": "来源 IP（sourceIp）", "kind": "input", "value": "10.20.3.18" },
+              { "label": "设备码（deviceCode）", "kind": "input", "value": "WIN-7F3A-9C21" },
+              { "label": "新设备 · 未登记的设备指纹", "kind": "switch", "value": "off" },
+              { "label": "非常用时段 · 偏离历史活跃时间", "kind": "switch", "value": "off" },
+              { "label": "弱口令命中 · 触发口令策略红线", "kind": "switch", "value": "off" },
+              { "label": "已过 MFA · 本次已完成多因子", "kind": "switch", "value": "on" }
+            ]
+          }
+        },
+        {
+          "title": "判定结果",
+          "body": {
+            "kind": "banner",
+            "tone": "ok",
+            "text": "✓ 放行 · 通过全部登录门，建立会话 · badge:ok:allow"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1.4fr",
+      "cards": [
+        {
+          "title": "（占位 · 与左侧表单同列）",
+          "body": { "kind": "text", "lines": ["主认证 → 风险评估 → 因子补全 流水（左列表单底部为「评估登录门」主按钮）"] }
+        },
+        {
+          "title": "判定原因（按 S8 编织顺序）",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "口令复杂度与有效期校验通过", "sub": "口令策略", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "来源网络「办公网 · 可信」信誉正常", "sub": "IP 信誉", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "登录时段处于常用区间", "sub": "账号安全", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "已登记设备，指纹匹配", "sub": "设备态势", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "多因子认证已通过", "sub": "认证策略", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "低风险登录，命中豁免规则，免追加因子放行", "sub": "认证豁免", "badge": { "tone": "ok", "text": "✓" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1.4fr",
+      "cards": [
+        {
+          "title": "",
+          "body": { "kind": "text", "lines": [""] }
+        },
+        {
+          "title": "建议补充因子（factors）",
+          "body": {
+            "kind": "text",
+            "lines": [
+              "无需补充因子 · 主认证已足够",
+              "登录门判定 = 口令策略 → 账号生命周期 → 账号安全（防爆破 / 时段 / 并发）→ IP 信誉 → 认证策略（MFA / 二次鉴权）→ 认证豁免。任一前置门拒绝即终止，后置门按风险升级处置。"
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

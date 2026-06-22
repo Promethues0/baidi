@@ -1,0 +1,81 @@
+{
+  "route": "/gateway/ipsec",
+  "file": "GatewayIpsec.vue",
+  "title": "IPSec 站点编排",
+  "centerKey": "gateway",
+  "sub": "站点互联全生命周期：策略 → IKE SA → Child SA · 判定走统一模型（ZL-FR-607 / PUC-11）",
+  "headControls": ["badge:idle:演示数据", "+ 新建站点隧道"],
+  "sections": [
+    {
+      "cols": "1.55fr 1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "隧道" },
+              { "title": "套件", "width": 150 },
+              { "title": "Child SA", "align": "center", "width": 84 },
+              { "title": "状态", "align": "center", "width": 90 }
+            ],
+            "rows": [
+              ["tun-hq-sh · zl-gw-hq-01 ↔ 上海分支 · zl-gw-branch-sh", "badge:accent:国密 SM2/SM3/SM4", "2", "badge:ok:已建立"],
+              ["tun-hq-gz · zl-gw-hq-01 ↔ 广州分支 · zl-gw-branch-gz", "badge:accent:国密 SM2/SM3/SM4", "0", "badge:danger:断开"],
+              ["tun-hq-cloud · zl-gw-dmz-02 ↔ 阿里云 VPC · vpn-gw-ali", "badge:idle:AES-GCM/SHA2", "1", "badge:ok:已建立"],
+              ["tun-sh-partner · zl-gw-branch-sh ↔ 合作方机房 · partner-fw", "badge:idle:AES-GCM/SHA2", "0", "badge:warn:协商中"]
+            ]
+          }
+        },
+        {
+          "title": "SA 生命周期 · tun-hq-sh",
+          "body": {
+            "kind": "steps",
+            "items": [
+              { "label": "Traffic Selector", "desc": "10.8.0.0/16 ↔ 10.20.0.0/16", "state": "done" },
+              { "label": "IKE_SA_INIT", "desc": "密钥交换与算法协商", "state": "done" },
+              { "label": "IKE_AUTH", "desc": "身份认证（证书/PSK）", "state": "done" },
+              { "label": "CHILD_SA", "desc": "建立数据面 SA · selector 下发", "state": "done" },
+              { "label": "REKEY", "desc": "周期性重协商（前向保密）", "state": "pending" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1.55fr 1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "info",
+            "text": "IPSec 执行点粒度为站点/子网；与用户级策略冲突时取交集并在此可视化提示，不允许静默放大权限（ZL-FR-107）。"
+          }
+        },
+        {
+          "title": "SA 参数与操作",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "IKE 版本", "v": "IKEv2" },
+              { "k": "下次 Rekey", "v": "42 分钟" },
+              { "k": "接收", "v": "38.2 GB" },
+              { "k": "发送", "v": "21.7 GB" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "SA 操作",
+          "body": {
+            "kind": "toolbar",
+            "items": ["发起协商", "Rekey", "拆除"]
+          }
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,96 @@
+{
+  "route": "/audit/events",
+  "file": "AuditEvents.vue",
+  "title": "统一事件",
+  "centerKey": "audit",
+  "sub": "控制面实时审计：登录/策略变更/配置变更/自适应访问决策 emit 落库 + syslog 外发 · 入 HMAC-SM3 审计链（ZL-FR-109）",
+  "headControls": ["badge:idle:mock", "导出 CSV（6）"],
+  "sections": [
+    {
+      "cols": "repeat(5, 1fr)",
+      "cards": [
+        {
+          "body": {
+            "kind": "stat",
+            "label": "全部事件",
+            "value": "6"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "允许",
+            "value": "4",
+            "tone": "ok"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "二次鉴权",
+            "value": "0",
+            "tone": "warn"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "拒绝",
+            "value": "2",
+            "tone": "danger"
+          }
+        },
+        {
+          "body": {
+            "kind": "stat",
+            "label": "登录失败",
+            "value": "0"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "filter",
+            "controls": [
+              { "kind": "search", "text": "搜索主体 / 资源 / 策略 / 详情" },
+              { "kind": "select", "text": "类别" },
+              { "kind": "select", "text": "判定" }
+            ],
+            "count": 6
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "时间", "width": 92 },
+              { "title": "主体", "width": 130 },
+              { "title": "类别", "width": 96 },
+              { "title": "资源/目标" },
+              { "title": "信任/风险", "align": "center", "width": 92 },
+              { "title": "判定", "align": "center", "width": 84 },
+              { "title": "命中策略 / 详情", "width": 230 }
+            ],
+            "rows": [
+              ["15:02:11", "zhang.wei", "badge:accent:访问决策", "app:gitlab", "0/0", "badge:ok:允许", "pol-rd-database"],
+              ["15:02:03", "li.na", "badge:accent:访问决策", "app:oa.corp", "0/0", "badge:ok:允许", "pol-oa-all"],
+              ["15:01:55", "BYOD-tablet", "badge:accent:访问决策", "app:finance", "0/0", "badge:danger:拒绝", "pol-finance-deny-byod"],
+              ["15:01:40", "svc.ci", "badge:accent:访问决策", "service:db.corp:5432", "0/0", "badge:ok:允许", "pol-rd-database"],
+              ["15:01:22", "上海分支", "badge:accent:访问决策", "subnet:10.20.0.0/16", "0/0", "badge:ok:允许", "pol-branch-erp"],
+              ["15:00:58", "wang.qiang", "badge:accent:访问决策", "service:bastion.corp:22", "0/0", "badge:danger:拒绝", "pol-ops-ssh"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

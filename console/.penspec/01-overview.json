@@ -1,0 +1,91 @@
+{
+  "route": "/overview",
+  "file": "Overview.vue",
+  "title": "网关总览",
+  "sub": "三种接入模式 · 一处身份策略 · 8C/16G appliance",
+  "centerKey": "overview",
+  "headControls": ["近 1 小时", "近 24 小时", "近 7 天"],
+  "sections": [
+    {
+      "cols": "repeat(4, 1fr)",
+      "cards": [
+        {
+          "body": { "kind": "stat", "label": "在线设备", "value": "1,284", "unit": "台", "trend": "+36 近 1 小时", "tone": "ok" }
+        },
+        {
+          "body": { "kind": "stat", "label": "活跃会话", "value": "942", "trend": "+12 近 1 小时", "tone": "ok" }
+        },
+        {
+          "body": { "kind": "stat", "label": "今日策略命中", "value": "18,630" }
+        },
+        {
+          "body": { "kind": "stat", "label": "威胁/阻断事件", "value": "7", "unit": "起", "trend": "-2 近 1 小时", "tone": "warn" }
+        }
+      ]
+    },
+    {
+      "cols": "1.5fr 1fr",
+      "cards": [
+        {
+          "title": "三模式流量趋势（MB/s）",
+          "body": {
+            "kind": "chart",
+            "chartType": "area",
+            "legend": ["SSL", "Mesh", "IPSec"],
+            "note": "横轴 14:00–15:00（10 分钟采样）"
+          }
+        },
+        {
+          "title": "网关健康",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "zl-gw-hq-01", "sub": "ALL-IN-ONE", "tags": ["pill:ssl:SSL", "pill:mesh:Mesh", "pill:ipsec:IPSec"], "badge": { "tone": "ok", "text": "在线" } },
+              { "main": "zl-gw-dmz-02", "sub": "接入网关", "tags": ["pill:ssl:SSL", "pill:mesh:Mesh"], "badge": { "tone": "ok", "text": "在线" } },
+              { "main": "zl-gw-branch-sh", "sub": "站点网关", "tags": ["pill:ipsec:IPSec", "pill:mesh:Mesh"], "badge": { "tone": "warn", "text": "降级" } },
+              { "main": "zl-gw-branch-gz", "sub": "站点网关", "tags": ["pill:ipsec:IPSec"], "badge": { "tone": "danger", "text": "离线" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1fr 1.2fr",
+      "cards": [
+        {
+          "title": "接入模式分布",
+          "sub": "活跃会话 / 连接（近 1 小时）",
+          "body": {
+            "kind": "chart",
+            "chartType": "donut",
+            "legend": ["SSL 会话", "Mesh 连接", "IPSec 隧道"],
+            "note": "SSL 会话 942 · Mesh 连接 318 · IPSec 隧道 6"
+          }
+        },
+        {
+          "title": "访问判定",
+          "sub": "放行 / 拒绝（近 1 小时）",
+          "body": {
+            "kind": "chart",
+            "chartType": "donut",
+            "legend": ["放行", "拒绝"],
+            "note": "放行 18,630 · 拒绝 212"
+          }
+        },
+        {
+          "title": "Appliance 系统资源 · 8C/16G",
+          "body": {
+            "kind": "progress",
+            "items": [
+              { "label": "CPU（8 核）", "val": "41%", "pct": 41 },
+              { "label": "内存（16G）", "val": "63% · 10.1G", "pct": 63, "tone": "warn" },
+              { "label": "会话表", "val": "38% · 47.6万/125万", "pct": 38 },
+              { "label": "吞吐", "val": "2.4 / 10 Gbps", "pct": 24 },
+              { "label": "netstack goroutine", "val": "1,920", "pct": 19 }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

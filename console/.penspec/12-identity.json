@@ -1,0 +1,89 @@
+{
+  "route": "/identity/devices",
+  "file": "IdentityDevices.vue",
+  "title": "设备管理",
+  "centerKey": "identity",
+  "sub": "终端设备清单 + 持续态势 → 设备信任分 → 自适应策略（设备态势驱动准入）· 信任分由五维态势实时算出 · 吊销 ≤10s 下发",
+  "headControls": [
+    "badge:idle:mock",
+    "2 高信任",
+    "0 中",
+    "0 低/受限",
+    "2 在线"
+  ],
+  "sections": [
+    {
+      "cols": "1fr 380px",
+      "cards": [
+        {
+          "title": "设备清单（2）",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "设备" },
+              { "title": "归属用户" },
+              { "title": "系统/模式" },
+              { "title": "归属" },
+              { "title": "信任分" },
+              { "title": "状态" }
+            ],
+            "rows": [
+              ["MBP-7F2A · hw_3f8a_c91d", "zhang.wei", "macOS 14.5 · pill:ssl:SSL", "企业", "100", "badge:ok:在线"],
+              ["Pad-1180 · hm_1180_7e22", "li.na", "HarmonyOS 5.1 · pill:mesh:Mesh", "BYOD", "80", "badge:ok:在线"]
+            ]
+          }
+        },
+        {
+          "title": "MBP-7F2A",
+          "sub": "hw_3f8a_c91d · 企业配发",
+          "body": {
+            "kind": "metric-list",
+            "items": [
+              { "label": "设备信任分", "value": "100/100", "sub": "签约基线 100 · 风险分 0" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "380px",
+      "cards": [
+        {
+          "title": "态势信号 → 信任分解",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "基线", "right": "+10", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "磁盘加密", "right": "+25", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "系统版本达标", "right": "+25", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "EDR 安全软件在位", "right": "+20", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "合规姿态通过", "right": "+20", "badge": { "tone": "ok", "text": "✓" } },
+              { "main": "未越狱 / Root", "right": "0", "badge": { "tone": "ok", "text": "✓" } }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "380px",
+      "cards": [
+        {
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "归属用户", "v": "zhang.wei" },
+              { "k": "最近在线", "v": "13:05" },
+              { "k": "纳管时间", "v": "—" }
+            ]
+          }
+        },
+        {
+          "body": {
+            "kind": "toolbar",
+            "items": ["强制重认证", "吊销设备"]
+          }
+        }
+      ]
+    }
+  ]
+}

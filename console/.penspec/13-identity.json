@@ -1,0 +1,47 @@
+{
+  "route": "/identity/org",
+  "file": "IdentityOrg.vue",
+  "title": "组织树",
+  "centerKey": "identity",
+  "sub": "组织 path 物化便于子树查询（PRD 5.2）· 上游 IdP 同步或本地维护",
+  "headControls": ["badge:idle:mock", "从集团 AD 同步", "新建部门"],
+  "sections": [
+    {
+      "cols": "300px 1fr",
+      "cards": [
+        {
+          "title": "组织树",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "ACME 集团", "sub": "/acme", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "1284 设备" },
+              { "main": "研发中心", "sub": "/acme/研发中心", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "412 设备" },
+              { "main": "平台组", "sub": "/acme/研发中心/平台组", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "96 设备" },
+              { "main": "移动组", "sub": "/acme/研发中心/移动组", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "61 设备" },
+              { "main": "财务中心", "sub": "/acme/财务中心", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "58 设备" },
+              { "main": "运维中心", "sub": "/acme/运维中心", "badge": { "tone": "accent", "text": "集团 AD" }, "right": "87 设备" },
+              { "main": "服务账号", "sub": "/acme/服务账号", "badge": { "tone": "idle", "text": "本地" }, "right": "23 设备" }
+            ]
+          }
+        },
+        {
+          "title": "研发中心",
+          "sub": "/acme/研发中心 · 集团 AD · 0 直属 · 2 子部门 · 412 设备",
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "姓名", "width": 120 },
+              { "title": "账号", "width": 150 },
+              { "title": "认证方式" },
+              { "title": "状态", "align": "center", "width": 90 }
+            ],
+            "rows": [
+              ["张伟", "zhang.wei", "tags:密码,TOTP", "badge:ok:正常"],
+              ["陈静", "chen.jing", "tags:扫码", "badge:warn:已锁定"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

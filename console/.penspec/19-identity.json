@@ -1,0 +1,48 @@
+{
+  "route": "/identity/waiver",
+  "file": "IdentityWaiver.vue",
+  "title": "认证豁免",
+  "centerKey": "identity",
+  "sub": "在授信终端 / 网络 / 域条件下放宽二次认证 · 无规则 = 无豁免 = 最严（默认安全）",
+  "headControls": ["badge:idle:mock", "+ 新建规则"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "banner",
+            "tone": "warn",
+            "text": "⚠ 认证豁免规则只会放宽命中会话的二次认证要求，不会收紧任何策略。删除规则即恢复严格（按认证策略最严执行）。条件按「与」组合，全部满足才放宽。"
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "规则名称", "width": 220 },
+              { "title": "豁免类型", "align": "center", "width": 150 },
+              { "title": "生效条件（全部满足）" },
+              { "title": "启用", "align": "center", "width": 86 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              [
+                "总部办公网免二次认证 · wv-office",
+                "badge:accent:免二次认证",
+                "授信终端 且 命中网络（addr/总部办公网）",
+                "已启用",
+                "编辑 · 删除"
+              ]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

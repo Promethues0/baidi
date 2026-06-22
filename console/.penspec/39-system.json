@@ -1,0 +1,80 @@
+{
+  "route": "/system/ha",
+  "file": "SystemHA.vue",
+  "title": "高可用（HA）",
+  "centerKey": "system",
+  "sub": "主备 / 双活集群 · VRRP 虚 IP 漂移 · 会话同步保证故障切换不掉线 · 脑裂保护",
+  "headControls": ["badge:idle:mock", "手动主备切换", "保存配置"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "集群高可用",
+          "sub": "开关：已启用",
+          "body": {
+            "kind": "rows",
+            "items": [
+              {
+                "main": "主 (MASTER)",
+                "sub": "10.8.0.2",
+                "badge": { "tone": "ok", "text": "运行中" }
+              },
+              {
+                "main": "链路",
+                "sub": "VIP 10.8.0.1 · ❤ 心跳 1000ms · eth1 · ⇄ 会话同步",
+                "tags": ["VIP 10.8.0.1", "心跳 1000ms", "eth1", "会话同步"]
+              },
+              {
+                "main": "备 (BACKUP)",
+                "sub": "10.8.0.3",
+                "badge": { "tone": "warn", "text": "热备就绪" }
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr 1fr",
+      "cards": [
+        {
+          "title": "集群参数",
+          "body": {
+            "kind": "form",
+            "fields": [
+              {
+                "label": "工作模式",
+                "kind": "select",
+                "value": "主备（Active-Standby）",
+                "options": ["主备（Active-Standby）", "双活（Active-Active）"]
+              },
+              {
+                "label": "本机角色",
+                "kind": "select",
+                "value": "主（MASTER）",
+                "options": ["主（MASTER）", "备（BACKUP）"]
+              },
+              { "label": "虚 IP (VIP)", "kind": "input", "value": "10.8.0.1" },
+              { "label": "对端地址", "kind": "input", "value": "10.8.0.3" }
+            ]
+          }
+        },
+        {
+          "title": "心跳与切换",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "心跳网卡", "kind": "input", "value": "eth1" },
+              { "label": "心跳间隔", "kind": "input", "value": "1000 ms" },
+              { "label": "切换超时", "kind": "input", "value": "5000 ms" },
+              { "label": "会话同步 · 故障切换时已建隧道不掉线", "kind": "switch", "value": "开" },
+              { "label": "抢占模式 · 主恢复后自动夺回 VIP", "kind": "switch", "value": "关" },
+              { "label": "脑裂保护 · 仲裁防双主（建议开启）", "kind": "switch", "value": "开" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

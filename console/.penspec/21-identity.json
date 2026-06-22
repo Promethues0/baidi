@@ -1,0 +1,87 @@
+{
+  "route": "/identity/idp",
+  "file": "IdentityIdp.vue",
+  "title": "IdP 联邦",
+  "centerKey": "identity",
+  "sub": "对接上游企业身份源（OIDC / SAML / LDAP + 钉钉 / 企微 / 飞书）· JIT 建账户（ZL-FR-503）· SAML/opaque 经边缘 broker 桥成 OIDC（ADR-0003）",
+  "headControls": ["badge:idle:mock", "+ 新建联邦"],
+  "sections": [
+    {
+      "cols": "360px 1fr",
+      "cards": [
+        {
+          "title": "联邦源",
+          "body": {
+            "kind": "rows",
+            "items": [
+              { "main": "钉钉（集团主）", "sub": "钉钉 · 1,180 用户", "right": "badge:ok:正常" },
+              { "main": "企业微信（子公司）", "sub": "企业微信 · 312 用户", "right": "badge:ok:正常" },
+              { "main": "集团 AD", "sub": "LDAP / AD · 1,496 用户", "right": "badge:ok:正常" },
+              { "main": "合作方 Okta", "sub": "标准 SAML · 28 用户", "right": "badge:danger:异常" },
+              { "main": "飞书（试点）", "sub": "飞书 · 0 用户", "right": "badge:idle:停用" }
+            ]
+          }
+        },
+        {
+          "title": "钉钉（集团主）  pill:mesh:OIDC",
+          "sub": "钉钉企业内部应用免登（CorpId + 扫码 / 免密），用户映射到组织。",
+          "body": {
+            "kind": "form",
+            "fields": [
+              { "label": "CorpId", "kind": "input", "value": "ding-acme-hq" },
+              { "label": "AppKey", "kind": "input", "value": "" },
+              { "label": "AppSecret", "kind": "input", "value": "" },
+              { "label": "AgentId", "kind": "input", "value": "" },
+              { "label": "回调域名", "kind": "input", "value": "https://sso.corp.com/dingtalk/cb" },
+              { "label": "用户唯一标识", "kind": "select", "value": "unionId（推荐）", "options": ["unionId（推荐）", "手机号", "userId"] },
+              { "label": "JIT 建账户", "kind": "switch", "value": "on" },
+              { "label": "启用此源", "kind": "switch", "value": "on" }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "title": "SDK 联邦 · ExchangeToken",
+          "sub": "B2B2C：ISV 客户用自己 IdP 的 JWT 换节点授权，端用户零二次登录（ZL-FR-507）",
+          "body": { "kind": "text", "lines": ["头部工具条 / 测试连通 / 发起测试登录 / 删除"] }
+        }
+      ]
+    },
+    {
+      "cols": "1.3fr 1fr",
+      "cards": [
+        {
+          "title": "换发流程",
+          "body": {
+            "kind": "steps",
+            "items": [
+              { "label": "验签 ISV IdP JWT（JWKS / iss / aud / jti 防重放）" },
+              { "label": "claim 映射 → 身份（JIT 建账户）" },
+              { "label": "设备策略校验 → 绑定 node key" },
+              { "label": "铸短时 node grant + 预算 netmap" },
+              { "label": "建会话 + 审计" }
+            ]
+          }
+        },
+        {
+          "title": "联邦指标",
+          "body": {
+            "kind": "kv",
+            "items": [
+              { "k": "node grant TTL", "v": "10 分钟" },
+              { "k": "每账户设备上限", "v": "5 · LRU 踢最旧" },
+              { "k": "ephemeral 节点 GC", "v": "已启用" },
+              { "k": "近 24h 会话", "v": "437" },
+              { "k": "jti 重放拦截", "v": "3 次" },
+              { "k": "audiences", "v": "zhulong-sdk" }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

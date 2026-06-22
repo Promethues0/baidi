@@ -1,0 +1,32 @@
+{
+  "route": "/resource/auth",
+  "file": "ResourceAuth.vue",
+  "title": "资源授权",
+  "centerKey": "resource",
+  "sub": "谁（用户 / 用户组 / 组织 / 角色）能访问哪个资源对象 + 授权有效期 · 到期为只读派生态（不可手改，由有效期自动判定）",
+  "headControls": ["badge:idle:mock", "+ 新建授权"],
+  "sections": [
+    {
+      "cols": "1fr",
+      "cards": [
+        {
+          "body": {
+            "kind": "table",
+            "columns": [
+              { "title": "资源", "width": 200 },
+              { "title": "被授权主体", "width": 220 },
+              { "title": "有效期", "width": 220 },
+              { "title": "有效期态", "align": "center", "width": 110 },
+              { "title": "启用", "align": "center", "width": 86 },
+              { "title": "", "align": "center", "width": 120 }
+            ],
+            "rows": [
+              ["OA 办公系统  ·  auth-oa-all", "badge:accent:组织   全体员工", "永久", "badge:ok:生效中", "开", "编辑 / 删除"],
+              ["财务系统  ·  auth-fin-q3", "badge:accent:用户组   财务部-外包", "2026-07-01 ~ 2026-09-30", "badge:ok:生效中", "开", "编辑 / 删除"]
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

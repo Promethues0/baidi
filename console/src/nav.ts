@@ -30,6 +30,7 @@ export const NAV: NavGroup[] = [
       { title: '应用管理', path: '/business/apps', icon: 'IconApps', done: true },
       { title: '策略管理', path: '/business/policy', icon: 'IconSafe', done: true },
       { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup', done: true },
+      { title: '认证源接入', path: '/business/auth', icon: 'IconLock', done: true },
       { title: '终端管理', path: '/business/devices', icon: 'IconMobile', done: true }
     ]
   },
@@ -37,14 +38,14 @@ export const NAV: NavGroup[] = [
     label: '安全防护',
     children: [
       { title: '网关与隐身', path: '/security/gateway', icon: 'IconStorage', done: true },
-      { title: '安全中心', path: '/security/center', icon: 'IconLock' },
+      { title: '安全中心', path: '/security/center', icon: 'IconSafe', done: true },
       { title: '审计中心', path: '/security/audit', icon: 'IconFile', done: true }
     ]
   },
   {
     label: '系统',
     children: [
-      { title: '系统管理', path: '/system/manage', icon: 'IconSettings' }
+      { title: '系统管理', path: '/system/manage', icon: 'IconSettings', done: true }
     ]
   }
 ];

@@ -13,6 +13,9 @@ type Store interface {
 	Devices(ctx context.Context) (DeviceBundle, error)
 	Audit(ctx context.Context) (AuditBundle, error)
 	Gateway(ctx context.Context) (GatewayBundle, error)
+	System(ctx context.Context) (SystemBundle, error)
+	AuthSrc(ctx context.Context) (AuthSrcBundle, error)
+	Security(ctx context.Context) (SecurityBundle, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

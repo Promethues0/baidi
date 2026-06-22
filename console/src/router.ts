@@ -9,8 +9,11 @@ const BUILT: Record<string, () => Promise<unknown>> = {
   '/business/apps': () => import('@/views/Apps.vue'),
   '/business/users': () => import('@/views/Users.vue'),
   '/business/devices': () => import('@/views/Devices.vue'),
+  '/business/auth': () => import('@/views/Auth.vue'),
   '/security/audit': () => import('@/views/Audit.vue'),
-  '/security/gateway': () => import('@/views/Gateway.vue')
+  '/security/gateway': () => import('@/views/Gateway.vue'),
+  '/security/center': () => import('@/views/Security.vue'),
+  '/system/manage': () => import('@/views/System.vue')
 };
 
 const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>

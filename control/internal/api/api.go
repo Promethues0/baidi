@@ -61,7 +61,41 @@ func (s *Server) Routes() http.Handler {
 	// 网关与隐身：区域/节点拓扑 + SPA
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
 
+	// 系统管理：三权分立 + 集群
+	mux.HandleFunc("GET /api/v1/system", s.handleSystem)
+	// 认证源接入：认证源 + 自适应规则
+	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
+	// 安全中心：安全基线 + SPA
+	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
+
 	return mux
+}
+
+func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.System(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load system")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleAuthSrc(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.AuthSrc(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load authsrc")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Security(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load security")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
 }
 
 func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {

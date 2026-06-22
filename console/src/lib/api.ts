@@ -91,3 +91,21 @@ export interface GwNode { name: string; ip: string; role: 'primary' | 'backup'; 
 export interface GwZone { key: string; name: string; status: 'healthy' | 'degraded' | 'down'; apps: number; clients: number; nodes: GwNode[] }
 export interface SpaStatus { generation: string; authMode: string; protectedPorts: string[]; hidden: boolean; knockOk: boolean }
 export interface GatewayBundle { zones: GwZone[]; spa: SpaStatus }
+
+/* ── 系统管理（store.SystemBundle）── */
+export interface AdminGroup { key: string; name: string; power: 'root' | 'system' | 'security' | 'audit' | 'custom'; builtin: boolean; members: number; scope: string }
+export interface AdminAccount { name: string; account: string; group: string; auth: string; twoFa: boolean; lastLogin: string }
+export interface ClusterNode { name: string; ip: string; role: 'master' | 'backup' | 'center' | 'branch'; status: string }
+export interface ClusterInfo { localNodes: ClusterNode[]; distNodes: ClusterNode[] }
+export interface SystemBundle { adminGroups: AdminGroup[]; admins: AdminAccount[]; cluster: ClusterInfo }
+
+/* ── 认证源接入（store.AuthSrcBundle）── */
+export interface AuthSource { key: string; name: string; type: 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert'; status: string; users: number; primary: boolean }
+export interface RuleCond { field: 'weakPwd' | 'geoAnomaly' | 'offHours' | 'riskScore' | 'untrustedDevice' | 'newDevice'; op: 'is' | 'gt' | 'in'; value: string }
+export interface AdaptiveRule { id: string; name: string; enabled: boolean; logic: 'AND' | 'OR'; conditions: RuleCond[]; action: 'allow' | 'mfa' | 'stepup' | 'block'; priority: number }
+export interface AuthSrcBundle { sources: AuthSource[]; rules: AdaptiveRule[] }
+
+/* ── 安全中心（store.SecurityBundle）── */
+export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
+export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
+export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }

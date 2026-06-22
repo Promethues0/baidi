@@ -1,15 +1,31 @@
 <template>
-  <div class="zl-page">
-    <div class="zl-card zl-soon" style="margin-top: 40px;">
-      <icon-tool style="font-size: 32px; color: var(--accent);" />
-      <div style="font-size: 16px; font-weight: 600; color: var(--ink);">{{ title }}</div>
-      <div style="font-size: 13px;">该模块在 M1/M2 里程碑内陆续点亮。当前已可用：概览、统一策略、网关清单、用户管理、统一资源对象、统一事件。</div>
-    </div>
+  <div class="bd-page bd-coming">
+    <a-result status="info" :title="title">
+      <template #subtitle>
+        该模块正按《白帝控制台交互设计规范》建设中 —— 将统一采用<b>创建向导 / 抽屉编辑 / 继承可视化 / 提交影响预览 / 实时态势</b>等交互范式，区别于传统堆表格管理后台。
+      </template>
+      <template #extra>
+        <a-space>
+          <a-tag v-if="leafTitle" color="arcoblue" bordered>{{ groupTitle }} · {{ leafTitle }}</a-tag>
+          <a-button type="primary" @click="$router.push('/posture/dashboard')">返回安全监控大屏</a-button>
+        </a-space>
+      </template>
+    </a-result>
   </div>
 </template>
+
 <script setup lang="ts">
 import { computed } from 'vue';
 import { useRoute } from 'vue-router';
+import { locate } from '@/nav';
+
 const route = useRoute();
-const title = computed(() => (route.meta.title as string) || '建设中');
+const loc = computed(() => locate(route.path));
+const groupTitle = computed(() => loc.value.group?.title ?? '');
+const leafTitle = computed(() => loc.value.leaf?.title ?? '');
+const title = computed(() => (leafTitle.value ? `${leafTitle.value}` : '建设中'));
 </script>
+
+<style scoped>
+.bd-coming { display: flex; align-items: center; justify-content: center; min-height: 60vh; }
+</style>

@@ -1,184 +1,193 @@
 <template>
-  <div class="zl-page">
-    <div class="zl-page__head">
+  <div class="bd-page">
+    <div class="bd-page__head">
       <div>
-        <h1 class="zl-page__title">运行总览</h1>
-        <div class="zl-page__sub">运维 / 容量视角：流量、接入结构与 appliance 资源 · 安全态势见〈安全监控大屏〉</div>
+        <div class="bd-page__title">安全监控大屏</div>
+        <div class="bd-page__sub">三道防线 · 在线会话 · 实时判定态势 · 数据时间 {{ stamp }}</div>
       </div>
-      <a-radio-group v-model="range" type="button" size="small">
-        <a-radio value="1h">近 1 小时</a-radio>
-        <a-radio value="24h">近 24 小时</a-radio>
-        <a-radio value="7d">近 7 天</a-radio>
-      </a-radio-group>
+      <a-space>
+        <a-tag :color="live ? 'green' : 'orange'" bordered>
+          <template #icon><icon-cloud /></template>
+          {{ live ? '已连 baidi-control' : '降级演示 · 内置数据' }}
+        </a-tag>
+        <a-button :loading="loading" @click="load">
+          <template #icon><icon-refresh /></template>刷新
+        </a-button>
+      </a-space>
     </div>
 
-    <!-- 指标卡 -->
-    <div class="zl-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom: 16px;">
-      <div v-for="s in runtimeStats" :key="s.label" class="zl-card zl-card__pad">
-        <div class="zl-stat">
-          <span class="zl-stat__label">{{ s.label }}</span>
-          <span class="zl-stat__value data">
-            {{ s.value.toLocaleString() }}<span class="unit">{{ s.unit }}</span>
-          </span>
-          <span v-if="s.trend" class="zl-badge" :class="s.tone === 'warn' ? 'zl-badge--warn' : 'zl-badge--ok'">
-            {{ s.trend }} {{ rangeLabel }}
-          </span>
-        </div>
-      </div>
-    </div>
+    <!-- KPI 行 -->
+    <a-grid :cols="{ xs: 1, sm: 2, lg: 4 }" :col-gap="16" :row-gap="16">
+      <a-grid-item>
+        <a-card class="bd-kpi" :bordered="false">
+          <div class="bd-kpi__label">在线设备</div>
+          <div class="bd-kpi__value">{{ ov.devices.online }}<span class="bd-kpi__unit"> / {{ ov.devices.total }}</span></div>
+          <a-progress :percent="ov.devices.rate" :show-text="false" size="small" :color="brand" />
+          <div class="bd-kpi__foot">在线率 {{ (ov.devices.rate * 100).toFixed(0) }}%</div>
+        </a-card>
+      </a-grid-item>
+      <a-grid-item>
+        <a-card class="bd-kpi" :bordered="false">
+          <div class="bd-kpi__label">纳管用户</div>
+          <div class="bd-kpi__value">{{ ov.users.total }}</div>
+          <div class="bd-kpi__foot">禁用 {{ ov.users.disabled }} · 锁定 {{ ov.users.locked }}</div>
+        </a-card>
+      </a-grid-item>
+      <a-grid-item>
+        <a-card class="bd-kpi" :bordered="false">
+          <div class="bd-kpi__label">在线会话</div>
+          <div class="bd-kpi__value">{{ ov.sessions }}</div>
+          <div class="bd-kpi__foot">当前活跃接入</div>
+        </a-card>
+      </a-grid-item>
+      <a-grid-item>
+        <a-card class="bd-kpi" :bordered="false">
+          <div class="bd-kpi__label">威胁事件</div>
+          <div class="bd-kpi__value bd-kpi__value--danger">{{ threats }}</div>
+          <div class="bd-kpi__foot">拒绝 {{ ov.threats.rejected }} · 失败 {{ ov.threats.failed }} · 二次鉴权 {{ ov.threats.secondary }}</div>
+        </a-card>
+      </a-grid-item>
+    </a-grid>
 
-    <div class="zl-grid" style="grid-template-columns: 1.5fr 1fr;">
-      <!-- 流量趋势 -->
-      <div class="zl-card zl-card__pad">
-        <div class="zl-card__title" style="margin-bottom: 12px;">
-          三模式流量趋势 <span class="zl-page__sub" style="margin:0;">（MB/s）</span>
-        </div>
-        <v-chart class="chart" :option="trafficOption" autoresize style="height: 280px;" />
-      </div>
-
-      <!-- 网关清单（精简） -->
-      <div class="zl-card zl-card__pad">
-        <div class="zl-card__title" style="margin-bottom: 12px; display:flex; align-items:baseline; justify-content:space-between;">
-          <span>网关健康</span>
-          <router-link to="/gateway" style="font-size:12px;font-weight:400;color:var(--accent-2);text-decoration:none">查看全部 →</router-link>
-        </div>
-        <div v-for="g in gwList" :key="g.name" class="gw-row">
-          <div class="gw-row__main">
-            <span class="gw-row__name data">{{ g.name }}</span>
-            <span class="gw-row__role">{{ g.role }}</span>
+    <!-- 三道防线 -->
+    <div class="bd-section-title">三道防线</div>
+    <a-grid :cols="{ xs: 1, md: 3 }" :col-gap="16" :row-gap="16">
+      <a-grid-item v-for="d in ov.defense" :key="d.key">
+        <a-card class="bd-line" :bordered="false">
+          <div class="bd-line__head">
+            <span class="bd-line__name">{{ d.name }}</span>
+            <a-tag :color="riskColor(d.risk)" size="small">{{ riskLabel(d.risk) }}</a-tag>
           </div>
-          <div class="gw-row__modes">
-            <span v-for="m in g.modes" :key="m" class="zl-mode-pill" :class="`zl-mode--${m}`">{{ m }}</span>
+          <div class="bd-line__risk">
+            <span class="bd-line__score" :style="{ color: riskHex(d.risk) }">{{ d.risk }}</span>
+            <span class="bd-line__unit">风险分</span>
+            <component :is="trendIcon(d.trend)" class="bd-line__trend" :style="{ color: trendHex(d.trend) }" />
           </div>
-          <span class="zl-badge" :class="statusBadge(g.status)">
-            <span class="dot" :style="{ background: 'currentColor' }"></span>{{ statusText(g.status) }}
-          </span>
-        </div>
-      </div>
-    </div>
+          <a-progress :percent="d.risk / 100" :show-text="false" size="mini" :color="riskHex(d.risk)" />
+          <div class="bd-line__top">
+            <div class="bd-line__top-h">TOP 风险实体</div>
+            <div v-for="(e, i) in d.top" :key="e" class="bd-line__top-row">
+              <span class="bd-line__rank">{{ i + 1 }}</span><span class="bd-line__ent">{{ e }}</span>
+            </div>
+          </div>
+        </a-card>
+      </a-grid-item>
+    </a-grid>
 
-    <!-- 接入分布 / 今日判定 / 系统资源 -->
-    <div class="zl-grid" style="grid-template-columns: 1fr 1.4fr; margin-top: 16px;">
-      <div class="zl-card zl-card__pad">
-        <div class="zl-card__title" style="margin-bottom: 8px;">接入模式分布</div>
-        <div class="zl-page__sub" style="margin-bottom: 6px;">活跃会话 / 连接（{{ rangeLabel }}）</div>
-        <v-chart :option="modeOption" autoresize style="height: 200px;" />
-      </div>
-
-      <div class="zl-card zl-card__pad">
-        <div class="zl-card__title" style="margin-bottom: 14px;">Appliance 系统资源 · 8C/16G</div>
-        <div v-for="r in sysRes" :key="r.label" class="sysr">
-          <div class="sysr__head"><span>{{ r.label }}</span><b class="data" :style="r.pct>=80?'color:var(--danger)':r.pct>=60?'color:var(--warn)':''">{{ r.val }}</b></div>
-          <div class="sysr__bar"><i :style="{ width: r.pct + '%', background: r.pct>=80?'var(--danger)':r.pct>=60?'var(--warn)':'var(--accent-2)' }" /></div>
-        </div>
-      </div>
-    </div>
+    <!-- 分布 -->
+    <a-grid :cols="{ xs: 1, lg: 2 }" :col-gap="16" :row-gap="16" style="margin-top: 16px">
+      <a-grid-item>
+        <a-card class="bd-bars" :bordered="false" title="审计类别分布">
+          <div v-for="b in ov.auditByKind" :key="b.name" class="bd-bar">
+            <span class="bd-bar__label">{{ b.name }}</span>
+            <span class="bd-bar__track"><span class="bd-bar__fill" :style="{ width: pct(b.value, auditMax), background: brand }" /></span>
+            <span class="bd-bar__val">{{ b.value }}</span>
+          </div>
+        </a-card>
+      </a-grid-item>
+      <a-grid-item>
+        <a-card class="bd-bars" :bordered="false" title="访问判定分布">
+          <div v-for="b in ov.verdicts" :key="b.name" class="bd-bar">
+            <span class="bd-bar__label">{{ b.name }}</span>
+            <span class="bd-bar__track"><span class="bd-bar__fill" :style="{ width: pct(b.value, verdictMax), background: verdictColor(b.name) }" /></span>
+            <span class="bd-bar__val">{{ b.value }}</span>
+          </div>
+        </a-card>
+      </a-grid-item>
+    </a-grid>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import VChart from 'vue-echarts';
-import { use } from 'echarts/core';
-import { LineChart, PieChart } from 'echarts/charts';
-import { GridComponent, TooltipComponent, LegendComponent } from 'echarts/components';
-import { CanvasRenderer } from 'echarts/renderers';
-import { overviewStats, gateways, trafficSeries, type Gateway } from '@/mock';
-import { listGateways } from '@/services/gateways';
-import { gwStatus } from '@/lib/status';
+import { api, type Overview } from '@/lib/api';
 
-use([LineChart, PieChart, GridComponent, TooltipComponent, LegendComponent, CanvasRenderer]);
+const brand = '#165DFF';
 
-const range = ref('1h');
-const rangeLabel = computed(() => ({ '1h': '近 1 小时', '24h': '近 24 小时', '7d': '近 7 天' } as Record<string, string>)[range.value]);
-// 时间窗放大系数：累计类指标按窗放大，瞬时类（在线/会话）保持
-const mult = computed(() => ({ '1h': 1, '24h': 18, '7d': 110 } as Record<string, number>)[range.value]);
-
-const scaledStats = computed(() => overviewStats.map((s) => {
-  const cumulative = s.label.includes('命中') || s.label.includes('威胁');
-  return { ...s, value: cumulative ? Math.round(s.value * mult.value) : s.value };
-}));
-
-// 网关健康卡走控制面真实清单；指标卡与流量趋势暂无对应端点，保留演示数据。
-const gwList = ref<Gateway[]>([...gateways]);
-onMounted(async () => {
-  try {
-    gwList.value = await listGateways();
-  } catch {
-    /* 控制面未起：保留 mock 种子 */
-  }
-});
-
-const onlineGw = computed(() => gwList.value.filter((g) => g.status === 'online').length);
-// 运维/容量指标：去掉与安全大屏重复的「在线设备 / 威胁事件」，避免两套 mock 口径打架；
-// 保留会话/命中并补「在线网关」（由真实网关清单派生）。
-const runtimeStats = computed(() => [
-  ...scaledStats.value.filter((s) => s.label.includes('会话') || s.label.includes('命中')),
-  { label: '在线网关', value: onlineGw.value, unit: ` / ${gwList.value.length}`, trend: '', tone: 'ok' as const }
-]);
-
-// 按时间窗生成横轴与三模式序列（1h 用真实采样；24h/7d 合成确定性序列）
-const series = computed(() => {
-  if (range.value === '1h') return { axis: trafficSeries.hours, ssl: trafficSeries.ssl, mesh: trafficSeries.mesh, ipsec: trafficSeries.ipsec };
-  const n = range.value === '24h' ? 24 : 7;
-  const axis = Array.from({ length: n }, (_, i) => range.value === '24h' ? `${String(i).padStart(2, '0')}:00` : `D-${n - i}`);
-  const gen = (base: number, amp: number, ph: number) => axis.map((_, i) => +(base + amp * Math.sin(i / 2 + ph) + amp * 0.4 * Math.cos(i)).toFixed(1));
-  return { axis, ssl: gen(9, 4, 0), mesh: gen(8, 2.5, 1.5), ipsec: gen(2.7, 1, 3) };
-});
-const trafficOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  legend: { data: ['SSL', 'Mesh', 'IPSec'], right: 0, top: 0, textStyle: { color: '#8d8579' } },
-  grid: { left: 36, right: 12, top: 36, bottom: 28 },
-  xAxis: { type: 'category', data: series.value.axis, axisLine: { lineStyle: { color: '#ddd6c9' } }, axisLabel: { color: '#8d8579' } },
-  yAxis: { type: 'value', splitLine: { lineStyle: { color: 'rgba(140,128,110,0.16)' } }, axisLabel: { color: '#8d8579' } },
-  series: [
-    { name: 'SSL', type: 'line', smooth: true, data: series.value.ssl, areaStyle: { opacity: 0.12 }, lineStyle: { width: 2 }, itemStyle: { color: '#d99a45' } },
-    { name: 'Mesh', type: 'line', smooth: true, data: series.value.mesh, areaStyle: { opacity: 0.12 }, lineStyle: { width: 2 }, itemStyle: { color: '#bd5a38' } },
-    { name: 'IPSec', type: 'line', smooth: true, data: series.value.ipsec, areaStyle: { opacity: 0.1 }, lineStyle: { width: 2 }, itemStyle: { color: '#a89a86' } }
+const MOCK: Overview = {
+  generatedAt: '',
+  devices: { online: 186, total: 240, rate: 0.775 },
+  users: { total: 312, disabled: 7, locked: 4 },
+  threats: { rejected: 173, failed: 62, secondary: 53 },
+  sessions: 186,
+  auditByKind: [
+    { name: '访问决策', value: 1284 }, { name: '登录认证', value: 642 },
+    { name: '策略变更', value: 73 }, { name: '配置变更', value: 41 }
+  ],
+  verdicts: [
+    { name: '允许', value: 1102 }, { name: '二次鉴权', value: 128 },
+    { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
+  ],
+  defense: [
+    { key: 'device', name: '设备防线', risk: 28, trend: 'down', top: ['203.0.113.7', '198.51.100.22', '203.0.113.91'] },
+    { key: 'account', name: '账号防线', risk: 41, trend: 'up', top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
+    { key: 'endpoint', name: '终端防线', risk: 19, trend: 'flat', top: ['WIN-诊室-12', 'MAC-研发-08', '未授信-Android-3'] }
   ]
-}));
+};
 
-const donut = (data: { name: string; value: number; color: string }[], center = ['50%', '52%']) => ({
-  tooltip: { trigger: 'item', formatter: '{b}: {c}（{d}%）' },
-  legend: { bottom: 0, textStyle: { color: '#8d8579', fontSize: 11 } },
-  series: [{
-    type: 'pie', radius: ['52%', '74%'], center, avoidLabelOverlap: true,
-    label: { show: false }, labelLine: { show: false },
-    data: data.map((d) => ({ name: d.name, value: d.value, itemStyle: { color: d.color } }))
-  }]
-});
-const modeOption = computed(() => donut([
-  { name: 'SSL 会话', value: Math.round(942 * (range.value === '1h' ? 1 : range.value === '24h' ? 1.1 : 1.2)), color: '#d99a45' },
-  { name: 'Mesh 连接', value: 318, color: '#bd5a38' },
-  { name: 'IPSec 隧道', value: 6, color: '#a89a86' }
-]));
-const sysRes = computed(() => {
-  const load = range.value === '7d' ? 1.15 : 1; // 演示：长窗峰值略高
-  const cpu = Math.min(99, Math.round(41 * load));
-  return [
-    { label: 'CPU（8 核）', pct: cpu, val: cpu + '%' },
-    { label: '内存（16G）', pct: 63, val: '63% · 10.1G' },
-    { label: '会话表', pct: 38, val: '38% · 47.6万/125万' },
-    { label: '吞吐', pct: 24, val: '2.4 / 10 Gbps' },
-    { label: 'netstack goroutine', pct: 19, val: '1,920' }
-  ];
-});
+const ov = ref<Overview>(MOCK);
+const live = ref(false);
+const loading = ref(false);
 
-const statusBadge = (s: string) => gwStatus(s).badge;
-const statusText = (s: string) => gwStatus(s).label;
+const stamp = computed(() => (ov.value.generatedAt ? ov.value.generatedAt.replace('T', ' ').slice(0, 19) : '—'));
+const threats = computed(() => ov.value.threats.rejected + ov.value.threats.failed + ov.value.threats.secondary);
+const auditMax = computed(() => Math.max(...ov.value.auditByKind.map((b) => b.value), 1));
+const verdictMax = computed(() => Math.max(...ov.value.verdicts.map((b) => b.value), 1));
+
+function pct(v: number, max: number) { return `${Math.round((v / max) * 100)}%`; }
+function riskColor(r: number) { return r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
+function riskHex(r: number) { return r >= 40 ? '#F53F3F' : r >= 25 ? '#FF7D00' : '#00B42A'; }
+function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
+function trendIcon(t: string) { return t === 'up' ? 'IconArrowRise' : t === 'down' ? 'IconArrowFall' : 'IconMinus'; }
+function trendHex(t: string) { return t === 'up' ? '#F53F3F' : t === 'down' ? '#00B42A' : '#86909C'; }
+function verdictColor(name: string) {
+  return name === '拒绝' ? '#F53F3F' : name === '二次鉴权' ? '#FF7D00' : name === '降权' ? '#FF9A2E' : '#165DFF';
+}
+
+async function load() {
+  loading.value = true;
+  try {
+    ov.value = await api<Overview>('/overview');
+    live.value = true;
+  } catch {
+    ov.value = { ...MOCK, generatedAt: new Date().toISOString() };
+    live.value = false;
+  } finally {
+    loading.value = false;
+  }
+}
+
+onMounted(load);
 </script>
 
 <style scoped>
-.gw-row { display: flex; align-items: center; gap: 10px; padding: 11px 0; border-bottom: 1px solid var(--line); }
-.gw-row:last-child { border-bottom: 0; }
-.gw-row__main { flex: 1; display: flex; flex-direction: column; gap: 3px; min-width: 0; }
-.gw-row__name { font-size: 13px; font-weight: 600; color: var(--ink); }
-.gw-row__role { font-size: 11.5px; color: var(--ink-3); }
-.gw-row__modes { display: flex; gap: 4px; }
-.sysr { margin-bottom: 12px; }
-.sysr:last-child { margin-bottom: 0; }
-.sysr__head { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 5px; font-size: 12px; color: var(--ink-3); }
-.sysr__head b { font-size: 12.5px; color: var(--ink); font-weight: 650; }
-.sysr__bar { height: 6px; border-radius: 3px; background: var(--surface-3, rgba(140,128,110,0.16)); overflow: hidden; }
-.sysr__bar i { display: block; height: 100%; border-radius: 3px; transition: width .3s; }
+.bd-kpi { border-radius: var(--bd-radius); }
+.bd-kpi__label { font-size: 13px; color: var(--color-text-3); }
+.bd-kpi__value { font-size: 30px; font-weight: 700; line-height: 1.4; color: var(--color-text-1); }
+.bd-kpi__value--danger { color: var(--bd-danger); }
+.bd-kpi__unit { font-size: 15px; font-weight: 400; color: var(--color-text-3); }
+.bd-kpi__foot { font-size: 12px; color: var(--color-text-3); margin-top: 6px; }
+
+.bd-line { border-radius: var(--bd-radius); }
+.bd-line__head { display: flex; align-items: center; justify-content: space-between; }
+.bd-line__name { font-weight: 600; color: var(--color-text-1); }
+.bd-line__risk { display: flex; align-items: baseline; gap: 6px; margin: 10px 0 8px; }
+.bd-line__score { font-size: 28px; font-weight: 700; }
+.bd-line__unit { font-size: 12px; color: var(--color-text-3); }
+.bd-line__trend { margin-left: auto; font-size: 18px; }
+.bd-line__top { margin-top: 14px; }
+.bd-line__top-h { font-size: 12px; color: var(--color-text-3); margin-bottom: 8px; }
+.bd-line__top-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }
+.bd-line__rank {
+  width: 18px; height: 18px; border-radius: 4px; background: var(--color-fill-2);
+  color: var(--color-text-2); font-size: 11px; display: inline-flex; align-items: center; justify-content: center;
+}
+.bd-line__ent { color: var(--color-text-1); font-variant-numeric: tabular-nums; }
+
+.bd-bars { border-radius: var(--bd-radius); }
+.bd-bar { display: flex; align-items: center; gap: 12px; padding: 7px 0; }
+.bd-bar__label { width: 72px; font-size: 13px; color: var(--color-text-2); flex-shrink: 0; }
+.bd-bar__track { flex: 1; height: 10px; background: var(--color-fill-2); border-radius: 6px; overflow: hidden; }
+.bd-bar__fill { display: block; height: 100%; border-radius: 6px; transition: width 0.4s ease; }
+.bd-bar__val { width: 48px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--color-text-1); }
 </style>

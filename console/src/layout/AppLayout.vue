@@ -1,157 +1,141 @@
 <template>
-  <div class="zl-shell">
-    <!-- 顶栏：品牌 + 六中心 + 操作 -->
-    <header class="zl-top">
-      <div class="zl-brand">
-        <div class="zl-brand__mark">
+  <a-layout class="bd-shell">
+    <!-- 左侧 Sider：品牌 + 七大工作域两级菜单（Arco Pro 模型，区别于烛龙顶部六中心横条） -->
+    <a-layout-sider
+      class="bd-sider"
+      :width="220"
+      :collapsed="collapsed"
+      :collapsed-width="48"
+      :collapsible="false"
+    >
+      <div class="bd-brand" :class="{ mini: collapsed }">
+        <span class="bd-brand__mark">
           <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L3 7V12C3 16.55 6.84 20.74 12 22C17.16 20.74 21 16.55 21 12V7L12 2Z" fill="currentColor" opacity="0.92"/>
-            <path d="M10 15.5L7 12.5L8.41 11.09L10 12.67L15.59 7.08L17 8.5L10 15.5Z" fill="#fff"/>
+            <path d="M12 2L3 7V12C3 16.55 6.84 20.74 12 22C17.16 20.74 21 16.55 21 12V7L12 2Z" fill="currentColor" />
+            <path d="M9.6 12.2 L11.3 13.9 L14.7 10.2" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
           </svg>
-        </div>
-        <span class="zl-brand__name">白帝 <i>· 零信任访问控制系统</i></span>
+        </span>
+        <span v-if="!collapsed" class="bd-brand__txt">白帝<i>零信任访问控制</i></span>
       </div>
 
-      <nav class="zl-centers">
-        <button
-          v-for="c in NAV"
-          :key="c.key"
-          class="zl-center"
-          :class="{ on: c.key === activeCenter }"
-          @click="goCenter(c)"
-        >{{ c.title }}</button>
-      </nav>
+      <a-menu
+        class="bd-menu"
+        :selected-keys="[route.path]"
+        :open-keys="openKeys"
+        :collapsed="collapsed"
+        accordion
+        @menu-item-click="onLeaf"
+        @sub-menu-click="onSub"
+      >
+        <a-sub-menu v-for="g in NAV" :key="g.key">
+          <template #icon><component :is="g.icon" /></template>
+          <template #title>{{ g.title }}</template>
+          <a-menu-item v-for="c in g.children" :key="c.path">{{ c.title }}</a-menu-item>
+        </a-sub-menu>
+      </a-menu>
+    </a-layout-sider>
 
-      <div class="zl-top__right">
-        <a-tooltip :content="ui.theme === 'dark' ? '切换浅色' : '切换深色'">
-          <button class="zl-iconbtn" @click="ui.toggleTheme()">
-            <component :is="ui.theme === 'dark' ? 'IconSun' : 'IconMoon'" />
+    <a-layout>
+      <!-- 顶栏：折叠 + 面包屑 + 搜索 + 主题 + 用户 -->
+      <a-layout-header class="bd-header">
+        <button class="bd-iconbtn" @click="collapsed = !collapsed">
+          <component :is="collapsed ? 'IconMenuUnfold' : 'IconMenuFold'" />
+        </button>
+        <a-breadcrumb class="bd-crumb">
+          <a-breadcrumb-item>{{ loc.group?.title ?? '白帝' }}</a-breadcrumb-item>
+          <a-breadcrumb-item>{{ loc.leaf?.title ?? '' }}</a-breadcrumb-item>
+        </a-breadcrumb>
+        <div class="bd-header__spacer" />
+        <a-input-search class="bd-search" placeholder="搜索用户 / 应用 / 策略" allow-clear />
+        <a-tooltip :content="dark ? '切换浅色' : '切换深色'">
+          <button class="bd-iconbtn" @click="toggleTheme">
+            <component :is="dark ? 'IconSun' : 'IconMoon'" />
           </button>
         </a-tooltip>
         <a-dropdown>
-          <button class="zl-user"><icon-user /><span>管理员</span><icon-down /></button>
+          <button class="bd-user"><icon-user /><span>管理员</span><icon-down /></button>
           <template #content>
             <a-doption><template #icon><icon-export /></template>退出登录</a-doption>
           </template>
         </a-dropdown>
-      </div>
-    </header>
+      </a-layout-header>
 
-    <div class="zl-body">
-      <!-- 侧栏：当前中心的二级菜单 -->
-      <aside class="zl-side">
-        <template v-for="(g, gi) in activeGroups" :key="gi">
-          <div v-if="g.title" class="zl-side__group">{{ g.title }}</div>
-          <button
-            v-for="leaf in g.children"
-            :key="leaf.key"
-            class="zl-side__item"
-            :class="{ on: leaf.path === route.path }"
-            @click="goLeaf(leaf)"
-          >
-            <span>{{ leaf.title }}</span>
-            <span v-if="leaf.soon" class="zl-side__soon">建设中</span>
-          </button>
-        </template>
-      </aside>
-
-      <main class="zl-main">
+      <a-layout-content class="bd-content">
         <RouterView />
-      </main>
-    </div>
-  </div>
+      </a-layout-content>
+    </a-layout>
+  </a-layout>
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
-import { useRoute, useRouter, RouterView } from 'vue-router';
-import { NAV, type NavCenter, type NavLeaf } from '@/nav';
-import { useUiStore } from '@/store';
+import { ref, computed, watch } from 'vue';
+import { useRoute, useRouter } from 'vue-router';
+import { NAV, locate } from '@/nav';
 
 const route = useRoute();
 const router = useRouter();
-const ui = useUiStore();
 
-const activeCenter = computed(() => {
-  // 用路径首段匹配中心；找不到则归到概览
-  const seg = '/' + (route.path.split('/')[1] || 'overview');
-  const hit = NAV.find((c) => c.groups.some((g) => g.children.some((l) => l.path.startsWith(seg))));
-  return hit?.key || 'overview';
-});
-const activeGroups = computed(() => NAV.find((c) => c.key === activeCenter.value)?.groups || []);
+const collapsed = ref(false);
+const dark = ref(false);
+const openKeys = ref<string[]>([]);
 
-function goCenter(c: NavCenter) {
-  const first = c.groups[0]?.children[0];
-  if (first) router.push(first.path);
+const loc = computed(() => locate(route.path));
+
+watch(
+  () => route.path,
+  () => { openKeys.value = loc.value.group ? [loc.value.group.key] : []; },
+  { immediate: true }
+);
+
+function onLeaf(key: string) {
+  if (key !== route.path) router.push(key);
 }
-function goLeaf(leaf: NavLeaf) {
-  router.push(leaf.path);
+function onSub(key: string) {
+  openKeys.value = openKeys.value.includes(key) ? [] : [key];
+}
+function toggleTheme() {
+  dark.value = !dark.value;
+  document.body.toggleAttribute('arco-theme', dark.value);
+  if (dark.value) document.body.setAttribute('arco-theme', 'dark');
+  else document.body.removeAttribute('arco-theme');
 }
 </script>
 
 <style scoped>
-.zl-shell { display: flex; flex-direction: column; height: 100vh; }
-.zl-top {
-  height: 56px; flex: none; display: flex; align-items: center; gap: 28px;
-  padding: 0 20px; background: var(--surface); border-bottom: 1px solid var(--line);
-}
-.zl-brand { display: flex; align-items: center; gap: 10px; min-width: 230px; }
-.zl-brand__mark { color: var(--accent); display: flex; }
-.zl-brand__name { font-size: 15px; font-weight: 700; color: var(--ink); white-space: nowrap; letter-spacing: -0.01em; }
-.zl-brand__name i { font-style: normal; font-weight: 500; color: var(--ink-3); font-size: 13px; }
+.bd-shell { height: 100vh; }
+.bd-sider { background: var(--color-bg-1); border-right: 1px solid var(--color-border-2); }
 
-.zl-centers { display: flex; gap: 4px; flex: 1; }
-.zl-center {
-  border: 0; background: transparent; cursor: pointer; padding: 7px 15px; border-radius: var(--r-sm);
-  font-size: 14px; font-weight: 550; color: var(--ink-2); font-family: var(--font-cn);
-  transition: background .14s, color .14s, transform .12s ease;
+.bd-brand {
+  height: var(--bd-header-h); display: flex; align-items: center; gap: 10px;
+  padding: 0 16px; border-bottom: 1px solid var(--color-border-2); overflow: hidden;
 }
-.zl-center:hover { background: var(--surface-2); color: var(--ink); }
-.zl-center:active { transform: translateY(1px); }
-.zl-center.on { background: var(--accent-soft); color: var(--accent-2); font-weight: 650; }
-.zl-center:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+.bd-brand.mini { padding: 0; justify-content: center; }
+.bd-brand__mark { color: var(--bd-brand); display: inline-flex; }
+.bd-brand__txt { font-size: 18px; font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
+.bd-brand__txt i {
+  font-style: normal; font-weight: 400; font-size: 11px; letter-spacing: 0;
+  color: var(--color-text-3); margin-left: 6px;
+}
+.bd-menu { border: none; }
 
-.zl-top__right { display: flex; align-items: center; gap: 8px; }
-.zl-iconbtn {
-  width: 34px; height: 34px; border-radius: var(--r-sm); border: 1px solid var(--line);
-  background: var(--surface); color: var(--ink-2); cursor: pointer; display: flex;
+.bd-header {
+  height: var(--bd-header-h); display: flex; align-items: center; gap: 12px;
+  padding: 0 16px; background: var(--color-bg-1); border-bottom: 1px solid var(--color-border-2);
+}
+.bd-header__spacer { flex: 1; }
+.bd-crumb { font-size: 13px; }
+.bd-search { width: 240px; }
+
+.bd-iconbtn {
+  width: 32px; height: 32px; border: none; background: transparent; cursor: pointer;
+  border-radius: 6px; color: var(--color-text-2); display: inline-flex;
   align-items: center; justify-content: center; font-size: 16px;
-  transition: background .14s, color .14s, border-color .14s, transform .12s ease;
 }
-.zl-iconbtn:hover { color: var(--accent-2); border-color: var(--accent-line); background: var(--accent-soft); }
-.zl-iconbtn:active { transform: translateY(1px); }
-.zl-iconbtn:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.zl-user {
-  display: flex; align-items: center; gap: 6px; border: 0; background: transparent;
-  cursor: pointer; color: var(--ink-2); font-size: 13.5px; padding: 6px 8px; border-radius: var(--r-sm);
-  transition: background .14s, color .14s;
+.bd-iconbtn:hover { background: var(--color-fill-2); color: var(--color-text-1); }
+.bd-user {
+  height: 32px; border: none; background: transparent; cursor: pointer; border-radius: 6px;
+  padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-1);
 }
-.zl-user:hover { background: var(--surface-2); }
-.zl-user:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-
-.zl-body { flex: 1; display: flex; min-height: 0; }
-.zl-side {
-  width: 216px; flex: none; background: var(--surface); border-right: 1px solid var(--line);
-  padding: 12px 10px; overflow-y: auto;
-}
-.zl-side__group {
-  font-size: 13px; font-weight: 650; color: var(--ink-3); letter-spacing: .02em;
-  padding: 12px 10px 6px;
-}
-.zl-side__item {
-  width: 100%; display: flex; align-items: center; justify-content: space-between;
-  border: 0; background: transparent; cursor: pointer; text-align: left;
-  padding: 9px 12px; border-radius: var(--r-sm); margin-bottom: 2px;
-  font-size: 12.5px; color: var(--ink-2); font-family: var(--font-cn);
-  transition: background .14s, color .14s, transform .12s ease;
-}
-.zl-side__item:hover { background: var(--surface-2); color: var(--ink); }
-.zl-side__item:active { transform: translateY(1px); }
-.zl-side__item.on { background: var(--accent-soft); color: var(--accent-2); font-weight: 650; }
-.zl-side__item:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
-.zl-side__soon {
-  font-size: 10.5px; color: var(--ink-3); border: 1px solid var(--line-2);
-  border-radius: var(--r-pill); padding: 0 7px; line-height: 16px;
-}
-.zl-main { flex: 1; overflow-y: auto; background: var(--bg); }
+.bd-user:hover { background: var(--color-fill-2); }
+.bd-content { overflow: auto; background: var(--color-fill-2); }
 </style>

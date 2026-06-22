@@ -1,27 +1,34 @@
-/* 白帝控制台 · 基础版式 + 页面通用骨架（Arco 原生） */
+/* 白帝控制台 · 基础版式（对齐设计稿） */
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body {
-  background: var(--color-fill-2);
-  color: var(--color-text-1);
-  font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Hiragino Sans GB',
-    'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  background: var(--bd-fill-1);
+  color: var(--bd-t1);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
   -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
 }
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-thumb { background: var(--bd-t4); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
 
-/* 页面外壳 */
-.bd-page { padding: var(--bd-content-pad); }
-.bd-page__head {
-  display: flex; align-items: flex-start; justify-content: space-between;
-  gap: 16px; margin-bottom: var(--bd-gap);
-}
-.bd-page__title { font-size: 18px; font-weight: 600; color: var(--color-text-1); line-height: 1.3; }
-.bd-page__sub { margin-top: 4px; font-size: 13px; color: var(--color-text-3); }
+/* 页面骨架 */
+.bd-page { padding: 22px 26px 40px; }
+.bd-page__head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
+.bd-page__title { font-size: 20px; font-weight: 700; letter-spacing: .3px; color: var(--bd-t1); line-height: 1.3; }
+.bd-page__sub { margin-top: 4px; font-size: 13px; color: var(--bd-t3); }
 
-.bd-section-title {
-  font-size: 14px; font-weight: 600; color: var(--color-text-2);
-  margin: 4px 0 12px; display: flex; align-items: center; gap: 8px;
+/* 主按钮（设计稿主 CTA） */
+.bd-btn {
+  height: 36px; padding: 0 16px; background: var(--bd-primary); border: none; border-radius: 7px;
+  color: #fff; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 7px;
+  cursor: pointer; box-shadow: 0 2px 6px rgba(22, 93, 255, .3); transition: background .15s;
 }
-.bd-section-title::before {
-  content: ''; width: 3px; height: 14px; border-radius: 2px; background: var(--bd-brand);
+.bd-btn:hover { background: var(--bd-primary-h); }
+.bd-btn--ghost {
+  background: #fff; color: var(--bd-t2); border: 1px solid var(--bd-border); box-shadow: none;
 }
+.bd-btn--ghost:hover { border-color: var(--bd-primary); color: var(--bd-primary); background: #fff; }
+
+/* 卡片 */
+.bd-card { background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); }

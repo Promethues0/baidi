@@ -1,90 +1,55 @@
 /**
- * 白帝控制台导航 · 围绕「一次零信任访问决策的生命周期」组织（区别于烛龙六中心功能字典）。
- * 七大工作域：态势 → 访问者 → 资源 → 策略 → 网关 → 洞察 → 系统。
+ * 白帝控制台导航 · 对齐《白帝零信任控制中心》设计稿的分组 IA。
+ * 四组：监控中心 / 业务管理 / 安全防护 / 系统。
  */
 export interface NavLeaf {
   title: string;
   path: string;
-  done?: boolean; // 是否已按白帝规范重做（否则落 ComingSoon 占位）
+  icon: string;                   // Arco 图标组件名
+  badge?: string;                 // 右侧角标文案
+  badgeKind?: 'count' | 'alert';  // count=灰色计数；alert=红色告警
+  done?: boolean;                 // 是否已按设计稿落地（否则 ComingSoon 占位）
 }
 export interface NavGroup {
-  key: string;
-  title: string;
-  icon: string; // Arco 图标组件名
+  label: string;
   children: NavLeaf[];
 }
 
 export const NAV: NavGroup[] = [
   {
-    key: 'posture', title: '态势', icon: 'IconDashboard',
+    label: '监控中心',
     children: [
-      { title: '安全监控大屏', path: '/posture/dashboard', done: true },
-      { title: '运行总览', path: '/posture/overview' }
+      { title: '安全概览', path: '/monitor/overview', icon: 'IconDashboard', done: true },
+      { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badge: '1,284', badgeKind: 'count' },
+      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '18', badgeKind: 'alert' }
     ]
   },
   {
-    key: 'subject', title: '访问者', icon: 'IconUserGroup',
+    label: '业务管理',
     children: [
-      { title: '用户目录', path: '/subject/users' },
-      { title: '组织与角色', path: '/subject/orgs' },
-      { title: '认证源与策略', path: '/subject/auth' },
-      { title: '终端设备与信任', path: '/subject/devices' },
-      { title: '终端合规基线', path: '/subject/baseline' }
+      { title: '应用管理', path: '/business/apps', icon: 'IconApps' },
+      { title: '策略管理', path: '/business/policy', icon: 'IconSafe', done: true },
+      { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup' }
     ]
   },
   {
-    key: 'resource', title: '资源', icon: 'IconApps',
+    label: '安全防护',
     children: [
-      { title: '应用发布', path: '/resource/apps' },
-      { title: '应用授权', path: '/resource/authz' },
-      { title: '权限审批', path: '/resource/approval' },
-      { title: '对象库', path: '/resource/objects' }
+      { title: '安全中心', path: '/security/center', icon: 'IconLock' },
+      { title: '审计中心', path: '/security/audit', icon: 'IconFile' }
     ]
   },
   {
-    key: 'policy', title: '策略', icon: 'IconSafe',
+    label: '系统',
     children: [
-      { title: '全局策略', path: '/policy/global' },
-      { title: '用户策略', path: '/policy/user' },
-      { title: '安全基线', path: '/policy/baseline' },
-      { title: '策略仿真器', path: '/policy/simulator' }
-    ]
-  },
-  {
-    key: 'gateway', title: '网关', icon: 'IconStorage',
-    children: [
-      { title: '区域与节点', path: '/gateway/zones' },
-      { title: 'SSL 接入', path: '/gateway/ssl' },
-      { title: 'IPSec 组网', path: '/gateway/ipsec' },
-      { title: '地址转换 NAT', path: '/gateway/nat' },
-      { title: 'SPA 服务隐身', path: '/gateway/spa' }
-    ]
-  },
-  {
-    key: 'insight', title: '洞察', icon: 'IconHistory',
-    children: [
-      { title: '统一日志', path: '/insight/logs' },
-      { title: '高级查询与导出', path: '/insight/export' },
-      { title: '审计链', path: '/insight/chain' },
-      { title: '日志外送', path: '/insight/forward' }
-    ]
-  },
-  {
-    key: 'system', title: '系统', icon: 'IconSettings',
-    children: [
-      { title: '管理员（三权分立）', path: '/system/admins' },
-      { title: '证书与密钥', path: '/system/certs' },
-      { title: 'License', path: '/system/license' },
-      { title: '集群', path: '/system/cluster' },
-      { title: '升级', path: '/system/upgrade' },
-      { title: '开放平台', path: '/system/openapi' }
+      { title: '系统管理', path: '/system/manage', icon: 'IconSettings' }
     ]
   }
 ];
 
-export const FIRST_PATH = '/posture/dashboard';
+export const FIRST_PATH = '/monitor/overview';
 
-/** 由路径反查所属分组与叶子标题（面包屑/标题用）。 */
+/** 由路径反查所属分组与叶子（面包屑/标题用）。 */
 export function locate(path: string): { group?: NavGroup; leaf?: NavLeaf } {
   for (const g of NAV) {
     const leaf = g.children.find((c) => c.path === path);

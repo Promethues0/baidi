@@ -23,3 +23,25 @@ export interface Overview {
   verdicts: KV[];
   defense: DefenseLine[];
 }
+
+/* ── 与 store.PolicyBundle 同构（策略继承树 + 用户策略清单） ── */
+export interface OrgNode {
+  key: string;
+  title: string;
+  hasCustom: boolean;
+  members: number;
+  children?: OrgNode[];
+}
+export interface UserPolicy {
+  id: string;
+  name: string;
+  scope: string;
+  status: 'custom' | 'inherited';
+  inheritedFrom: string;
+  members: number;
+  updated: string;
+}
+export interface PolicyBundle {
+  tree: OrgNode[];
+  list: UserPolicy[];
+}

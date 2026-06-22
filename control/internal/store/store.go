@@ -7,6 +7,7 @@ import "context"
 // Store 控制中心数据访问接口。模块处理器只依赖此接口，便于切换持久化后端。
 type Store interface {
 	Overview(ctx context.Context) (Overview, error)
+	PolicyBundle(ctx context.Context) (PolicyBundle, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

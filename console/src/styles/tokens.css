@@ -1,22 +1,37 @@
-/* 白帝设计 token · Arco 原生主题层
-   原则：不覆盖 Arco 的 --primary-*（回归 ArcoBlue #165DFF），只在其上补白帝的布局尺度。
-   与烛龙的黏土橙暖色系彻底分离。 */
+/* 白帝设计 token · 对齐《白帝零信任控制中心》设计稿（Arco 原生 ArcoBlue，不覆盖 Arco --primary） */
 :root {
-  /* 品牌色 = Arco 主色，供自定义元素引用 */
-  --bd-brand:    rgb(var(--primary-6));     /* #165DFF */
-  --bd-brand-5:  rgb(var(--primary-5));
-  --bd-brand-1:  rgb(var(--primary-1));     /* #E8F3FF 浅底 */
+  /* 主色 / 语义 */
+  --bd-primary:   #165DFF;
+  --bd-primary-d: #0E42D2;   /* logo 渐变深 */
+  --bd-primary-h: #4080FF;   /* hover */
+  --bd-primary-1: #E8F3FF;   /* 主色浅底 */
+  --bd-primary-b: #BEDAFF;   /* 主色浅边 */
+  --bd-purple:    #722ED1;   /* 头像渐变 */
+  --bd-success:   #00B42A;
+  --bd-warning:   #FF7D00;
+  --bd-danger:    #F53F3F;
 
-  /* 语义色（与 Arco 一致，便于自绘组件引用） */
-  --bd-success: rgb(var(--green-6));
-  --bd-warning: rgb(var(--orange-6));
-  --bd-danger:  rgb(var(--red-6));
+  /* 文本 / 中性（Arco 灰阶） */
+  --bd-t1: #1D2129; --bd-t2: #4E5969; --bd-t3: #86909C; --bd-t4: #C9CDD4;
+  --bd-border: #E5E6EB;
+  --bd-fill-1: #F7F8FA;
+  --bd-fill-2: #F2F3F5;
 
-  /* 布局尺度（Arco Pro 基线） */
-  --bd-sider-w:           220px;
-  --bd-sider-w-collapsed: 48px;
-  --bd-header-h:          56px;
-  --bd-radius:            8px;
-  --bd-gap:               16px;
-  --bd-content-pad:       20px;
+  /* tag 浅色族（bg / text） */
+  --bd-tag-blue-bg:   #F2F7FF;
+  --bd-tag-green-bg:  #E8FFEA;
+  --bd-tag-red-bg:    #FFECE8;
+  --bd-tag-gold-bg:   #FFF7E8;
+  --bd-tag-purple-bg: #F5E8FF;
+
+  /* 侧栏底部深色状态卡 */
+  --bd-dark-1:   #0E1F4A;
+  --bd-dark-2:   #15327F;
+  --bd-dark-txt: #A8C0F0;
+
+  /* 尺度 */
+  --bd-header-h: 56px;
+  --bd-sider-w:  228px;
+  --bd-radius:   10px;
+  --bd-radius-s: 7px;
 }

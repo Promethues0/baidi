@@ -45,7 +45,19 @@ func (s *Server) Routes() http.Handler {
 	// 态势总览（监控中心一屏聚合）
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 
+	// 策略：继承树 + 用户策略清单
+	mux.HandleFunc("GET /api/v1/policies", s.handlePolicies)
+
 	return mux
+}
+
+func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
+	pb, err := s.store.PolicyBundle(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load policies")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, pb)
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {

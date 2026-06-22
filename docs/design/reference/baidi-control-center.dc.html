@@ -1,0 +1,1365 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<script src="./support.js"></script>
+</head>
+<body>
+<x-dc>
+<helmet>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{font-family:-apple-system,"PingFang SC","Microsoft YaHei","Segoe UI",Roboto,Helvetica,Arial,sans-serif;background:#F7F8FA;color:#1D2129;-webkit-font-smoothing:antialiased;font-variant-numeric:tabular-nums}
+  ::-webkit-scrollbar{width:8px;height:8px}
+  ::-webkit-scrollbar-thumb{background:#C9CDD4;border-radius:4px}
+  ::-webkit-scrollbar-track{background:transparent}
+  @keyframes pulseRing{0%{transform:scale(1);opacity:.5}70%{transform:scale(1.9);opacity:0}100%{opacity:0}}
+  @keyframes dash{from{stroke-dashoffset:600}}
+  .hov{transition:background .12s}
+  .hov:hover{background:#F2F3F5}
+</style>
+</helmet>
+
+<div style="display:flex;flex-direction:column;height:100vh;min-height:100vh;overflow:hidden">
+
+  <!-- Top header -->
+  <header style="height:56px;flex:none;background:#fff;border-bottom:1px solid #E5E6EB;display:flex;align-items:center;padding:0 20px;gap:16px;z-index:20">
+    <div style="display:flex;align-items:center;gap:11px">
+      <div style="width:30px;height:30px;border-radius:7px;background:linear-gradient(135deg,#165DFF,#0E42D2);display:flex;align-items:center;justify-content:center;box-shadow:0 2px 6px rgba(22,93,255,.35)">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95"/><path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </div>
+      <div style="display:flex;flex-direction:column;line-height:1.15">
+        <span style="font-size:15px;font-weight:700;letter-spacing:.3px">白帝 · 零信任访问控制中心</span>
+        <span style="font-size:11px;color:#86909C">ZTNA / SDP Control Center</span>
+      </div>
+    </div>
+    <div style="width:1px;height:24px;background:#E5E6EB;margin:0 4px"></div>
+    <nav style="display:flex;gap:2px">
+      <span style="font-size:13px;color:#165DFF;font-weight:600;padding:6px 12px;border-radius:6px;background:#E8F3FF">控制台</span>
+      <span style="font-size:13px;color:#4E5969;padding:6px 12px;border-radius:6px;cursor:pointer" style-hover="background:#F2F3F5">态势大屏</span>
+      <span style="font-size:13px;color:#4E5969;padding:6px 12px;border-radius:6px;cursor:pointer" style-hover="background:#F2F3F5">运维诊断</span>
+    </nav>
+    <div style="flex:1"></div>
+    <div style="display:flex;align-items:center;height:32px;background:#F2F3F5;border-radius:6px;padding:0 10px;gap:8px;width:220px">
+      <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="#86909C" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="#86909C" stroke-width="2" stroke-linecap="round"/></svg>
+      <span style="font-size:13px;color:#86909C">搜索用户、应用、策略…</span>
+    </div>
+    <div style="position:relative;width:34px;height:34px;border-radius:8px;display:flex;align-items:center;justify-content:center;cursor:pointer" style-hover="background:#F2F3F5">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none"><path d="M18 8a6 6 0 10-12 0c0 7-3 9-3 9h18s-3-2-3-9" stroke="#4E5969" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/><path d="M13.7 21a2 2 0 01-3.4 0" stroke="#4E5969" stroke-width="2" stroke-linecap="round"/></svg>
+      <span style="position:absolute;top:5px;right:6px;min-width:15px;height:15px;padding:0 4px;background:#F53F3F;color:#fff;border-radius:8px;font-size:10px;font-weight:600;display:flex;align-items:center;justify-content:center;border:1.5px solid #fff">6</span>
+    </div>
+    <div style="display:flex;align-items:center;gap:9px;cursor:pointer;padding:3px 6px;border-radius:8px" style-hover="background:#F2F3F5">
+      <div style="width:30px;height:30px;border-radius:50%;background:linear-gradient(135deg,#722ED1,#165DFF);display:flex;align-items:center;justify-content:center;color:#fff;font-size:12px;font-weight:600">管</div>
+      <div style="display:flex;flex-direction:column;line-height:1.2">
+        <span style="font-size:13px;font-weight:600">安全管理员</span>
+        <span style="font-size:11px;color:#86909C">security-admin</span>
+      </div>
+    </div>
+  </header>
+
+  <div style="display:flex;flex:1;overflow:hidden">
+
+    <!-- Sidebar -->
+    <aside style="width:228px;flex:none;background:#fff;border-right:1px solid #E5E6EB;padding:12px 12px 24px;overflow-y:auto">
+      <div style="font-size:11px;color:#86909C;font-weight:600;padding:0 12px;margin:6px 0 4px;letter-spacing:.5px">监控中心</div>
+      <div class="navit hov" data-nav="overview" onClick="{{ go.overview }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M3 4h7v7H3z M14 4h7v4h-7z M14 11h7v9h-7z M3 14h7v6H3z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span style="flex:1">安全概览</span>
+      </div>
+      <div class="navit hov" data-nav="online" onClick="{{ go.online }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M12 12a3.2 3.2 0 100-6.4 3.2 3.2 0 000 6.4 M5.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">在线用户</span>
+        <span style="font-size:11px;color:#86909C;font-weight:500">1,284</span>
+      </div>
+      <div class="navit hov" data-nav="userstate" onClick="{{ go.userstate }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M12 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7 M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">用户状态</span>
+        <span style="min-width:16px;height:16px;padding:0 5px;background:#FFECE8;color:#F53F3F;border-radius:8px;font-size:10px;font-weight:600;display:flex;align-items:center;justify-content:center">18</span>
+      </div>
+
+      <div style="font-size:11px;color:#86909C;font-weight:600;padding:0 12px;margin:16px 0 4px;letter-spacing:.5px">业务管理</div>
+      <div class="navit hov" data-nav="apps" onClick="{{ go.apps }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/></svg>
+        <span style="flex:1">应用管理</span>
+      </div>
+      <div class="navit hov" data-nav="policy" onClick="{{ go.policy }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z M9 12l2 2 4-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">策略管理</span>
+      </div>
+      <div class="navit hov" data-nav="users" onClick="{{ go.users }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M8.5 11a3 3 0 100-6 3 3 0 000 6 M3 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5 M16.5 12.5a2.4 2.4 0 100-4.8 2.4 2.4 0 000 4.8 M15 19c.2-2.6 1.6-4.2 4.5-4.2" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">用户与角色</span>
+      </div>
+
+      <div style="font-size:11px;color:#86909C;font-weight:600;padding:0 12px;margin:16px 0 4px;letter-spacing:.5px">安全防护</div>
+      <div class="navit hov" data-nav="security" onClick="{{ go.security }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z M12 9.5a2 2 0 100 4 2 2 0 000-4" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">安全中心</span>
+      </div>
+      <div class="navit hov" data-nav="audit" onClick="{{ go.audit }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M6 3.5h8l5 5V20.5H6z M14 3.5V9h5 M9 13h6 M9 16.5h6" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">审计中心</span>
+      </div>
+
+      <div style="font-size:11px;color:#86909C;font-weight:600;padding:0 12px;margin:16px 0 4px;letter-spacing:.5px">系统</div>
+      <div class="navit hov" data-nav="system" onClick="{{ go.system }}" style="display:flex;align-items:center;gap:10px;padding:0 12px;height:38px;border-radius:7px;cursor:pointer;font-size:13px;color:#4E5969;margin-bottom:2px;user-select:none;transition:background .12s">
+        <svg width="17" height="17" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M12 15a3 3 0 100-6 3 3 0 000 6 M12 2.5v3 M12 18.5v3 M21.5 12h-3 M5.5 12h-3 M18.5 5.5l-2 2 M7.5 16.5l-2 2 M18.5 18.5l-2-2 M7.5 7.5l-2-2" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        <span style="flex:1">系统管理</span>
+      </div>
+
+      <div style="margin-top:20px;padding:12px;background:linear-gradient(135deg,#0E1F4A,#15327F);border-radius:10px;color:#fff">
+        <div style="display:flex;align-items:center;gap:7px;font-size:12px;font-weight:600;margin-bottom:6px">
+          <span style="width:7px;height:7px;border-radius:50%;background:#23C343;box-shadow:0 0 0 3px rgba(35,195,67,.25)"></span>系统运行正常
+        </div>
+        <div style="font-size:11px;color:#A8C0F0;line-height:1.7">集群 HA · 双节点活动<br/>公网暴露端口 <b style="color:#fff">0</b> · SPA 隐身中</div>
+      </div>
+    </aside>
+
+    <!-- Main content -->
+    <main style="flex:1;overflow-y:auto;padding:22px 26px 40px">
+
+      <!-- ============ 安全概览 ============ -->
+      <sc-if value="{{ show.overview }}" hint-placeholder-val="{{ true }}">
+      <div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:20px;font-weight:700;letter-spacing:.3px">安全概览</h1>
+            <p style="font-size:13px;color:#86909C;margin-top:4px">围绕设备防线 · 账号防线 · 终端防线三道零信任防线的实时态势</p>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;background:#fff;border:1px solid #E5E6EB;border-radius:7px;padding:3px;gap:2px">
+            <span onClick="{{ setRange.hour }}" style="{{ rangeStyle.hour }}">最近一小时</span>
+            <span onClick="{{ setRange.day }}" style="{{ rangeStyle.day }}">最近一天</span>
+            <span onClick="{{ setRange.week }}" style="{{ rangeStyle.week }}">最近一周</span>
+          </div>
+          <button style="margin-left:10px;height:34px;padding:0 14px;background:#fff;border:1px solid #E5E6EB;border-radius:7px;color:#4E5969;font-size:13px;display:flex;align-items:center;gap:6px;cursor:pointer" style-hover="border-color:#165DFF;color:#165DFF">
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M20 11a8 8 0 10-1.5 5M20 5v6h-6" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>刷新
+          </button>
+        </div>
+
+        <!-- KPI row -->
+        <div style="display:grid;grid-template-columns:repeat(6,1fr);gap:14px;margin-bottom:16px">
+          <sc-for list="{{ kpis }}" as="k" hint-placeholder-count="6">
+            <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:16px 16px 14px;position:relative;overflow:hidden">
+              <div style="position:absolute;top:0;left:0;width:100%;height:3px;background:{{ k.accent }}"></div>
+              <div style="display:flex;align-items:center;gap:7px;color:#86909C;font-size:12.5px;margin-bottom:9px">
+                <span style="width:8px;height:8px;border-radius:2px;background:{{ k.accent }}"></span>{{ k.label }}
+              </div>
+              <div style="display:flex;align-items:baseline;gap:6px">
+                <span style="font-size:26px;font-weight:700;color:{{ k.valColor }};line-height:1">{{ k.value }}</span>
+                <span style="font-size:12px;color:#86909C">{{ k.unit }}</span>
+              </div>
+              <div style="font-size:11.5px;color:{{ k.subColor }};margin-top:7px;display:flex;align-items:center;gap:4px">{{ k.sub }}</div>
+            </div>
+          </sc-for>
+        </div>
+
+        <!-- two-column -->
+        <div style="display:grid;grid-template-columns:1.55fr 1fr;gap:16px;margin-bottom:16px">
+          <!-- left -->
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <!-- three defense lines -->
+            <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:14px">
+              <sc-for list="{{ defenseLines }}" as="d" hint-placeholder-count="3">
+                <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:16px">
+                  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+                    <div style="display:flex;align-items:center;gap:8px">
+                      <span style="width:9px;height:9px;border-radius:3px;background:{{ d.color }}"></span>
+                      <span style="font-size:13.5px;font-weight:600">{{ d.name }}</span>
+                    </div>
+                  </div>
+                  <div style="display:flex;align-items:center;gap:14px">
+                    <div style="position:relative;width:74px;height:74px;flex:none">
+                      <svg width="74" height="74" viewBox="0 0 80 80">
+                        <circle cx="40" cy="40" r="33" fill="none" stroke="#F2F3F5" stroke-width="8"/>
+                        <circle cx="40" cy="40" r="33" fill="none" stroke="{{ d.color }}" stroke-width="8" stroke-linecap="round" stroke-dasharray="207.3" stroke-dashoffset="{{ d.dashoffset }}" transform="rotate(-90 40 40)"/>
+                      </svg>
+                      <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center">
+                        <span style="font-size:16px;font-weight:700;color:#1D2129">{{ d.ratePct }}</span>
+                        <span style="font-size:9.5px;color:#86909C">处置率</span>
+                      </div>
+                    </div>
+                    <div style="flex:1;display:flex;flex-direction:column;gap:7px">
+                      <sc-for list="{{ d.subs }}" as="s" hint-placeholder-count="2">
+                        <div style="display:flex;align-items:center;justify-content:space-between;font-size:12px">
+                          <span style="color:#86909C">{{ s.label }}</span>
+                          <span style="font-weight:600;color:{{ s.color }}">{{ s.val }}</span>
+                        </div>
+                      </sc-for>
+                    </div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+
+            <!-- trend -->
+            <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px 14px">
+              <div style="display:flex;align-items:center;margin-bottom:6px">
+                <span style="font-size:15px;font-weight:600">风险事件趋势</span>
+                <div style="display:flex;gap:16px;margin-left:auto;font-size:12px;color:#86909C">
+                  <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:3px;border-radius:2px;background:#165DFF"></span>风险事件</span>
+                  <span style="display:flex;align-items:center;gap:5px"><span style="width:9px;height:3px;border-radius:2px;background:#F53F3F"></span>高危事件</span>
+                </div>
+              </div>
+              <svg viewBox="0 0 680 210" style="width:100%;height:200px;display:block">
+                <line x1="8" y1="38" x2="672" y2="38" stroke="#F2F3F5" stroke-width="1"/>
+                <line x1="8" y1="84" x2="672" y2="84" stroke="#F2F3F5" stroke-width="1"/>
+                <line x1="8" y1="130" x2="672" y2="130" stroke="#F2F3F5" stroke-width="1"/>
+                <line x1="8" y1="176" x2="672" y2="176" stroke="#E5E6EB" stroke-width="1"/>
+                <path d="{{ trendArea }}" fill="url(#tg)" opacity="0.5"/>
+                <defs><linearGradient id="tg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#165DFF" stop-opacity="0.28"/><stop offset="1" stop-color="#165DFF" stop-opacity="0"/></linearGradient></defs>
+                <polyline points="{{ trendLine }}" fill="none" stroke="#165DFF" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+                <polyline points="{{ trendLine2 }}" fill="none" stroke="#F53F3F" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="1 0"/>
+                <sc-for list="{{ trendDots }}" as="p" hint-placeholder-count="12">
+                  <circle cx="{{ p.x }}" cy="{{ p.y }}" r="3" fill="#fff" stroke="#165DFF" stroke-width="2"/>
+                </sc-for>
+              </svg>
+              <div style="display:flex;justify-content:space-between;margin-top:2px;padding:0 4px">
+                <sc-for list="{{ trendLabels }}" as="t" hint-placeholder-count="7">
+                  <span style="font-size:11px;color:#86909C">{{ t }}</span>
+                </sc-for>
+              </div>
+            </div>
+          </div>
+
+          <!-- right -->
+          <div style="display:flex;flex-direction:column;gap:16px">
+            <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px 16px">
+              <div style="font-size:15px;font-weight:600;margin-bottom:16px">设备运行状态</div>
+              <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:6px">
+                <sc-for list="{{ gauges }}" as="g" hint-placeholder-count="3">
+                  <div style="display:flex;flex-direction:column;align-items:center;gap:8px">
+                    <div style="position:relative;width:72px;height:72px">
+                      <svg width="72" height="72" viewBox="0 0 72 72">
+                        <circle cx="36" cy="36" r="29" fill="none" stroke="#F2F3F5" stroke-width="7"/>
+                        <circle cx="36" cy="36" r="29" fill="none" stroke="{{ g.color }}" stroke-width="7" stroke-linecap="round" stroke-dasharray="182.2" stroke-dashoffset="{{ g.offset }}" transform="rotate(-90 36 36)"/>
+                      </svg>
+                      <div style="position:absolute;inset:0;display:flex;align-items:center;justify-content:center;font-size:15px;font-weight:700;color:{{ g.color }}">{{ g.val }}%</div>
+                    </div>
+                    <span style="font-size:12px;color:#4E5969">{{ g.label }}</span>
+                  </div>
+                </sc-for>
+              </div>
+              <div style="display:flex;gap:10px;margin-top:16px;padding-top:14px;border-top:1px solid #F2F3F5">
+                <div style="flex:1;background:#F7F8FA;border-radius:8px;padding:10px 12px">
+                  <div style="font-size:11.5px;color:#86909C">入向吞吐</div>
+                  <div style="font-size:17px;font-weight:700;color:#00B42A;margin-top:2px">386 <span style="font-size:11px;color:#86909C;font-weight:400">Mbps</span></div>
+                </div>
+                <div style="flex:1;background:#F7F8FA;border-radius:8px;padding:10px 12px">
+                  <div style="font-size:11.5px;color:#86909C">出向吞吐</div>
+                  <div style="font-size:17px;font-weight:700;color:#165DFF;margin-top:2px">512 <span style="font-size:11px;color:#86909C;font-weight:400">Mbps</span></div>
+                </div>
+              </div>
+            </div>
+
+            <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px 8px;flex:1">
+              <div style="display:flex;align-items:center;margin-bottom:6px">
+                <span style="font-size:15px;font-weight:600">恶意行为识别</span>
+                <span style="margin-left:auto;font-size:12px;color:#165DFF;cursor:pointer">查看全部</span>
+              </div>
+              <sc-for list="{{ malicious }}" as="m" hint-placeholder-count="4">
+                <div style="display:flex;align-items:flex-start;gap:11px;padding:11px 0;border-bottom:1px solid #F2F3F5">
+                  <span style="width:30px;height:30px;border-radius:8px;background:{{ m.iconBg }};display:flex;align-items:center;justify-content:center;flex:none;margin-top:1px">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 2l9 5v6c0 5-3.5 8-9 11-5.5-3-9-6-9-11V7l9-5z" stroke="{{ m.iconColor }}" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8v4M12 15.5v.5" stroke="{{ m.iconColor }}" stroke-width="2" stroke-linecap="round"/></svg>
+                  </span>
+                  <div style="flex:1;min-width:0">
+                    <div style="font-size:13px;font-weight:500;color:#1D2129">{{ m.behavior }}</div>
+                    <div style="font-size:11.5px;color:#86909C;margin-top:2px">{{ m.detail }}</div>
+                  </div>
+                  <span style="font-size:11px;padding:2px 8px;border-radius:4px;background:{{ m.tagBg }};color:{{ m.tagColor }};white-space:nowrap;font-weight:500">{{ m.status }}</span>
+                </div>
+              </sc-for>
+            </div>
+          </div>
+        </div>
+
+        <!-- TOP5 -->
+        <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:16px">
+          <sc-for list="{{ topGroups }}" as="grp" hint-placeholder-count="3">
+            <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px">
+              <div style="display:flex;align-items:center;gap:8px;margin-bottom:14px">
+                <span style="font-size:14.5px;font-weight:600">{{ grp.title }}</span>
+                <span style="font-size:11px;color:#86909C">TOP 5</span>
+                <span style="margin-left:auto;font-size:11px;color:#165DFF">点击调查 ›</span>
+              </div>
+              <sc-for list="{{ grp.rows }}" as="r" hint-placeholder-count="5">
+                <div onClick="{{ r.onInvestigate }}" class="hov" style="display:flex;align-items:center;gap:10px;margin:0 -10px;padding:7px 10px;border-radius:7px;cursor:pointer">
+                  <span style="width:18px;height:18px;border-radius:5px;background:{{ r.rankBg }};color:{{ r.rankColor }};font-size:11px;font-weight:700;display:flex;align-items:center;justify-content:center;flex:none">{{ r.rank }}</span>
+                  <div style="flex:1;min-width:0">
+                    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:4px">
+                      <span style="font-size:12.5px;color:#1D2129;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:140px">{{ r.label }}</span>
+                      <span style="font-size:12px;font-weight:600;color:#4E5969;margin-left:8px">{{ r.val }}</span>
+                    </div>
+                    <div style="height:5px;background:#F2F3F5;border-radius:3px;overflow:hidden">
+                      <div style="height:100%;width:{{ r.pct }};background:{{ grp.color }};border-radius:3px"></div>
+                    </div>
+                  </div>
+                </div>
+              </sc-for>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ 在线用户 ============ -->
+      <sc-if value="{{ show.online }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:20px;font-weight:700">在线用户</h1>
+            <p style="font-size:13px;color:#86909C;margin-top:4px">当前登录成功 <b style="color:#165DFF">1,284</b> 人 · 实时会话与就近处置</p>
+          </div>
+        </div>
+        <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:12px;padding:14px 18px;border-bottom:1px solid #F2F3F5">
+            <button onClick="{{ logoutSelected }}" style="{{ logoutBtnStyle }}">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><path d="M15 4h3a2 2 0 012 2v12a2 2 0 01-2 2h-3" stroke="currentColor" stroke-width="2" stroke-linecap="round"/><path d="M10 8l-4 4 4 4M6 12h11" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+              注销用户 <sc-if value="{{ hasSelection }}" hint-placeholder-val="{{ false }}"><span>（{{ selectedCount }}）</span></sc-if>
+            </button>
+            <span style="font-size:12.5px;color:#86909C">已选 {{ selectedCount }} 项</span>
+            <div style="flex:1"></div>
+            <div style="display:flex;align-items:center;height:32px;background:#F7F8FA;border:1px solid #E5E6EB;border-radius:6px;padding:0 10px;gap:8px;width:240px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="#86909C" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="#86909C" stroke-width="2" stroke-linecap="round"/></svg>
+              <span style="font-size:13px;color:#86909C">按用户名 / 组织 / 接入 IP 搜索</span>
+            </div>
+            <button style="height:32px;width:32px;background:#fff;border:1px solid #E5E6EB;border-radius:6px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#4E5969" style-hover="border-color:#165DFF;color:#165DFF">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><circle cx="5" cy="12" r="1.6" fill="currentColor"/><circle cx="12" cy="12" r="1.6" fill="currentColor"/><circle cx="19" cy="12" r="1.6" fill="currentColor"/></svg>
+            </button>
+          </div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="background:#F7F8FA">
+                <th style="width:46px;padding:11px 0 11px 18px;text-align:left"><div onClick="{{ toggleAll }}" style="{{ allCheckStyle }}"><sc-if value="{{ allChecked }}" hint-placeholder-val="{{ false }}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 6" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if></div></th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">用户名</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">所属组织架构</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">终端 / 浏览器</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">接入 IP</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">认证方式</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">最后登录</th>
+                <th style="padding:11px 18px 11px 12px;text-align:right;font-size:12px;font-weight:600;color:#86909C">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{ onlineUsers }}" as="u" hint-placeholder-count="8">
+                <tr style="{{ u.rowStyle }}" style-hover="background:#F7F8FA">
+                  <td style="padding:0 0 0 18px"><div onClick="{{ u.onToggle }}" style="{{ u.checkStyle }}"><sc-if value="{{ u.checked }}" hint-placeholder-val="{{ false }}"><svg width="12" height="12" viewBox="0 0 24 24" fill="none"><path d="M5 12l5 5L20 6" stroke="#fff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/></svg></sc-if></div></td>
+                  <td style="padding:13px 12px">
+                    <div onClick="{{ u.onOpen }}" class="hov" style="display:flex;align-items:center;gap:9px;cursor:pointer;margin:-6px -8px;padding:6px 8px;border-radius:7px">
+                      <span style="width:28px;height:28px;border-radius:50%;background:{{ u.avBg }};color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none">{{ u.initial }}</span>
+                      <div>
+                        <div style="font-size:13px;font-weight:500;color:#165DFF">{{ u.name }}</div>
+                        <div style="font-size:11px;color:#86909C">{{ u.account }}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#4E5969">{{ u.org }}</td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#4E5969">{{ u.terminal }} · {{ u.browser }}</td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#4E5969;font-family:ui-monospace,monospace">{{ u.ip }}</td>
+                  <td style="padding:13px 12px"><span style="font-size:11.5px;padding:2px 8px;border-radius:4px;background:{{ u.authBg }};color:{{ u.authColor }};font-weight:500">{{ u.auth }}</span></td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#86909C">{{ u.last }}</td>
+                  <td style="padding:13px 18px 13px 12px;text-align:right"><span onClick="{{ u.onLogout }}" style="font-size:12.5px;color:#F53F3F;cursor:pointer;font-weight:500" style-hover="text-decoration:underline">注销</span></td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+          <div style="display:flex;align-items:center;padding:14px 18px;border-top:1px solid #F2F3F5">
+            <span style="font-size:12.5px;color:#86909C">共 1,284 条 · 当前展示前 8 条</span>
+            <div style="flex:1"></div>
+            <div style="display:flex;gap:6px;align-items:center">
+              <span style="width:30px;height:30px;border:1px solid #E5E6EB;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#C9CDD4">‹</span>
+              <span style="width:30px;height:30px;background:#165DFF;color:#fff;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;font-weight:600">1</span>
+              <span style="width:30px;height:30px;border:1px solid #E5E6EB;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#4E5969;cursor:pointer">2</span>
+              <span style="width:30px;height:30px;border:1px solid #E5E6EB;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#4E5969;cursor:pointer">3</span>
+              <span style="width:30px;height:30px;border:1px solid #E5E6EB;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:13px;color:#4E5969;cursor:pointer">›</span>
+            </div>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ 应用管理 ============ -->
+      <sc-if value="{{ show.apps }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:20px;font-weight:700">应用管理</h1>
+            <p style="font-size:13px;color:#86909C;margin-top:4px">把内网业务注册为受控资源 · 隧道应用与 WEB 应用 · 以资源为最小授权单元</p>
+          </div>
+          <div style="flex:1"></div>
+          <button onClick="{{ openDrawer }}" style="height:36px;padding:0 16px;background:#165DFF;border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:500;display:flex;align-items:center;gap:7px;cursor:pointer;box-shadow:0 2px 6px rgba(22,93,255,.3)" style-hover="background:#4080FF">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M12 5v14M5 12h14" stroke="#fff" stroke-width="2.2" stroke-linecap="round"/></svg>新增应用
+          </button>
+        </div>
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <!-- category tree -->
+          <div style="width:210px;flex:none;background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:12px">
+            <div style="font-size:12px;font-weight:600;color:#86909C;padding:4px 8px 10px">应用分类</div>
+            <sc-for list="{{ appCats }}" as="c" hint-placeholder-count="6">
+              <div onClick="{{ c.onClick }}" class="hov" style="{{ c.style }}">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v8a2 2 0 01-2 2H5a2 2 0 01-2-2V7z" stroke="currentColor" stroke-width="1.7" stroke-linejoin="round"/></svg>
+                <span style="flex:1">{{ c.label }}</span>
+                <span style="font-size:11px;color:#86909C">{{ c.count }}</span>
+              </div>
+            </sc-for>
+          </div>
+          <!-- app table -->
+          <div style="flex:1;background:#fff;border:1px solid #E5E6EB;border-radius:10px;overflow:hidden">
+            <table style="width:100%;border-collapse:collapse">
+              <thead>
+                <tr style="background:#F7F8FA">
+                  <th style="padding:11px 18px;text-align:left;font-size:12px;font-weight:600;color:#86909C">应用名称</th>
+                  <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">发布模式</th>
+                  <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">所属节点区域</th>
+                  <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">已授权</th>
+                  <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">状态</th>
+                  <th style="padding:11px 18px;text-align:right;font-size:12px;font-weight:600;color:#86909C">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <sc-for list="{{ appsFiltered }}" as="a" hint-placeholder-count="6">
+                  <tr style="border-top:1px solid #F2F3F5" style-hover="background:#F7F8FA">
+                    <td style="padding:14px 18px">
+                      <div onClick="{{ a.onOpen }}" class="hov" style="display:flex;align-items:center;gap:11px;cursor:pointer;margin:-6px -8px;padding:6px 8px;border-radius:8px">
+                        <span style="width:34px;height:34px;border-radius:8px;background:{{ a.iconBg }};display:flex;align-items:center;justify-content:center;flex:none">
+                          <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2" stroke="{{ a.iconColor }}" stroke-width="1.8"/><path d="M3 8h18M7 21h10" stroke="{{ a.iconColor }}" stroke-width="1.8" stroke-linecap="round"/></svg>
+                        </span>
+                        <div>
+                          <div style="font-size:13px;font-weight:500;color:#165DFF">{{ a.name }}</div>
+                          <div style="font-size:11.5px;color:#86909C;font-family:ui-monospace,monospace">{{ a.addr }}</div>
+                        </div>
+                      </div>
+                    </td>
+                    <td style="padding:14px 12px"><span style="font-size:11.5px;padding:3px 9px;border-radius:4px;background:{{ a.modeBg }};color:{{ a.modeColor }};font-weight:500">{{ a.mode }}</span></td>
+                    <td style="padding:14px 12px;font-size:12.5px;color:#4E5969">{{ a.node }}</td>
+                    <td style="padding:14px 12px;font-size:12.5px;color:#4E5969">{{ a.auth }} 用户</td>
+                    <td style="padding:14px 12px"><span style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:{{ a.statusColor }}"><span style="width:7px;height:7px;border-radius:50%;background:{{ a.statusColor }}"></span>{{ a.status }}</span></td>
+                    <td style="padding:14px 18px;text-align:right">
+                      <span onClick="{{ openDrawer }}" style="font-size:12.5px;color:#165DFF;cursor:pointer;font-weight:500;margin-right:14px" style-hover="text-decoration:underline">编辑</span>
+                      <span onClick="{{ a.onOpen }}" style="font-size:12.5px;color:#4E5969;cursor:pointer;font-weight:500" style-hover="color:#165DFF">详情</span>
+                    </td>
+                  </tr>
+                </sc-for>
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ 策略管理 ============ -->
+      <sc-if value="{{ show.policy }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:20px;font-weight:700">策略管理 · 全局策略</h1>
+            <p style="font-size:13px;color:#86909C;margin-top:4px">全局兜底 + 个性覆盖 · 决定用户以何种安全姿态登录、客户端处于何种受控状态</p>
+          </div>
+          <div style="flex:1"></div>
+          <button style="height:36px;padding:0 18px;background:#165DFF;border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 6px rgba(22,93,255,.3)" style-hover="background:#4080FF">保存策略</button>
+        </div>
+        <div style="display:flex;gap:16px;align-items:flex-start">
+          <div style="width:200px;flex:none;background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:8px">
+            <sc-for list="{{ policySections }}" as="p" hint-placeholder-count="4">
+              <div onClick="{{ p.onClick }}" class="hov" style="{{ p.style }}">{{ p.label }}</div>
+            </sc-for>
+          </div>
+          <div style="flex:1;background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:8px 24px">
+
+            <sc-if value="{{ psLogin }}" hint-placeholder-val="{{ true }}">
+              <div>
+                <div style="font-size:15px;font-weight:600;padding:18px 0 6px;border-bottom:1px solid #F2F3F5;margin-bottom:4px">防暴力破解</div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">图形校验码</div><div style="font-size:12px;color:#86909C;margin-top:3px">登录时要求输入校验码（支持中文 / 英文）</div></div>
+                  <div onClick="{{ tg.captcha.handler }}" data-toggle="captcha" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">同 IP 连续登录错误锁定</div><div style="font-size:12px;color:#86909C;margin-top:3px">同一 IP 密码错误达阈值后锁定该 IP 一段时间</div></div>
+                  <div style="display:flex;align-items:center;gap:8px;margin-right:18px;font-size:12.5px;color:#4E5969">阈值 <span style="display:inline-flex;align-items:center;justify-content:center;width:52px;height:30px;border:1px solid #E5E6EB;border-radius:6px;font-weight:600;background:#fff">5</span> 次</div>
+                  <div onClick="{{ tg.ipLock.handler }}" data-toggle="ipLock" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">同用户名连续登录错误锁定</div><div style="font-size:12px;color:#86909C;margin-top:3px">锁定的用户需管理员在「用户状态」处手动解封后方可再认证</div></div>
+                  <div style="display:flex;align-items:center;gap:8px;margin-right:18px;font-size:12.5px;color:#4E5969">阈值 <span style="display:inline-flex;align-items:center;justify-content:center;width:52px;height:30px;border:1px solid #E5E6EB;border-radius:6px;font-weight:600;background:#fff">5</span> 次</div>
+                  <div onClick="{{ tg.userLock.handler }}" data-toggle="userLock" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="font-size:15px;font-weight:600;padding:22px 0 6px;border-bottom:1px solid #F2F3F5;margin-bottom:4px">密码与会话安全 <span style="font-size:11px;color:#86909C;font-weight:400">（仅本地用户目录）</span></div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">禁止空密码登录</div><div style="font-size:12px;color:#86909C;margin-top:3px">阻断未设置密码的本地账号直接登录</div></div>
+                  <div onClick="{{ tg.passEmpty.handler }}" data-toggle="passEmpty" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">中间人攻击防护</div><div style="font-size:12px;color:#86909C;margin-top:3px">检测并阻断 SSL 链路被劫持的中间人风险</div></div>
+                  <div onClick="{{ tg.antiMitm.handler }}" data-toggle="antiMitm" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">防会话劫持</div><div style="font-size:12px;color:#86909C;margin-top:3px">绑定会话与终端特征，防止 Cookie 被盗用复用</div></div>
+                  <div onClick="{{ tg.antiHijack.handler }}" data-toggle="antiHijack" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ psAccess }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="font-size:15px;font-weight:600;padding:18px 0 6px;border-bottom:1px solid #F2F3F5;margin-bottom:4px">接入加速与限制</div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">弱网带宽优化</div><div style="font-size:12px;color:#86909C;margin-top:3px">优化 TCP，抗丢包抗抖动，提升弱网下的访问体验</div></div>
+                  <div onClick="{{ tg.weakNet.handler }}" data-toggle="weakNet" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">时延优化（0RTT）</div><div style="font-size:12px;color:#86909C;margin-top:3px">Local Handshake + Early Data，仅对 PC 端短隧道资源生效</div></div>
+                  <div onClick="{{ tg.latency.handler }}" data-toggle="latency" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">禁止用户通过浏览器登录</div><div style="font-size:12px;color:#86909C;margin-top:3px">强制走客户端接入（暂不支持 Linux）</div></div>
+                  <div onClick="{{ tg.browserLimit.handler }}" data-toggle="browserLimit" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+              </div>
+            </sc-if>
+
+            <sc-if value="{{ psClient }}" hint-placeholder-val="{{ false }}">
+              <div>
+                <div style="font-size:15px;font-weight:600;padding:18px 0 6px;border-bottom:1px solid #F2F3F5;margin-bottom:4px">客户端强管控</div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">强制安装客户端</div><div style="font-size:12px;color:#86909C;margin-top:3px">Web 认证页检测本地未装客户端则弹框引导安装</div></div>
+                  <div onClick="{{ tg.forceInstall.handler }}" data-toggle="forceInstall" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0;border-bottom:1px solid #F7F8FA">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">强制升级至最新客户端 <span style="font-size:11px;color:#FF7D00;background:#FFF7E8;padding:1px 6px;border-radius:4px;margin-left:4px">高影响</span></div><div style="font-size:12px;color:#86909C;margin-top:3px">检测到新版本则阻断登录直至更新；开启后自动关闭灰度升级</div></div>
+                  <div onClick="{{ tg.forceUpgrade.handler }}" data-toggle="forceUpgrade" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+                <div style="display:flex;align-items:center;padding:18px 0">
+                  <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">开机自动启动客户端</div><div style="font-size:12px;color:#86909C;margin-top:3px">默认开关，用户可在客户端侧个性化覆盖</div></div>
+                  <div onClick="{{ tg.autostart.handler }}" data-toggle="autostart" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+                </div>
+              </div>
+            </sc-if>
+
+          </div>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ 用户状态 ============ -->
+      <sc-if value="{{ show.userstate }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="display:flex;align-items:flex-start;margin-bottom:18px">
+          <div>
+            <h1 style="font-size:20px;font-weight:700">用户状态</h1>
+            <p style="font-size:13px;color:#86909C;margin-top:4px">检索爆破登录 / 爆破锁定 / 异地登录 / ACL 策略锁定的异常用户，就地解锁或下钻调查</p>
+          </div>
+          <div style="flex:1"></div>
+          <div style="display:flex;align-items:center;gap:8px;background:#FFECE8;border:1px solid #FDCDC5;border-radius:8px;padding:8px 14px">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M12 2l9 5v6c0 5-3.5 8-9 11-5.5-3-9-6-9-11V7l9-5z" stroke="#F53F3F" stroke-width="1.8" stroke-linejoin="round"/><path d="M12 8v4M12 15.5v.5" stroke="#F53F3F" stroke-width="2" stroke-linecap="round"/></svg>
+            <span style="font-size:13px;color:#4E5969">当前锁定 <b style="color:#F53F3F;font-size:15px">{{ usLockedCount }}</b> 个账号待处置</span>
+          </div>
+        </div>
+        <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;overflow:hidden">
+          <div style="display:flex;align-items:center;gap:6px;padding:12px 16px;border-bottom:1px solid #F2F3F5">
+            <sc-for list="{{ usFilters }}" as="f" hint-placeholder-count="5">
+              <div onClick="{{ f.onClick }}" style="{{ f.style }}">
+                <span>{{ f.label }}</span>
+                <span style="{{ f.badgeStyle }}">{{ f.count }}</span>
+              </div>
+            </sc-for>
+            <div style="flex:1"></div>
+            <div style="display:flex;align-items:center;height:32px;background:#F7F8FA;border:1px solid #E5E6EB;border-radius:6px;padding:0 10px;gap:8px;width:220px">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none"><circle cx="11" cy="11" r="7" stroke="#86909C" stroke-width="2"/><path d="M20 20l-3.5-3.5" stroke="#86909C" stroke-width="2" stroke-linecap="round"/></svg>
+              <span style="font-size:13px;color:#86909C">搜索用户名 / 来源 IP</span>
+            </div>
+          </div>
+          <table style="width:100%;border-collapse:collapse">
+            <thead>
+              <tr style="background:#F7F8FA">
+                <th style="padding:11px 18px;text-align:left;font-size:12px;font-weight:600;color:#86909C">用户</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C;white-space:nowrap">异常类型</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">触发原因</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">来源 IP</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C;white-space:nowrap">触发时间</th>
+                <th style="padding:11px 12px;text-align:left;font-size:12px;font-weight:600;color:#86909C">状态</th>
+                <th style="padding:11px 18px 11px 12px;text-align:right;font-size:12px;font-weight:600;color:#86909C">操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              <sc-for list="{{ usRows }}" as="u" hint-placeholder-count="8">
+                <tr style="border-top:1px solid #F2F3F5" style-hover="background:#F7F8FA">
+                  <td style="padding:13px 18px">
+                    <div style="display:flex;align-items:center;gap:9px">
+                      <span style="width:28px;height:28px;border-radius:50%;background:{{ u.avBg }};color:#fff;font-size:11px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none">{{ u.initial }}</span>
+                      <div>
+                        <div style="font-size:13px;font-weight:500;color:#1D2129">{{ u.name }}</div>
+                        <div style="font-size:11px;color:#86909C">{{ u.account }}</div>
+                      </div>
+                    </div>
+                  </td>
+                  <td style="padding:13px 12px"><span style="font-size:11.5px;padding:3px 9px;border-radius:4px;background:{{ u.typeBg }};color:{{ u.typeColor }};font-weight:500;white-space:nowrap">{{ u.typeLabel }}</span></td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#4E5969;max-width:230px">{{ u.reason }}</td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#4E5969;white-space:nowrap"><span style="font-family:ui-monospace,monospace">{{ u.ip }}</span> <span style="color:#86909C">· {{ u.loc }}</span></td>
+                  <td style="padding:13px 12px;font-size:12.5px;color:#86909C;white-space:nowrap">{{ u.time }}</td>
+                  <td style="padding:13px 12px"><span style="display:inline-flex;align-items:center;gap:6px;font-size:12.5px;color:{{ u.statusColor }};white-space:nowrap"><span style="width:7px;height:7px;border-radius:50%;background:{{ u.statusColor }}"></span>{{ u.statusText }}</span></td>
+                  <td style="padding:13px 18px 13px 12px;text-align:right">
+                    <span onClick="{{ u.onInvestigate }}" style="font-size:12.5px;color:#4E5969;cursor:pointer;font-weight:500;margin-right:14px" style-hover="color:#165DFF">调查</span>
+                    <sc-if value="{{ u.canUnlock }}" hint-placeholder-val="{{ false }}"><span onClick="{{ u.onUnlock }}" style="font-size:12.5px;color:#165DFF;cursor:pointer;font-weight:500" style-hover="text-decoration:underline">解锁</span></sc-if>
+                    <sc-if value="{{ u.unlocked }}" hint-placeholder-val="{{ false }}"><span style="font-size:12.5px;color:#C9CDD4;font-weight:500">已解锁</span></sc-if>
+                  </td>
+                </tr>
+              </sc-for>
+            </tbody>
+          </table>
+        </div>
+      </div>
+      </sc-if>
+
+      <!-- ============ placeholders ============ -->
+      <sc-if value="{{ show.placeholder }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <h1 style="font-size:20px;font-weight:700">{{ phTitle }}</h1>
+        <p style="font-size:13px;color:#86909C;margin-top:4px">{{ phDesc }}</p>
+        <div style="margin-top:60px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;padding:60px">
+          <div style="width:96px;height:96px;border-radius:24px;background:#fff;border:1px solid #E5E6EB;display:flex;align-items:center;justify-content:center">
+            <svg width="44" height="44" viewBox="0 0 24 24" fill="none"><path d="M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6l7-3z" stroke="#C9CDD4" stroke-width="1.6" stroke-linejoin="round"/></svg>
+          </div>
+          <div style="text-align:center">
+            <div style="font-size:15px;font-weight:600;color:#4E5969">该模块原型待补充</div>
+            <div style="font-size:13px;color:#86909C;margin-top:6px;max-width:420px;line-height:1.7">{{ phNote }}</div>
+          </div>
+          <button onClick="{{ go.overview }}" style="height:36px;padding:0 18px;background:#fff;border:1px solid #E5E6EB;border-radius:7px;color:#165DFF;font-size:13px;font-weight:500;cursor:pointer" style-hover="border-color:#165DFF">返回安全概览</button>
+        </div>
+      </div>
+      </sc-if>
+
+    </main>
+  </div>
+</div>
+
+<!-- ===== 新增应用 抽屉 ===== -->
+<sc-if value="{{ drawerOpen }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:50">
+  <div onClick="{{ closeDrawer }}" style="position:absolute;inset:0;background:rgba(29,33,41,.4)"></div>
+  <div style="position:absolute;top:0;right:0;height:100%;width:620px;background:#F7F8FA;box-shadow:-8px 0 30px rgba(0,0,0,.12);display:flex;flex-direction:column">
+    <div style="height:60px;flex:none;background:#fff;border-bottom:1px solid #E5E6EB;display:flex;align-items:center;padding:0 24px">
+      <span style="font-size:16px;font-weight:600">新增应用</span>
+      <div style="flex:1"></div>
+      <span onClick="{{ closeDrawer }}" style="width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#86909C" style-hover="background:#F2F3F5"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+    </div>
+    <div style="flex:none;background:#fff;border-bottom:1px solid #E5E6EB;display:flex;padding:0 24px;gap:4px">
+      <sc-for list="{{ drawerTabs }}" as="t" hint-placeholder-count="5">
+        <div onClick="{{ t.onClick }}" style="{{ t.style }}">{{ t.label }}</div>
+      </sc-for>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:24px">
+
+      <sc-if value="{{ dtBasic }}" hint-placeholder-val="{{ true }}">
+      <div style="display:flex;flex-direction:column;gap:20px">
+        <div style="display:flex;gap:8px;background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:6px">
+          <div onClick="{{ setMode.tunnel }}" data-mode="tunnel" style="flex:1;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:8px;cursor:pointer;transition:all .12s;color:#4E5969;background:transparent">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><path d="M2 12c0-3 2-5 5-5h10c3 0 5 2 5 5s-2 5-5 5H7c-3 0-5-2-5-5z" stroke="currentColor" stroke-width="1.8"/><path d="M7 12h10" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-dasharray="2 3"/></svg>
+            <div><div style="font-size:13.5px;font-weight:600">隧道应用</div><div style="font-size:11.5px;color:#86909C;margin-top:2px">C/S 经客户端隧道 · TCP/UDP/ICMP</div></div>
+          </div>
+          <div onClick="{{ setMode.web }}" data-mode="web" style="flex:1;display:flex;align-items:center;gap:12px;padding:14px 16px;border-radius:8px;cursor:pointer;transition:all .12s;color:#4E5969;background:transparent">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="9" stroke="currentColor" stroke-width="1.8"/><path d="M3 12h18M12 3c2.5 2.5 2.5 15 0 18M12 3c-2.5 2.5-2.5 15 0 18" stroke="currentColor" stroke-width="1.6"/></svg>
+            <div><div style="font-size:13.5px;font-weight:600">WEB 应用</div><div style="font-size:11.5px;color:#86909C;margin-top:2px">B/S 七层代理 · 免客户端/插件</div></div>
+          </div>
+        </div>
+        <div><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">应用名称 <span style="color:#F53F3F">*</span></label><div style="height:36px;border:1px solid #165DFF;border-radius:7px;background:#fff;display:flex;align-items:center;padding:0 12px;font-size:13px;color:#1D2129;box-shadow:0 0 0 2px rgba(22,93,255,.1)">OA 协同办公系统</div></div>
+        <div style="display:flex;gap:16px">
+          <div style="flex:1"><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">所属应用分类</label><div style="height:36px;border:1px solid #E5E6EB;border-radius:7px;background:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px;color:#4E5969">办公协同<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="#86909C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div>
+          <div style="flex:1"><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">所属节点区域 <span style="color:#F53F3F">*</span></label><div style="height:36px;border:1px solid #E5E6EB;border-radius:7px;background:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px;color:#4E5969">华东网关集群<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="#86909C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div>
+        </div>
+        <div><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">服务器地址</label><div style="height:36px;border:1px solid #E5E6EB;border-radius:7px;background:#fff;display:flex;align-items:center;padding:0 12px;font-size:13px;color:#1D2129;font-family:ui-monospace,monospace">oa.corp.internal</div><div style="font-size:11.5px;color:#86909C;margin-top:6px">支持单个 IP、IP 范围、IP 段(CIDR)及域名(含通配符 *.domain.com)，可通过 + 配置多组地址+端口</div></div>
+        <div style="display:flex;gap:16px"><div style="flex:1"><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">端口</label><div style="height:36px;border:1px solid #E5E6EB;border-radius:7px;background:#fff;display:flex;align-items:center;padding:0 12px;font-size:13px;color:#1D2129;font-family:ui-monospace,monospace">443</div></div><div style="flex:1"><label style="font-size:13px;font-weight:500;color:#1D2129;display:block;margin-bottom:7px">协议</label><div style="height:36px;border:1px solid #E5E6EB;border-radius:7px;background:#fff;display:flex;align-items:center;justify-content:space-between;padding:0 12px;font-size:13px;color:#4E5969">HTTPS<svg width="13" height="13" viewBox="0 0 24 24" fill="none"><path d="M6 9l6 6 6-6" stroke="#86909C" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg></div></div></div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ dtSecurity }}" hint-placeholder-val="{{ false }}">
+      <div>
+        <div style="font-size:13px;color:#86909C;background:#E8F3FF;border:1px solid #BEDAFF;border-radius:8px;padding:10px 14px;margin-bottom:18px;display:flex;gap:8px;align-items:flex-start">
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" style="margin-top:1px;flex:none"><circle cx="12" cy="12" r="9" stroke="#165DFF" stroke-width="1.8"/><path d="M12 8v.5M12 11v5" stroke="#165DFF" stroke-width="2" stroke-linecap="round"/></svg>
+          <span style="color:#4E5969">数据防泄露与水印能力仅对 WEB 应用或「隧道转 Web」生效 · 数据不落地，落地必留痕</span>
+        </div>
+        <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:4px 18px">
+          <sc-for list="{{ dlpItems }}" as="d" hint-placeholder-count="6">
+            <div style="display:flex;align-items:center;padding:16px 0;border-bottom:1px solid #F7F8FA">
+              <div style="flex:1"><div style="font-size:13.5px;font-weight:500;color:#1D2129">{{ d.label }}</div><div style="font-size:12px;color:#86909C;margin-top:3px">{{ d.desc }}</div></div>
+              <div onClick="{{ d.handler }}" data-toggle="{{ d.key }}" style="width:40px;height:22px;border-radius:11px;background:#C9CDD4;position:relative;cursor:pointer;transition:background .2s;flex:none"><div style="position:absolute;top:2px;left:2px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .2s;box-shadow:0 1px 3px rgba(0,0,0,.25)"></div></div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ dtOther }}" hint-placeholder-val="{{ false }}">
+      <div style="display:flex;flex-direction:column;align-items:center;justify-content:center;padding:80px 20px;gap:14px">
+        <svg width="48" height="48" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="16" rx="2" stroke="#C9CDD4" stroke-width="1.6"/><path d="M3 9h18M8 14h8M8 17h5" stroke="#C9CDD4" stroke-width="1.6" stroke-linecap="round"/></svg>
+        <div style="font-size:13.5px;color:#86909C;text-align:center;max-width:340px;line-height:1.7">{{ dtOtherNote }}</div>
+      </div>
+      </sc-if>
+
+    </div>
+    <div style="flex:none;background:#fff;border-top:1px solid #E5E6EB;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:0 24px;height:64px">
+      <button onClick="{{ closeDrawer }}" style="height:36px;padding:0 18px;background:#fff;border:1px solid #E5E6EB;border-radius:7px;color:#4E5969;font-size:13px;cursor:pointer" style-hover="border-color:#C9CDD4">取消</button>
+      <button style="height:36px;padding:0 18px;background:#fff;border:1px solid #165DFF;border-radius:7px;color:#165DFF;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:#F2F7FF">保存并继续授权</button>
+      <button onClick="{{ closeDrawer }}" style="height:36px;padding:0 20px;background:#165DFF;border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 6px rgba(22,93,255,.3)" style-hover="background:#4080FF">保存发布</button>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<!-- ===== 实体调查 抽屉 ===== -->
+<sc-if value="{{ invOpen }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:55">
+  <div onClick="{{ closeInv }}" style="position:absolute;inset:0;background:rgba(29,33,41,.45)"></div>
+  <div style="position:absolute;top:0;right:0;height:100%;width:700px;background:#F7F8FA;box-shadow:-8px 0 30px rgba(0,0,0,.12);display:flex;flex-direction:column">
+    <div style="flex:none;background:#fff;border-bottom:1px solid #E5E6EB;padding:22px 24px">
+      <div style="display:flex;align-items:flex-start;gap:14px">
+        <span style="width:46px;height:46px;border-radius:11px;background:{{ inv.iconBg }};display:flex;align-items:center;justify-content:center;flex:none">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><path d="{{ inv.iconPath }}" stroke="{{ inv.iconColor }}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/></svg>
+        </span>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px;font-weight:700;font-family:ui-monospace,monospace;color:#1D2129">{{ inv.title }}</span>
+            <span style="font-size:11.5px;font-weight:600;padding:2px 9px;border-radius:5px;background:{{ inv.level.bg }};color:{{ inv.level.c }}">{{ inv.level.t }}</span>
+          </div>
+          <div style="font-size:12.5px;color:#86909C;margin-top:4px">{{ inv.subtitle }}</div>
+        </div>
+        <span onClick="{{ closeInv }}" style="width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#86909C;flex:none" style-hover="background:#F2F3F5"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:18px 24px 24px;display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px;display:flex;align-items:center;gap:20px">
+        <div style="position:relative;width:84px;height:84px;flex:none">
+          <svg width="84" height="84" viewBox="0 0 84 84"><circle cx="42" cy="42" r="29" fill="none" stroke="#F2F3F5" stroke-width="8"/><circle cx="42" cy="42" r="29" fill="none" stroke="{{ inv.level.c }}" stroke-width="8" stroke-linecap="round" stroke-dasharray="182.2" stroke-dashoffset="{{ inv.gOffset }}" transform="rotate(-90 42 42)"/></svg>
+          <div style="position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center"><span style="font-size:23px;font-weight:700;color:{{ inv.level.c }};line-height:1">{{ inv.score }}</span><span style="font-size:9.5px;color:#86909C;margin-top:2px">风险评分</span></div>
+        </div>
+        <div style="flex:1">
+          <div style="font-size:13px;font-weight:600;color:#1D2129;margin-bottom:10px">威胁画像</div>
+          <div style="display:flex;flex-wrap:wrap;gap:8px">
+            <sc-for list="{{ inv.tags }}" as="t" hint-placeholder-count="3">
+              <span style="font-size:12px;padding:3px 12px;border-radius:20px;background:{{ t.bg }};color:{{ t.c }};font-weight:500">{{ t.t }}</span>
+            </sc-for>
+          </div>
+        </div>
+      </div>
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:4px 20px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr)">
+          <sc-for list="{{ inv.attrs }}" as="a" hint-placeholder-count="6">
+            <div style="padding:13px 0">
+              <div style="font-size:11.5px;color:#86909C">{{ a.k }}</div>
+              <div style="font-size:13px;font-weight:500;color:#1D2129;margin-top:3px">{{ a.v }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px 6px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:14px">行为时间线</div>
+        <sc-for list="{{ inv.timeline }}" as="e" hint-placeholder-count="4">
+          <div style="display:flex;gap:12px">
+            <div style="display:flex;flex-direction:column;align-items:center;flex:none">
+              <span style="width:9px;height:9px;border-radius:50%;background:{{ e.c }};margin-top:4px;flex:none"></span>
+              <span style="flex:1;width:2px;background:#F2F3F5;margin:3px 0"></span>
+            </div>
+            <div style="flex:1;padding-bottom:16px;min-width:0">
+              <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+                <span style="font-size:13px;font-weight:600;color:#1D2129">{{ e.e }}</span>
+                <span style="font-size:11.5px;color:#86909C;white-space:nowrap">{{ e.time }}</span>
+              </div>
+              <div style="font-size:12px;color:#86909C;margin-top:3px;line-height:1.6">{{ e.d }}</div>
+            </div>
+          </div>
+        </sc-for>
+      </div>
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:18px 20px">
+        <div style="font-size:13px;font-weight:600;margin-bottom:10px">关联实体</div>
+        <sc-for list="{{ inv.related }}" as="r" hint-placeholder-count="3">
+          <div onClick="{{ r.onClick }}" class="hov" style="display:flex;align-items:center;gap:11px;padding:11px 12px;border-radius:8px;cursor:pointer;margin:0 -12px">
+            <span style="font-size:11px;font-weight:600;padding:2px 8px;border-radius:5px;background:#F2F3F5;color:#4E5969;flex:none">{{ r.badge }}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:#1D2129;font-family:ui-monospace,monospace">{{ r.name }}</div>
+              <div style="font-size:11.5px;color:#86909C;margin-top:1px">{{ r.sub }}</div>
+            </div>
+            <span style="width:7px;height:7px;border-radius:50%;background:{{ r.riskColor }};flex:none"></span>
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" style="flex:none"><path d="M9 6l6 6-6 6" stroke="#C9CDD4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+          </div>
+        </sc-for>
+      </div>
+    </div>
+    <div style="flex:none;background:#fff;border-top:1px solid #E5E6EB;display:flex;align-items:center;gap:12px;padding:0 24px;height:64px">
+      <button onClick="{{ invFp }}" style="height:36px;padding:0 16px;background:#fff;border:1px solid #E5E6EB;border-radius:7px;color:#4E5969;font-size:13px;cursor:pointer" style-hover="border-color:#C9CDD4">标记误报</button>
+      <div style="flex:1"></div>
+      <button onClick="{{ invBlock }}" style="height:36px;padding:0 16px;background:#fff;border:1px solid #FF7D00;border-radius:7px;color:#FF7D00;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:#FFF7E8">临时阻断</button>
+      <button onClick="{{ invBlacklist }}" style="height:36px;padding:0 18px;background:#F53F3F;border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 6px rgba(245,63,63,.3)" style-hover="background:#E63333">加入黑名单</button>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<!-- ===== 应用详情 抽屉 ===== -->
+<sc-if value="{{ appDetailOpen }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;inset:0;z-index:56">
+  <div onClick="{{ closeApp }}" style="position:absolute;inset:0;background:rgba(29,33,41,.45)"></div>
+  <div style="position:absolute;top:0;right:0;height:100%;width:720px;background:#F7F8FA;box-shadow:-8px 0 30px rgba(0,0,0,.12);display:flex;flex-direction:column">
+    <div style="flex:none;background:#fff;border-bottom:1px solid #E5E6EB;padding:22px 24px">
+      <div style="display:flex;align-items:flex-start;gap:14px">
+        <span style="width:46px;height:46px;border-radius:11px;background:{{ appD.iconBg }};display:flex;align-items:center;justify-content:center;flex:none">
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="none"><rect x="3" y="4" width="18" height="14" rx="2" stroke="{{ appD.iconColor }}" stroke-width="1.8"/><path d="M3 8h18M7 21h10" stroke="{{ appD.iconColor }}" stroke-width="1.8" stroke-linecap="round"/></svg>
+        </span>
+        <div style="flex:1;min-width:0">
+          <div style="display:flex;align-items:center;gap:10px">
+            <span style="font-size:18px;font-weight:700;color:#1D2129">{{ appD.name }}</span>
+            <span style="font-size:11.5px;font-weight:500;padding:2px 9px;border-radius:5px;background:{{ appD.modeBg }};color:{{ appD.modeColor }}">{{ appD.mode }}</span>
+            <span style="display:inline-flex;align-items:center;gap:5px;font-size:12px;color:{{ appD.statusColor }}"><span style="width:7px;height:7px;border-radius:50%;background:{{ appD.statusColor }}"></span>{{ appD.status }}</span>
+          </div>
+          <div style="font-size:12.5px;color:#86909C;margin-top:4px;font-family:ui-monospace,monospace">{{ appD.addr }}</div>
+        </div>
+        <span onClick="{{ closeApp }}" style="width:32px;height:32px;border-radius:7px;display:flex;align-items:center;justify-content:center;cursor:pointer;color:#86909C;flex:none" style-hover="background:#F2F3F5"><svg width="16" height="16" viewBox="0 0 24 24" fill="none"><path d="M6 6l12 12M18 6L6 18" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg></span>
+      </div>
+    </div>
+    <div style="flex:1;overflow-y:auto;padding:18px 24px 24px;display:flex;flex-direction:column;gap:16px">
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:4px 20px">
+        <div style="display:grid;grid-template-columns:repeat(3,1fr)">
+          <sc-for list="{{ appD.attrs }}" as="a" hint-placeholder-count="6">
+            <div style="padding:13px 0">
+              <div style="font-size:11.5px;color:#86909C">{{ a.k }}</div>
+              <div style="font-size:13px;font-weight:500;color:#1D2129;margin-top:3px">{{ a.v }}</div>
+            </div>
+          </sc-for>
+        </div>
+      </div>
+      <div style="display:flex;gap:6px;background:#F2F3F5;border-radius:9px;padding:4px">
+        <div onClick="{{ appTabToUsers }}" data-apptab="users" style="flex:1;text-align:center;padding:8px 0;font-size:13px;border-radius:6px;cursor:pointer;font-weight:500;color:#4E5969;background:transparent">授权用户</div>
+        <div onClick="{{ appTabToLogs }}" data-apptab="logs" style="flex:1;text-align:center;padding:8px 0;font-size:13px;border-radius:6px;cursor:pointer;font-weight:500;color:#4E5969;background:transparent">访问明细</div>
+      </div>
+
+      <sc-if value="{{ appTabUsers }}" hint-placeholder-val="{{ true }}">
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:6px 20px 12px">
+        <div style="display:flex;align-items:center;padding:14px 0 10px;border-bottom:1px solid #F2F3F5">
+          <span style="font-size:13px;font-weight:600">授权用户 · 共 {{ appD.userCount }}</span>
+          <span onClick="{{ appManageAuth }}" style="margin-left:auto;font-size:12.5px;color:#165DFF;cursor:pointer;font-weight:500">管理授权</span>
+        </div>
+        <sc-if value="{{ appD.free }}" hint-placeholder-val="{{ false }}">
+          <div style="padding:34px 0;text-align:center;font-size:13px;color:#86909C">该应用对所有人 <b style="color:#FF7D00">免认证开放</b>，无需逐用户授权</div>
+        </sc-if>
+        <sc-for list="{{ appD.users }}" as="u" hint-placeholder-count="5">
+          <div style="display:flex;align-items:center;gap:11px;padding:12px 0;border-bottom:1px solid #F7F8FA">
+            <span style="width:30px;height:30px;border-radius:50%;background:{{ u.avBg }};color:#fff;font-size:12px;font-weight:600;display:flex;align-items:center;justify-content:center;flex:none">{{ u.initial }}</span>
+            <div style="flex:1;min-width:0">
+              <div style="font-size:13px;font-weight:500;color:#1D2129">{{ u.name }} <span style="font-size:11.5px;color:#86909C;font-weight:400">{{ u.account }}</span></div>
+              <div style="font-size:11.5px;color:#86909C;margin-top:1px">{{ u.org }}</div>
+            </div>
+            <span style="font-size:11.5px;padding:2px 9px;border-radius:4px;background:{{ u.scopeBg }};color:{{ u.scopeColor }};font-weight:500">{{ u.scope }}</span>
+            <span style="font-size:11.5px;color:#86909C;width:70px;text-align:right">{{ u.last }}</span>
+          </div>
+        </sc-for>
+      </div>
+      </sc-if>
+
+      <sc-if value="{{ appTabLogs }}" hint-placeholder-val="{{ false }}">
+      <div style="background:#fff;border:1px solid #E5E6EB;border-radius:10px;padding:6px 20px 12px">
+        <div style="display:flex;align-items:center;padding:14px 0 10px;border-bottom:1px solid #F2F3F5">
+          <span style="font-size:13px;font-weight:600">访问明细</span>
+          <span style="margin-left:auto;display:flex;align-items:center;gap:5px;font-size:11.5px;color:#86909C"><span style="width:6px;height:6px;border-radius:50%;background:#00B42A"></span>实时</span>
+        </div>
+        <sc-for list="{{ appD.logs }}" as="l" hint-placeholder-count="6">
+          <div style="display:flex;align-items:center;gap:12px;padding:12px 0;border-bottom:1px solid #F7F8FA">
+            <span style="width:6px;height:6px;border-radius:50%;background:{{ l.rc }};flex:none"></span>
+            <span style="font-size:12.5px;font-weight:500;color:#1D2129;width:96px">{{ l.user }}</span>
+            <span style="flex:1;font-size:12.5px;color:#4E5969;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis">{{ l.action }}</span>
+            <span style="font-size:11.5px;color:#86909C;white-space:nowrap">{{ l.time }}</span>
+            <span style="font-size:11.5px;padding:2px 9px;border-radius:4px;background:{{ l.rb }};color:{{ l.rc }};font-weight:500;white-space:nowrap">{{ l.result }}</span>
+          </div>
+        </sc-for>
+      </div>
+      </sc-if>
+    </div>
+    <div style="flex:none;background:#fff;border-top:1px solid #E5E6EB;display:flex;align-items:center;justify-content:flex-end;gap:12px;padding:0 24px;height:64px">
+      <button onClick="{{ closeApp }}" style="height:36px;padding:0 18px;background:#fff;border:1px solid #E5E6EB;border-radius:7px;color:#4E5969;font-size:13px;cursor:pointer" style-hover="border-color:#C9CDD4">关闭</button>
+      <button onClick="{{ appManageAuth }}" style="height:36px;padding:0 16px;background:#fff;border:1px solid #165DFF;border-radius:7px;color:#165DFF;font-size:13px;font-weight:500;cursor:pointer" style-hover="background:#F2F7FF">管理授权</button>
+      <button onClick="{{ appEdit }}" style="height:36px;padding:0 18px;background:#165DFF;border:none;border-radius:7px;color:#fff;font-size:13px;font-weight:500;cursor:pointer;box-shadow:0 2px 6px rgba(22,93,255,.3)" style-hover="background:#4080FF">编辑应用</button>
+    </div>
+  </div>
+</div>
+</sc-if>
+
+<!-- toast -->
+<sc-if value="{{ toast }}" hint-placeholder-val="{{ false }}">
+<div style="position:fixed;top:72px;left:50%;transform:translateX(-50%);z-index:80;background:#fff;border:1px solid #E5E6EB;border-radius:8px;box-shadow:0 6px 24px rgba(0,0,0,.12);padding:11px 18px;display:flex;align-items:center;gap:9px">
+  <svg width="17" height="17" viewBox="0 0 24 24" fill="none"><circle cx="12" cy="12" r="10" fill="#00B42A"/><path d="M7 12l3.5 3.5L17 9" stroke="#fff" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/></svg>
+  <span style="font-size:13.5px;color:#1D2129">{{ toast }}</span>
+</div>
+</sc-if>
+</x-dc>
+<script type="text/x-dc" data-dc-script>
+class Component extends DCLogic {
+  state = {
+    nav: 'overview',
+    range: 'day',
+    selected: [],
+    appCat: 'all',
+    drawerOpen: false,
+    drawerTab: 'basic',
+    drawerMode: 'web',
+    policySection: 'login',
+    inv: null,
+    appDetail: null,
+    appTab: 'users',
+    usFilter: 'all',
+    usUnlocked: [],
+    toggles: { captcha:true, ipLock:true, userLock:true, passEmpty:true, antiMitm:false, antiHijack:true, weakNet:true, latency:false, browserLimit:false, forceInstall:true, forceUpgrade:false, autostart:true,
+      noCopy:true, noPrint:true, noRightClick:false, noDownload:true, noDebug:true, watermark:true },
+    toast: ''
+  };
+
+  showToast(msg){
+    this.setState({ toast: msg });
+    clearTimeout(this._t);
+    this._t = setTimeout(()=>this.setState({ toast:'' }), 2200);
+  }
+  toggle(key){ this.setState(s=>({ toggles: { ...s.toggles, [key]: !s.toggles[key] } })); }
+
+  openInv(kind,label,val){ this.setState({ inv: this.buildInv(kind,label,val) }); }
+  chainInv(kind,label,val){ this.setState({ inv:null }); setTimeout(()=>this.openInv(kind,label,val), 30); }
+  openSession(u){ this.setState({ inv: this.mkSession(u) }); }
+  closeInv(){ this.setState({ inv:null }); }
+  openApp(app){ this.setState({ appDetail: this.buildApp(app), appTab:'users' }); }
+  closeApp(){ this.setState({ appDetail:null }); }
+  buildApp(app){
+    const av=['#165DFF','#722ED1','#00B42A','#FF7D00','#0FC6C2','#3491FA'];
+    const userPool=[
+      {name:'张伟',account:'zhang.wei',org:'研发中心',scope:'读写',last:'2 分钟前'},
+      {name:'李娜',account:'li.na',org:'财务部',scope:'只读',last:'9 分钟前'},
+      {name:'刘洋',account:'liu.yang',org:'研发中心',scope:'读写',last:'15 分钟前'},
+      {name:'孙强',account:'sun.qiang',org:'人力资源',scope:'只读',last:'26 分钟前'},
+      {name:'周婷',account:'zhou.ting',org:'法务部',scope:'只读',last:'41 分钟前'},
+      {name:'陈浩',account:'chen.hao',org:'市场部',scope:'读写',last:'1 小时前'}
+    ];
+    const scopeStyle = (s)=> s==='读写' ? {c:'#165DFF',bg:'#E8F3FF'} : {c:'#00B42A',bg:'#E8FFEA'};
+    const free = app.status==='免认证';
+    const off = app.status==='已停用';
+    const users = (free||off) ? [] : userPool.slice(0, Math.min(6, Math.max(2, app.auth))).map((u,i)=>{ const ss=scopeStyle(u.scope); return { ...u, avBg:av[i%av.length], initial:u.name[0], scopeColor:ss.c, scopeBg:ss.bg }; });
+    const logs = [
+      {user:'张伟',action:'访问首页',time:'刚刚',result:'允许',rc:'#00B42A',rb:'#E8FFEA'},
+      {user:'李娜',action:'下载报表 Q2.xlsx',time:'3 分钟前',result: free?'允许':'拦截·DLP',rc: free?'#00B42A':'#F53F3F',rb: free?'#E8FFEA':'#FFECE8'},
+      {user:'未知用户',action:'越权访问 /admin',time:'7 分钟前',result:'拒绝',rc:'#F53F3F',rb:'#FFECE8'},
+      {user:'刘洋',action:'提交表单',time:'12 分钟前',result:'允许',rc:'#00B42A',rb:'#E8FFEA'},
+      {user:'孙强',action:'查询明细',time:'18 分钟前',result:'允许',rc:'#00B42A',rb:'#E8FFEA'},
+      {user:'svc_backup',action:'异常高频请求',time:'25 分钟前',result:'限流',rc:'#FF7D00',rb:'#FFF7E8'}
+    ];
+    const web = app.mode.indexOf('WEB')>=0;
+    const sc = app.status==='已发布'?'#00B42A':(free?'#FF7D00':'#86909C');
+    return {
+      name:app.name, addr:app.addr, mode:app.mode, status:app.status, statusColor:sc,
+      modeBg: web?'#E8F3FF':'#F5E8FF', modeColor: web?'#165DFF':'#722ED1', iconBg: web?'#E8F3FF':'#F5E8FF', iconColor: web?'#165DFF':'#722ED1',
+      attrs:[ {k:'服务地址',v:app.addr},{k:'节点区域',v:app.node},{k:'发布模式',v:app.mode},{k:'已授权',v: free?'全员免认证':(app.auth+' 用户')},{k:'今日访问',v: off?'0':(app.auth*7+128)+' 次'},{k:'平均时延',v: off?'—':(web?'38 ms':'12 ms')} ],
+      users, userCount: app.auth, free, off, logs
+    };
+  }
+  invDispose(action){
+    const o=this.state.inv; if(!o) return;
+    const msg = action==='fp' ? '已将「'+o.title+'」标记为误报，相关告警将被抑制'
+      : action==='block' ? '已对「'+o.title+'」下发临时阻断（2 小时）'
+      : o.dispo;
+    this.setState({ inv:null }); this.showToast(msg);
+  }
+  buildInv(kind,label,val){
+    const tg2bg = {'#F53F3F':'#FFECE8','#FF7D00':'#FFF7E8','#FF9A2E':'#FFF7E8','#00B42A':'#E8FFEA','#165DFF':'#E8F3FF','#722ED1':'#F5E8FF'};
+    const lvl = (s)=> s>=80?{t:'高危',c:'#F53F3F',bg:'#FFECE8'} : s>=60?{t:'中高危',c:'#FF7D00',bg:'#FFF7E8'} : s>=40?{t:'中危',c:'#FF9A2E',bg:'#FFF7E8'} : {t:'低危',c:'#00B42A',bg:'#E8FFEA'};
+    const badgeOf = (k)=> k==='ip'?'IP':k==='account'?'账号':k==='terminal'?'终端':'会话';
+    const rel = (k,l,sub,v,c)=>({ kind:k, badge:badgeOf(k), name:l, sub, riskColor:c, onClick:()=>this.chainInv(k,l,v) });
+    const icons = {
+      ip:'M12 21a9 9 0 100-18 9 9 0 000 18 M3 12h18 M12 3c2.6 2.6 2.6 15.4 0 18 M12 3c-2.6 2.6-2.6 15.4 0 18',
+      account:'M12 12a4 4 0 100-8 4 4 0 000 8 M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5',
+      terminal:'M5 5h14v10H5z M3 19h18'
+    };
+    let o;
+    if(kind==='ip'){
+      const loc = label.split(' ')[1]||'境外'; const ipOnly = label.split(' ')[0];
+      const score = Math.min(97, 68 + Math.round(val/328*29));
+      o = { kind, iconBg:'#FFECE8', iconColor:'#F53F3F', iconPath:icons.ip, title:ipOnly, subtitle:loc+' · 高频攻击源 IP', score, level:lvl(score),
+        attrs:[ {k:'归属地',v:loc},{k:'ASN',v:'AS'+(4000+val%900)},{k:'首次出现',v:'06-18 02:14'},{k:'最近活动',v:'3 分钟前'},{k:'命中规则',v:(8+val%9)+' 条'},{k:'攻击次数',v:String(val)} ],
+        tags:[ {t:'SPA 敲门爆破',c:'#F53F3F'},{t:'端口扫描',c:'#FF7D00'},{t:'Web 暴力破解',c:'#F53F3F'} ],
+        timeline:[
+          {time:'刚刚',e:'触发 SPA 敲门失败阈值',d:'连续 '+val+' 次错误 SPA 报文，已被设备防线丢弃',c:'#F53F3F'},
+          {time:'8 分钟前',e:'扫描内网业务端口',d:'探测 443 / 8080 / 22，命中蜜罐诱饵',c:'#FF7D00'},
+          {time:'1 小时前',e:'尝试登录 OA 系统',d:'目标账号 svc_backup，连续失败 23 次',c:'#FF7D00'},
+          {time:'06-18 02:14',e:'首次被标记',d:'安全雷达标记为可疑境外来源',c:'#86909C'} ],
+        related:[ rel('account','svc_backup','被高频爆破',67,'#F53F3F'), rel('account','test_oa','被爆破尝试',52,'#FF7D00'), rel('terminal','PC-3382','疑似同源跳板',54,'#FF7D00') ],
+        dispo:'已将 IP '+ipOnly+' 加入黑名单，设备防线将丢弃其全部报文' };
+    } else if(kind==='account'){
+      const score = Math.min(90, 50 + Math.round(val/67*38));
+      o = { kind, iconBg:'#F5E8FF', iconColor:'#722ED1', iconPath:icons.account, title:label, subtitle:'本地账号 · 疑似凭据滥用', score, level:lvl(score),
+        attrs:[ {k:'所属组织',v:'分公司 / 运维部'},{k:'账号类型',v:'服务账号'},{k:'最近登录',v:'12 分钟前'},{k:'失败次数',v:val+' 次'},{k:'当前状态',v:'已锁定'},{k:'关联终端',v:(2+val%4)+' 台'} ],
+        tags:[ {t:'爆破登录',c:'#F53F3F'},{t:'异地登录',c:'#FF7D00'},{t:'凭据填充',c:'#F53F3F'} ],
+        timeline:[
+          {time:'12 分钟前',e:'账号被自动锁定',d:'命中"同用户名连续错误"阈值，需管理员解封',c:'#F53F3F'},
+          {time:'20 分钟前',e:'异地登录尝试',d:'来源 45.142.122.8（荷兰），与常用地不符',c:'#FF7D00'},
+          {time:'35 分钟前',e:'连续密码错误',d:val+' 次失败，分布在 3 个来源 IP',c:'#FF7D00'},
+          {time:'2 小时前',e:'正常登录',d:'终端 PC-3382，认证方式：账密',c:'#00B42A'} ],
+        related:[ rel('ip','45.142.122.8 荷兰','主要攻击来源',328,'#F53F3F'), rel('terminal','PC-3382','常用终端',54,'#FF7D00') ],
+        dispo:'已禁用账号 '+label+' 并强制下线其全部会话' };
+    } else {
+      const score = Math.min(88, 46 + Math.round(val/54*38));
+      o = { kind, iconBg:'#E8F3FF', iconColor:'#165DFF', iconPath:icons.terminal, title:label, subtitle:'Windows 终端 · 合规校验未通过', score, level:lvl(score),
+        attrs:[ {k:'使用人',v:'王磊 wang.lei'},{k:'操作系统',v:'Windows 11'},{k:'终端 IP',v:'192.168.31.77'},{k:'合规状态',v:'不合规'},{k:'风险事件',v:val+' 起'},{k:'最近在线',v:'刚刚'} ],
+        tags:[ {t:'违规外联',c:'#FF7D00'},{t:'漏洞未修复',c:'#F53F3F'},{t:'杀软未开启',c:'#FF7D00'} ],
+        timeline:[
+          {time:'刚刚',e:'检测到异常进程外联',d:'进程访问 10.20.3.45，命中威胁情报',c:'#F53F3F'},
+          {time:'15 分钟前',e:'基线校验未通过',d:'磁盘未加密 + 高危补丁缺失 2 项',c:'#FF7D00'},
+          {time:'40 分钟前',e:'LSASS 内存读取',d:'疑似凭据窃取行为，已告警',c:'#F53F3F'},
+          {time:'1 小时前',e:'终端上线',d:'用户 wang.lei 登录',c:'#00B42A'} ],
+        related:[ rel('account','wang.lei','登录用户',41,'#FF7D00'), rel('ip','45.142.122.8 荷兰','疑似 C2 通联',328,'#F53F3F') ],
+        dispo:'已隔离终端 '+label+'，仅放行修复所需的合规通道' };
+    }
+    o.gOffset = (182.2*(1-o.score/100)).toFixed(1);
+    o.tags = o.tags.map(t=>({ t:t.t, c:t.c, bg: tg2bg[t.c]||'#F2F3F5' }));
+    return o;
+  }
+  mkSession(u){
+    return { kind:'session', iconBg:'#E8F3FF', iconColor:'#165DFF', iconPath:'M12 12a4 4 0 100-8 4 4 0 000 8 M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5',
+      title:u.name, subtitle:u.account+' · 实时会话', score:18, level:{t:'正常',c:'#00B42A',bg:'#E8FFEA'}, gOffset:(182.2*(1-18/100)).toFixed(1),
+      attrs:[ {k:'所属组织',v:u.org},{k:'终端',v:u.terminal+' · '+u.browser},{k:'接入 IP',v:u.ip},{k:'认证方式',v:u.auth},{k:'登录时间',v:u.last},{k:'风险评分',v:'18 / 100'} ],
+      tags:[ {t:'设备合规',c:'#00B42A',bg:'#E8FFEA'},{t:'强认证',c:'#165DFF',bg:'#E8F3FF'} ],
+      timeline:[
+        {time:u.last,e:'访问 OA 协同办公系统',d:'WEB 应用 · 策略校验通过',c:'#00B42A'},
+        {time:'稍早',e:'访问 GitLab 代码仓库',d:'隧道应用 · 已授权',c:'#00B42A'},
+        {time:'登录时',e:'完成身份认证',d:'认证方式：'+u.auth+'，设备指纹匹配',c:'#165DFF'} ],
+      related:[ {kind:'app',badge:'应用',name:'OA 协同办公系统',sub:'WEB 应用 · 已授权',riskColor:'#00B42A',onClick:()=>{}}, {kind:'app',badge:'应用',name:'GitLab 代码仓库',sub:'隧道应用 · 已授权',riskColor:'#00B42A',onClick:()=>{}} ],
+      dispo:'已强制注销 '+u.name+' 的当前会话' };
+  }
+
+  repaint(){
+    const nav = this.state.nav;
+    document.querySelectorAll('[data-nav]').forEach(el=>{
+      const active = el.getAttribute('data-nav')===nav;
+      el.style.background = active ? '#E8F3FF' : '';
+      el.style.color = active ? '#165DFF' : '#4E5969';
+      el.style.fontWeight = active ? '600' : '400';
+    });
+    const tg = this.state.toggles;
+    document.querySelectorAll('[data-toggle]').forEach(el=>{
+      const on = !!tg[el.getAttribute('data-toggle')];
+      el.style.background = on ? '#165DFF' : '#C9CDD4';
+      const knob = el.firstElementChild;
+      if(knob) knob.style.left = on ? '20px' : '2px';
+    });
+    const dm = this.state.drawerMode;
+    document.querySelectorAll('[data-mode]').forEach(el=>{
+      const m = el.getAttribute('data-mode');
+      if(m===dm){ const c = m==='tunnel'?'#722ED1':'#165DFF'; el.style.background = m==='tunnel'?'#F5E8FF':'#E8F3FF'; el.style.color = c; el.style.boxShadow = 'inset 0 0 0 1.5px '+c; }
+      else { el.style.background = 'transparent'; el.style.color = '#4E5969'; el.style.boxShadow = 'none'; }
+    });
+    const at = this.state.appTab;
+    document.querySelectorAll('[data-apptab]').forEach(el=>{
+      const on = el.getAttribute('data-apptab')===at;
+      el.style.background = on ? '#fff' : 'transparent';
+      el.style.color = on ? '#165DFF' : '#4E5969';
+      el.style.boxShadow = on ? '0 1px 3px rgba(0,0,0,.1)' : 'none';
+    });
+  }
+  scheduleRepaint(){ this.repaint(); requestAnimationFrame(()=>this.repaint()); setTimeout(()=>this.repaint(), 120); }
+  componentDidMount(){ this.scheduleRepaint(); }
+  componentDidUpdate(){ this.scheduleRepaint(); }
+
+  mkSwitch(key){
+    const on = this.state.toggles[key];
+    return {
+      handler: ()=>this.toggle(key),
+      track: { width:'40px', height:'22px', borderRadius:'11px', background: on?'#165DFF':'#C9CDD4', position:'relative', cursor:'pointer', transition:'background .2s', flex:'none' },
+      knob: { position:'absolute', top:'2px', left: on?'20px':'2px', width:'18px', height:'18px', borderRadius:'50%', background:'#fff', transition:'left .2s', boxShadow:'0 1px 3px rgba(0,0,0,.25)' }
+    };
+  }
+
+  renderVals(){
+    const st = this.state;
+    const nav = st.nav;
+
+    // ---- nav ----
+    const navKeys = ['overview','online','userstate','apps','policy','users','security','audit','system'];
+    const baseNav = { display:'flex', alignItems:'center', gap:'10px', padding:'0 12px', height:'38px', borderRadius:'7px', cursor:'pointer', fontSize:'13px', color:'#4E5969', marginBottom:'2px', transition:'all .12s', userSelect:'none' };
+    const go = {};
+    navKeys.forEach(k=>{ go[k] = ()=>this.setState({ nav:k, drawerOpen:false }); });
+    const iconPaths = {
+      overview:'M3 4h7v7H3z M14 4h7v4h-7z M14 11h7v9h-7z M3 14h7v6H3z',
+      online:'M12 12a3.2 3.2 0 100-6.4 3.2 3.2 0 000 6.4 M5.5 20c0-3.6 2.9-6 6.5-6s6.5 2.4 6.5 6',
+      userstate:'M12 11a3.5 3.5 0 100-7 3.5 3.5 0 000 7 M5 20c0-3.9 3.1-6.5 7-6.5s7 2.6 7 6.5',
+      apps:'M4 4h6v6H4z M14 4h6v6h-6z M4 14h6v6H4z M14 14h6v6h-6z',
+      policy:'M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z M9 12l2 2 4-4',
+      users:'M8.5 11a3 3 0 100-6 3 3 0 000 6 M3 19c0-3 2.4-5 5.5-5s5.5 2 5.5 5 M16.5 12.5a2.4 2.4 0 100-4.8 2.4 2.4 0 000 4.8 M15 19c.2-2.6 1.6-4.2 4.5-4.2',
+      security:'M12 3l7 3v5c0 4.5-3 7.5-7 9-4-1.5-7-4.5-7-9V6z M12 9.5a2 2 0 100 4 2 2 0 000-4',
+      audit:'M6 3.5h8l5 5V20.5H6z M14 3.5V9h5 M9 13h6 M9 16.5h6',
+      system:'M12 15a3 3 0 100-6 3 3 0 000 6 M12 2.5v3 M12 18.5v3 M21.5 12h-3 M5.5 12h-3 M18.5 5.5l-2 2 M7.5 16.5l-2 2 M18.5 18.5l-2-2 M7.5 7.5l-2-2'
+    };
+    const navLabels = { overview:'安全概览', online:'在线用户', userstate:'用户状态', apps:'应用管理', policy:'策略管理', users:'用户与角色', security:'安全中心', defense:'主动防御', audit:'审计中心', system:'系统管理' };
+    const grayPill = { marginLeft:'auto', fontSize:'11px', color:'#86909C', fontWeight:500 };
+    const pill = (bg,c)=>({ marginLeft:'auto', minWidth:'16px', height:'16px', padding:'0 5px', background:bg, color:c, borderRadius:'8px', fontSize:'10px', fontWeight:600, display:'flex', alignItems:'center', justifyContent:'center' });
+    const navBadge = { online:{ txt:'1,284', st:grayPill }, userstate:{ txt:'18', st:pill('#FFECE8','#F53F3F') } };
+    const groupsDef = [ {label:'监控中心', keys:['overview','online','userstate']}, {label:'业务管理', keys:['apps','policy','users']}, {label:'安全防护', keys:['security','audit']}, {label:'系统', keys:['system']} ];
+    const navGroups = groupsDef.map((grp,gi)=>({
+      label: grp.label,
+      labelStyle: { fontSize:'11px', color:'#86909C', fontWeight:600, padding:'0 12px', margin:(gi===0?'6px 0 4px':'16px 0 4px'), letterSpacing:'.5px' },
+      items: grp.keys.map(k=>({
+        onClick: go[k], label: navLabels[k], d: iconPaths[k],
+        style: nav===k ? { ...baseNav, background:'#E8F3FF', color:'#165DFF', fontWeight:600 } : { ...baseNav },
+        badge: navBadge[k] ? navBadge[k].txt : null,
+        badgeStyle: navBadge[k] ? navBadge[k].st : null
+      }))
+    }));
+
+    const realScreens = ['overview','online','apps','policy','userstate'];
+    const show = {
+      overview: nav==='overview', online: nav==='online', apps: nav==='apps', policy: nav==='policy', userstate: nav==='userstate',
+      placeholder: !realScreens.includes(nav)
+    };
+    const phMap = {
+      userstate: ['用户状态','检索爆破登录 / 爆破锁定 / 异地登录 / ACL 策略锁定异常用户并就地解锁','按异常类型筛选与解锁的完整原型可在此扩展，数据来源于策略管理的防爆破阈值。'],
+      users: ['用户与角色','身份目录 · 组织架构 · 角色权限','用户、组织树、认证源同步与角色授权的管理界面可在此扩展。'],
+      security: ['安全中心','基线 / 服务隐身(SPA) / 虚拟网络域 / 可信应用','让业务对未授权者「隐身」——SPA 服务隐身与可信应用配置可在此扩展。'],
+      audit: ['审计中心','全量操作与访问日志 · 落地必留痕','管理员操作日志、访问日志、日志外送与检索界面可在此扩展。'],
+      system: ['系统管理','三权分立 · 集群管理 · 代理网关 · 证书授权 · 开放平台','管理员分级分权、集群与代理网关、证书与开放平台配置可在此扩展。']
+    };
+    const ph = phMap[nav] || ['',''];
+
+    // ---- time range ----
+    const baseRange = { fontSize:'12.5px', padding:'6px 12px', borderRadius:'5px', cursor:'pointer', color:'#4E5969', transition:'all .12s' };
+    const rangeStyle = {}; const setRange = {};
+    ['hour','day','week'].forEach(k=>{
+      rangeStyle[k] = st.range===k ? { ...baseRange, background:'#165DFF', color:'#fff', fontWeight:500 } : { ...baseRange };
+      setRange[k] = ()=>this.setState({ range:k });
+    });
+
+    // ---- KPIs ----
+    const kpis = [
+      { label:'公网暴露端口', value:'0', unit:'个', valColor:'#00B42A', accent:'#00B42A', sub:'仅 SPA 敲门后开放 · 隐身中', subColor:'#00B42A' },
+      { label:'在线用户', value:'1,284', unit:'人', valColor:'#1D2129', accent:'#165DFF', sub:'↑ 6.2% 较昨日', subColor:'#86909C' },
+      { label:'今日风险事件', value:'37', unit:'起', valColor:'#1D2129', accent:'#F53F3F', sub:'↑ 9 起 较昨日', subColor:'#F53F3F' },
+      { label:'已处置', value:'31', unit:'起', valColor:'#1D2129', accent:'#722ED1', sub:'处置率 83.8%', subColor:'#86909C' },
+      { label:'终端在线', value:'2,156', unit:'台', valColor:'#1D2129', accent:'#0FC6C2', sub:'PC 1,742 · 移动 414', subColor:'#86909C' },
+      { label:'风险账号', value:'18', unit:'个', valColor:'#FF7D00', accent:'#FF7D00', sub:'含 6 个已锁定', subColor:'#86909C' }
+    ];
+
+    // ---- defense lines ----
+    const C = 207.3;
+    const mkDef = (name,color,rate,subs)=>({ name, color, ratePct: Math.round(rate*100)+'%', dashoffset:(C*(1-rate)).toFixed(1), subs });
+    const defenseLines = [
+      mkDef('设备防线','#165DFF',0.92,[{label:'SPA 攻击源 IP',val:'142',color:'#F53F3F'},{label:'接口攻击源 IP',val:'38',color:'#FF7D00'}]),
+      mkDef('账号防线','#722ED1',0.78,[{label:'爆破登录',val:'214',color:'#F53F3F'},{label:'异地登录',val:'47',color:'#FF7D00'}]),
+      mkDef('终端防线','#00B42A',0.85,[{label:'钓鱼远控',val:'5',color:'#F53F3F'},{label:'违规外联',val:'23',color:'#FF7D00'}])
+    ];
+
+    // ---- trend chart ----
+    const W=680,H=210,padL=10,padR=10,padT=14,padB=34;
+    const innerW=W-padL-padR, innerH=H-padT-padB, max=44;
+    const d1=[12,18,14,23,19,27,22,31,26,33,29,38];
+    const d2=[3,5,4,7,6,9,7,12,9,11,10,14];
+    const toPts=(arr)=>arr.map((v,i)=>{ const x=padL+i*(innerW/(arr.length-1)); const y=padT+innerH*(1-v/max); return {x:+x.toFixed(1),y:+y.toFixed(1),v}; });
+    const p1=toPts(d1), p2=toPts(d2);
+    const trendLine = p1.map(p=>p.x+','+p.y).join(' ');
+    const trendLine2 = p2.map(p=>p.x+','+p.y).join(' ');
+    const baseY = padT+innerH;
+    const trendArea = 'M '+p1[0].x+','+baseY+' L '+p1.map(p=>p.x+' '+p.y).join(' L ')+' L '+p1[p1.length-1].x+','+baseY+' Z';
+    const trendDots = p1.filter((_,i)=>i%2===1);
+    const trendLabels = st.range==='hour'
+      ? ['00m','10m','20m','30m','40m','50m','60m']
+      : st.range==='week'
+      ? ['周一','周二','周三','周四','周五','周六','周日']
+      : ['00:00','04:00','08:00','12:00','16:00','20:00','24:00'];
+
+    // ---- gauges ----
+    const GC = 182.2;
+    const mkGauge=(label,val,color)=>({ label, val, color, offset:(GC*(1-val/100)).toFixed(1) });
+    const gauges = [ mkGauge('CPU',42,'#165DFF'), mkGauge('内存',63,'#FF7D00'), mkGauge('磁盘',57,'#722ED1') ];
+
+    // ---- malicious ----
+    const malicious = [
+      { behavior:'内网业务系统异常扫描', detail:'终端 PC-3382 · 192.168.31.77 · 用户 wang.lei', status:'已自动锁定', tagBg:'#FFECE8', tagColor:'#F53F3F', iconBg:'#FFECE8', iconColor:'#F53F3F' },
+      { behavior:'凭据窃取行为识别', detail:'终端 PC-1107 · 检测到 LSASS 内存读取', status:'待处置', tagBg:'#FFF7E8', tagColor:'#FF7D00', iconBg:'#FFF7E8', iconColor:'#FF7D00' },
+      { behavior:'终端钓鱼页面访问', detail:'用户 chen.hao 命中钓鱼诱饵', status:'已阻断', tagBg:'#E8FFEA', tagColor:'#00B42A', iconBg:'#E8FFEA', iconColor:'#00B42A' },
+      { behavior:'恶意侦查（端口探测）', detail:'蜜罐捕获 · 来源 10.20.3.45', status:'已诱捕', tagBg:'#E8F3FF', tagColor:'#165DFF', iconBg:'#E8F3FF', iconColor:'#165DFF' }
+    ];
+
+    // ---- TOP5 ----
+    const kindBg = { ip:'#FFECE8', account:'#F5E8FF', terminal:'#E8F3FF' };
+    const mkTop=(kind,rows)=>{ const mx=Math.max(...rows.map(r=>r.val)); return rows.map((r,i)=>({ ...r, rank:i+1, pct:Math.round(r.val/mx*100)+'%', rankBg:i<3?'#FFECE8':'#F2F3F5', rankColor:i<3?'#F53F3F':'#86909C', onInvestigate:()=>this.openInv(kind, r.label, r.val) })); };
+    const topGroups = [
+      { title:'风险 IP', color:'#165DFF', rows: mkTop('ip',[{label:'45.142.122.8 荷兰',val:328},{label:'103.97.56.12 香港',val:241},{label:'192.241.x.x 美国',val:176},{label:'58.220.x.x 江苏',val:120},{label:'117.50.x.x 北京',val:88}]) },
+      { title:'风险账号', color:'#722ED1', rows: mkTop('account',[{label:'svc_backup',val:67},{label:'test_oa',val:52},{label:'wang.lei',val:41},{label:'admin_bak',val:33},{label:'zhang.wei',val:19}]) },
+      { title:'风险终端', color:'#00B42A', rows: mkTop('terminal',[{label:'PC-3382',val:54},{label:'PC-1107',val:38},{label:'MAC-0291',val:27},{label:'PC-2210',val:21},{label:'MB-iOS-77',val:12}]) }
+    ];
+
+    // ---- online users ----
+    const avColors=['#165DFF','#722ED1','#00B42A','#FF7D00','#0FC6C2','#F53F3F','#3491FA','#D91AD9'];
+    const rawUsers = [
+      { id:1, name:'张伟', account:'zhang.wei', org:'总部 / 研发中心', terminal:'Windows', browser:'Chrome', ip:'10.21.33.18', auth:'账密 + 短信', authBg:'#E8FFEA', authColor:'#00B42A', last:'2 分钟前' },
+      { id:2, name:'李娜', account:'li.na', org:'总部 / 财务部', terminal:'macOS', browser:'Safari', ip:'10.21.40.92', auth:'SSO', authBg:'#E8F3FF', authColor:'#165DFF', last:'5 分钟前' },
+      { id:3, name:'王磊', account:'wang.lei', org:'分公司 / 运维部', terminal:'Windows', browser:'Edge', ip:'58.220.11.4', auth:'账密', authBg:'#FFF7E8', authColor:'#FF7D00', last:'8 分钟前' },
+      { id:4, name:'陈浩', account:'chen.hao', org:'总部 / 市场部', terminal:'iOS', browser:'App', ip:'117.135.2.88', auth:'指纹', authBg:'#E8FFEA', authColor:'#00B42A', last:'12 分钟前' },
+      { id:5, name:'刘洋', account:'liu.yang', org:'总部 / 研发中心', terminal:'Windows', browser:'Chrome', ip:'10.21.33.51', auth:'账密 + 短信', authBg:'#E8FFEA', authColor:'#00B42A', last:'15 分钟前' },
+      { id:6, name:'赵敏', account:'zhao.min', org:'分公司 / 销售部', terminal:'Android', browser:'App', ip:'223.104.5.12', auth:'手势', authBg:'#E8F3FF', authColor:'#165DFF', last:'21 分钟前' },
+      { id:7, name:'孙强', account:'sun.qiang', org:'总部 / 人力资源', terminal:'Windows', browser:'Firefox', ip:'10.21.50.7', auth:'SSO', authBg:'#E8F3FF', authColor:'#165DFF', last:'26 分钟前' },
+      { id:8, name:'周婷', account:'zhou.ting', org:'总部 / 法务部', terminal:'macOS', browser:'Chrome', ip:'10.21.44.30', auth:'账密 + 短信', authBg:'#E8FFEA', authColor:'#00B42A', last:'33 分钟前' }
+    ];
+    const sel = st.selected;
+    const onlineUsers = rawUsers.map((u,i)=>{
+      const checked = sel.includes(u.id);
+      return { ...u, initial:u.name[0], avBg:avColors[i%avColors.length], checked,
+        rowStyle:{ borderTop:'1px solid #F2F3F5', background: checked?'#F2F7FF':'transparent' },
+        checkStyle:{ width:'17px', height:'17px', borderRadius:'4px', border: checked?'none':'1.5px solid #C9CDD4', background: checked?'#165DFF':'#fff', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' },
+        onToggle:()=>this.setState(s=>({ selected: s.selected.includes(u.id)? s.selected.filter(x=>x!==u.id): [...s.selected,u.id] })),
+        onOpen:()=>this.openSession(u),
+        onLogout:()=>{ this.setState(s=>({ selected: s.selected.filter(x=>x!==u.id) })); this.showToast('已强制注销用户「'+u.name+'」，终端已收到下线提示'); }
+      };
+    });
+    const allChecked = sel.length===rawUsers.length;
+    const allCheckStyle = { width:'17px', height:'17px', borderRadius:'4px', border: allChecked?'none':'1.5px solid #C9CDD4', background: allChecked?'#165DFF':'#fff', display:'flex', alignItems:'center', justifyContent:'center', cursor:'pointer' };
+    const toggleAll = ()=>this.setState(s=>({ selected: s.selected.length===rawUsers.length? [] : rawUsers.map(u=>u.id) }));
+    const hasSelection = sel.length>0;
+    const logoutBtnStyle = { height:'32px', padding:'0 14px', borderRadius:'7px', fontSize:'13px', fontWeight:500, display:'flex', alignItems:'center', gap:'6px', border:'none',
+      cursor: hasSelection?'pointer':'not-allowed', background: hasSelection?'#F53F3F':'#F2F3F5', color: hasSelection?'#fff':'#C9CDD4', boxShadow: hasSelection?'0 2px 6px rgba(245,63,63,.3)':'none' };
+    const logoutSelected = ()=>{ if(!hasSelection) return; const n=sel.length; this.setState({ selected:[] }); this.showToast('已强制注销 '+n+' 个用户会话'); };
+
+    // ---- apps ----
+    const allCats = [
+      { key:'all', label:'全部应用', count:24 },
+      { key:'office', label:'办公协同', count:8 },
+      { key:'finance', label:'财务系统', count:5 },
+      { key:'dev', label:'研发工具', count:6 },
+      { key:'ops', label:'运维管理', count:3 },
+      { key:'partner', label:'对外接口', count:2 }
+    ];
+    const baseCat = { display:'flex', alignItems:'center', gap:'9px', padding:'0 10px', height:'36px', borderRadius:'7px', cursor:'pointer', fontSize:'13px', color:'#4E5969', marginBottom:'1px' };
+    const appCats = allCats.map(c=>({ ...c, onClick:()=>this.setState({ appCat:c.key }),
+      style: st.appCat===c.key ? { ...baseCat, background:'#E8F3FF', color:'#165DFF', fontWeight:600 } : { ...baseCat } }));
+    const rawApps = [
+      { name:'OA 协同办公系统', addr:'oa.corp.internal/*', mode:'WEB 应用', cat:'office', node:'华东网关集群', auth:1284, status:'已发布' },
+      { name:'差旅报销 /travel', addr:'oa.corp.internal/travel', mode:'WEB 应用', cat:'office', node:'华东网关集群', auth:642, status:'已发布' },
+      { name:'财务核算 NC', addr:'10.30.5.20:8080', mode:'WEB 应用', cat:'finance', node:'华北网关集群', auth:88, status:'已发布' },
+      { name:'堡垒机 SSH', addr:'10.30.1.5:22', mode:'隧道应用', cat:'ops', node:'华北网关集群', auth:24, status:'已发布' },
+      { name:'GitLab 代码仓库', addr:'git.corp.internal:443', mode:'隧道应用', cat:'dev', node:'华东网关集群', auth:312, status:'已发布' },
+      { name:'Jenkins 流水线', addr:'10.30.2.18:8443', mode:'WEB 应用', cat:'dev', node:'华东网关集群', auth:96, status:'已发布' },
+      { name:'携程对接 /partner', addr:'oa.corp.internal/partner', mode:'WEB 应用', cat:'partner', node:'华东网关集群', auth:0, status:'免认证' },
+      { name:'数据库 Oracle', addr:'10.30.6.11:1521', mode:'隧道应用', cat:'ops', node:'华北网关集群', auth:12, status:'已停用' }
+    ];
+    const appsFiltered = rawApps.filter(a=>st.appCat==='all'||a.cat===st.appCat).map(a=>{
+      const web = a.mode.indexOf('WEB')>=0;
+      const sc = a.status==='已发布'?'#00B42A':(a.status==='免认证'?'#FF7D00':'#86909C');
+      return { ...a,
+        modeBg: web?'#E8F3FF':'#F5E8FF', modeColor: web?'#165DFF':'#722ED1',
+        iconBg: web?'#E8F3FF':'#F5E8FF', iconColor: web?'#165DFF':'#722ED1',
+        statusColor: sc, onOpen: ()=>this.openApp(a) };
+    });
+    const appTabUsers = st.appTab==='users';
+    const appTabLogs = st.appTab==='logs';
+    const appD = st.appDetail || {};
+
+    // ---- 用户状态 ----
+    const usAv=['#F53F3F','#FF7D00','#722ED1','#165DFF','#0FC6C2','#00B42A','#3491FA','#D91AD9'];
+    const usTypeMeta = {
+      brute: {label:'爆破登录', c:'#FF7D00', bg:'#FFF7E8', locked:false},
+      lock:  {label:'爆破锁定', c:'#F53F3F', bg:'#FFECE8', locked:true},
+      geo:   {label:'异地登录', c:'#FF9A2E', bg:'#FFF7E8', locked:false},
+      acl:   {label:'ACL 锁定', c:'#F53F3F', bg:'#FFECE8', locked:true}
+    };
+    const rawUS = [
+      {id:1, name:'svc_backup', account:'服务账号', typeKey:'lock', reason:'同用户名连续错误 23 次', ip:'45.142.122.8', loc:'荷兰', time:'12 分钟前', invVal:67},
+      {id:2, name:'王磊', account:'wang.lei', typeKey:'geo', reason:'常用地北京，本次荷兰登录', ip:'45.142.122.8', loc:'荷兰', time:'18 分钟前', invVal:41},
+      {id:3, name:'test_oa', account:'测试账号', typeKey:'lock', reason:'同 IP 连续错误 31 次', ip:'103.97.56.12', loc:'香港', time:'25 分钟前', invVal:52},
+      {id:4, name:'admin_bak', account:'备份管理员', typeKey:'acl', reason:'命中 ACL：禁止非工作时间登录', ip:'58.220.11.4', loc:'江苏', time:'34 分钟前', invVal:33},
+      {id:5, name:'李娜', account:'li.na', typeKey:'brute', reason:'密码连续错误 3 次（监控中）', ip:'117.135.2.88', loc:'广东', time:'40 分钟前', invVal:20},
+      {id:6, name:'赵敏', account:'zhao.min', typeKey:'geo', reason:'常用地上海，本次美国登录', ip:'192.241.66.9', loc:'美国', time:'52 分钟前', invVal:18},
+      {id:7, name:'zhang.wei', account:'研发账号', typeKey:'brute', reason:'密码连续错误 2 次（监控中）', ip:'10.21.33.18', loc:'内网', time:'1 小时前', invVal:19},
+      {id:8, name:'sun.qiang', account:'人力账号', typeKey:'acl', reason:'命中 ACL：禁止异地接入财务系统', ip:'223.104.5.12', loc:'浙江', time:'1 小时前', invVal:15}
+    ];
+    const usCounts = { all: rawUS.length, brute:0, lock:0, geo:0, acl:0 };
+    rawUS.forEach(u=>{ usCounts[u.typeKey]++; });
+    const usFilterDefs = [{k:'all',l:'全部'},{k:'lock',l:'爆破锁定'},{k:'acl',l:'ACL 锁定'},{k:'geo',l:'异地登录'},{k:'brute',l:'爆破登录'}];
+    const usFilters = usFilterDefs.map(f=>{
+      const active = st.usFilter===f.k;
+      return { label:f.l, count: usCounts[f.k],
+        onClick: ()=>this.setState({ usFilter:f.k }),
+        style: { display:'flex', alignItems:'center', gap:'7px', padding:'7px 14px', borderRadius:'7px', cursor:'pointer', fontSize:'13px', fontWeight: active?600:500, color: active?'#165DFF':'#4E5969', background: active?'#E8F3FF':'transparent' },
+        badgeStyle: { fontSize:'11px', fontWeight:600, minWidth:'18px', height:'17px', padding:'0 5px', borderRadius:'9px', display:'flex', alignItems:'center', justifyContent:'center', background: active?'#fff':'#F2F3F5', color:'#86909C' }
+      };
+    });
+    const usUnlocked = st.usUnlocked || [];
+    const usRows = rawUS.filter(u=>st.usFilter==='all'||u.typeKey===st.usFilter).map((u)=>{
+      const m = usTypeMeta[u.typeKey];
+      const unlocked = usUnlocked.includes(u.id);
+      const statusText = unlocked ? '已解锁' : (m.locked ? '已锁定' : (u.typeKey==='geo'?'待确认':'监控中'));
+      const statusColor = unlocked ? '#00B42A' : (m.locked ? '#F53F3F' : '#FF7D00');
+      return { ...u, avBg:usAv[(u.id-1)%usAv.length], initial:u.name[0].toUpperCase(),
+        typeLabel:m.label, typeColor:m.c, typeBg:m.bg, canUnlock: m.locked && !unlocked, unlocked,
+        statusText, statusColor,
+        onUnlock: ()=>{ this.setState(s=>({ usUnlocked:[...(s.usUnlocked||[]), u.id] })); this.showToast('已解锁用户「'+u.name+'」，该用户可重新发起认证'); },
+        onInvestigate: ()=>this.openInv('account', u.name, u.invVal) };
+    });
+    const usLockedCount = rawUS.filter(u=>usTypeMeta[u.typeKey].locked).length - usUnlocked.length;
+
+    // ---- drawer ----
+    const drawerOpen = st.drawerOpen;
+    const openDrawer = ()=>this.setState({ drawerOpen:true, drawerTab:'basic' });
+    const closeDrawer = ()=>this.setState({ drawerOpen:false });
+    const tabsDef = [ {k:'basic',l:'基础配置'},{k:'advanced',l:'高级设置'},{k:'proxy',l:'代理设置'},{k:'security',l:'安全设置'},{k:'profile',l:'个性设置'} ];
+    const baseTab = { padding:'16px 4px', fontSize:'13px', color:'#4E5969', cursor:'pointer', borderBottom:'2px solid transparent', fontWeight:500, margin:'0 8px' };
+    const drawerTabs = tabsDef.map(t=>({ label:t.l, onClick:()=>this.setState({ drawerTab:t.k }),
+      style: st.drawerTab===t.k ? { ...baseTab, color:'#165DFF', borderBottom:'2px solid #165DFF', fontWeight:600 } : { ...baseTab } }));
+    const dtBasic = st.drawerTab==='basic';
+    const dtSecurity = st.drawerTab==='security';
+    const dtOther = !dtBasic && !dtSecurity;
+    const dtOtherNote = st.drawerTab==='advanced' ? '高级设置：隧道转 Web、隧道长连接、解析地址伪装(Fake IP) 等能力可在此配置。'
+      : st.drawerTab==='proxy' ? '代理设置：XFF 源 IP 透传、Proxy Protocol 溯源、请求 HOST 与 header/cookie/参数改写。'
+      : '个性设置：可见性、工作台打开方式、允许用户自助申请、未授权告警页面配置。';
+
+    const baseMode = { flex:1, display:'flex', alignItems:'center', gap:'12px', padding:'14px 16px', borderRadius:'8px', cursor:'pointer', transition:'all .12s' };
+    const setMode = { tunnel:()=>this.setState({drawerMode:'tunnel'}), web:()=>this.setState({drawerMode:'web'}) };
+    const modeCardStyle = {
+      tunnel: st.drawerMode==='tunnel' ? { ...baseMode, background:'#F5E8FF', color:'#722ED1', boxShadow:'inset 0 0 0 1.5px #722ED1' } : { ...baseMode, color:'#4E5969' },
+      web: st.drawerMode==='web' ? { ...baseMode, background:'#E8F3FF', color:'#165DFF', boxShadow:'inset 0 0 0 1.5px #165DFF' } : { ...baseMode, color:'#4E5969' }
+    };
+
+    const dlpDef = [
+      {key:'noCopy',label:'禁止复制',desc:'阻断鼠标右键复制与 Ctrl+C'},
+      {key:'noPrint',label:'禁止打印',desc:'阻断 Ctrl+P 并提示禁止打印'},
+      {key:'noRightClick',label:'禁止鼠标右键',desc:'监听并中断右键事件'},
+      {key:'noDownload',label:'禁止下载',desc:'识别 word/excel/pdf/zip 等下载动作并阻止'},
+      {key:'noDebug',label:'禁止浏览器调试',desc:'监听 F12/开发者工具并中断'},
+      {key:'watermark',label:'页面水印',desc:'叠加访问用户与访问时间，支持截屏/拍照溯源'}
+    ];
+    const dlpItems = dlpDef.map(d=>({ key:d.key, label:d.label, desc:d.desc, handler:()=>this.toggle(d.key) }));
+
+    // ---- policy ----
+    const psDef = [ {k:'login',l:'登录安全'},{k:'access',l:'接入策略'},{k:'client',l:'客户端选项'},{k:'workbench',l:'工作台'},{k:'easyconnect',l:'EasyConnect 升级'},{k:'diag',l:'诊断工具'} ];
+    const basePs = { padding:'0 14px', height:'40px', display:'flex', alignItems:'center', fontSize:'13px', color:'#4E5969', borderRadius:'7px', cursor:'pointer', marginBottom:'2px' };
+    const policySections = psDef.map(p=>({ label:p.l, onClick:()=>this.setState({ policySection:p.k }),
+      style: st.policySection===p.k ? { ...basePs, background:'#E8F3FF', color:'#165DFF', fontWeight:600 } : { ...basePs } }));
+    const psLogin = st.policySection==='login';
+    const psAccess = st.policySection==='access';
+    const psClient = st.policySection==='client';
+    // sections without dedicated layout fall back to login? show only the three built ones
+    const tg = {};
+    ['captcha','ipLock','userLock','passEmpty','antiMitm','antiHijack','weakNet','latency','browserLimit','forceInstall','forceUpgrade','autostart'].forEach(k=>tg[k]=this.mkSwitch(k));
+
+    return {
+      navOn:true, navGroups, go, show, phTitle:ph[0], phDesc:ph[1], phNote:ph[2],
+      rangeStyle, setRange,
+      kpis, defenseLines,
+      trendLine, trendLine2, trendArea, trendDots, trendLabels,
+      gauges, malicious, topGroups,
+      onlineUsers, allChecked, allCheckStyle, toggleAll, hasSelection, selectedCount:sel.length, logoutBtnStyle, logoutSelected,
+      appCats, appsFiltered,
+      drawerOpen, openDrawer, closeDrawer, drawerTabs, dtBasic, dtSecurity, dtOther, dtOtherNote, setMode, modeCardStyle, dlpItems,
+      policySections, psLogin, psAccess, psClient, tg,
+      toast: st.toast,
+      invOpen: !!st.inv, inv: st.inv || {},
+      closeInv: ()=>this.closeInv(), invFp: ()=>this.invDispose('fp'), invBlock: ()=>this.invDispose('block'), invBlacklist: ()=>this.invDispose('bl'),
+      usFilters, usRows, usLockedCount,
+      appDetailOpen: !!st.appDetail, appD, appTabUsers, appTabLogs,
+      closeApp: ()=>this.closeApp(),
+      appTabToUsers: ()=>this.setState({ appTab:'users' }), appTabToLogs: ()=>this.setState({ appTab:'logs' }),
+      appManageAuth: ()=>{ this.showToast('已打开「'+appD.name+'」的授权管理'); }, appEdit: ()=>{ this.setState({ appDetail:null, drawerOpen:true, drawerTab:'basic' }); }
+    };
+  }
+}
+</script>
+</body>
+</html>

@@ -2,9 +2,10 @@ import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router'
 import AppLayout from '@/layout/AppLayout.vue';
 import { NAV, FIRST_PATH } from '@/nav';
 
-// 已按白帝规范重做的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位（保持新设计语言一致）
+// 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
 const BUILT: Record<string, () => Promise<unknown>> = {
-  '/posture/dashboard': () => import('@/views/Overview.vue')
+  '/monitor/overview': () => import('@/views/Overview.vue'),
+  '/business/policy': () => import('@/views/Policy.vue')
 };
 
 const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>

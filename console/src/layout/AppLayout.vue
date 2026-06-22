@@ -1,141 +1,156 @@
 <template>
-  <a-layout class="bd-shell">
-    <!-- 左侧 Sider：品牌 + 七大工作域两级菜单（Arco Pro 模型，区别于烛龙顶部六中心横条） -->
-    <a-layout-sider
-      class="bd-sider"
-      :width="220"
-      :collapsed="collapsed"
-      :collapsed-width="48"
-      :collapsible="false"
-    >
-      <div class="bd-brand" :class="{ mini: collapsed }">
-        <span class="bd-brand__mark">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2L3 7V12C3 16.55 6.84 20.74 12 22C17.16 20.74 21 16.55 21 12V7L12 2Z" fill="currentColor" />
-            <path d="M9.6 12.2 L11.3 13.9 L14.7 10.2" stroke="#fff" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" fill="none" />
+  <div class="bd-shell">
+    <!-- 顶栏 -->
+    <header class="bd-top">
+      <div class="bd-logo">
+        <span class="bd-logo__mark">
+          <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
+            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95" />
+            <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </span>
-        <span v-if="!collapsed" class="bd-brand__txt">白帝<i>零信任访问控制</i></span>
+        <span class="bd-logo__txt">
+          <b>白帝 · 零信任访问控制中心</b>
+          <i>ZTNA / SDP Control Center</i>
+        </span>
       </div>
+      <span class="bd-top__divider" />
+      <nav class="bd-modes">
+        <span class="bd-mode on">控制台</span>
+        <span class="bd-mode">态势大屏</span>
+        <span class="bd-mode">运维诊断</span>
+      </nav>
+      <div class="bd-top__spacer" />
+      <div class="bd-search"><icon-search /><span>搜索用户、应用、策略…</span></div>
+      <button class="bd-bell"><icon-notification /><span class="bd-bell__dot">6</span></button>
+      <div class="bd-acct">
+        <span class="bd-acct__av">管</span>
+        <span class="bd-acct__txt"><b>安全管理员</b><i>security-admin</i></span>
+      </div>
+    </header>
 
-      <a-menu
-        class="bd-menu"
-        :selected-keys="[route.path]"
-        :open-keys="openKeys"
-        :collapsed="collapsed"
-        accordion
-        @menu-item-click="onLeaf"
-        @sub-menu-click="onSub"
-      >
-        <a-sub-menu v-for="g in NAV" :key="g.key">
-          <template #icon><component :is="g.icon" /></template>
-          <template #title>{{ g.title }}</template>
-          <a-menu-item v-for="c in g.children" :key="c.path">{{ c.title }}</a-menu-item>
-        </a-sub-menu>
-      </a-menu>
-    </a-layout-sider>
-
-    <a-layout>
-      <!-- 顶栏：折叠 + 面包屑 + 搜索 + 主题 + 用户 -->
-      <a-layout-header class="bd-header">
-        <button class="bd-iconbtn" @click="collapsed = !collapsed">
-          <component :is="collapsed ? 'IconMenuUnfold' : 'IconMenuFold'" />
-        </button>
-        <a-breadcrumb class="bd-crumb">
-          <a-breadcrumb-item>{{ loc.group?.title ?? '白帝' }}</a-breadcrumb-item>
-          <a-breadcrumb-item>{{ loc.leaf?.title ?? '' }}</a-breadcrumb-item>
-        </a-breadcrumb>
-        <div class="bd-header__spacer" />
-        <a-input-search class="bd-search" placeholder="搜索用户 / 应用 / 策略" allow-clear />
-        <a-tooltip :content="dark ? '切换浅色' : '切换深色'">
-          <button class="bd-iconbtn" @click="toggleTheme">
-            <component :is="dark ? 'IconSun' : 'IconMoon'" />
+    <div class="bd-body">
+      <!-- 侧栏：分组导航 + 底部深色状态卡 -->
+      <aside class="bd-side">
+        <template v-for="g in NAV" :key="g.label">
+          <div class="bd-side__label">{{ g.label }}</div>
+          <button
+            v-for="leaf in g.children"
+            :key="leaf.path"
+            class="bd-nav"
+            :class="{ on: leaf.path === route.path }"
+            @click="go(leaf.path)"
+          >
+            <component :is="leaf.icon" class="bd-nav__icon" />
+            <span class="bd-nav__t">{{ leaf.title }}</span>
+            <span v-if="leaf.badge" class="bd-nav__badge" :class="leaf.badgeKind">{{ leaf.badge }}</span>
           </button>
-        </a-tooltip>
-        <a-dropdown>
-          <button class="bd-user"><icon-user /><span>管理员</span><icon-down /></button>
-          <template #content>
-            <a-doption><template #icon><icon-export /></template>退出登录</a-doption>
-          </template>
-        </a-dropdown>
-      </a-layout-header>
+        </template>
 
-      <a-layout-content class="bd-content">
-        <RouterView />
-      </a-layout-content>
-    </a-layout>
-  </a-layout>
+        <div class="bd-health">
+          <div class="bd-health__h"><span class="bd-health__dot" />系统运行正常</div>
+          <div class="bd-health__b">集群 HA · 双节点活动<br />公网暴露端口 <b>0</b> · SPA 隐身中</div>
+        </div>
+      </aside>
+
+      <main class="bd-main"><RouterView /></main>
+    </div>
+  </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
-import { NAV, locate } from '@/nav';
+import { NAV } from '@/nav';
 
 const route = useRoute();
 const router = useRouter();
-
-const collapsed = ref(false);
-const dark = ref(false);
-const openKeys = ref<string[]>([]);
-
-const loc = computed(() => locate(route.path));
-
-watch(
-  () => route.path,
-  () => { openKeys.value = loc.value.group ? [loc.value.group.key] : []; },
-  { immediate: true }
-);
-
-function onLeaf(key: string) {
-  if (key !== route.path) router.push(key);
-}
-function onSub(key: string) {
-  openKeys.value = openKeys.value.includes(key) ? [] : [key];
-}
-function toggleTheme() {
-  dark.value = !dark.value;
-  document.body.toggleAttribute('arco-theme', dark.value);
-  if (dark.value) document.body.setAttribute('arco-theme', 'dark');
-  else document.body.removeAttribute('arco-theme');
-}
+function go(path: string) { if (path !== route.path) router.push(path); }
 </script>
 
 <style scoped>
-.bd-shell { height: 100vh; }
-.bd-sider { background: var(--color-bg-1); border-right: 1px solid var(--color-border-2); }
+.bd-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
-.bd-brand {
-  height: var(--bd-header-h); display: flex; align-items: center; gap: 10px;
-  padding: 0 16px; border-bottom: 1px solid var(--color-border-2); overflow: hidden;
+/* 顶栏 */
+.bd-top {
+  height: var(--bd-header-h); flex: none; background: #fff; border-bottom: 1px solid var(--bd-border);
+  display: flex; align-items: center; padding: 0 20px; gap: 16px; z-index: 20;
 }
-.bd-brand.mini { padding: 0; justify-content: center; }
-.bd-brand__mark { color: var(--bd-brand); display: inline-flex; }
-.bd-brand__txt { font-size: 18px; font-weight: 700; letter-spacing: 1px; white-space: nowrap; }
-.bd-brand__txt i {
-  font-style: normal; font-weight: 400; font-size: 11px; letter-spacing: 0;
-  color: var(--color-text-3); margin-left: 6px;
+.bd-logo { display: flex; align-items: center; gap: 11px; }
+.bd-logo__mark {
+  width: 30px; height: 30px; border-radius: 7px; flex: none;
+  background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d));
+  display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(22, 93, 255, .35);
 }
-.bd-menu { border: none; }
+.bd-logo__txt { display: flex; flex-direction: column; line-height: 1.15; }
+.bd-logo__txt b { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
+.bd-logo__txt i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
+.bd-top__divider { width: 1px; height: 24px; background: var(--bd-border); margin: 0 4px; }
+.bd-modes { display: flex; gap: 2px; }
+.bd-mode { font-size: 13px; color: var(--bd-t2); padding: 6px 12px; border-radius: 6px; cursor: pointer; }
+.bd-mode:hover { background: var(--bd-fill-2); }
+.bd-mode.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
+.bd-top__spacer { flex: 1; }
+.bd-search {
+  display: flex; align-items: center; height: 32px; background: var(--bd-fill-2); border-radius: 6px;
+  padding: 0 10px; gap: 8px; width: 220px; color: var(--bd-t3); font-size: 13px; cursor: text;
+}
+.bd-bell {
+  position: relative; width: 34px; height: 34px; border: none; background: transparent; border-radius: 8px;
+  display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--bd-t2); font-size: 18px;
+}
+.bd-bell:hover { background: var(--bd-fill-2); }
+.bd-bell__dot {
+  position: absolute; top: 4px; right: 5px; min-width: 15px; height: 15px; padding: 0 4px;
+  background: var(--bd-danger); color: #fff; border-radius: 8px; font-size: 10px; font-weight: 600;
+  display: flex; align-items: center; justify-content: center; border: 1.5px solid #fff;
+}
+.bd-acct { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 3px 6px; border-radius: 8px; }
+.bd-acct:hover { background: var(--bd-fill-2); }
+.bd-acct__av {
+  width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 12px; font-weight: 600;
+  background: linear-gradient(135deg, var(--bd-purple), var(--bd-primary));
+  display: flex; align-items: center; justify-content: center;
+}
+.bd-acct__txt { display: flex; flex-direction: column; line-height: 1.2; }
+.bd-acct__txt b { font-size: 13px; font-weight: 600; }
+.bd-acct__txt i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
 
-.bd-header {
-  height: var(--bd-header-h); display: flex; align-items: center; gap: 12px;
-  padding: 0 16px; background: var(--color-bg-1); border-bottom: 1px solid var(--color-border-2);
+/* 主体 */
+.bd-body { display: flex; flex: 1; overflow: hidden; }
+.bd-side {
+  width: var(--bd-sider-w); flex: none; background: #fff; border-right: 1px solid var(--bd-border);
+  padding: 12px 12px 24px; overflow-y: auto;
 }
-.bd-header__spacer { flex: 1; }
-.bd-crumb { font-size: 13px; }
-.bd-search { width: 240px; }
+.bd-side__label {
+  font-size: 11px; color: var(--bd-t3); font-weight: 600; padding: 0 12px;
+  margin: 16px 0 4px; letter-spacing: .5px;
+}
+.bd-side__label:first-child { margin-top: 6px; }
+.bd-nav {
+  width: 100%; display: flex; align-items: center; gap: 10px; padding: 0 12px; height: 38px;
+  border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px;
+  color: var(--bd-t2); margin-bottom: 2px; transition: background .12s; text-align: left;
+}
+.bd-nav:hover { background: var(--bd-fill-2); }
+.bd-nav.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 500; }
+.bd-nav__icon { font-size: 17px; flex: none; }
+.bd-nav__t { flex: 1; }
+.bd-nav__badge { font-size: 11px; color: var(--bd-t3); font-weight: 500; }
+.bd-nav__badge.alert {
+  min-width: 16px; height: 16px; padding: 0 5px; background: var(--bd-tag-red-bg); color: var(--bd-danger);
+  border-radius: 8px; font-weight: 600; display: flex; align-items: center; justify-content: center;
+}
 
-.bd-iconbtn {
-  width: 32px; height: 32px; border: none; background: transparent; cursor: pointer;
-  border-radius: 6px; color: var(--color-text-2); display: inline-flex;
-  align-items: center; justify-content: center; font-size: 16px;
+.bd-health {
+  margin-top: 20px; padding: 12px; border-radius: 10px; color: #fff;
+  background: linear-gradient(135deg, var(--bd-dark-1), var(--bd-dark-2));
 }
-.bd-iconbtn:hover { background: var(--color-fill-2); color: var(--color-text-1); }
-.bd-user {
-  height: 32px; border: none; background: transparent; cursor: pointer; border-radius: 6px;
-  padding: 0 8px; display: inline-flex; align-items: center; gap: 6px; color: var(--color-text-1);
+.bd-health__h { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
+.bd-health__dot {
+  width: 7px; height: 7px; border-radius: 50%; background: #23C343; box-shadow: 0 0 0 3px rgba(35, 195, 67, .25);
 }
-.bd-user:hover { background: var(--color-fill-2); }
-.bd-content { overflow: auto; background: var(--color-fill-2); }
+.bd-health__b { font-size: 11px; color: var(--bd-dark-txt); line-height: 1.7; }
+.bd-health__b b { color: #fff; }
+
+.bd-main { flex: 1; overflow-y: auto; background: var(--bd-fill-1); }
 </style>

@@ -5,7 +5,9 @@ import { NAV, FIRST_PATH } from '@/nav';
 // 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
 const BUILT: Record<string, () => Promise<unknown>> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
-  '/business/policy': () => import('@/views/Policy.vue')
+  '/business/policy': () => import('@/views/Policy.vue'),
+  '/business/apps': () => import('@/views/Apps.vue'),
+  '/business/users': () => import('@/views/Users.vue')
 };
 
 const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>

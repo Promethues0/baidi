@@ -8,6 +8,8 @@ import "context"
 type Store interface {
 	Overview(ctx context.Context) (Overview, error)
 	PolicyBundle(ctx context.Context) (PolicyBundle, error)
+	Apps(ctx context.Context) (AppBundle, error)
+	Users(ctx context.Context) (UserDirBundle, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

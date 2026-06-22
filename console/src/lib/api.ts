@@ -45,3 +45,24 @@ export interface PolicyBundle {
   tree: OrgNode[];
   list: UserPolicy[];
 }
+
+/* ── 应用管理（store.AppBundle）── */
+export interface AppCategory { key: string; label: string; count: number }
+export interface App {
+  id: string; name: string; addr: string;
+  mode: 'tunnel' | 'web' | 'global';
+  category: string; node: string; authedUsers: number;
+  status: 'running' | 'stopped';
+}
+export interface AppBundle { categories: AppCategory[]; apps: App[] }
+
+/* ── 访问者目录（store.UserDirBundle）── */
+export interface Directory { key: string; name: string; type: 'local' | 'ad' | 'ldap'; users: number; online: number; lastSync: string }
+export interface OrgUnit { key: string; title: string; members: number; children?: OrgUnit[] }
+export interface DirUser {
+  id: string; name: string; account: string; org: string; orgKey: string;
+  device: string; ip: string; auth: string; lastLogin: string;
+  online: boolean; status: 'active' | 'locked' | 'disabled' | 'idle'; risk: 'none' | 'low' | 'high';
+  roles: string[];
+}
+export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; users: DirUser[] }

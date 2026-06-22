@@ -27,9 +27,9 @@ export const NAV: NavGroup[] = [
   {
     label: '业务管理',
     children: [
-      { title: '应用管理', path: '/business/apps', icon: 'IconApps' },
+      { title: '应用管理', path: '/business/apps', icon: 'IconApps', done: true },
       { title: '策略管理', path: '/business/policy', icon: 'IconSafe', done: true },
-      { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup' }
+      { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup', done: true }
     ]
   },
   {

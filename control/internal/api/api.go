@@ -48,7 +48,31 @@ func (s *Server) Routes() http.Handler {
 	// 策略：继承树 + 用户策略清单
 	mux.HandleFunc("GET /api/v1/policies", s.handlePolicies)
 
+	// 应用管理：分类 + 应用清单
+	mux.HandleFunc("GET /api/v1/apps", s.handleApps)
+
+	// 访问者目录：身份源 + 组织树 + 用户清单
+	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
+
 	return mux
+}
+
+func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Apps(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load apps")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
+}
+
+func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Users(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load users")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, b)
 }
 
 func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {

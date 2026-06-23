@@ -30,7 +30,7 @@
       <div class="st__kv"><span>客户端</span><b>白帝安全接入客户端 v0.1.0（桌面端壳 · Tauri-ready）</b></div>
       <div class="st__kv"><span>架构</span><b>控制中心 baidi-control + 安全代理网关 + 终端 Agent</b></div>
       <div class="st__kv"><span>能力</span><b>一键接入 · 环境检测上报 · SPA 隐身 · 流量打标引流 · 自助诊断</b></div>
-      <div class="st__note">数据面（SPA 敲门 / SSL 隧道 / 打标引流）为后续 Rust/Go 引擎层；当前为壳层 UX，已接通 baidi-control 登录与应用门户。</div>
+      <div class="st__note">数据面网关 <b>baidi-gateway</b> 已实现真链路（SPA 单包授权 + 门控 SSL 隧道代理 + JWT 身份绑定，见 <span class="dk-mono">gateway/</span>）。客户端"接入"接入真链路只差一步：Tauri sidecar 打包 baidi-knock，登录拿 JWT 后发起真实敲门。</div>
     </div>
   </div>
 </template>

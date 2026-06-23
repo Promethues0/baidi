@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+
+	"baidi.dev/gateway/internal/knock"
 )
 
 func main() {
@@ -25,7 +27,12 @@ func main() {
 		os.Exit(1)
 	}
 	defer conn.Close()
-	if _, err := conn.Write([]byte(*token)); err != nil {
+	sealed, err := knock.Seal(*token)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "封装敲门包失败:", err)
+		os.Exit(1)
+	}
+	if _, err := conn.Write(sealed); err != nil {
 		fmt.Fprintln(os.Stderr, "敲门包发送失败:", err)
 		os.Exit(1)
 	}

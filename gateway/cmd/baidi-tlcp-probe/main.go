@@ -12,6 +12,7 @@ import (
 	"gitee.com/Trisia/gotlcp/tlcp"
 
 	"baidi.dev/gateway/internal/gmcert"
+	"baidi.dev/gateway/internal/knock"
 )
 
 func main() {
@@ -30,7 +31,9 @@ func main() {
 	}
 	// ① SPA 敲门
 	if c, err := net.Dial("udp", *spaAddr); err == nil {
-		_, _ = c.Write([]byte(*token))
+		if sealed, e := knock.Seal(*token); e == nil {
+			_, _ = c.Write(sealed)
+		}
 		_ = c.Close()
 	} else {
 		fmt.Fprintln(os.Stderr, "SPA 端口不可达:", err)
@@ -43,6 +46,10 @@ func main() {
 	if *insecure {
 		cfg.InsecureSkipVerify = true
 	} else {
+		if *serverName == "" {
+			fmt.Fprintln(os.Stderr, "非 -insecure 模式必须指定非空 -servername（须命中网关证书 SAN）")
+			os.Exit(2)
+		}
 		pool, err := gmcert.LoadCAPool(*caDir)
 		if err != nil {
 			fmt.Fprintln(os.Stderr, "加载 CA 失败（-ca 指向证书目录，或 -insecure 跳过）:", err)

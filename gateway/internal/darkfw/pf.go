@@ -23,8 +23,8 @@ type backend int
 
 const (
 	none backend = iota
-	pf          // macOS
-	nft         // Linux
+	pf           // macOS
+	nft          // Linux
 )
 
 func detect() backend {

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"baidi.dev/gateway/internal/auth"
+	"baidi.dev/gateway/internal/knock"
 )
 
 // Allowlist 源 IP → 放行到期时间 的并发安全表。
@@ -71,6 +72,8 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 		return err
 	}
 	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String())
+	cache := knock.NewCache()
+	const skew = 30 * time.Second // 允许时钟偏移 / 重放窗口
 	buf := make([]byte, 8192)
 	for {
 		n, src, err := conn.ReadFrom(buf)
@@ -78,10 +81,18 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 			continue
 		}
 		ip := hostOf(src.String())
-		claims, err := auth.Verify(secret, string(buf[:n]))
+		token, protected, err := knock.Open(buf[:n], skew, cache)
+		if err != nil {
+			slog.Warn("SPA 敲门拒绝（重放/信封无效）", "src", ip, "err", err.Error())
+			continue
+		}
+		claims, err := auth.Verify(secret, token)
 		if err != nil {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
 			continue
+		}
+		if !protected {
+			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放保护，建议客户端升级敲门信封", "src", ip)
 		}
 		al.Allow(ip, claims.Name, claims.Role, ttl)
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())

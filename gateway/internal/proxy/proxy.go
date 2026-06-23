@@ -20,8 +20,10 @@ import (
 )
 
 const (
-	preamblePrefix = "CONNECT " // 8 字节
-	preambleMax    = 256        // 前导单行最长，防滥用
+	preamblePrefix  = "CONNECT " // 8 字节
+	preambleMax     = 256        // 前导单行最长，防滥用/无界缓冲
+	preambleTimeout = 3 * time.Second
+	maxConcurrent   = 1024 // 同时处于握手/前导阶段的连接上限，封顶内存/goroutine
 )
 
 // Serve 启动通用 TLS 代理监听。reg.Default 为默认回退后端。
@@ -44,14 +46,19 @@ func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al
 	return serve(ln, reg, al)
 }
 
-// serve 是两种监听共享的接受循环（门控/路由逻辑与加密层无关）。
+// serve 是两种监听共享的接受循环（门控/路由逻辑与加密层无关）；信号量封顶并发。
 func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist) error {
+	sem := make(chan struct{}, maxConcurrent)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		go handle(c, reg, al)
+		sem <- struct{}{}
+		go func() {
+			defer func() { <-sem }()
+			handle(c, reg, al)
+		}()
 	}
 }
 
@@ -65,25 +72,17 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 		return
 	}
 
-	br := bufio.NewReader(c)
+	br := bufio.NewReaderSize(c, 4096) // 固定缓冲，前导用 ReadSlice 受此封顶（防无界缓冲 OOM）
+	rid, hasPreamble, good := readPreamble(c, br)
+	if !good {
+		// 疑似前导但未在预算内读全（截断/超时）→ fail-closed，绝不降级回退默认后端
+		slog.Warn("代理拒绝（前导不完整/超时，fail-closed）", "src", ip, "user", user)
+		_ = c.Close()
+		return
+	}
+
 	backend := reg.Default
-
-	// 偷看前 8 字节判断是否带 CONNECT 前导；Peek 不消费，故无前导时全部字节留在 br 不丢。
-	_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-	prefix, _ := br.Peek(len(preamblePrefix))
-	_ = c.SetReadDeadline(time.Time{})
-
-	if string(prefix) == preamblePrefix {
-		// 有前导：消费这一行，解析 resource-id
-		_ = c.SetReadDeadline(time.Now().Add(200 * time.Millisecond))
-		line, err := br.ReadString('\n')
-		_ = c.SetReadDeadline(time.Time{})
-		if err != nil || len(line) > preambleMax {
-			slog.Warn("代理拒绝（前导异常）", "src", ip, "user", user)
-			_ = c.Close()
-			return
-		}
-		rid := strings.TrimSpace(strings.TrimPrefix(line, preamblePrefix))
+	if hasPreamble {
 		res, found := reg.Lookup(rid) // ★ 白名单查表：唯一允许的取后端途径（SSRF 防线）
 		if !found {
 			slog.Warn("代理拒绝（资源未注册/疑似 SSRF）", "src", ip, "user", user, "resource", rid)
@@ -112,6 +111,45 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 	go func() { _, _ = io.Copy(b, br); _ = b.Close() }()
 	_, _ = io.Copy(c, b)
 	_ = c.Close()
+}
+
+// readPreamble 解析隧道首部是否带 "CONNECT <id>\n" 前导。
+// 返回 good=false 表示"疑似前导但未读全"，调用方必须 fail-closed（不得降级默认后端）。
+// 按"已收字节是否仍是 CONNECT 前缀"决策，避免正常 TCP 分段把慢到达的前导误判为无前导：
+//   - 首字节非 'C' → 立即判无前导（不阻塞 server-speaks-first 协议）
+//   - 收到的是 CONNECT 真前缀但在预算内没凑齐 → fail-closed
+//   - 凑齐 "CONNECT " → 限长读取该行解析 id
+func readPreamble(c net.Conn, br *bufio.Reader) (rid string, hasPreamble, good bool) {
+	_ = c.SetReadDeadline(time.Now().Add(preambleTimeout))
+	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
+
+	for n := 1; n <= len(preamblePrefix); n++ {
+		p, err := br.Peek(n) // Peek 不消费 → 无前导字节留在 br 不丢
+		if err != nil {
+			switch {
+			case len(p) == 0:
+				return "", false, true // 无任何字节（空闲）→ 视作无前导，回退默认
+			case string(p) == preamblePrefix[:len(p)]:
+				return "", false, false // 是 CONNECT 真前缀但没凑齐 → fail-closed
+			default:
+				return "", false, true // 已分叉，非前导业务流
+			}
+		}
+		if string(p) != preamblePrefix[:n] {
+			return "", false, true // 第 n 字节分叉 → 无前导
+		}
+	}
+
+	// 凑齐 "CONNECT "：限长读这一行（ReadSlice 受 br 固定缓冲封顶，超长即拒）
+	line, err := br.ReadSlice('\n')
+	if err != nil || len(line) > preambleMax {
+		return "", false, false // 行过长/读错 → fail-closed
+	}
+	rid = strings.TrimSpace(strings.TrimPrefix(string(line), preamblePrefix))
+	if rid == "" {
+		return "", false, false // 空 id → fail-closed
+	}
+	return rid, true, true
 }
 
 func hostOf(addr string) string {

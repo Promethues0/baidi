@@ -13,6 +13,8 @@ import (
 	"net/http"
 	"os"
 	"time"
+
+	"baidi.dev/gateway/internal/knock"
 )
 
 func main() {
@@ -30,9 +32,11 @@ func main() {
 			writeJSON(w, 400, map[string]any{"ok": false, "detail": "缺少身份令牌"})
 			return
 		}
-		// ① 真实 SPA 敲门（UDP，携带 JWT）
+		// ① 真实 SPA 敲门（UDP，携带 JWT，封防重放信封）
 		if c, err := net.Dial("udp", *spa); err == nil {
-			_, _ = c.Write([]byte(b.Token))
+			if sealed, e := knock.Seal(b.Token); e == nil {
+				_, _ = c.Write(sealed)
+			}
 			_ = c.Close()
 		} else {
 			writeJSON(w, 200, map[string]any{"ok": false, "detail": "网关 SPA 端口不可达"})

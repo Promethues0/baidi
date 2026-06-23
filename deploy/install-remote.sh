@@ -29,41 +29,59 @@ if [ ! -f "$BD_PREFIX/etc/baidi.env" ]; then
   echo "==> 已生成随机 JWT 密钥 → $BD_PREFIX/etc/baidi.env"
 fi
 
-# 自签 TLS（仅首次；生产请换正式证书）。带 IP/host SAN，避免按 IP 访问告警。
+# 自签 TLS（仅首次；生产请换正式证书）。SAN 区分 IP/域名；私钥严格 0600（umask 兜底）。
 if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
   san="DNS:baidi"
-  [ "$PUBLIC_HOST" != "_" ] && san="$san,IP:$PUBLIC_HOST"
-  openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
-    -keyout "$BD_PREFIX/etc/tls/server.key" -out "$BD_PREFIX/etc/tls/server.crt" \
-    -subj "/CN=baidi" -addext "subjectAltName=$san" >/dev/null 2>&1
-  echo "==> 已生成自签 TLS 证书（SAN=$san）"
+  if [ "$PUBLIC_HOST" != "_" ]; then
+    case $PUBLIC_HOST in
+      *[!0-9.]*) san="$san,DNS:$PUBLIC_HOST" ;; # 含非 IP 字符 → 域名
+      *)         san="$san,IP:$PUBLIC_HOST"  ;; # 纯数字与点 → IPv4
+    esac
+  fi
+  ( umask 077; openssl req -x509 -newkey rsa:2048 -nodes -days 825 \
+      -keyout "$BD_PREFIX/etc/tls/server.key" -out "$BD_PREFIX/etc/tls/server.crt" \
+      -subj "/CN=baidi" -addext "subjectAltName=$san" >/dev/null 2>&1 )
+  chmod 0700 "$BD_PREFIX/etc/tls"; chmod 0600 "$BD_PREFIX/etc/tls/server.key"; chmod 0644 "$BD_PREFIX/etc/tls/server.crt"
+  echo "==> 已生成自签 TLS 证书（SAN=$san，私钥 0600）"
 fi
 
 chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX"
 
-# 渲染并安装 systemd 单元
+# 渲染 systemd 单元（先装单元，nginx 校验通过后再启动控制面，避免无入口空跑）
 render() { sed -e "s#@BD_PREFIX@#$BD_PREFIX#g" -e "s#@BD_USER@#$BD_USER#g" \
                -e "s#@CONTROL_PORT@#$CONTROL_PORT#g" -e "s#@PUBLIC_ORIGIN@#$PUBLIC_ORIGIN#g" \
                -e "s#@BD_HTTPS_PORT@#$BD_HTTPS_PORT#g" -e "s#@PUBLIC_HOST@#$PUBLIC_HOST#g" "$1"; }
 render "$HERE/systemd/baidi-control.service" > /etc/systemd/system/baidi-control.service
 systemctl daemon-reload
+
+# 渲染并校验 nginx 站点（对烛龙零副作用：备份→防御→端口预检→nginx -t→reload，任一失败即还原旧配置）
+[ -f /etc/nginx/conf.d/baidi.conf ] && cp -a /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi.conf.bak
+restore_nginx() { # 有旧备份则还原可用配置，仅首装无备份才删（绝不留半残文件毒化烛龙后续 reload）
+  if [ -f /etc/nginx/conf.d/baidi.conf.bak ]; then mv -f /etc/nginx/conf.d/baidi.conf.bak /etc/nginx/conf.d/baidi.conf
+  else rm -f /etc/nginx/conf.d/baidi.conf; fi
+}
+render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
+# 防御①：白帝绝不得声明 default_server（剥注释后再查，避免被说明性注释里的字样误伤）
+if sed 's/#.*//' /etc/nginx/conf.d/baidi.conf | grep -q 'default_server'; then
+  restore_nginx; echo "✗ 拒绝：baidi nginx 站点含 default_server，已还原（绝不抢占烛龙 80/443）"; exit 1
+fi
+# 防御②：端口占用预检（kill -HUP 型 reload 不回非零，端口冲突靠预检兜住）
+if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$BD_HTTPS_PORT" 2>/dev/null | grep -q LISTEN; then
+  restore_nginx; echo "✗ 端口 $BD_HTTPS_PORT 已被占用，已还原 baidi 配置（烛龙未受影响）"; exit 1
+fi
+# 防御③：nginx -t 失败即还原
+if ! nginx -t; then
+  restore_nginx; echo "✗ nginx -t 失败，已还原 baidi 配置（烛龙站点未受影响）"; exit 1
+fi
+if ! systemctl reload nginx; then
+  restore_nginx; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
+  echo "✗ nginx reload 失败，已还原 baidi 配置"; exit 1
+fi
+rm -f /etc/nginx/conf.d/baidi.conf.bak
+
+# nginx 就绪后再启动控制面
 systemctl enable --now baidi-control
 systemctl restart baidi-control
-
-# 渲染并安装 nginx 站点（对烛龙零副作用的双重防御）
-render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
-# 防御①：白帝绝不得声明 default_server 指令（否则与烛龙的 default_server 冲突）。
-#         先剥掉所有注释(整行+行内 # 之后)，再查，避免被说明性注释里的字样误伤。
-if sed 's/#.*//' /etc/nginx/conf.d/baidi.conf | grep -q 'default_server'; then
-  rm -f /etc/nginx/conf.d/baidi.conf
-  echo "✗ 拒绝：baidi nginx 站点含 default_server，已撤销（绝不抢占烛龙 80/443）"; exit 1
-fi
-# 防御②：nginx -t 失败即撤销坏文件并退出，保证烛龙配置不被半残文件影响
-if ! nginx -t; then
-  rm -f /etc/nginx/conf.d/baidi.conf
-  echo "✗ nginx -t 失败，已撤销 baidi 配置（烛龙站点未受影响）"; exit 1
-fi
-systemctl reload nginx
 
 echo "✓ 安装完成（与烛龙共存）。控制台: https://${PUBLIC_HOST}:${BD_HTTPS_PORT}/  ·  门户: /portal/login"
 echo "  需在腾讯云安全组放行 TCP ${BD_HTTPS_PORT}（如要公网客户端，再放 gateway 18443/tcp + 18201/udp）"

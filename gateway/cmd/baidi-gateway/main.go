@@ -37,6 +37,12 @@ func main() {
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	if *secret == "" {
+		log.Fatal("拒绝启动：BAIDI_JWT_SECRET 为空（数据面授权依赖它校验 SPA 敲门身份）")
+	}
+	if *secret == "baidi-dev-secret-change-me" {
+		slog.Warn("⚠ 正在使用开发默认 JWT 密钥，生产务必经 BAIDI_JWT_SECRET 配置独立密钥（须与 baidi-control 一致）")
+	}
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend, "ttl", ttl.String())
 
 	al := spa.NewAllowlist()
@@ -64,6 +70,10 @@ func main() {
 			defer t.Stop()
 			for range t.C {
 				for _, ip := range al.Reap() {
+					// 回收前再确认：若该 IP 已被重新敲门放行，别让陈旧 Deny 误删内核放行规则
+					if _, _, ok := al.Allowed(ip); ok {
+						continue
+					}
 					if err := darkfw.DenyIP(ip); err == nil {
 						slog.Info("pf 放行回收（TTL 到期）", "ip", ip)
 					}

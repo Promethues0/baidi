@@ -25,6 +25,7 @@ import (
 	"golang.zx2c4.com/wireguard/tun"
 
 	"baidi.dev/gateway/internal/gmcert"
+	"baidi.dev/gateway/internal/knock"
 
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
@@ -41,6 +42,10 @@ import (
 const (
 	mtu    = 1420
 	offset = 4 // macOS utun 读写在包前留 4 字节地址族头（见 wireguard tun_darwin）
+	// 入站读缓冲须容纳「去分段后的最大单包」而非链路 MTU：Linux 开 IFF_VNET_HDR(GRO/USO) 时
+	// 一次 Read 可吐出 >MTU 的合并包，wireguard 契约缓冲尺寸为 64KiB。若只给 mtu 大小，
+	// UDP-USO 大包会令 gsoSplit 写越界 panic、整进程崩。统一用 64KiB（约 128*64KiB≈8MB，可接受）。
+	maxSegSize = 65535
 )
 
 func main() {
@@ -69,6 +74,9 @@ func main() {
 		if *insecure {
 			tlcpCfg.InsecureSkipVerify = true
 		} else {
+			if *serverName == "" {
+				log.Fatal("非 -insecure 模式必须指定非空 -servername（须命中网关证书 SAN）；空 ServerName 会静默关闭主机名校验")
+			}
 			pool, err := gmcert.LoadCAPool(*caDir)
 			if err != nil {
 				log.Fatalf("加载 CA 失败（-ca 指目录或 -insecure 跳过）: %v", err)
@@ -153,7 +161,9 @@ func (c *tunnelCfg) tunnel(local net.Conn, dst string) {
 	defer local.Close()
 	// SPA 敲门（携带 JWT），先认证后连接
 	if uc, err := net.Dial("udp", c.spa); err == nil {
-		_, _ = uc.Write([]byte(c.token))
+		if sealed, e := knock.Seal(c.token); e == nil {
+			_, _ = uc.Write(sealed)
+		}
 		_ = uc.Close()
 	}
 	time.Sleep(120 * time.Millisecond)
@@ -189,13 +199,13 @@ func pumpInbound(dev tun.Device, ep *channel.Endpoint) {
 	bufs := make([][]byte, dev.BatchSize())
 	sizes := make([]int, dev.BatchSize())
 	for i := range bufs {
-		bufs[i] = make([]byte, offset+mtu+4)
+		bufs[i] = make([]byte, offset+maxSegSize) // 容纳 GRO/USO 合并包，避免 Linux 越界 panic
 	}
 	for {
 		n, err := dev.Read(bufs, sizes, offset)
 		if err != nil {
-			slog.Error("utun 读失败", "err", err.Error())
-			return
+			// 入站泵死掉会让隧道静默半死（出站还活）；宁可整进程退出由 systemd/用户重启
+			log.Fatalf("TUN 读失败，数据面退出: %v", err)
 		}
 		for i := 0; i < n; i++ {
 			if sizes[i] == 0 {

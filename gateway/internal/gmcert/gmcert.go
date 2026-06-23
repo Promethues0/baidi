@@ -9,6 +9,10 @@
 //	sign.pem / sign.key.pem  —— 网关 SM2 签名证书（CA 签发，2 年，KeyUsage=数字签名）
 //	enc.pem  / enc.key.pem   —— 网关 SM2 加密证书（CA 签发，2 年，KeyUsage=密钥协商/加密）
 //
+// 健壮性：EnsureGateway 全程持目录文件锁，串行化并发首启；落盘走"临时文件+rename"原子写，
+// 杜绝并发交错产出 cert/key 不配对的损坏库；复用前校验 leaf 未过期、且确由当前 CA 签发，
+// 否则自动重签（换 CA / 临近到期都能自愈）。
+//
 // 注意：gotlcp 的 tlcp.Config.RootCAs/ClientCAs 字段虽标注 *x509.CertPool，但该包内 x509 是
 // github.com/emmansun/gmsm/smx509 的别名——故必须用 smx509.NewCertPool()（标准库 x509.CertPool 编译不过）。
 package gmcert
@@ -19,6 +23,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"os"
@@ -34,6 +39,9 @@ const (
 	caCertFile, caKeyFile     = "ca.pem", "ca.key.pem"
 	signCertFile, signKeyFile = "sign.pem", "sign.key.pem"
 	encCertFile, encKeyFile   = "enc.pem", "enc.key.pem"
+
+	leafRenewWindow = 30 * 24 * time.Hour // leaf 剩余有效期 < 此值即提前重签
+	caWarnWindow    = 90 * 24 * time.Hour // CA 剩余有效期 < 此值即告警
 )
 
 // 网关证书 SAN：DNS 名 + 回环 IP（客户端 ServerName 命中其一即可）。
@@ -42,12 +50,19 @@ var (
 	gwIPs   = []net.IP{net.ParseIP("127.0.0.1")}
 )
 
-// EnsureGateway 确保 dir 下有持久化 CA + 网关双证书；缺则生成、有则复用。
+// EnsureGateway 确保 dir 下有持久化 CA + 网关双证书；缺/过期/不匹配则（重）生成，有效则复用。
 // 返回 TLCP 服务端用的 [签名证书, 加密证书]（顺序要求：先签名后加密）。
+// 全程持目录文件锁，可安全并发/多进程首启。
 func EnsureGateway(dir string) ([]tlcp.Certificate, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
+	unlock, err := lockDir(dir)
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
+
 	caCert, caKey, err := ensureCA(dir)
 	if err != nil {
 		return nil, err
@@ -79,7 +94,7 @@ func LoadCAPool(dir string) (*smx509.CertPool, error) {
 	return pool, nil
 }
 
-// CAInfo 返回 CA 证书的人读信息（指纹/有效期/SAN），供 baidi-gmca 打印。
+// CAInfo 返回 CA 证书的人读信息（主体/有效期），供 baidi-gmca 打印。
 func CAInfo(dir string) (subject string, notAfter time.Time, err error) {
 	cb, err := os.ReadFile(filepath.Join(dir, caCertFile))
 	if err != nil {
@@ -95,7 +110,21 @@ func CAInfo(dir string) (subject string, notAfter time.Time, err error) {
 func ensureCA(dir string) (*smx509.Certificate, *sm2.PrivateKey, error) {
 	cp, kp := filepath.Join(dir, caCertFile), filepath.Join(dir, caKeyFile)
 	if fileExists(cp) && fileExists(kp) {
-		return loadCA(cp, kp)
+		if caCert, caKey, err := loadCA(cp, kp); err == nil {
+			now := time.Now()
+			if now.Before(caCert.NotAfter) { // CA 仍有效 → 复用
+				if caCert.NotAfter.Sub(now) < caWarnWindow {
+					slog.Warn("国密 CA 临近到期，建议续签并重新分发 CA 池", "notAfter", caCert.NotAfter)
+				}
+				return caCert, caKey, nil
+			}
+			slog.Warn("国密 CA 已过期，重新生成（客户端需重新分发 CA 池）", "notAfter", caCert.NotAfter)
+		} else {
+			slog.Warn("国密 CA 加载失败，重新生成", "err", err.Error())
+		}
+		// 过期/损坏：删除旧 CA，重新生成（旧 leaf 会因签名不匹配在 ensureLeaf 自动重签）
+		_ = os.Remove(cp)
+		_ = os.Remove(kp)
 	}
 	now := time.Now()
 	caKey, err := sm2.GenerateKey(rand.Reader)
@@ -116,11 +145,11 @@ func ensureCA(dir string) (*smx509.Certificate, *sm2.PrivateKey, error) {
 	if err != nil {
 		return nil, nil, err
 	}
-	if err := writePEM(cp, "CERTIFICATE", der, 0o644); err != nil {
-		return nil, nil, err
-	}
 	keyDER, err := smx509.MarshalPKCS8PrivateKey(caKey)
 	if err != nil {
+		return nil, nil, err
+	}
+	if err := writePEM(cp, "CERTIFICATE", der, 0o644); err != nil {
 		return nil, nil, err
 	}
 	if err := writePEM(kp, "PRIVATE KEY", keyDER, 0o600); err != nil {
@@ -134,7 +163,20 @@ func ensureLeaf(dir, certFile, keyFile, cn string, ku x509.KeyUsage, serial *big
 	ca *smx509.Certificate, caKey *sm2.PrivateKey) (tlcp.Certificate, error) {
 	cp, kp := filepath.Join(dir, certFile), filepath.Join(dir, keyFile)
 	if fileExists(cp) && fileExists(kp) {
-		return tlcp.LoadX509KeyPair(cp, kp) // 复用已落盘 leaf
+		if cert, err := tlcp.LoadX509KeyPair(cp, kp); err == nil && len(cert.Certificate) > 0 {
+			if leaf, e := smx509.ParseCertificate(cert.Certificate[0]); e == nil {
+				now := time.Now()
+				fresh := now.After(leaf.NotBefore) && leaf.NotAfter.Sub(now) > leafRenewWindow
+				byCurrentCA := leaf.CheckSignatureFrom(ca) == nil
+				if fresh && byCurrentCA {
+					return cert, nil // 有效且由当前 CA 签发 → 复用
+				}
+				slog.Warn("网关证书需重签", "file", certFile, "fresh", fresh, "byCurrentCA", byCurrentCA, "notAfter", leaf.NotAfter)
+			}
+		}
+		// 过期/换 CA/损坏 → 删除后重签（fail-closed，绝不复用不可信 leaf）
+		_ = os.Remove(cp)
+		_ = os.Remove(kp)
 	}
 	now := time.Now()
 	key, err := sm2.GenerateKey(rand.Reader)
@@ -196,9 +238,18 @@ func loadCA(cp, kp string) (*smx509.Certificate, *sm2.PrivateKey, error) {
 	return caCert, caKey, nil
 }
 
+// writePEM 原子落盘：先写临时文件再 rename，避免读到半截 PEM 或 cert/key 不配对。
 func writePEM(path, typ string, der []byte, mode os.FileMode) error {
 	b := pem.EncodeToMemory(&pem.Block{Type: typ, Bytes: der})
-	return os.WriteFile(path, b, mode)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, b, mode); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp, mode); err != nil { // WriteFile 受 umask 影响，显式收紧
+		_ = os.Remove(tmp)
+		return err
+	}
+	return os.Rename(tmp, path)
 }
 
 func fileExists(p string) bool { _, err := os.Stat(p); return err == nil }

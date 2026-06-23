@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"baidi.dev/control/internal/auth"
@@ -23,15 +24,25 @@ const (
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
-	store  store.Store
-	writer store.Writer
-	secret []byte
-	env    string
+	store    store.Store
+	writer   store.Writer
+	secret   []byte
+	env      string
+	mu       sync.Mutex
+	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
+}
+
+// GatewayInfo 一台已注册数据面网关的运行信息。
+type GatewayInfo struct {
+	ID       string `json:"id"`
+	Proxy    string `json:"proxy"`
+	SPA      string `json:"spa"`
+	LastSeen int64  `json:"lastSeen"`
 }
 
 // New 构造 Server。
 func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env}
+	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
@@ -48,6 +59,16 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	c, ok := auth.FromContext(r.Context())
 	if !ok || c.Role != "admin" {
 		httpx.Error(w, http.StatusForbidden, "需要管理员权限")
+		return false
+	}
+	return true
+}
+
+// requireGateway 校验上下文角色为 gateway 或 admin（数据面拉策略/注册用）。
+func (s *Server) requireGateway(w http.ResponseWriter, r *http.Request) bool {
+	c, ok := auth.FromContext(r.Context())
+	if !ok || (c.Role != "gateway" && c.Role != "admin") {
+		httpx.Error(w, http.StatusForbidden, "需要网关身份")
 		return false
 	}
 	return true
@@ -111,6 +132,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)             // 读取用户策略覆盖
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                     // 新增用户
 	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)      // 禁用/启用/解锁
+
+	// ── 网关数据面：注册 + 拉策略（需 gateway/admin 身份）；资源 CRUD（admin）──
+	mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister) // 网关注册/心跳
+	mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)      // 网关拉资源策略
+	mux.HandleFunc("GET /api/v1/resources", s.handleResources)                // 资源清单（管理）
+	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)            // 新增/改资源
+	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource)   // 删资源
 
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
@@ -249,6 +277,84 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	}
 	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
+}
+
+// handleGatewayRegister 记录一台数据面网关上线/心跳（网关用自签 gateway 令牌认证）。
+func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	var b struct {
+		ID    string `json:"id"`
+		Proxy string `json:"proxy"`
+		SPA   string `json:"spa"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&b)
+	c, _ := auth.FromContext(r.Context())
+	id := b.ID
+	if id == "" {
+		id = c.Sub
+	}
+	s.mu.Lock()
+	s.gateways[id] = GatewayInfo{ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix()}
+	s.mu.Unlock()
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// handleGatewayPolicy 网关拉取当前资源授权策略（替代静态 resources.json）。
+func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireGateway(w, r) {
+		return
+	}
+	rs, err := s.store.Resources(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
+}
+
+// handleResources 资源清单（管理台用）。
+func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	rs, err := s.store.Resources(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
+}
+
+// handleSaveResource 新增/修改一条受控资源（admin），落库后网关下次轮询即生效。
+func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var res store.Resource
+	if err := json.NewDecoder(r.Body).Decode(&res); err != nil || res.ID == "" || res.Backend == "" {
+		httpx.Error(w, http.StatusBadRequest, "id/backend 必填")
+		return
+	}
+	if err := s.writer.SaveResource(r.Context(), res); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to save resource")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "resource": res})
+}
+
+// handleDeleteResource 删除一条受控资源（admin）。
+func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	if err := s.writer.DeleteResource(r.Context(), id); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to delete resource")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {

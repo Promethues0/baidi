@@ -20,6 +20,8 @@ type Writer interface {
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
+	SaveResource(ctx context.Context, r Resource) error
+	DeleteResource(ctx context.Context, id string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -76,6 +78,9 @@ CREATE TABLE IF NOT EXISTS policy_overrides (
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT, account TEXT, org TEXT, org_key TEXT, device TEXT,
   ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT
+);
+CREATE TABLE IF NOT EXISTS resources (
+  id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, updated_at TEXT
 );`)
 	return err
 }
@@ -120,7 +125,57 @@ func (s *SQLiteStore) seed() error {
 			}
 		}
 	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM resources`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		rs, _ := s.Memory.Resources(ctx)
+		for _, r := range rs {
+			if err := s.SaveResource(ctx, r); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+// Resources 从库读受控资源清单（覆盖 Memory 种子）。
+func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users FROM resources ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Resource{}
+	for rows.Next() {
+		var r Resource
+		var roles, users string
+		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(roles), &r.AllowRoles)
+		_ = json.Unmarshal([]byte(users), &r.AllowUsers)
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
+// SaveResource 落库（upsert）一条受控资源。
+func (s *SQLiteStore) SaveResource(ctx context.Context, r Resource) error {
+	roles, _ := json.Marshal(r.AllowRoles)
+	users, _ := json.Marshal(r.AllowUsers)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,updated_at)
+VALUES(?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, backend=excluded.backend,
+  allow_roles=excluded.allow_roles, allow_users=excluded.allow_users, updated_at=excluded.updated_at`,
+		r.ID, r.Name, r.Backend, string(roles), string(users), nowStr())
+	return err
+}
+
+// DeleteResource 删除一条受控资源。
+func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM resources WHERE id=?`, id)
+	return err
 }
 
 func (s *SQLiteStore) insertUser(u DirUser) error {

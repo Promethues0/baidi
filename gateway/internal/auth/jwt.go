@@ -23,6 +23,19 @@ type Claims struct {
 
 var b64 = base64.RawURLEncoding
 
+// Sign 用共享密钥签发 HS256 JWT（网关据此自签 gateway 身份令牌去调控制面）。
+func Sign(secret []byte, c Claims, ttl time.Duration) string {
+	now := time.Now()
+	c.Iat = now.Unix()
+	c.Exp = now.Add(ttl).Unix()
+	header := b64.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
+	payload, _ := json.Marshal(c)
+	body := header + "." + b64.EncodeToString(payload)
+	h := hmac.New(sha256.New, secret)
+	h.Write([]byte(body))
+	return body + "." + b64.EncodeToString(h.Sum(nil))
+}
+
 // Verify 校验签名与有效期。
 func Verify(secret []byte, token string) (Claims, error) {
 	parts := strings.Split(token, ".")

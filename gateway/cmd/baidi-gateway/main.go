@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"baidi.dev/gateway/internal/cplane"
 	"baidi.dev/gateway/internal/darkfw"
 	"baidi.dev/gateway/internal/gmcert"
 	"baidi.dev/gateway/internal/proxy"
@@ -34,6 +35,9 @@ func main() {
 	certDir := flag.String("certdir", env("BAIDI_GW_CERTDIR", "certs"), "国密证书目录（持久化 CA 签发的双证书；首启自动生成）")
 	pf := flag.Bool("pf", false, "内核态隐身：SPA 放行落到 macOS pf 表 baidi_allowed（默认 DROP，需 root + 已加载 anchor）")
 	resources := flag.String("resources", env("BAIDI_GW_RESOURCES", ""), "资源注册表 JSON 路径（按目的多资源路由；空=仅默认后端）")
+	control := flag.String("control", env("BAIDI_GW_CONTROL", ""), "baidi-control 地址；设了则向控制面注册并周期拉取资源策略（动态，优先于静态 -resources）")
+	gwid := flag.String("gwid", env("BAIDI_GW_ID", "gw-1"), "本网关 id（控制面注册标识）")
+	poll := flag.Duration("poll", 15*time.Second, "控制面策略轮询/心跳间隔")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -53,6 +57,33 @@ func main() {
 			log.Fatalf("加载资源注册表失败: %v", err)
 		}
 		slog.Info("资源注册表已加载", "file", *resources, "count", reg.Count())
+	}
+
+	// 控制面对接：注册自身 + 周期拉取资源授权策略（动态替代静态 resources.json）
+	if *control != "" {
+		cp := cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
+		if err := cp.Register(); err != nil {
+			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
+		}
+		if rs, err := cp.Policy(); err != nil {
+			slog.Warn("首次拉取策略失败，暂用本地默认/静态策略", "err", err.Error())
+		} else {
+			reg.Replace(rs)
+			slog.Info("控制面策略已拉取", "control", *control, "count", reg.Count())
+		}
+		go func() {
+			t := time.NewTicker(*poll)
+			defer t.Stop()
+			for range t.C {
+				_ = cp.Register() // 心跳
+				if rs, err := cp.Policy(); err == nil {
+					reg.Replace(rs)
+				} else {
+					slog.Warn("轮询拉策略失败（保留上次策略）", "err", err.Error())
+				}
+			}
+		}()
+		slog.Info("控制面对接：注册 + 周期拉策略", "gwid", *gwid, "interval", poll.String())
 	}
 
 	if *pf {

@@ -69,7 +69,7 @@ func (m *Memory) Devices(_ context.Context) (DeviceBundle, error) {
 			}},
 			{ID: "ap3", User: "外包-周", Device: "外包-周-未授信", Fingerprint: "FF01:2345:6789:ABCD", SubmittedAt: "2026-06-22 11:20", Reason: "临时访问工单系统", Status: "pending", Timeline: []ApprovalEvent{
 				{Time: "2026-06-22 11:20", Kind: "submit", Title: "提交绑定申请", Detail: "外包-周 在个人 Android 发起绑定"},
-				{Time: "2026-06-22 11:20", Kind: "risk", Title: "环境研判", Detail: "个人设备、非企业网络、历史异地登录，风险分 78（高）", },
+				{Time: "2026-06-22 11:20", Kind: "risk", Title: "环境研判", Detail: "个人设备、非企业网络、历史异地登录，风险分 78（高）"},
 				{Time: "2026-06-22 11:21", Kind: "review", Title: "等待管理员审批", Detail: "高风险，建议驳回或限授（当前）"},
 			}},
 		},

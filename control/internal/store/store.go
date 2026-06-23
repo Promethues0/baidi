@@ -16,18 +16,19 @@ type Store interface {
 	System(ctx context.Context) (SystemBundle, error)
 	AuthSrc(ctx context.Context) (AuthSrcBundle, error)
 	Security(ctx context.Context) (SecurityBundle, error)
+	Resources(ctx context.Context) ([]Resource, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。
 type Overview struct {
-	GeneratedAt string         `json:"generatedAt"`
-	Devices     DeviceStat     `json:"devices"`
-	Users       UserStat       `json:"users"`
-	Threats     ThreatStat     `json:"threats"`
-	Sessions    int            `json:"sessions"`
-	AuditByKind []KV           `json:"auditByKind"`
-	Verdicts    []KV           `json:"verdicts"`
-	Defense     []DefenseLine  `json:"defense"`
+	GeneratedAt string        `json:"generatedAt"`
+	Devices     DeviceStat    `json:"devices"`
+	Users       UserStat      `json:"users"`
+	Threats     ThreatStat    `json:"threats"`
+	Sessions    int           `json:"sessions"`
+	AuditByKind []KV          `json:"auditByKind"`
+	Verdicts    []KV          `json:"verdicts"`
+	Defense     []DefenseLine `json:"defense"`
 }
 
 type DeviceStat struct {

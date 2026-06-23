@@ -4,9 +4,9 @@ import "context"
 
 // AuditBundle 审计中心页：分类聚合 + 磁盘水位 + 日志条目。
 type AuditBundle struct {
-	Categories []KV        `json:"categories"`
-	TodayTotal int         `json:"todayTotal"`
-	Disk       DiskStat    `json:"disk"`
+	Categories []KV         `json:"categories"`
+	TodayTotal int          `json:"todayTotal"`
+	Disk       DiskStat     `json:"disk"`
 	Logs       []AuditEntry `json:"logs"`
 }
 

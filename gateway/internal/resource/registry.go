@@ -49,6 +49,19 @@ func (r *Registry) LoadFile(path string) error {
 	return nil
 }
 
+// Replace 原子替换全部资源（控制面拉到新策略后热更新）。
+func (r *Registry) Replace(list []Resource) {
+	m := make(map[string]Resource, len(list))
+	for _, res := range list {
+		if res.ID != "" && res.Backend != "" {
+			m[res.ID] = res
+		}
+	}
+	r.mu.Lock()
+	r.byID = m
+	r.mu.Unlock()
+}
+
 // Lookup 按 id 取资源（白名单查表——唯一允许的取后端途径）。
 func (r *Registry) Lookup(id string) (Resource, bool) {
 	r.mu.RLock()

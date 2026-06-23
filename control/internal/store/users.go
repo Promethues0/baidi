@@ -12,7 +12,7 @@ type UserDirBundle struct {
 type Directory struct {
 	Key      string `json:"key"`
 	Name     string `json:"name"`
-	Type     string `json:"type"`     // local | ad | ldap
+	Type     string `json:"type"` // local | ad | ldap
 	Users    int    `json:"users"`
 	Online   int    `json:"online"`
 	LastSync string `json:"lastSync"` // 外部目录上次同步（local 为空）

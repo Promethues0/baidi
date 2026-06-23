@@ -22,14 +22,15 @@ type Allowlist struct {
 type entry struct {
 	until time.Time
 	user  string
+	role  string
 }
 
 func NewAllowlist() *Allowlist { return &Allowlist{m: map[string]entry{}} }
 
-// Allow 放行某源 IP 一段时间。
-func (a *Allowlist) Allow(ip, user string, ttl time.Duration) {
+// Allow 放行某源 IP 一段时间（记录身份 user/role）。
+func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) {
 	a.mu.Lock()
-	a.m[ip] = entry{until: time.Now().Add(ttl), user: user}
+	a.m[ip] = entry{until: time.Now().Add(ttl), user: user, role: role}
 	cb := a.OnAllow
 	a.mu.Unlock()
 	if cb != nil {
@@ -52,15 +53,15 @@ func (a *Allowlist) Reap() []string {
 	return expired
 }
 
-// Allowed 返回该源 IP 是否在有效放行窗口内（及对应身份）。
-func (a *Allowlist) Allowed(ip string) (string, bool) {
+// Allowed 返回该源 IP 是否在有效放行窗口内（及对应身份 user/role）。
+func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e, ok := a.m[ip]
-	if !ok || time.Now().After(e.until) {
-		return "", false
+	e, found := a.m[ip]
+	if !found || time.Now().After(e.until) {
+		return "", "", false
 	}
-	return e.user, true
+	return e.user, e.role, true
 }
 
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
@@ -82,7 +83,7 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
 			continue
 		}
-		al.Allow(ip, claims.Name, ttl)
+		al.Allow(ip, claims.Name, claims.Role, ttl)
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())
 	}
 }

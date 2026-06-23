@@ -69,7 +69,7 @@ func main() {
 		_, _ = conn.Write([]byte("CONNECT " + *resource + "\n"))
 	}
 	_, _ = conn.Write([]byte("GET / HTTP/1.0\r\nHost: baidi\r\n\r\n"))
-	buf := make([]byte, 200)
+	buf := make([]byte, 512)
 	n, _ := conn.Read(buf)
 	if n > 0 {
 		fmt.Printf("✓ 经国密隧道取到后端响应：\n%s\n", string(buf[:n]))

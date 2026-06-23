@@ -1,0 +1,5 @@
+[
+  { "id": "oa",      "backend": "127.0.0.1:19999", "allow_roles": ["admin", "staff"] },
+  { "id": "finance", "backend": "10.0.0.21:443",   "allow_roles": ["admin"], "allow_users": ["li.ming"] },
+  { "id": "wiki",    "backend": "10.0.0.30:80",     "allow_roles": [] }
+]

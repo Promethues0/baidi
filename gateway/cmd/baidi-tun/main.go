@@ -11,6 +11,7 @@ package main
 import (
 	"context"
 	"crypto/tls"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"io"
@@ -54,6 +55,8 @@ func main() {
 	caDir := flag.String("ca", "certs", "CA 证书目录（国密隧道校验网关证书链）")
 	serverName := flag.String("servername", "baidi-gateway", "校验的服务器名（须在网关证书 SAN 内）")
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障）")
+	resmapPath := flag.String("resmap", "", "VIP:port→资源id 映射 JSON（多资源路由；空=用 -resource 默认）")
+	defaultRes := flag.String("resource", "", "默认资源 id（resmap 未命中时用；空=网关回退默认后端）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -105,7 +108,17 @@ func main() {
 		{Destination: header.IPv6EmptySubnet, NIC: 1},
 	})
 
-	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, gm: *gm, tlcpCfg: tlcpCfg}
+	resmap := map[string]string{}
+	if *resmapPath != "" {
+		b, err := os.ReadFile(*resmapPath)
+		if err != nil {
+			log.Fatalf("读取 resmap 失败: %v", err)
+		}
+		if err := json.Unmarshal(b, &resmap); err != nil {
+			log.Fatalf("解析 resmap 失败: %v", err)
+		}
+	}
+	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, gm: *gm, tlcpCfg: tlcpCfg, resmap: resmap, defaultRes: *defaultRes}
 	fwd := tcp.NewForwarder(s, 0, 2048, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		dst := net.JoinHostPort(id.LocalAddress.String(), fmt.Sprint(id.LocalPort))
@@ -132,6 +145,8 @@ type tunnelCfg struct {
 	spa, proxy, token string
 	gm                bool
 	tlcpCfg           *tlcp.Config
+	resmap            map[string]string // VIP:port → resource-id
+	defaultRes        string
 }
 
 // tunnel 把一条被 utun 捕获的 TCP 流，经 SPA 敲门后拨入网关隧道并双向拷贝。
@@ -157,7 +172,15 @@ func (c *tunnelCfg) tunnel(local net.Conn, dst string) {
 		return
 	}
 	defer remote.Close()
-	slog.Info("utun 引流 · 经隧道转发", "captured_dst", dst, "via", c.proxy, "gm", c.gm)
+	// 目标前导：把捕获到的 VIP:port 映射成资源 id 告诉网关（多资源路由）；空则网关回退默认后端
+	rid := c.resmap[dst]
+	if rid == "" {
+		rid = c.defaultRes
+	}
+	if rid != "" {
+		_, _ = remote.Write([]byte("CONNECT " + rid + "\n"))
+	}
+	slog.Info("utun 引流 · 经隧道转发", "captured_dst", dst, "resource", rid, "via", c.proxy, "gm", c.gm)
 	go func() { _, _ = io.Copy(remote, local) }()
 	_, _ = io.Copy(local, remote)
 }

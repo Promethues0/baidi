@@ -20,6 +20,7 @@ import (
 	"baidi.dev/gateway/internal/darkfw"
 	"baidi.dev/gateway/internal/gmcert"
 	"baidi.dev/gateway/internal/proxy"
+	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/spa"
 )
 
@@ -32,12 +33,21 @@ func main() {
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
 	certDir := flag.String("certdir", env("BAIDI_GW_CERTDIR", "certs"), "国密证书目录（持久化 CA 签发的双证书；首启自动生成）")
 	pf := flag.Bool("pf", false, "内核态隐身：SPA 放行落到 macOS pf 表 baidi_allowed（默认 DROP，需 root + 已加载 anchor）")
+	resources := flag.String("resources", env("BAIDI_GW_RESOURCES", ""), "资源注册表 JSON 路径（按目的多资源路由；空=仅默认后端）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend, "ttl", ttl.String())
 
 	al := spa.NewAllowlist()
+
+	reg := resource.New(*backend)
+	if *resources != "" {
+		if err := reg.LoadFile(*resources); err != nil {
+			log.Fatalf("加载资源注册表失败: %v", err)
+		}
+		slog.Info("资源注册表已加载", "file", *resources, "count", reg.Count())
+	}
 
 	if *pf {
 		if !darkfw.Available() {
@@ -75,13 +85,13 @@ func main() {
 			log.Fatalf("生成/加载国密双证书失败: %v", err)
 		}
 		slog.Info("隧道加密：国密 TLCP（持久化 CA 签发的 SM2 双证书）", "certdir", *certDir)
-		if err := proxy.ServeTLCP(*proxyAddr, certs, *backend, al); err != nil {
+		if err := proxy.ServeTLCP(*proxyAddr, certs, reg, al); err != nil {
 			log.Fatalf("TLCP 代理监听失败: %v", err)
 		}
 		return
 	}
 	slog.Info("隧道加密：通用 TLS（自签）")
-	if err := proxy.Serve(*proxyAddr, mustSelfSigned(), *backend, al); err != nil {
+	if err := proxy.Serve(*proxyAddr, mustSelfSigned(), reg, al); err != nil {
 		log.Fatalf("代理监听失败: %v", err)
 	}
 }

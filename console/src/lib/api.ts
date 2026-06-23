@@ -126,6 +126,12 @@ export interface BaselineCheck { key: string; label: string; platform: 'Windows'
 export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
 export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
 
+/* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
+export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[] }
+export interface ResourcesResp { resources: Resource[] }
+export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number }
+export interface GatewaysResp { gateways: GatewayReg[] }
+
 /* ── 终端用户门户 ── */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
 export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }

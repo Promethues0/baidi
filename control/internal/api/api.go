@@ -136,6 +136,7 @@ func (s *Server) Routes() http.Handler {
 	// ── 网关数据面：注册 + 拉策略（需 gateway/admin 身份）；资源 CRUD（admin）──
 	mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister) // 网关注册/心跳
 	mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)      // 网关拉资源策略
+	mux.HandleFunc("GET /api/v1/gateways", s.handleGateways)                  // 在线网关清单（管理）
 	mux.HandleFunc("GET /api/v1/resources", s.handleResources)                // 资源清单（管理）
 	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)            // 新增/改资源
 	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource)   // 删资源
@@ -312,6 +313,20 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
+}
+
+// handleGateways 返回当前已注册（在线）的数据面网关清单（管理台用）。
+func (s *Server) handleGateways(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	s.mu.Lock()
+	list := make([]GatewayInfo, 0, len(s.gateways))
+	for _, g := range s.gateways {
+		list = append(list, g)
+	}
+	s.mu.Unlock()
+	httpx.JSON(w, http.StatusOK, map[string]any{"gateways": list})
 }
 
 // handleResources 资源清单（管理台用）。

@@ -30,6 +30,7 @@ func main() {
 	secret := flag.String("secret", env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"), "JWT 密钥（须与 baidi-control 一致）")
 	ttl := flag.Duration("ttl", 30*time.Second, "SPA 放行窗口")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
+	certDir := flag.String("certdir", env("BAIDI_GW_CERTDIR", "certs"), "国密证书目录（持久化 CA 签发的双证书；首启自动生成）")
 	pf := flag.Bool("pf", false, "内核态隐身：SPA 放行落到 macOS pf 表 baidi_allowed（默认 DROP，需 root + 已加载 anchor）")
 	flag.Parse()
 
@@ -69,11 +70,11 @@ func main() {
 	}()
 
 	if *gm {
-		certs, err := gmcert.Generate()
+		certs, err := gmcert.EnsureGateway(*certDir)
 		if err != nil {
-			log.Fatalf("生成国密双证书失败: %v", err)
+			log.Fatalf("生成/加载国密双证书失败: %v", err)
 		}
-		slog.Info("隧道加密：国密 TLCP（SM2 双证书）")
+		slog.Info("隧道加密：国密 TLCP（持久化 CA 签发的 SM2 双证书）", "certdir", *certDir)
 		if err := proxy.ServeTLCP(*proxyAddr, certs, *backend, al); err != nil {
 			log.Fatalf("TLCP 代理监听失败: %v", err)
 		}

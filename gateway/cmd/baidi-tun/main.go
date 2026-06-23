@@ -24,6 +24,8 @@ import (
 	"gitee.com/Trisia/gotlcp/tlcp"
 	"golang.zx2c4.com/wireguard/tun"
 
+	"baidi.dev/gateway/internal/gmcert"
+
 	"gvisor.dev/gvisor/pkg/buffer"
 	"gvisor.dev/gvisor/pkg/tcpip"
 	"gvisor.dev/gvisor/pkg/tcpip/adapters/gonet"
@@ -49,11 +51,28 @@ func main() {
 	proxyAddr := flag.String("proxy", "127.0.0.1:18443", "网关隧道代理地址")
 	token := flag.String("token", "", "baidi-control 签发的 JWT")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP，否则通用 TLS")
+	caDir := flag.String("ca", "certs", "CA 证书目录（国密隧道校验网关证书链）")
+	serverName := flag.String("servername", "baidi-gateway", "校验的服务器名（须在网关证书 SAN 内）")
+	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	if *token == "" {
 		log.Fatal("需 -token（baidi-control 签发的 JWT）")
+	}
+
+	// 国密隧道客户端配置：默认 CA 根校验，-insecure 仅排障
+	tlcpCfg := &tlcp.Config{ServerName: *serverName}
+	if *gm {
+		if *insecure {
+			tlcpCfg.InsecureSkipVerify = true
+		} else {
+			pool, err := gmcert.LoadCAPool(*caDir)
+			if err != nil {
+				log.Fatalf("加载 CA 失败（-ca 指目录或 -insecure 跳过）: %v", err)
+			}
+			tlcpCfg.RootCAs = pool
+		}
 	}
 
 	// ① 创建 utun（需 root）
@@ -86,7 +105,7 @@ func main() {
 		{Destination: header.IPv6EmptySubnet, NIC: 1},
 	})
 
-	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, gm: *gm}
+	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, gm: *gm, tlcpCfg: tlcpCfg}
 	fwd := tcp.NewForwarder(s, 0, 2048, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		dst := net.JoinHostPort(id.LocalAddress.String(), fmt.Sprint(id.LocalPort))
@@ -112,6 +131,7 @@ func main() {
 type tunnelCfg struct {
 	spa, proxy, token string
 	gm                bool
+	tlcpCfg           *tlcp.Config
 }
 
 // tunnel 把一条被 utun 捕获的 TCP 流，经 SPA 敲门后拨入网关隧道并双向拷贝。
@@ -128,7 +148,7 @@ func (c *tunnelCfg) tunnel(local net.Conn, dst string) {
 	var err error
 	d := &net.Dialer{Timeout: 5 * time.Second}
 	if c.gm {
-		remote, err = tlcp.DialWithDialer(d, "tcp", c.proxy, &tlcp.Config{InsecureSkipVerify: true})
+		remote, err = tlcp.DialWithDialer(d, "tcp", c.proxy, c.tlcpCfg)
 	} else {
 		remote, err = tls.DialWithDialer(d, "tcp", c.proxy, &tls.Config{InsecureSkipVerify: true})
 	}

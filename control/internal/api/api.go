@@ -4,6 +4,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
@@ -76,7 +77,69 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)            // 保存用户策略覆盖
 	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)             // 读取用户策略覆盖
 
+	// ── 终端用户门户（B/S 免客户端）──
+	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
+	mux.HandleFunc("GET /api/v1/portal/apps", s.handlePortalApps)
+
 	return mux
+}
+
+// handlePortalLogin 终端用户登录（演示口令 baidi@123；未授信/外包账号触发自适应二次认证，验证码 123456）。
+func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+		MfaCode  string `json:"mfaCode"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Username == "" || b.Password == "" {
+		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
+		return
+	}
+	if b.Password != "baidi@123" {
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示口令：baidi@123）"})
+		return
+	}
+	risky := strings.HasPrefix(b.Username, "ext") || strings.Contains(b.Username, "外包")
+	if risky && b.MfaCode == "" {
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "检测到未授信终端/异地登录，需短信二次认证"})
+		return
+	}
+	if risky && b.MfaCode != "123456" {
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：123456）"})
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": "demo-" + b.Username, "displayName": b.Username})
+}
+
+// PortalTile 应用门户卡片。
+type PortalTile struct {
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Mode        string `json:"mode"`
+	Addr        string `json:"addr"`
+	Sensitivity string `json:"sensitivity"` // normal | high
+	Accessible  bool   `json:"accessible"`  // false = 需申请
+}
+
+// handlePortalApps 返回当前用户可见的应用门户（复用 SQLite 中的已发布应用；高敏类需申请）。
+func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
+	b, err := s.store.Apps(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load portal apps")
+		return
+	}
+	tiles := []PortalTile{}
+	for _, a := range b.Apps {
+		if a.Status != "running" {
+			continue
+		}
+		sens, acc := "normal", true
+		if a.Category == "finance" {
+			sens, acc = "high", false // 高敏应用默认需走自助申请审批
+		}
+		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr, Sensitivity: sens, Accessible: acc})
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {

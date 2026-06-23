@@ -109,3 +109,8 @@ export interface AuthSrcBundle { sources: AuthSource[]; rules: AdaptiveRule[] }
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
 export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
 export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
+
+/* ── 终端用户门户 ── */
+export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
+export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
+export interface PortalAppsResp { apps: PortalTile[] }

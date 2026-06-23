@@ -24,6 +24,10 @@ const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>
 );
 
 const routes: RouteRecordRaw[] = [
+  // 终端用户门户（B/S 免客户端，独立于管理控制台 chrome）
+  { path: '/portal/login', component: () => import('@/views/PortalLogin.vue') },
+  { path: '/portal', redirect: '/portal/apps' },
+  { path: '/portal/apps', component: () => import('@/views/PortalApps.vue') },
   {
     path: '/',
     component: AppLayout,

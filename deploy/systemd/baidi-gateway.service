@@ -1,0 +1,24 @@
+[Unit]
+# 白帝数据面网关（可选）：SPA 单包授权 + 国密 TLCP 隧道代理。
+# 注意：默认不开 -pf（内核态隐身用 nftables，该机 strongSwan-gm 也用 nft，需先评审 ruleset 再开，避免互相覆盖）。
+# 启用前需在腾讯云安全组放行 18443/tcp + 18201/udp，并先跑一次 baidi-gmca 生成 @BD_PREFIX@/etc/gmcerts。
+Description=白帝数据面网关 baidi-gateway
+After=network.target
+
+[Service]
+Type=simple
+User=@BD_USER@
+WorkingDirectory=@BD_PREFIX@
+# 与 baidi-control 同一 JWT 密钥校验 SPA 敲门身份
+EnvironmentFile=-@BD_PREFIX@/etc/baidi.env
+# -gm 国密 TLCP；-certdir 持久化 CA 双证书；-resources 资源注册表（可选）；backend 为默认回退后端
+ExecStart=@BD_PREFIX@/bin/baidi-gateway -gm -certdir @BD_PREFIX@/etc/gmcerts -spa :18201 -proxy :18443 -backend 127.0.0.1:@CONTROL_PORT@ -resources @BD_PREFIX@/etc/resources.json -ttl 30s
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=@BD_PREFIX@/etc
+
+[Install]
+WantedBy=multi-user.target

@@ -19,6 +19,8 @@ RestartSec=3
 # 轻量加固
 NoNewPrivileges=true
 ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=@BD_PREFIX@/data @BD_PREFIX@/etc
 
 [Install]
 WantedBy=multi-user.target

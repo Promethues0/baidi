@@ -21,12 +21,48 @@
 
 | 二进制 | 作用 |
 |---|---|
-| `baidi-gateway` | 网关数据面：SPA UDP 监听 + 门控 TLS 代理（启动期自签证书，生产换国密 TLCP / 正式证书） |
-| `baidi-knock` | SPA 敲门器：向网关发携带 JWT 的 UDP 包。桌面客户端"接入"时由 **Tauri sidecar** 调用它完成真实敲门 |
+| `baidi-gateway` | 网关数据面：SPA UDP 监听 + 门控隧道代理。`-gm` 国密 TLCP，`-pf` 内核态隐身 |
+| `baidi-knock` | SPA 敲门器：向网关发携带 JWT 的 UDP 包。桌面客户端"接入"时由 **Tauri sidecar** 调用 |
+| `baidi-tlcp-probe` | 国密 TLCP 验证探针：敲门 + tlcp.Dial 握手 + 取后端（curl 不支持国密，用它验证） |
+| `baidi-tun` | **客户端数据面（macOS，需 root）**：utun 接管系统流量 → gVisor 网络栈终止 TCP → 逐流敲门 + 隧道 |
 
 ```bash
 baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -secret <与control一致> -ttl 30s
 baidi-knock   -spa 127.0.0.1:18201 -token <baidi-control 签发的 JWT>
+```
+
+## 进阶数据面（已落地）
+
+### ① 国密 TLCP 隧道 — `-gm`
+
+隧道从通用 TLS 换成**国密 TLCP**（自签 SM2 CA → SM2 签名证书 + SM2 加密证书双证书；SM3/SM4 套件）。
+
+```bash
+baidi-gateway -gm -spa :18201 -proxy :18443 -backend 127.0.0.1:19999
+baidi-tlcp-probe -spa 127.0.0.1:18201 -proxy 127.0.0.1:18443 -token <JWT>
+# ✓ 国密 TLCP 握手成功  version=0x0101(TLCP1.1)  cipher=0xE053(ECC_SM4_GCM_SM3)
+# ✓ 经国密隧道取到后端响应：HTTP/1.0 200 OK …
+```
+
+### ② 内核态隐身 — `-pf`（防火墙 DROP）
+
+把 SPA 放行落到内核防火墙：默认 **DROP** 代理端口（无 RST，扫描器只见 `filtered`＝端口在网络层不存在），仅放行经敲门授权的源 IP，TTL 到期自动撤。自动适配 **Linux nftables / macOS pf**。
+
+```bash
+# Linux：  sudo firewall/baidi-nft.sh setup
+# macOS：  sudo firewall/setup-pf.sh
+sudo baidi-gateway -pf -gm -proxy :18443 -spa :18201 -backend 127.0.0.1:19999   # 需 root 调 nft/pfctl
+```
+
+### ③ utun 引流 — `baidi-tun`（让客户端真正接管系统流量）
+
+受保护网段路由进 utun，gVisor 用户态网络栈终止 TCP，每条流先 SPA 敲门再拨入隧道。不启它时受保护 VIP 不可达＝真"先认证后连接"。
+
+```bash
+sudo gateway/cmd/baidi-tun/run-demo.sh        # 国密隧道；起全栈 + curl 受保护 VIP 验证
+# utun 已创建 dev=utun4 …
+# 受保护网段已引流进 utun route=10.99.0.0/24
+# utun 引流·经隧道转发 captured_dst=10.99.0.10:80 gm=true
 ```
 
 ## 一键演示
@@ -46,5 +82,6 @@ SPA 敲门放行   src=127.0.0.1 user=li.ming role=user ttl=30s
 ## 与三组件的关系 / 后续
 
 - **控制面**：网关与 `baidi-control` 共享 `BAIDI_JWT_SECRET`；后续网关向控制面注册、拉取访问策略（按用户/应用细粒度放行，而非仅源 IP）。
-- **客户端**：桌面客户端的"一键接入"目前是 UX 动画；接真链路只差一步——**Tauri sidecar 打包 `baidi-knock`**，登录拿到 JWT 后由 sidecar 发起真实敲门，再由本地 SOCKS/代理把业务流量送入隧道。
-- **生产化**：① 国密 TLCP 隧道（可复用烛龙 Tongsuo）；② 真"隐身"用防火墙层 DROP（端口在敲门前内核态不可见，而非 userspace 断开）；③ 流量打身份标签引流（客户端侧 utun/驱动）。
+- **客户端**：桌面 Tauri sidecar 已打包 `baidi-knock` 接真实敲门；`baidi-tun` 进一步用 utun 接管系统流量进隧道（真引流，非 UX 动画）。
+- **已落地**：✅ 国密 TLCP 隧道（`-gm`，SM2 双证书）；✅ 防火墙层 DROP 真隐身（`-pf`，nftables/pf）；✅ utun 身份引流（`baidi-tun`，gVisor 网络栈）。
+- **生产化待续**：① 正式 SM2 证书（CA 签发，非自签）；② 网关按 `dst` 多资源路由（utun 多目标需客户端送目标地址前缀，当前演示单 VIP→固定后端）；③ Linux/Windows 端 utun/wintun 客户端；④ 远端部署到云网关并开安全组。

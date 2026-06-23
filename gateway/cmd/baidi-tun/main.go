@@ -1,11 +1,11 @@
-//go:build darwin
-
-// Command baidi-tun 是白帝客户端数据面：用 utun 真正接管系统流量进隧道。
+// Command baidi-tun 是白帝客户端数据面：用 TUN（macOS utun / Linux tun / Windows wintun）
+// 真正接管系统流量进隧道。
 //
-//	受保护网段路由进 utun → gVisor 用户态网络栈终止 TCP → 每条流 SPA 敲门 + 拨网关隧道(TLS/国密TLCP) → 后端业务
+//	受保护网段路由进 TUN → gVisor 用户态网络栈终止 TCP → 每条流 SPA 敲门 + 拨网关隧道(TLS/国密TLCP) → 后端业务
 //
-// 即“先认证后连接”落到真实链路：未敲门时网关隐身；应用访问受保护资源时由本进程透明引流加密。
-// 需 root（创建 utun、配 IP/路由）。演示：受保护网段内任一 VIP → 网关 → 其后端业务。
+// 即”先认证后连接”落到真实链路：未敲门时网关隐身；应用访问受保护资源时由本进程透明引流加密。
+// 需管理员/root（创建 TUN、配 IP/路由）。平台相关的接口配置见 ifup_{darwin,linux,windows}.go。
+// Windows 还需运行目录有 wintun.dll（https://www.wintun.net/）。
 package main
 
 import (
@@ -19,7 +19,6 @@ import (
 	"log/slog"
 	"net"
 	"os"
-	"os/exec"
 	"time"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
@@ -45,7 +44,7 @@ const (
 )
 
 func main() {
-	tunName := flag.String("tun", "utun", "utun 设备名（macOS 内核分配 utunN）")
+	tunName := flag.String("tun", defaultTunName, "TUN 设备名（macOS 必须 utun*；Linux/Windows 任意如 baidi0）")
 	tunIP := flag.String("ip", "10.99.0.2", "utun 接口 IP")
 	route := flag.String("route", "10.99.0.0/24", "引流进隧道的受保护网段")
 	spaAddr := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址")
@@ -239,17 +238,4 @@ func pumpOutbound(dev tun.Device, ep *channel.Endpoint) {
 	}
 }
 
-// ifup 配置 utun 接口 IP 并把受保护网段路由进该接口（darwin，需 root）。
-func ifup(dev, ip, route string) error {
-	if err := sh("ifconfig", dev, "inet", ip, ip, "up"); err != nil {
-		return err
-	}
-	return sh("route", "-q", "-n", "add", "-net", route, "-interface", dev)
-}
-
-func sh(name string, args ...string) error {
-	if out, err := exec.Command(name, args...).CombinedOutput(); err != nil {
-		return fmt.Errorf("%s %v: %v: %s", name, args, err, out)
-	}
-	return nil
-}
+// ifup（配置 TUN 接口 IP + 受保护网段路由）按平台实现，见 ifup_{darwin,linux,windows}.go。

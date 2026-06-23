@@ -1,0 +1,24 @@
+[Unit]
+Description=白帝控制中心 baidi-control
+After=network.target
+
+[Service]
+Type=simple
+User=@BD_USER@
+WorkingDirectory=@BD_PREFIX@
+Environment=BAIDI_ADDR=127.0.0.1:@CONTROL_PORT@
+Environment=BAIDI_DB=@BD_PREFIX@/data/baidi.db
+Environment=BAIDI_ENV=prod
+# 公网来源（CORS）；同源经 nginx 反代时可留默认
+Environment=BAIDI_CORS_ORIGIN=@PUBLIC_ORIGIN@
+# JWT 密钥单独放保密的 env 文件（install-remote.sh 自动生成随机值）
+EnvironmentFile=-@BD_PREFIX@/etc/baidi.env
+ExecStart=@BD_PREFIX@/bin/baidi-control
+Restart=on-failure
+RestartSec=3
+# 轻量加固
+NoNewPrivileges=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

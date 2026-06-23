@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"baidi.dev/gateway/internal/gmcert"
 	"baidi.dev/gateway/internal/proxy"
 	"baidi.dev/gateway/internal/spa"
 )
@@ -27,12 +28,12 @@ func main() {
 	backend := flag.String("backend", env("BAIDI_GW_BACKEND", "127.0.0.1:9999"), "后端业务 host:port")
 	secret := flag.String("secret", env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"), "JWT 密钥（须与 baidi-control 一致）")
 	ttl := flag.Duration("ttl", 30*time.Second, "SPA 放行窗口")
+	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend, "ttl", ttl.String())
 
-	cert := mustSelfSigned()
 	al := spa.NewAllowlist()
 
 	go func() {
@@ -41,7 +42,19 @@ func main() {
 		}
 	}()
 
-	if err := proxy.Serve(*proxyAddr, cert, *backend, al); err != nil {
+	if *gm {
+		certs, err := gmcert.Generate()
+		if err != nil {
+			log.Fatalf("生成国密双证书失败: %v", err)
+		}
+		slog.Info("隧道加密：国密 TLCP（SM2 双证书）")
+		if err := proxy.ServeTLCP(*proxyAddr, certs, *backend, al); err != nil {
+			log.Fatalf("TLCP 代理监听失败: %v", err)
+		}
+		return
+	}
+	slog.Info("隧道加密：通用 TLS（自签）")
+	if err := proxy.Serve(*proxyAddr, mustSelfSigned(), *backend, al); err != nil {
 		log.Fatalf("代理监听失败: %v", err)
 	}
 }

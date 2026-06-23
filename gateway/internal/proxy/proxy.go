@@ -10,16 +10,33 @@ import (
 
 	"crypto/tls"
 
+	"gitee.com/Trisia/gotlcp/tlcp"
+
 	"baidi.dev/gateway/internal/spa"
 )
 
-// Serve 启动 TLS 代理监听。backend 为后端业务地址（host:port）。
+// Serve 启动通用 TLS 代理监听。backend 为后端业务地址（host:port）。
 func Serve(addr string, cert tls.Certificate, backend string, al *spa.Allowlist) error {
 	ln, err := tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return err
 	}
-	slog.Info("SSL 隧道代理监听", "addr", addr, "backend", backend)
+	slog.Info("SSL 隧道代理监听（通用 TLS）", "addr", addr, "backend", backend)
+	return serve(ln, backend, al)
+}
+
+// ServeTLCP 启动国密 TLCP 代理监听（SM2 双证书 + SM3/SM4 套件）。
+func ServeTLCP(addr string, certs []tlcp.Certificate, backend string, al *spa.Allowlist) error {
+	ln, err := tlcp.Listen("tcp", addr, &tlcp.Config{Certificates: certs})
+	if err != nil {
+		return err
+	}
+	slog.Info("SSL 隧道代理监听（国密 TLCP）", "addr", addr, "backend", backend)
+	return serve(ln, backend, al)
+}
+
+// serve 是两种监听共享的接受循环（门控 + 代理逻辑与加密层无关）。
+func serve(ln net.Listener, backend string, al *spa.Allowlist) error {
 	for {
 		c, err := ln.Accept()
 		if err != nil {

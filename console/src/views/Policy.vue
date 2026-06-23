@@ -269,10 +269,19 @@ const allRows = computed(() => sections.value.flatMap((s) => s.rows));
 const customCount = computed(() => allRows.value.filter((r) => r.source === 'custom').length);
 const inheritCount = computed(() => allRows.value.filter((r) => r.source === 'inherited').length);
 
-function select(key: string) {
+async function select(key: string) {
   selected.value = key;
   const n = flatTree.value.find((x) => x.key === key);
   sections.value = seed(!!n?.hasCustom);
+  clearUndo();
+  // 已保存的覆盖优先（落库的编辑回填）
+  try {
+    const r = await api<{ exists: boolean; override?: { settings: string } }>(`/policies/${key}`);
+    if (r.exists && r.override?.settings) {
+      const saved = JSON.parse(r.override.settings);
+      if (Array.isArray(saved) && saved.length) sections.value = saved;
+    }
+  } catch { /* 离线则用种子 */ }
 }
 function fmt(row: Row, v: unknown) {
   if (row.type === 'toggle') return v ? '开启' : '关闭';
@@ -316,9 +325,18 @@ const platforms = computed(() => {
     { name: '移动端', count: mob, pct: Math.round((mob / max) * 100) }
   ];
 });
-function doSave() {
+async function doSave() {
+  const title = node.value?.title ?? '';
+  try {
+    await api(`/policies/${selected.value}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ title, settings: sections.value, customCount: customCount.value })
+    });
+    Message.success(`策略已保存并下发至「${title}」的代理网关（已落库）`);
+  } catch {
+    Message.error('保存失败，请检查后端连接');
+  }
   impact.open = false; impact.ack = false;
-  Message.success(`策略已保存并下发至「${node.value?.title}」的代理网关`);
 }
 
 /* ── 全局策略（复刻设计稿开关行）── */
@@ -347,6 +365,7 @@ onMounted(async () => {
     const pb = await api<PolicyBundle>('/policies');
     tree.value = pb.tree; live.value = true;
   } catch { live.value = false; }
+  await select(selected.value); // 回填初始节点的已存覆盖
 });
 </script>
 

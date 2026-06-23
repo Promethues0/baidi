@@ -22,8 +22,13 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	cfg := config.Load()
-	st := store.NewMemory()
-	srv := api.New(st, cfg.Env)
+	st, err := store.OpenSQLite(cfg.DBPath)
+	if err != nil {
+		slog.Error("open sqlite failed", "path", cfg.DBPath, "err", err)
+		os.Exit(1)
+	}
+	defer st.Close()
+	srv := api.New(st, st, cfg.Env)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

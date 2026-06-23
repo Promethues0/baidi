@@ -244,24 +244,30 @@ function saveSettings() {
   Message.success(settings.enabled ? `已保存：${settings.bindMethod === 'auto' ? '自动绑定' : '审批绑定'} · 每用户上限 ${settings.perUserQuota || '不限'}` : '已关闭终端信任绑定');
 }
 
-function approve() {
+async function decide(decision: 'approved' | 'rejected', reason: string) {
   const a = cur.value;
   if (!a) return;
-  approvals.value = approvals.value.filter((x) => x.id !== a.id);
-  selId.value = approvals.value[0]?.id ?? '';
-  Message.success(`已通过 ${a.user} 对「${a.device}」的绑定，已下发授信指纹`);
+  try {
+    await api(`/approvals/${a.id}/decide`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, reason })
+    });
+    if (decision === 'approved') Message.success(`已通过 ${a.user} 对「${a.device}」的绑定，已下发授信指纹（已落库）`);
+    else Message.warning(`已驳回 ${a.user} 的绑定申请${reason ? `：${reason}` : ''}（已落库）`);
+    await load();
+  } catch {
+    Message.error('处置失败，请检查后端连接');
+  }
 }
+function approve() { decide('approved', ''); }
 function reject() {
-  const a = cur.value;
-  if (!a) return;
   rejectOpen.value = false;
-  approvals.value = approvals.value.filter((x) => x.id !== a.id);
-  selId.value = approvals.value[0]?.id ?? '';
-  Message.warning(`已驳回 ${a.user} 的绑定申请${rejectReason.value ? `：${rejectReason.value}` : ''}`);
+  const r = rejectReason.value;
   rejectReason.value = '';
+  decide('rejected', r);
 }
 
-onMounted(async () => {
+async function load() {
   try {
     const b = await api<DeviceBundle>('/devices');
     Object.assign(settings, b.settings);
@@ -270,7 +276,8 @@ onMounted(async () => {
     selId.value = b.approvals[0]?.id ?? '';
     live.value = true;
   } catch { live.value = false; }
-});
+}
+onMounted(load);
 </script>
 
 <style scoped>

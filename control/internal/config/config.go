@@ -13,6 +13,7 @@ type Config struct {
 	AllowOrigin     string        // CORS 允许来源（开发期 console），默认 *
 	ShutdownTimeout time.Duration // 优雅关闭超时
 	Env             string        // dev / prod
+	DBPath          string        // SQLite 数据库文件路径
 }
 
 // Load 从环境变量装载配置。
@@ -22,6 +23,7 @@ func Load() Config {
 		AllowOrigin:     env("BAIDI_CORS_ORIGIN", "*"),
 		ShutdownTimeout: envDuration("BAIDI_SHUTDOWN_TIMEOUT", 10*time.Second),
 		Env:             env("BAIDI_ENV", "dev"),
+		DBPath:          env("BAIDI_DB", "baidi.db"),
 	}
 }
 

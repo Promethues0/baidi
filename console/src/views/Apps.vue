@@ -179,19 +179,34 @@ const canNext = computed(() => {
   if (wz.step === 1) return !!wz.f.name && !!wz.f.addr;
   return true;
 });
-function next() {
-  if (!canNext.value) return;
-  if (wz.step < 3) { wz.step++; return; }
-  wz.open = false;
-  Message.success(`应用「${wz.f.name}」已发布，正在跳转授权…`);
-}
-
-onMounted(async () => {
+const publishing = ref(false);
+async function load() {
   try {
     const b = await api<AppBundle>('/apps');
     categories.value = b.categories; apps.value = b.apps; live.value = true;
   } catch { live.value = false; }
-});
+}
+async function next() {
+  if (!canNext.value) return;
+  if (wz.step < 3) { wz.step++; return; }
+  publishing.value = true;
+  try {
+    await api('/apps', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat || 'office' })
+    });
+    wz.open = false;
+    Message.success(`应用「${wz.f.name}」已发布并落库`);
+    cat.value = 'all';
+    await load();
+  } catch {
+    Message.error('发布失败，请检查后端连接');
+  } finally {
+    publishing.value = false;
+  }
+}
+
+onMounted(load);
 </script>
 
 <style scoped>

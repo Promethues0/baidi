@@ -14,6 +14,7 @@ type Config struct {
 	ShutdownTimeout time.Duration // 优雅关闭超时
 	Env             string        // dev / prod
 	DBPath          string        // SQLite 数据库文件路径
+	JWTSecret       string        // JWT 签名密钥（生产务必经 BAIDI_JWT_SECRET 注入）
 }
 
 // Load 从环境变量装载配置。
@@ -24,6 +25,7 @@ func Load() Config {
 		ShutdownTimeout: envDuration("BAIDI_SHUTDOWN_TIMEOUT", 10*time.Second),
 		Env:             env("BAIDI_ENV", "dev"),
 		DBPath:          env("BAIDI_DB", "baidi.db"),
+		JWTSecret:       env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"),
 	}
 }
 

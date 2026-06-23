@@ -1,11 +1,27 @@
 /** 白帝控制台 · HTTP 客户端。管理 API 经 vite /api 反代到自有后端 baidi-control(:8090)。 */
 const BASE = '/api/v1';
+const TOKEN_KEY = 'baidi_token';
+
+export function getToken(): string { return localStorage.getItem(TOKEN_KEY) || ''; }
+export function setToken(t: string): void { localStorage.setItem(TOKEN_KEY, t); }
+export function clearToken(): void { localStorage.removeItem(TOKEN_KEY); }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  const t = getToken();
   const res = await fetch(BASE + path, {
-    headers: { Accept: 'application/json', ...(init?.headers ?? {}) },
+    headers: {
+      Accept: 'application/json',
+      ...(t ? { Authorization: `Bearer ${t}` } : {}),
+      ...(init?.headers ?? {})
+    },
     ...init
   });
+  if (res.status === 401) {
+    clearToken();
+    // 门户与管理台分别回各自登录页
+    location.href = location.pathname.startsWith('/portal') ? '/portal/login' : '/login';
+    throw new Error('401 未认证');
+  }
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;
 }

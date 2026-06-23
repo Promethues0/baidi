@@ -89,7 +89,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type PortalAppsResp, type PortalTile } from '@/lib/api';
+import { api, clearToken, type PortalAppsResp, type PortalTile } from '@/lib/api';
 
 const router = useRouter();
 
@@ -117,6 +117,7 @@ const filtered = computed(() => {
 });
 
 function logout() {
+  clearToken();
   sessionStorage.removeItem('baidi_portal');
   router.push('/portal/login');
 }

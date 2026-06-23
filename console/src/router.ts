@@ -1,6 +1,7 @@
 import { createRouter, createWebHistory, type RouteRecordRaw } from 'vue-router';
 import AppLayout from '@/layout/AppLayout.vue';
 import { NAV, FIRST_PATH } from '@/nav';
+import { getToken } from '@/lib/api';
 
 // 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
 const BUILT: Record<string, () => Promise<unknown>> = {
@@ -24,6 +25,8 @@ const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>
 );
 
 const routes: RouteRecordRaw[] = [
+  // 管理员登录
+  { path: '/login', component: () => import('@/views/Login.vue') },
   // 终端用户门户（B/S 免客户端，独立于管理控制台 chrome）
   { path: '/portal/login', component: () => import('@/views/PortalLogin.vue') },
   { path: '/portal', redirect: '/portal/apps' },
@@ -39,4 +42,13 @@ const routes: RouteRecordRaw[] = [
   }
 ];
 
-export default createRouter({ history: createWebHistory(), routes });
+const router = createRouter({ history: createWebHistory(), routes });
+
+// 管理台登录守卫：非 /login、非 /portal/* 的路由需已登录，否则跳登录页
+router.beforeEach((to) => {
+  const isPublic = to.path === '/login' || to.path.startsWith('/portal');
+  if (!isPublic && !getToken()) return '/login';
+  return true;
+});
+
+export default router;

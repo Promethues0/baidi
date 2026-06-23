@@ -5,24 +5,49 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
+	"time"
 
+	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 )
 
 // Version 控制中心版本号。
-const Version = "0.2.0"
+const Version = "0.3.0"
 
-// Server 持有依赖（store 读 + writer 写），按模块注册路由。
+// tokenTTL 令牌有效期。
+const tokenTTL = 8 * time.Hour
+
+// Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
 	store  store.Store
 	writer store.Writer
+	secret []byte
 	env    string
 }
 
 // New 构造 Server。
-func New(st store.Store, wr store.Writer, env string) *Server {
-	return &Server{store: st, writer: wr, env: env}
+func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
+	return &Server{store: st, writer: wr, secret: secret, env: env}
+}
+
+// IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
+func (s *Server) IsOpen(_ , path string) bool {
+	switch path {
+	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login":
+		return true
+	}
+	return false
+}
+
+// requireAdmin 校验上下文中的角色为 admin，否则 403。
+func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
+	c, ok := auth.FromContext(r.Context())
+	if !ok || c.Role != "admin" {
+		httpx.Error(w, http.StatusForbidden, "需要管理员权限")
+		return false
+	}
+	return true
 }
 
 // Routes 返回已注册全部路由的 mux（Go 1.22+ 方法+路径路由）。
@@ -44,6 +69,10 @@ func (s *Server) Routes() http.Handler {
 			"env":     s.env,
 		})
 	})
+
+	// 管理员登录 / 当前身份
+	mux.HandleFunc("POST /api/v1/auth/login", s.handleAdminLogin)
+	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
 
 	// 态势总览（监控中心一屏聚合）
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
@@ -108,7 +137,8 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：123456）"})
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": "demo-" + b.Username, "displayName": b.Username})
+	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "user", Name: b.Username}, tokenTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": b.Username})
 }
 
 // PortalTile 应用门户卡片。
@@ -142,7 +172,34 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
 }
 
+// handleAdminLogin 管理员登录（演示：admin / baidi@123）→ 签发 admin 角色 JWT。
+func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
+	var b struct {
+		Username string `json:"username"`
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Username == "" || b.Password == "" {
+		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
+		return
+	}
+	if b.Username != "admin" || b.Password != "baidi@123" {
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示账号 admin / baidi@123）"})
+		return
+	}
+	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "admin", Name: "安全管理员"}, tokenTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": "安全管理员", "role": "admin"})
+}
+
+// handleMe 返回当前令牌身份。
+func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
+	c, _ := auth.FromContext(r.Context())
+	httpx.JSON(w, http.StatusOK, map[string]any{"sub": c.Sub, "role": c.Role, "name": c.Name, "exp": c.Exp})
+}
+
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	var a store.App
 	if err := json.NewDecoder(r.Body).Decode(&a); err != nil || a.Name == "" || a.Mode == "" {
 		httpx.Error(w, http.StatusBadRequest, "invalid app payload")
@@ -157,6 +214,9 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	id := r.PathValue("id")
 	var body struct {
 		Decision string `json:"decision"`
@@ -174,6 +234,9 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSavePolicy(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	node := r.PathValue("node")
 	var body struct {
 		Title       string `json:"title"`

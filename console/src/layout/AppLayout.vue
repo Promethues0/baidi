@@ -23,9 +23,10 @@
       <div class="bd-top__spacer" />
       <div class="bd-search"><icon-search /><span>搜索用户、应用、策略…</span></div>
       <button class="bd-bell"><icon-notification /><span class="bd-bell__dot">6</span></button>
-      <div class="bd-acct">
+      <div class="bd-acct" title="退出登录" @click="logout">
         <span class="bd-acct__av">管</span>
         <span class="bd-acct__txt"><b>安全管理员</b><i>security-admin</i></span>
+        <icon-export class="bd-acct__out" />
       </div>
     </header>
 
@@ -61,10 +62,12 @@
 <script setup lang="ts">
 import { useRoute, useRouter } from 'vue-router';
 import { NAV } from '@/nav';
+import { clearToken } from '@/lib/api';
 
 const route = useRoute();
 const router = useRouter();
 function go(path: string) { if (path !== route.path) router.push(path); }
+function logout() { clearToken(); router.push('/login'); }
 </script>
 
 <style scoped>

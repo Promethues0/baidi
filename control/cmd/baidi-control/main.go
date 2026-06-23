@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"baidi.dev/control/internal/api"
+	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
@@ -28,11 +29,13 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
-	srv := api.New(st, st, cfg.Env)
+	secret := []byte(cfg.JWTSecret)
+	srv := api.New(st, st, secret, cfg.Env)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,
 		httpx.CORS(cfg.AllowOrigin),
+		auth.Middleware(secret, srv.IsOpen), // 校验 Bearer JWT（登录/健康/门户登录免认证）
 		httpx.Logger,
 		httpx.Recover,
 	)

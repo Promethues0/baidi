@@ -155,7 +155,7 @@
 import { reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type PortalLoginResp } from '@/lib/api';
+import { api, setToken, type PortalLoginResp } from '@/lib/api';
 
 const router = useRouter();
 
@@ -167,6 +167,7 @@ const mfaReason = ref('');
 const form = reactive({ username: '', password: '', mfaCode: '' });
 
 function onSuccess(resp: PortalLoginResp) {
+  if (resp.token) setToken(resp.token); // 写 localStorage，使 /portal/apps 携带 Bearer
   sessionStorage.setItem(
     'baidi_portal',
     JSON.stringify({ token: resp.token, displayName: resp.displayName ?? form.username })

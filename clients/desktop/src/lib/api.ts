@@ -1,7 +1,13 @@
-/** 白帝桌面客户端 · HTTP 客户端。经 vite /api 反代到 baidi-control(:8090)；自动携带 Bearer。 */
+/** 白帝桌面客户端 · HTTP 客户端。dev 经 vite /api 反代；Tauri 打包后无代理，直连控制中心。 */
 import { session } from './store';
 
-const BASE = '/api/v1';
+function inTauri(): boolean {
+  return typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
+}
+// 打包后 webview origin 是 tauri://localhost，没有 vite /api 代理 → 直连控制中心（本机演示；
+// 生产改读 session.serverAddr）。控制中心 CORS=* 且放行 OPTIONS，localhost http 允许。
+const ORIGIN = inTauri() ? 'http://127.0.0.1:8090' : '';
+const BASE = ORIGIN + '/api/v1';
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(BASE + path, {
@@ -19,7 +25,7 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 /** 控制中心连通性探测（真实命中 baidi-control /healthz，开放免认证）。 */
 export async function ping(): Promise<boolean> {
   try {
-    const res = await fetch('/healthz', { headers: { Accept: 'application/json' } });
+    const res = await fetch(ORIGIN + '/healthz', { headers: { Accept: 'application/json' } });
     return res.ok;
   } catch {
     return false;

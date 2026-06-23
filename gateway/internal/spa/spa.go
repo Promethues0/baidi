@@ -15,6 +15,8 @@ import (
 type Allowlist struct {
 	mu sync.Mutex
 	m  map[string]entry
+	// OnAllow 在放行某 IP 时回调（如向防火墙 pf 表写入 pass 规则）。可空。
+	OnAllow func(ip, user string)
 }
 
 type entry struct {
@@ -27,8 +29,27 @@ func NewAllowlist() *Allowlist { return &Allowlist{m: map[string]entry{}} }
 // Allow 放行某源 IP 一段时间。
 func (a *Allowlist) Allow(ip, user string, ttl time.Duration) {
 	a.mu.Lock()
-	defer a.mu.Unlock()
 	a.m[ip] = entry{until: time.Now().Add(ttl), user: user}
+	cb := a.OnAllow
+	a.mu.Unlock()
+	if cb != nil {
+		cb(ip, user)
+	}
+}
+
+// Reap 删除并返回已过期的源 IP（供防火墙模式回收 pf 放行规则）。
+func (a *Allowlist) Reap() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	var expired []string
+	for ip, e := range a.m {
+		if now.After(e.until) {
+			expired = append(expired, ip)
+			delete(a.m, ip)
+		}
+	}
+	return expired
 }
 
 // Allowed 返回该源 IP 是否在有效放行窗口内（及对应身份）。

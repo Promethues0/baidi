@@ -17,6 +17,7 @@ import (
 	"os"
 	"time"
 
+	"baidi.dev/gateway/internal/darkfw"
 	"baidi.dev/gateway/internal/gmcert"
 	"baidi.dev/gateway/internal/proxy"
 	"baidi.dev/gateway/internal/spa"
@@ -29,12 +30,37 @@ func main() {
 	secret := flag.String("secret", env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"), "JWT 密钥（须与 baidi-control 一致）")
 	ttl := flag.Duration("ttl", 30*time.Second, "SPA 放行窗口")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
+	pf := flag.Bool("pf", false, "内核态隐身：SPA 放行落到 macOS pf 表 baidi_allowed（默认 DROP，需 root + 已加载 anchor）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend, "ttl", ttl.String())
 
 	al := spa.NewAllowlist()
+
+	if *pf {
+		if !darkfw.Available() {
+			log.Fatal("-pf 需要内核防火墙后端：Linux 的 nft 或 macOS 的 pfctl，均未找到")
+		}
+		_ = darkfw.Flush() // 启动归零，确保默认隐身
+		al.OnAllow = func(ip, user string) {
+			if err := darkfw.AllowIP(ip); err == nil {
+				slog.Info("pf 放行写入", "ip", ip, "user", user, "table", darkfw.Table)
+			}
+		}
+		go func() { // TTL 到期回收 pf 放行规则
+			t := time.NewTicker(2 * time.Second)
+			defer t.Stop()
+			for range t.C {
+				for _, ip := range al.Reap() {
+					if err := darkfw.DenyIP(ip); err == nil {
+						slog.Info("pf 放行回收（TTL 到期）", "ip", ip)
+					}
+				}
+			}
+		}()
+		slog.Info("内核态隐身：默认 DROP + 动态放行集合", "backend", darkfw.Backend(), "set", darkfw.Table)
+	}
 
 	go func() {
 		if err := spa.Serve(*spaAddr, []byte(*secret), *ttl, al); err != nil {

@@ -8,7 +8,7 @@
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
         <button class="bd-btn bd-btn--ghost"><icon-upload />批量导入</button>
-        <button class="bd-btn"><icon-plus />新增用户</button>
+        <button class="bd-btn" @click="createOpen = true"><icon-plus />新增用户</button>
       </div>
     </div>
 
@@ -111,18 +111,43 @@
         <div class="bd-roles"><span v-for="r in sel.roles" :key="r" class="bd-tg" :style="tagStyle('#165DFF')">{{ r }}</span></div>
 
         <div class="bd-ud__acts">
-          <button v-if="sel.status === 'locked'" class="bd-btn" @click="act('已解锁')"><icon-unlock />解锁账号</button>
+          <button v-if="sel.status === 'locked'" class="bd-btn" @click="setStatus('active', '已解锁账号')"><icon-unlock />解锁账号</button>
+          <button v-if="sel.status === 'disabled'" class="bd-btn" @click="setStatus('active', '已启用账号')"><icon-check />启用账号</button>
           <button class="bd-btn bd-btn--ghost" @click="act('密码重置链接已发送')">重置密码</button>
           <button v-if="sel.online" class="bd-btn bd-btn--ghost" @click="act('已强制下线')">强制下线</button>
-          <button class="bd-btn bd-btn--ghost bd-btn--danger" @click="act('已禁用账号')">禁用账号</button>
+          <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
         </div>
       </div>
     </a-drawer>
+
+    <!-- 新增用户（写入 SQLite） -->
+    <a-modal v-model:visible="createOpen" title="新增用户" :width="460" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-uform__f"><label>姓名</label><a-input v-model="form.name" placeholder="如：钱七" /></div>
+        <div class="bd-uform__f"><label>登录账号</label><a-input v-model="form.account" placeholder="如：qian.qi" /></div>
+        <div class="bd-uform__f"><label>所属组织</label>
+          <a-select v-model="form.orgKey" @change="(v:any) => form.org = ({dev:'研发部',sales:'销售部',cs:'客服中心',ext:'外包人员'} as Record<string,string>)[v] || ''">
+            <a-option value="dev">研发部</a-option><a-option value="sales">销售部</a-option>
+            <a-option value="cs">客服中心</a-option><a-option value="ext">外包人员</a-option>
+          </a-select>
+        </div>
+        <div class="bd-uform__f"><label>认证方式</label>
+          <a-select v-model="form.auth">
+            <a-option value="密码">密码</a-option><a-option value="密码+短信">密码+短信</a-option>
+            <a-option value="密码+UKey">密码+UKey</a-option><a-option value="SAML SSO">SAML SSO</a-option>
+          </a-select>
+        </div>
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
+          <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
+        </div>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type UserDirBundle, type Directory, type OrgUnit, type DirUser } from '@/lib/api';
 
@@ -173,12 +198,51 @@ function riskLabel(r: string) { return r === 'high' ? '高风险' : r === 'low' 
 function open(u: DirUser) { sel.value = u; drawer.value = true; }
 function act(msg: string) { Message.success(`${sel.value?.name}：${msg}`); }
 
-onMounted(async () => {
+async function load() {
   try {
     const b = await api<UserDirBundle>('/users');
     directories.value = b.directories; orgTree.value = b.orgTree; users.value = b.users; live.value = true;
   } catch { live.value = false; }
-});
+}
+
+// 改账号状态（禁用/启用/解锁）→ 落库
+async function setStatus(status: string, label: string) {
+  if (!sel.value) return;
+  try {
+    await api(`/users/${sel.value.id}/status`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status })
+    });
+    Message.success(`${sel.value.name}：${label}`);
+    drawer.value = false;
+    await load();
+  } catch { Message.error('操作失败，请检查权限或后端连接'); }
+}
+
+// 新增用户 → 落库
+const createOpen = ref(false);
+const creating = ref(false);
+const form = reactive({ name: '', account: '', org: '研发部', orgKey: 'dev', auth: '密码+短信' });
+async function createUser() {
+  if (!form.name || !form.account) { Message.warning('请填写姓名与账号'); return; }
+  creating.value = true;
+  try {
+    await api('/users', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...form, device: '未登记', ip: '—', roles: [] })
+    });
+    Message.success(`已新增用户「${form.name}」并落库`);
+    createOpen.value = false;
+    form.name = ''; form.account = '';
+    await load();
+  } catch {
+    Message.error('新增失败，请检查权限或后端连接');
+  } finally {
+    creating.value = false;
+  }
+}
+
+onMounted(load);
 </script>
 
 <style scoped>
@@ -228,4 +292,10 @@ onMounted(async () => {
 .bd-kv b { font-weight: 500; color: var(--bd-t1); }
 .bd-roles { display: flex; gap: 8px; flex-wrap: wrap; }
 .bd-ud__acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+
+.bd-uform__f { margin-bottom: 16px; }
+.bd-uform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
+.bd-uform__f :deep(.arco-input-wrapper), .bd-uform__f :deep(.arco-select-view) { width: 100%; }
+.bd-uform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.bd-uform__foot .bd-btn[disabled] { opacity: .6; cursor: not-allowed; }
 </style>

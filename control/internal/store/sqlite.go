@@ -18,6 +18,8 @@ type Writer interface {
 	DecideApproval(ctx context.Context, id, decision, reason string) error
 	SavePolicyOverride(ctx context.Context, node, title, settings string, customCount int) error
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
+	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
+	SetUserStatus(ctx context.Context, id, status string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -70,6 +72,10 @@ CREATE TABLE IF NOT EXISTS approvals (
 );
 CREATE TABLE IF NOT EXISTS policy_overrides (
   node TEXT PRIMARY KEY, title TEXT, settings TEXT, custom_count INTEGER, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY, name TEXT, account TEXT, org TEXT, org_key TEXT, device TEXT,
+  ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT
 );`)
 	return err
 }
@@ -103,7 +109,87 @@ func (s *SQLiteStore) seed() error {
 			}
 		}
 	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		b, _ := s.Memory.Users(ctx)
+		for _, u := range b.Users {
+			if err := s.insertUser(u); err != nil {
+				return err
+			}
+		}
+	}
 	return nil
+}
+
+func (s *SQLiteStore) insertUser(u DirUser) error {
+	roles, _ := json.Marshal(u.Roles)
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr())
+	return err
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
+
+// Users 覆盖：身份源/组织树走种子，用户清单从库读取。
+func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
+	b, err := s.Memory.Users(ctx)
+	if err != nil {
+		return UserDirBundle{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles FROM users ORDER BY created_at`)
+	if err != nil {
+		return UserDirBundle{}, err
+	}
+	defer rows.Close()
+	var us []DirUser
+	for rows.Next() {
+		var u DirUser
+		var online int
+		var roles string
+		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin, &online, &u.Status, &u.Risk, &roles); err != nil {
+			return UserDirBundle{}, err
+		}
+		u.Online = online == 1
+		_ = json.Unmarshal([]byte(roles), &u.Roles)
+		us = append(us, u)
+	}
+	b.Users = us
+	return b, nil
+}
+
+// CreateUser 新增用户落库。
+func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error) {
+	u.ID = "u-" + uuid.NewString()[:8]
+	if u.Status == "" {
+		u.Status = "active"
+	}
+	if u.Risk == "" {
+		u.Risk = "none"
+	}
+	if u.LastLogin == "" {
+		u.LastLogin = "—"
+	}
+	if u.Roles == nil {
+		u.Roles = []string{}
+	}
+	if err := s.insertUser(u); err != nil {
+		return DirUser{}, err
+	}
+	return u, nil
+}
+
+// SetUserStatus 改用户状态（禁用/启用/解锁）落库。
+func (s *SQLiteStore) SetUserStatus(ctx context.Context, id, status string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET status=? WHERE id=?`, status, id)
+	return err
 }
 
 func nowStr() string { return time.Now().Format("2006-01-02 15:04:05") }

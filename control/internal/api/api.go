@@ -105,6 +105,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval) // 设备绑定审批
 	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)            // 保存用户策略覆盖
 	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)             // 读取用户策略覆盖
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                     // 新增用户
+	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)      // 禁用/启用/解锁
 
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
@@ -170,6 +172,43 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr, Sensitivity: sens, Accessible: acc})
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
+}
+
+func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	var u store.DirUser
+	if err := json.NewDecoder(r.Body).Decode(&u); err != nil || u.Name == "" || u.Account == "" {
+		httpx.Error(w, http.StatusBadRequest, "用户名/账号不能为空")
+		return
+	}
+	created, err := s.writer.CreateUser(r.Context(), u)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to create user")
+		return
+	}
+	httpx.JSON(w, http.StatusCreated, created)
+}
+
+func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Status string `json:"status"`
+	}
+	ok := map[string]bool{"active": true, "disabled": true, "locked": true, "idle": true}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !ok[body.Status] {
+		httpx.Error(w, http.StatusBadRequest, "status must be active|disabled|locked|idle")
+		return
+	}
+	if err := s.writer.SetUserStatus(r.Context(), id, body.Status); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to set user status")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": body.Status})
 }
 
 // handleAdminLogin 管理员登录（演示：admin / baidi@123）→ 签发 admin 角色 JWT。

@@ -10,7 +10,11 @@ export default defineConfig({
   server: {
     host: true,
     port: 5294,
-    proxy: { '/api': { target: 'http://127.0.0.1:8090', changeOrigin: true } }
+    proxy: {
+      '/api': { target: 'http://127.0.0.1:8090', changeOrigin: true },
+      // dev：本地敲门代理 baidi-knock-agent（生产为 Tauri sidecar，不经此）
+      '/knock': { target: 'http://127.0.0.1:8091', changeOrigin: true }
+    }
   },
   preview: { port: 4294 }
 });

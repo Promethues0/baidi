@@ -1,0 +1,19 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "白帝桌面默认权限：主窗口 + baidi-knock sidecar（按需 SPA 敲门）",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    {
+      "identifier": "shell:allow-execute",
+      "allow": [
+        {
+          "name": "binaries/baidi-knock",
+          "sidecar": true,
+          "args": ["-spa", { "validator": "\\S+" }, "-token", { "validator": ".+" }]
+        }
+      ]
+    }
+  ]
+}

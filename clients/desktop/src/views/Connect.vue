@@ -81,8 +81,10 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed } from 'vue';
+import { Message } from '@arco-design/web-vue';
 import { api, type PortalLoginResp } from '@/lib/api';
 import { session, login, authed } from '@/lib/store';
+import { knock } from '@/lib/knock';
 
 const authedNow = computed(() => authed());
 
@@ -113,8 +115,18 @@ const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : s
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 async function connect() {
   stage.value = 'connecting'; step.value = 0;
-  for (let i = 0; i < STEPS.length; i++) { step.value = i; await sleep(560); }
+  await sleep(500);                       // ① 终端环境检测上报
+  step.value = 1;                         // ② SPA 敲门 —— 真实链路（携带 JWT 身份）
+  const r = await knock(session.token);
+  if (!r.ok) {
+    stage.value = 'idle';
+    Message.error('SPA 敲门失败：' + (r.detail || '网关不可达'));
+    return;
+  }
+  step.value = 2; await sleep(450);       // ③ 建立 SSL 访问隧道
+  step.value = 3; await sleep(350);       // ④ 下发访问策略 / 引流打标
   step.value = STEPS.length; stage.value = 'connected'; session.connected = true;
+  Message.success('已接入企业内网 · ' + (r.detail || ''));
 }
 function disconnect() { stage.value = 'idle'; session.connected = false; }
 

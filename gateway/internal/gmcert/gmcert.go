@@ -87,6 +87,11 @@ func LoadCAPool(dir string) (*smx509.CertPool, error) {
 	if err != nil {
 		return nil, err
 	}
+	return CAPoolFromPEM(pemBytes)
+}
+
+// CAPoolFromPEM 从 PEM 字节构建 CA 根池（移动端把 CA 当字符串下发时用）。
+func CAPoolFromPEM(pemBytes []byte) (*smx509.CertPool, error) {
 	pool := smx509.NewCertPool()
 	if !pool.AppendCertsFromPEM(pemBytes) {
 		return nil, errors.New("gmcert: 无法解析 CA 根证书 PEM")

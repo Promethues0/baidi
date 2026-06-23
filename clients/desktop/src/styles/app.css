@@ -1,0 +1,28 @@
+/* 白帝桌面客户端 · 基础版式（Arco 原生 ArcoBlue，桌面窗口风） */
+* { box-sizing: border-box; }
+html, body, #app { height: 100%; margin: 0; }
+body {
+  background: var(--bd-fill-1, #F7F8FA);
+  color: var(--bd-t1, #1D2129);
+  font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+  overflow: hidden; /* 客户端窗口不滚动，内容区内部滚动 */
+}
+::-webkit-scrollbar { width: 7px; height: 7px; }
+::-webkit-scrollbar-thumb { background: var(--bd-t4, #C9CDD4); border-radius: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+
+/* 通用卡片 / 按钮 */
+.dk-card { background: #fff; border: 1px solid var(--bd-border, #E5E6EB); border-radius: 12px; }
+.dk-btn {
+  height: 36px; padding: 0 16px; border: none; border-radius: 8px; background: var(--bd-primary, #165DFF);
+  color: #fff; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 7px;
+  cursor: pointer; transition: background .15s;
+}
+.dk-btn:hover { background: var(--bd-primary-h, #4080FF); }
+.dk-btn--ghost { background: #fff; color: var(--bd-t2, #4E5969); border: 1px solid var(--bd-border, #E5E6EB); }
+.dk-btn--ghost:hover { border-color: var(--bd-primary, #165DFF); color: var(--bd-primary, #165DFF); background: #fff; }
+.dk-mono { font-family: ui-monospace, monospace; }
+.dk-page__title { font-size: 17px; font-weight: 700; color: var(--bd-t1, #1D2129); }
+.dk-page__sub { font-size: 12.5px; color: var(--bd-t3, #86909C); margin-top: 4px; }

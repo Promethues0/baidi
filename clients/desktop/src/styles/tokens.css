@@ -1,0 +1,37 @@
+/* 白帝设计 token · 对齐《白帝零信任控制中心》设计稿（Arco 原生 ArcoBlue，不覆盖 Arco --primary） */
+:root {
+  /* 主色 / 语义 */
+  --bd-primary:   #165DFF;
+  --bd-primary-d: #0E42D2;   /* logo 渐变深 */
+  --bd-primary-h: #4080FF;   /* hover */
+  --bd-primary-1: #E8F3FF;   /* 主色浅底 */
+  --bd-primary-b: #BEDAFF;   /* 主色浅边 */
+  --bd-purple:    #722ED1;   /* 头像渐变 */
+  --bd-success:   #00B42A;
+  --bd-warning:   #FF7D00;
+  --bd-danger:    #F53F3F;
+
+  /* 文本 / 中性（Arco 灰阶） */
+  --bd-t1: #1D2129; --bd-t2: #4E5969; --bd-t3: #86909C; --bd-t4: #C9CDD4;
+  --bd-border: #E5E6EB;
+  --bd-fill-1: #F7F8FA;
+  --bd-fill-2: #F2F3F5;
+
+  /* tag 浅色族（bg / text） */
+  --bd-tag-blue-bg:   #F2F7FF;
+  --bd-tag-green-bg:  #E8FFEA;
+  --bd-tag-red-bg:    #FFECE8;
+  --bd-tag-gold-bg:   #FFF7E8;
+  --bd-tag-purple-bg: #F5E8FF;
+
+  /* 侧栏底部深色状态卡 */
+  --bd-dark-1:   #0E1F4A;
+  --bd-dark-2:   #15327F;
+  --bd-dark-txt: #A8C0F0;
+
+  /* 尺度 */
+  --bd-header-h: 56px;
+  --bd-sider-w:  228px;
+  --bd-radius:   10px;
+  --bd-radius-s: 7px;
+}

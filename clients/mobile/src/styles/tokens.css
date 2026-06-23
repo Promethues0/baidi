@@ -1,0 +1,25 @@
+/* 白帝设计 token · 对齐《白帝零信任控制中心》（Arco 原生 ArcoBlue），移动端复用同一套色板。 */
+:root {
+  --bd-primary:   #165DFF;
+  --bd-primary-d: #0E42D2;
+  --bd-primary-h: #4080FF;
+  --bd-primary-1: #E8F3FF;
+  --bd-primary-b: #BEDAFF;
+  --bd-purple:    #722ED1;
+  --bd-success:   #00B42A;
+  --bd-warning:   #FF7D00;
+  --bd-danger:    #F53F3F;
+
+  --bd-t1: #1D2129; --bd-t2: #4E5969; --bd-t3: #86909C; --bd-t4: #C9CDD4;
+  --bd-border: #E5E6EB;
+  --bd-fill-1: #F7F8FA;
+  --bd-fill-2: #F2F3F5;
+
+  --bd-dark-1:   #0E1F4A;
+  --bd-dark-2:   #15327F;
+  --bd-dark-txt: #A8C0F0;
+
+  --bd-radius:   14px;
+  --bd-radius-s: 10px;
+  --bd-tabbar-h: 58px;
+}

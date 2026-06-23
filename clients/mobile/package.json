@@ -1,0 +1,25 @@
+{
+  "name": "baidi-mobile",
+  "version": "0.1.0",
+  "private": true,
+  "description": "白帝安全接入移动客户端（iOS / 安卓 / 鸿蒙，Vue3 + Arco 移动优先 UI；VPN 数据面走平台原生扩展）",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview --port 4295",
+    "type-check": "vue-tsc --noEmit"
+  },
+  "dependencies": {
+    "@arco-design/web-vue": "^2.57.0",
+    "vue": "^3.4.38",
+    "vue-router": "^4.4.5"
+  },
+  "devDependencies": {
+    "@types/node": "^20.17.6",
+    "@vitejs/plugin-vue": "^5.1.4",
+    "typescript": "^5.6.3",
+    "vite": "^5.4.11",
+    "vue-tsc": "^2.1.10"
+  }
+}

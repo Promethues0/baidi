@@ -72,6 +72,18 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 		return
 	}
 
+	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 的 Accept 不在 Accept 内握手，
+	// 若把握手推迟到带 3s deadline 的前导 Peek 里触发会与之卡死（gotlcp 在 Accept 即握手故无此问题）。
+	if hs, isHS := c.(interface{ Handshake() error }); isHS {
+		_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
+		if err := hs.Handshake(); err != nil {
+			slog.Warn("握手失败", "src", ip, "err", err.Error())
+			_ = c.Close()
+			return
+		}
+		_ = c.SetReadDeadline(time.Time{})
+	}
+
 	br := bufio.NewReaderSize(c, 4096) // 固定缓冲，前导用 ReadSlice 受此封顶（防无界缓冲 OOM）
 	rid, hasPreamble, good := readPreamble(c, br)
 	if !good {

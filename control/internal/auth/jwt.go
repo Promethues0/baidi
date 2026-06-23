@@ -3,6 +3,7 @@ package auth
 
 import (
 	"crypto/hmac"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -13,17 +14,28 @@ import (
 
 // Claims 令牌载荷。
 type Claims struct {
-	Sub  string `json:"sub"`  // 账号
-	Role string `json:"role"` // admin | user
-	Name string `json:"name"` // 显示名
-	Exp  int64  `json:"exp"`  // 过期 Unix 秒
+	Sub  string `json:"sub"`           // 账号
+	Role string `json:"role"`          // admin | user
+	Name string `json:"name"`          // 显示名
+	Exp  int64  `json:"exp"`           // 过期 Unix 秒
+	Iat  int64  `json:"iat,omitempty"` // 签发 Unix 秒
+	Jti  string `json:"jti,omitempty"` // 令牌唯一 id（短时效敲门令牌用，网关按它一次性去重）
 }
 
 var b64 = base64.RawURLEncoding
 
-// Sign 用 secret 签发 JWT（HS256）。
+// RandJTI 生成随机令牌 id（短时效敲门令牌单次有效的去重键）。
+func RandJTI() string {
+	b := make([]byte, 16)
+	_, _ = rand.Read(b)
+	return b64.EncodeToString(b)
+}
+
+// Sign 用 secret 签发 JWT（HS256）；自动填充 Iat。
 func Sign(secret []byte, c Claims, ttl time.Duration) string {
-	c.Exp = time.Now().Add(ttl).Unix()
+	now := time.Now()
+	c.Iat = now.Unix()
+	c.Exp = now.Add(ttl).Unix()
 	header := b64.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
 	payload, _ := json.Marshal(c)
 	body := header + "." + b64.EncodeToString(payload)

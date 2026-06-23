@@ -14,9 +14,39 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"net/http"
+	"strings"
 	"sync"
 	"time"
 )
+
+// FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti）。
+func FetchToken(control, sessionToken string) (string, error) {
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", nil)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Authorization", "Bearer "+sessionToken)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("control 返回 %d", resp.StatusCode)
+	}
+	var r struct {
+		Token string `json:"token"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
+		return "", err
+	}
+	if r.Token == "" {
+		return "", errors.New("control 返回空令牌")
+	}
+	return r.Token, nil
+}
 
 type packet struct {
 	T  string `json:"t"`  // JWT
@@ -41,7 +71,9 @@ type Cache struct {
 
 func NewCache() *Cache { return &Cache{seen: map[string]time.Time{}} }
 
-func (c *Cache) seenOrAdd(nonce string, ttl time.Duration) bool {
+// Seen 报告 key 是否已在窗口内出现过（出现过返回 true）；否则记下并在 ttl 后过期。
+// 调用方用命名空间前缀区分用途（如 "n:"+nonce、"j:"+jti），避免跨用途碰撞。
+func (c *Cache) Seen(key string, ttl time.Duration) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
@@ -50,10 +82,10 @@ func (c *Cache) seenOrAdd(nonce string, ttl time.Duration) bool {
 			delete(c.seen, k)
 		}
 	}
-	if _, ok := c.seen[nonce]; ok {
+	if _, ok := c.seen[key]; ok {
 		return true
 	}
-	c.seen[nonce] = now.Add(ttl)
+	c.seen[key] = now.Add(ttl)
 	return false
 }
 
@@ -68,7 +100,7 @@ func Open(data []byte, skew time.Duration, c *Cache) (token string, protected bo
 	if d := now - p.Ts; d > int64(skew/time.Second) || d < -int64(skew/time.Second) {
 		return "", false, errors.New("敲门包时间戳超出允许偏移（疑似重放）")
 	}
-	if p.N == "" || c.seenOrAdd(p.N, 2*skew) {
+	if p.N == "" || c.Seen("n:"+p.N, 2*skew) {
 		return "", false, errors.New("敲门 nonce 缺失或重复（重放被拒）")
 	}
 	return p.T, true, nil

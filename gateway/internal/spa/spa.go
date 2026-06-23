@@ -91,8 +91,21 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
 			continue
 		}
+		// 一次性敲门令牌（带 jti）：同一 jti 只放行一次——杜绝令牌被解出后用新信封主动重放。
+		if claims.Jti != "" {
+			dedupTTL := time.Until(time.Unix(claims.Exp, 0)) + skew
+			if dedupTTL > 10*time.Minute {
+				dedupTTL = 10 * time.Minute
+			}
+			if cache.Seen("j:"+claims.Jti, dedupTTL) {
+				slog.Warn("SPA 敲门拒绝（一次性令牌已用，主动重放被拒）", "src", ip, "jti", claims.Jti)
+				continue
+			}
+		} else {
+			slog.Warn("SPA 敲门为长效会话令牌（无 jti，仅被动重放防护），建议改用 /knock-token 短时效一次性令牌", "src", ip)
+		}
 		if !protected {
-			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放保护，建议客户端升级敲门信封", "src", ip)
+			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放防护，建议客户端升级敲门信封", "src", ip)
 		}
 		al.Allow(ip, claims.Name, claims.Role, ttl)
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())

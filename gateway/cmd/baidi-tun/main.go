@@ -61,6 +61,8 @@ func main() {
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障）")
 	resmapPath := flag.String("resmap", "", "VIP:port→资源id 映射 JSON（多资源路由；空=用 -resource 默认）")
 	defaultRes := flag.String("resource", "", "默认资源 id（resmap 未命中时用；空=网关回退默认后端）")
+	control := flag.String("control", "", "baidi-control 地址；设了则换短时效一次性敲门令牌+定期保活续窗（推荐），否则逐流用会话令牌敲门")
+	reknock := flag.Duration("reknock", 15*time.Second, "敲门保活间隔（须 < 网关 SPA TTL；-control 模式生效）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -125,7 +127,7 @@ func main() {
 			log.Fatalf("解析 resmap 失败: %v", err)
 		}
 	}
-	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, gm: *gm, tlcpCfg: tlcpCfg, resmap: resmap, defaultRes: *defaultRes}
+	cfg := &tunnelCfg{spa: *spaAddr, proxy: *proxyAddr, token: *token, control: *control, gm: *gm, tlcpCfg: tlcpCfg, resmap: resmap, defaultRes: *defaultRes}
 	fwd := tcp.NewForwarder(s, 0, 2048, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		dst := net.JoinHostPort(id.LocalAddress.String(), fmt.Sprint(id.LocalPort))
@@ -143,30 +145,61 @@ func main() {
 
 	slog.Info("数据面就绪：utun→netstack→隧道", "spa", *spaAddr, "proxy", *proxyAddr, "gm", *gm)
 
-	// ④ 双向泵：utun ⇄ 网络栈
+	// ④ -control 模式：用短时效一次性令牌敲门并定期保活续窗（逐流不再敲）
+	if *control != "" {
+		cfg.knock() // 启动即开窗
+		go func() {
+			t := time.NewTicker(*reknock)
+			defer t.Stop()
+			for range t.C {
+				cfg.knock()
+			}
+		}()
+		slog.Info("敲门保活：定期换短时效一次性令牌续窗", "control", *control, "interval", reknock.String())
+	}
+
+	// ⑤ 双向泵：utun ⇄ 网络栈
 	go pumpInbound(dev, linkEP)
 	pumpOutbound(dev, linkEP)
 }
 
 type tunnelCfg struct {
-	spa, proxy, token string
-	gm                bool
-	tlcpCfg           *tlcp.Config
-	resmap            map[string]string // VIP:port → resource-id
-	defaultRes        string
+	spa, proxy, token, control string
+	gm                         bool
+	tlcpCfg                    *tlcp.Config
+	resmap                     map[string]string // VIP:port → resource-id
+	defaultRes                 string
+}
+
+// knock 发一次 SPA 敲门：有 -control 则换取短时效一次性令牌，否则用会话令牌。
+func (c *tunnelCfg) knock() {
+	tok := c.token
+	if c.control != "" {
+		if kt, err := knock.FetchToken(c.control, c.token); err == nil {
+			tok = kt
+		} else {
+			slog.Warn("取短时效敲门令牌失败，回退会话令牌", "err", err.Error())
+		}
+	}
+	uc, err := net.Dial("udp", c.spa)
+	if err != nil {
+		slog.Warn("SPA 拨号失败", "err", err.Error())
+		return
+	}
+	defer uc.Close()
+	if sealed, e := knock.Seal(tok); e == nil {
+		_, _ = uc.Write(sealed)
+	}
 }
 
 // tunnel 把一条被 utun 捕获的 TCP 流，经 SPA 敲门后拨入网关隧道并双向拷贝。
 func (c *tunnelCfg) tunnel(local net.Conn, dst string) {
 	defer local.Close()
-	// SPA 敲门（携带 JWT），先认证后连接
-	if uc, err := net.Dial("udp", c.spa); err == nil {
-		if sealed, e := knock.Seal(c.token); e == nil {
-			_, _ = uc.Write(sealed)
-		}
-		_ = uc.Close()
+	// 无 -control 时退化为逐流敲门（会话令牌）；有 -control 时由后台保活循环持续开窗，此处不再敲。
+	if c.control == "" {
+		c.knock()
+		time.Sleep(120 * time.Millisecond)
 	}
-	time.Sleep(120 * time.Millisecond)
 
 	var remote net.Conn
 	var err error

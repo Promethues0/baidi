@@ -17,6 +17,8 @@ type Claims struct {
 	Role string `json:"role"`
 	Name string `json:"name"`
 	Exp  int64  `json:"exp"`
+	Iat  int64  `json:"iat,omitempty"`
+	Jti  string `json:"jti,omitempty"` // 短时效敲门令牌的唯一 id，网关据此一次性去重
 }
 
 var b64 = base64.RawURLEncoding

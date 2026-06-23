@@ -15,8 +15,11 @@ import (
 // Version 控制中心版本号。
 const Version = "0.3.0"
 
-// tokenTTL 令牌有效期。
-const tokenTTL = 8 * time.Hour
+// tokenTTL 会话令牌有效期；knockTTL 短时效一次性敲门令牌有效期。
+const (
+	tokenTTL = 8 * time.Hour
+	knockTTL = 90 * time.Second
+)
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
@@ -32,7 +35,7 @@ func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
-func (s *Server) IsOpen(_ , path string) bool {
+func (s *Server) IsOpen(_, path string) bool {
 	switch path {
 	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login":
 		return true
@@ -62,17 +65,18 @@ func (s *Server) Routes() http.Handler {
 	// 产品元信息
 	mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, _ *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{
-			"product": "白帝",
-			"subtitle": "零信任访问控制系统",
+			"product":   "白帝",
+			"subtitle":  "零信任访问控制系统",
 			"component": "baidi-control · 控制中心",
-			"version": Version,
-			"env":     s.env,
+			"version":   Version,
+			"env":       s.env,
 		})
 	})
 
 	// 管理员登录 / 当前身份
 	mux.HandleFunc("POST /api/v1/auth/login", s.handleAdminLogin)
 	mux.HandleFunc("GET /api/v1/auth/me", s.handleMe)
+	mux.HandleFunc("POST /api/v1/knock-token", s.handleKnockToken) // 签发短时效一次性敲门令牌（需登录）
 
 	// 态势总览（监控中心一屏聚合）
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
@@ -233,6 +237,18 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := auth.FromContext(r.Context())
 	httpx.JSON(w, http.StatusOK, map[string]any{"sub": c.Sub, "role": c.Role, "name": c.Name, "exp": c.Exp})
+}
+
+// handleKnockToken 为已登录会话签发短时效一次性敲门令牌（带随机 jti）。
+// 客户端用它敲门、网关按 jti 一次性放行，杜绝令牌被解出后主动重放（90s 内也仅一次）。
+func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
+	c, ok := auth.FromContext(r.Context())
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "未认证")
+		return
+	}
+	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {

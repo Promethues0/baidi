@@ -34,6 +34,16 @@ for svc in $(systemctl list-units --type=service --state=running --plain --no-le
   echo "==> 停并禁用 $svc"; systemctl stop "$svc" 2>/dev/null || true; systemctl disable "$svc" 2>/dev/null || true
 done
 
+# 释放 80/443：停服务后若仍被占用，杀掉占用进程（flk 等可能是裸进程/非 systemd）
+for p in 80 443; do
+  pids="$(ss -lntpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ')"
+  if [ -n "${pids// /}" ]; then
+    echo "==> 端口 $p 仍被占用，结束进程：$pids"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true
+  fi
+done
+
 echo "==================== 完成 ===================="
 echo "✓ 原业务已停 + nginx 站点已清空（备份在 $BK）；80/443 已释放，白帝可独占部署。"
 echo "  数据/应用目录(如 /var/www、/opt/* 非 baidi)未删除——如需彻底铲除，确认后人工 rm。"

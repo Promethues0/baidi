@@ -5,6 +5,17 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 OUT="$HERE/_out"
 
+# 定位 go（交互 shell/版本管理器可能没把它加进 PATH）
+GO="${GO:-go}"
+if ! command -v "$GO" >/dev/null 2>&1; then
+  for c in "$HOME/.local/share/mise/shims/go" /usr/local/go/bin/go /opt/homebrew/bin/go "$HOME/go/bin/go" \
+           "$HOME"/.local/share/mise/installs/go/*/bin/go; do
+    [ -x "$c" ] && GO="$c" && break
+  done
+fi
+"$GO" version >/dev/null 2>&1 || { echo "✗ 找不到 go：把 go 加入 PATH，或运行 GO=/path/to/go ./deploy.sh"; exit 1; }
+echo "==> 用 go：$("$GO" version) @ $GO"
+
 echo "==> 清理输出目录 $OUT"
 rm -rf "$OUT"; mkdir -p "$OUT/web" "$OUT/bin"
 
@@ -14,13 +25,13 @@ cp -R "$ROOT/console/dist/." "$OUT/web/"
 
 echo "==> 交叉编译 baidi-control（linux/amd64，纯 Go 无 cgo）"
 ( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-control" ./cmd/baidi-control )
+    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-control" ./cmd/baidi-control )
 
 echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
+    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    go build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
+    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
 
 echo "==> 携带部署脚本/模板"
 cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" "$OUT/"

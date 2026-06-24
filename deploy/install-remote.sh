@@ -73,9 +73,11 @@ fi
 if ! nginx -t; then
   restore_nginx; echo "✗ nginx -t 失败，已还原 baidi 配置（烛龙站点未受影响）"; exit 1
 fi
-if ! systemctl reload nginx; then
-  restore_nginx; nginx -t >/dev/null 2>&1 && systemctl reload nginx || true
-  echo "✗ nginx reload 失败，已还原 baidi 配置"; exit 1
+# reload-or-restart：nginx 在跑就 reload(共存场景)，被 wipe 停了就 start(独占场景)
+systemctl enable nginx >/dev/null 2>&1 || true
+if ! systemctl reload-or-restart nginx; then
+  restore_nginx; systemctl reload-or-restart nginx >/dev/null 2>&1 || true
+  echo "✗ nginx 重载/启动失败，已还原 baidi 配置"; exit 1
 fi
 rm -f /etc/nginx/conf.d/baidi.conf.bak
 
@@ -83,7 +85,7 @@ rm -f /etc/nginx/conf.d/baidi.conf.bak
 systemctl enable --now baidi-control
 systemctl restart baidi-control
 
-echo "✓ 安装完成（与烛龙共存）。控制台: https://${PUBLIC_HOST}:${BD_HTTPS_PORT}/  ·  门户: /portal/login"
+echo "✓ 安装完成。控制台: https://${PUBLIC_HOST}:${BD_HTTPS_PORT}/  ·  门户: /portal/login"
 echo "  需在腾讯云安全组放行 TCP ${BD_HTTPS_PORT}（如要公网客户端，再放 gateway 18443/tcp + 18201/udp）"
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
 echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"

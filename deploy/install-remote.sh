@@ -54,7 +54,22 @@ render() { sed -e "s#@BD_PREFIX@#$BD_PREFIX#g" -e "s#@BD_USER@#$BD_USER#g" \
 render "$HERE/systemd/baidi-control.service" > /etc/systemd/system/baidi-control.service
 systemctl daemon-reload
 
-# 渲染并校验 nginx 站点（对烛龙零副作用：备份→防御→端口预检→nginx -t→reload，任一失败即还原旧配置）
+# 确保 nginx 已装（独占机原业务可能没用 nginx，/etc/nginx/conf.d 可能不存在）
+if ! command -v nginx >/dev/null 2>&1; then
+  echo "==> 安装 nginx"
+  (apt-get update -qq && DEBIAN_FRONTEND=noninteractive apt-get install -y -qq nginx) \
+    || yum install -y nginx \
+    || { echo "✗ 安装 nginx 失败，请手动安装后重试"; exit 1; }
+fi
+mkdir -p /etc/nginx/conf.d
+# 若主配置没 include conf.d（非标准/被改过），补一行（写进 http 块前的兜底，幂等）
+if ! grep -rqs 'conf.d/\*.conf' /etc/nginx/nginx.conf; then
+  echo "==> nginx.conf 未 include conf.d，补 include"
+  sed -i 's#^\(\s*\)include /etc/nginx/sites-enabled/\*;#\1include /etc/nginx/sites-enabled/*;\n\1include /etc/nginx/conf.d/*.conf;#' /etc/nginx/nginx.conf 2>/dev/null || true
+  grep -rqs 'conf.d/\*.conf' /etc/nginx/nginx.conf || sed -i '/http {/a\    include /etc/nginx/conf.d/*.conf;' /etc/nginx/nginx.conf 2>/dev/null || true
+fi
+
+# 渲染并校验 nginx 站点（备份→防御→端口预检→nginx -t→reload-or-restart，任一失败即还原）
 [ -f /etc/nginx/conf.d/baidi.conf ] && cp -a /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi.conf.bak
 restore_nginx() { # 有旧备份则还原可用配置，仅首装无备份才删（绝不留半残文件毒化烛龙后续 reload）
   if [ -f /etc/nginx/conf.d/baidi.conf.bak ]; then mv -f /etc/nginx/conf.d/baidi.conf.bak /etc/nginx/conf.d/baidi.conf

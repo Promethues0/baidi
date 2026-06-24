@@ -30,7 +30,7 @@ rm -f /etc/nginx/sites-enabled/* /etc/nginx/conf.d/* 2>/dev/null || true
 
 # 停 + 禁用 旧业务 systemd 单元（保留系统/ssh）；名单可按盘点结果增删
 for svc in $(systemctl list-units --type=service --state=running --plain --no-legend 2>/dev/null \
-    | awk '{print $1}' | grep -ivE 'systemd|dbus|cron|ssh|networkd|resolved|polkit|rsyslog|getty|accounts|udisks|snapd|unattended|multipath|chrony|cloud-init|irqbalance|packagekit|nginx|docker'); do
+    | awk '{print $1}' | grep -ivE 'systemd|dbus|cron|ssh|networkd|resolved|polkit|rsyslog|getty|accounts|udisks|snapd|unattended|multipath|chrony|cloud-init|irqbalance|packagekit|nginx|docker|baidi'); do
   echo "==> 停并禁用 $svc"; systemctl stop "$svc" 2>/dev/null || true; systemctl disable "$svc" 2>/dev/null || true
 done
 

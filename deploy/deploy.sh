@@ -9,7 +9,7 @@ source "$HERE/config.env"
 
 : "${SERVER_SSH:?需在 config.env 设置 SERVER_SSH，如 root@101.43.125.131}"
 : "${BD_PREFIX:=/opt/baidi}"; : "${BD_USER:=baidi}"; : "${CONTROL_PORT:=8090}"; : "${PUBLIC_ORIGIN:=*}"
-: "${BD_HTTPS_PORT:=9443}"; : "${PUBLIC_HOST:=}"; : "${SSH_KEY:=}"; : "${WIPE:=0}"
+: "${BD_HTTPS_PORT:=9443}"; : "${PUBLIC_HOST:=}"; : "${SSH_KEY:=}"; : "${WIPE:=0}"; : "${WITH_GATEWAY:=0}"
 
 # 若指定私钥则用之（如 ubuntu 用户需 -i ~/.ssh/xxx）
 SSH=(ssh); RSYNC_E=(ssh)
@@ -28,6 +28,6 @@ if [ "$WIPE" = "1" ]; then
 fi
 
 echo "==> 远程安装（sudo；独立端口 $BD_HTTPS_PORT）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

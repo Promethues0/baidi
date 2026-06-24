@@ -100,6 +100,22 @@ rm -f /etc/nginx/conf.d/baidi.conf.bak
 systemctl enable --now baidi-control
 systemctl restart baidi-control
 
+# 可选：数据面网关（SPA 单包授权 + 国密 TLCP 隧道代理）
+if [ "${WITH_GATEWAY:-0}" = "1" ]; then
+  echo "==> 安装数据面网关 baidi-gateway + 生成国密证书"
+  install -m 0755 "$HERE/bin/baidi-gateway" "$BD_PREFIX/bin/baidi-gateway"
+  install -m 0755 "$HERE/bin/baidi-gmca" "$BD_PREFIX/bin/baidi-gmca"
+  "$BD_PREFIX/bin/baidi-gmca" -dir "$BD_PREFIX/etc/gmcerts" >/dev/null
+  chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX/etc/gmcerts" "$BD_PREFIX/bin"
+  render "$HERE/systemd/baidi-gateway.service" > /etc/systemd/system/baidi-gateway.service
+  systemctl daemon-reload
+  systemctl enable --now baidi-gateway
+  systemctl restart baidi-gateway
+  sleep 1
+  systemctl is-active --quiet baidi-gateway && echo "  ✓ baidi-gateway 已起：SPA :18201/udp + 国密 TLCP 代理 :18443/tcp（与 control 同密钥，后端=control:${CONTROL_PORT}）" \
+    || { echo "  ✗ baidi-gateway 启动失败，看日志："; journalctl -u baidi-gateway --no-pager -n 12; }
+fi
+
 echo "✓ 安装完成。控制台: https://${PUBLIC_HOST}:${BD_HTTPS_PORT}/  ·  门户: /portal/login"
 echo "  需在腾讯云安全组放行 TCP ${BD_HTTPS_PORT}（如要公网客户端，再放 gateway 18443/tcp + 18201/udp）"
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"

@@ -35,6 +35,7 @@ func main() {
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,
 		httpx.CORS(cfg.AllowOrigin),
+		httpx.BodyLimit(1<<20),              // 请求体上限 1 MiB
 		auth.Middleware(secret, srv.IsOpen), // 校验 Bearer JWT（登录/健康/门户登录免认证）
 		httpx.Logger,
 		httpx.Recover,
@@ -44,6 +45,7 @@ func main() {
 		Addr:              cfg.Addr,
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		MaxHeaderBytes:    1 << 20,
 	}
 
 	// 启动

@@ -6,7 +6,11 @@ import { getToken } from '@/lib/api';
 // 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
 const BUILT: Record<string, () => Promise<unknown>> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
+  '/monitor/online': () => import('@/views/Online.vue'),
+  '/monitor/userstate': () => import('@/views/UserState.vue'),
   '/business/policy': () => import('@/views/Policy.vue'),
+  '/business/objects': () => import('@/views/Objects.vue'),
+  '/security/ipsec': () => import('@/views/Ipsec.vue'),
   '/business/apps': () => import('@/views/Apps.vue'),
   '/business/users': () => import('@/views/Users.vue'),
   '/business/devices': () => import('@/views/Devices.vue'),

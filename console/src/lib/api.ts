@@ -132,6 +132,45 @@ export interface ResourcesResp { resources: Resource[] }
 export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number }
 export interface GatewaysResp { gateways: GatewayReg[] }
 
+/* ── 监控中心 · 在线用户（store.OnlineSession）── */
+export interface OnlineSession {
+  id: string; user: string; account: string; org: string;
+  ip: string; location: string; device: string; os: string;
+  auth: string; app: string; gateway: string;
+  loginAt: string; duration: string;
+  trust: 'trusted' | 'untrusted' | 'unknown';
+  risk: 'none' | 'low' | 'high';
+  status: 'online' | 'offline';
+  kickReason?: string;
+}
+export interface OnlineResp { sessions: OnlineSession[]; generatedAt: string }
+
+/* ── 监控中心 · 用户状态（store.UserStateBundle）── */
+export interface UserStateBucket { key: string; label: string; count: number; tone: 'danger' | 'warning' | 'info' | 'normal' }
+export interface UserStateItem {
+  id: string; user: string; account: string; org: string;
+  state: 'risk-high' | 'risk-low' | 'locked' | 'disabled' | 'idle';
+  risk: 'none' | 'low' | 'high'; online: boolean;
+  reasons: string[]; lastEvent: string; lastSeen: string;
+}
+export interface UserStateBundle { buckets: UserStateBucket[]; items: UserStateItem[] }
+
+/* ── IPSec VPN 组网（store.IpsecSite）── */
+export interface IpsecPhase { enc: string; hash: string; dh: string }
+export interface IpsecSite {
+  id: string; name: string; peer: string; localSubnet: string; remoteSubnet: string;
+  ikeVersion: string; auth: 'psk' | 'cert' | 'sm2cert'; suite: 'standard' | 'gm';
+  phase1: IpsecPhase; phase2: IpsecPhase; pfs: boolean; pqHybrid: boolean;
+  status: 'up' | 'down' | 'connecting'; rxBytes: number; txBytes: number; lastUp: string;
+}
+export interface IpsecResp { sites: IpsecSite[] }
+
+/* ── 对象库（store.ObjectBundle）── */
+export interface AddrObject { id: string; name: string; kind: 'ip' | 'cidr' | 'range' | 'domain'; value: string; desc: string }
+export interface ServiceObject { id: string; name: string; proto: 'tcp' | 'udp' | 'icmp' | 'any'; ports: string; desc: string }
+export interface TimeObject { id: string; name: string; kind: 'periodic' | 'absolute'; spec: string; desc: string }
+export interface ObjectBundle { addrs: AddrObject[]; services: ServiceObject[]; times: TimeObject[] }
+
 /* ── 终端用户门户 ── */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
 export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }

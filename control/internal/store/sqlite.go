@@ -22,6 +22,13 @@ type Writer interface {
 	SetUserStatus(ctx context.Context, id, status string) error
 	SaveResource(ctx context.Context, r Resource) error
 	DeleteResource(ctx context.Context, id string) error
+	SaveIpsecSite(ctx context.Context, s IpsecSite) (IpsecSite, error)
+	DeleteIpsecSite(ctx context.Context, id string) error
+	ToggleIpsecSite(ctx context.Context, id string) (string, error)
+	SaveAddrObject(ctx context.Context, o AddrObject) (AddrObject, error)
+	SaveServiceObject(ctx context.Context, o ServiceObject) (ServiceObject, error)
+	SaveTimeObject(ctx context.Context, o TimeObject) (TimeObject, error)
+	DeleteObject(ctx context.Context, kind, id string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -81,6 +88,20 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS ipsec_sites (
+  id TEXT PRIMARY KEY, name TEXT, peer TEXT, local_subnet TEXT, remote_subnet TEXT,
+  ike_version TEXT, auth TEXT, suite TEXT, phase1 TEXT, phase2 TEXT, pfs INTEGER, pq_hybrid INTEGER,
+  status TEXT, rx_bytes INTEGER, tx_bytes INTEGER, last_up TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS addr_objects (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, value TEXT, descr TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS service_objects (
+  id TEXT PRIMARY KEY, name TEXT, proto TEXT, ports TEXT, descr TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS time_objects (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, spec TEXT, descr TEXT, updated_at TEXT
 );`)
 	return err
 }
@@ -132,6 +153,38 @@ func (s *SQLiteStore) seed() error {
 		rs, _ := s.Memory.Resources(ctx)
 		for _, r := range rs {
 			if err := s.SaveResource(ctx, r); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM ipsec_sites`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		sites, _ := s.Memory.Ipsec(ctx)
+		for _, st := range sites {
+			if err := s.upsertIpsecSite(ctx, st); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM addr_objects`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		ob, _ := s.Memory.Objects(ctx)
+		for _, o := range ob.Addrs {
+			if _, err := s.SaveAddrObject(ctx, o); err != nil {
+				return err
+			}
+		}
+		for _, o := range ob.Services {
+			if _, err := s.SaveServiceObject(ctx, o); err != nil {
+				return err
+			}
+		}
+		for _, o := range ob.Times {
+			if _, err := s.SaveTimeObject(ctx, o); err != nil {
 				return err
 			}
 		}

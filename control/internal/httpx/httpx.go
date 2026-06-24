@@ -52,6 +52,18 @@ func CORS(origin string) Middleware {
 	}
 }
 
+// BodyLimit 为非 GET/HEAD 请求体设上限，挡住超大 JSON 触发的内存耗尽。
+func BodyLimit(max int64) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.Body != nil && r.Method != http.MethodGet && r.Method != http.MethodHead {
+				r.Body = http.MaxBytesReader(w, r.Body, max)
+			}
+			next.ServeHTTP(w, r)
+		})
+	}
+}
+
 // statusRecorder 捕获响应状态码用于访问日志。
 type statusRecorder struct {
 	http.ResponseWriter

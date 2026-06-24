@@ -20,8 +20,8 @@ export const NAV: NavGroup[] = [
     label: '监控中心',
     children: [
       { title: '安全概览', path: '/monitor/overview', icon: 'IconDashboard', done: true },
-      { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badge: '1,284', badgeKind: 'count' },
-      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '18', badgeKind: 'alert' }
+      { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badge: '10', badgeKind: 'count', done: true },
+      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '2', badgeKind: 'alert', done: true }
     ]
   },
   {
@@ -31,13 +31,15 @@ export const NAV: NavGroup[] = [
       { title: '策略管理', path: '/business/policy', icon: 'IconSafe', done: true },
       { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup', done: true },
       { title: '认证源接入', path: '/business/auth', icon: 'IconLock', done: true },
-      { title: '终端管理', path: '/business/devices', icon: 'IconMobile', done: true }
+      { title: '终端管理', path: '/business/devices', icon: 'IconMobile', done: true },
+      { title: '对象库', path: '/business/objects', icon: 'IconBookmark', done: true }
     ]
   },
   {
     label: '安全防护',
     children: [
       { title: '网关与隐身', path: '/security/gateway', icon: 'IconStorage', done: true },
+      { title: 'IPSec 组网', path: '/security/ipsec', icon: 'IconLink', done: true },
       { title: '资源策略', path: '/security/resources', icon: 'IconRelation', done: true },
       { title: '安全中心', path: '/security/center', icon: 'IconSafe', done: true },
       { title: '审计中心', path: '/security/audit', icon: 'IconFile', done: true }

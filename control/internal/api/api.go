@@ -30,6 +30,7 @@ type Server struct {
 	env      string
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
+	kicked   map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户）
 }
 
 // GatewayInfo 一台已注册数据面网关的运行信息。
@@ -42,7 +43,7 @@ type GatewayInfo struct {
 
 // New 构造 Server。
 func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}}
+	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, kicked: map[string]string{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
@@ -124,6 +125,22 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
 	// 安全中心：安全基线 + SPA
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
+
+	// 监控中心：在线用户（实时会话）+ 强制下线 + 用户状态
+	mux.HandleFunc("GET /api/v1/online", s.handleOnline)
+	mux.HandleFunc("POST /api/v1/online/{id}/kick", s.handleKickSession) // 强制下线（admin）
+	mux.HandleFunc("GET /api/v1/userstate", s.handleUserState)
+
+	// IPSec VPN 组网：站点清单 + CRUD + 启停
+	mux.HandleFunc("GET /api/v1/ipsec", s.handleIpsec)
+	mux.HandleFunc("POST /api/v1/ipsec", s.handleSaveIpsec)            // 新增/改站点（admin）
+	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)   // 删站点（admin）
+	mux.HandleFunc("POST /api/v1/ipsec/{id}/toggle", s.handleToggleIpsec) // 启停隧道（admin）
+
+	// 对象库：地址 / 服务 / 时间对象
+	mux.HandleFunc("GET /api/v1/objects", s.handleObjects)
+	mux.HandleFunc("POST /api/v1/objects/{kind}", s.handleSaveObject)       // 新增/改对象（admin）
+	mux.HandleFunc("DELETE /api/v1/objects/{kind}/{id}", s.handleDeleteObject) // 删对象（admin）
 
 	// ── 写操作（落 SQLite）──
 	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                       // 发布应用

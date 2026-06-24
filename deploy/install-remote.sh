@@ -80,9 +80,12 @@ render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
 if sed 's/#.*//' /etc/nginx/conf.d/baidi.conf | grep -q 'default_server'; then
   restore_nginx; echo "✗ 拒绝：baidi nginx 站点含 default_server，已还原（绝不抢占烛龙 80/443）"; exit 1
 fi
-# 防御②：端口占用预检（kill -HUP 型 reload 不回非零，端口冲突靠预检兜住）
-if command -v ss >/dev/null 2>&1 && ss -ltnH "sport = :$BD_HTTPS_PORT" 2>/dev/null | grep -q LISTEN; then
-  restore_nginx; echo "✗ 端口 $BD_HTTPS_PORT 已被占用，已还原 baidi 配置（烛龙未受影响）"; exit 1
+# 防御②：端口占用预检——只拦「非 nginx 进程」占用（nginx 占用=baidi/烛龙自己的，我们会重配+nginx -t 兜底）
+if command -v ss >/dev/null 2>&1; then
+  occ="$(ss -ltnpH "sport = :$BD_HTTPS_PORT" 2>/dev/null)"
+  if echo "$occ" | grep -q LISTEN && ! echo "$occ" | grep -q '"nginx"'; then
+    restore_nginx; echo "✗ 端口 $BD_HTTPS_PORT 被非 nginx 进程占用，已还原 baidi 配置"; exit 1
+  fi
 fi
 # 防御③：nginx -t 失败即还原
 if ! nginx -t; then

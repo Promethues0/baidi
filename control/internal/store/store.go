@@ -21,6 +21,7 @@ type Store interface {
 	UserStates(ctx context.Context) (UserStateBundle, error)
 	Ipsec(ctx context.Context) ([]IpsecSite, error)
 	Objects(ctx context.Context) (ObjectBundle, error)
+	AuthPolicies(ctx context.Context) ([]AuthPolicy, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

@@ -29,6 +29,8 @@ type Writer interface {
 	SaveServiceObject(ctx context.Context, o ServiceObject) (ServiceObject, error)
 	SaveTimeObject(ctx context.Context, o TimeObject) (TimeObject, error)
 	DeleteObject(ctx context.Context, kind, id string) error
+	SaveAuthPolicy(ctx context.Context, p AuthPolicy) (AuthPolicy, error)
+	DeleteAuthPolicy(ctx context.Context, id string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -102,6 +104,10 @@ CREATE TABLE IF NOT EXISTS service_objects (
 );
 CREATE TABLE IF NOT EXISTS time_objects (
   id TEXT PRIMARY KEY, name TEXT, kind TEXT, spec TEXT, descr TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_policies (
+  id TEXT PRIMARY KEY, name TEXT, directory TEXT, is_default INTEGER, scope TEXT, priority INTEGER, enabled INTEGER,
+  pc TEXT, mobile TEXT, exempt TEXT, one_click INTEGER, enhance TEXT, authz_apps TEXT, updated_at TEXT
 );`)
 	return err
 }
@@ -185,6 +191,17 @@ func (s *SQLiteStore) seed() error {
 		}
 		for _, o := range ob.Times {
 			if _, err := s.SaveTimeObject(ctx, o); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM auth_policies`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		pols, _ := s.Memory.AuthPolicies(ctx)
+		for _, p := range pols {
+			if err := s.upsertAuthPolicy(ctx, p); err != nil {
 				return err
 			}
 		}

@@ -142,6 +142,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/objects/{kind}", s.handleSaveObject)       // 新增/改对象（admin）
 	mux.HandleFunc("DELETE /api/v1/objects/{kind}/{id}", s.handleDeleteObject) // 删对象（admin）
 
+	// 认证策略：PC/WEB 端与移动端分栏认证方式 + 自适应规则
+	mux.HandleFunc("GET /api/v1/authpolicy", s.handleAuthPolicies)
+	mux.HandleFunc("POST /api/v1/authpolicy", s.handleSaveAuthPolicy)          // 新增/改策略（admin）
+	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
+
 	// ── 写操作（落 SQLite）──
 	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                       // 发布应用
 	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval) // 设备绑定审批

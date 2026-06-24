@@ -121,6 +121,20 @@ export interface RuleCond { field: 'weakPwd' | 'geoAnomaly' | 'offHours' | 'risk
 export interface AdaptiveRule { id: string; name: string; enabled: boolean; logic: 'AND' | 'OR'; conditions: RuleCond[]; action: 'allow' | 'mfa' | 'stepup' | 'block'; priority: number }
 export interface AuthSrcBundle { sources: AuthSource[]; rules: AdaptiveRule[] }
 
+/* ── 认证策略 · PC/移动端分栏（store.AuthPolicy，FR-AUTH-12）── */
+export type PrimaryMethod = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
+export type SecondaryMethod = 'sms' | 'totp' | 'radius' | 'cert' | 'http';
+export interface AuthMethodSet { primary: PrimaryMethod | ''; secondary: SecondaryMethod[] }
+export interface ExemptRule { trustedDevice: boolean; trustedNetwork: boolean; winDomain: boolean }
+export interface EnhanceRule { weakPwd: boolean; offHours: boolean; geoAnomaly: boolean }
+export interface AuthPolicy {
+  id: string; name: string; directory: PrimaryMethod | string; isDefault: boolean;
+  scope: string; priority: number; enabled: boolean;
+  pc: AuthMethodSet; mobile: AuthMethodSet;
+  exempt: ExemptRule; oneClick: boolean; enhance: EnhanceRule; authzApps: string;
+}
+export interface AuthPolicyResp { policies: AuthPolicy[] }
+
 /* ── 安全中心（store.SecurityBundle）── */
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
 export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }

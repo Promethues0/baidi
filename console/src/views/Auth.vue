@@ -13,6 +13,7 @@
     <!-- Tab 切换 -->
     <div class="bd-tabs">
       <span class="bd-tab" :class="{ on: tab === 'source' }" @click="tab = 'source'">认证源</span>
+      <span class="bd-tab" :class="{ on: tab === 'policy' }" @click="tab = 'policy'">认证策略</span>
       <span class="bd-tab" :class="{ on: tab === 'rule' }" @click="tab = 'rule'">自适应认证规则</span>
     </div>
 
@@ -52,6 +53,177 @@
         </div>
       </div>
     </div>
+
+    <!-- ============ 认证策略（FR-AUTH-12：PC/WEB 与 移动端 分栏认证）============ -->
+    <div v-show="tab === 'policy'">
+      <div class="bd-srctoolbar">
+        <div class="bd-srctoolbar__sub">
+          按<b>用户目录</b>分组编排 · 共 <b>{{ policies.length }}</b> 条策略 · PC/WEB 端与移动端 APP 分别配置主认证 / 二次认证
+        </div>
+        <button class="bd-btn" @click="openCreate"><icon-plus />新增策略</button>
+      </div>
+
+      <div v-for="g in grouped" :key="g.dir" class="bd-pgroup">
+        <div class="bd-pgroup__head">
+          <span class="bd-srcicon bd-pgroup__ic" :style="srcIconStyle(g.dir as any)"><component :is="srcIcon(g.dir as any)" /></span>
+          <span class="bd-pgroup__name">{{ g.name }}</span>
+          <span class="bd-pgroup__cnt">{{ g.list.length }} 条策略</span>
+        </div>
+
+        <div class="bd-card bd-pcard" :class="{ off: !p.enabled }" v-for="p in g.list" :key="p.id">
+          <!-- 行头：名称 + 范围 + 默认/优先级 -->
+          <div class="bd-pcard__head">
+            <div class="bd-pcard__title">
+              <span class="bd-pcard__name">{{ p.name }}</span>
+              <span v-if="p.isDefault" class="bd-tg bd-tg--default">默认策略</span>
+              <span class="bd-tg bd-tg--pri">优先级 {{ p.priority }}</span>
+              <span v-if="!p.enabled" class="bd-tg bd-tg--off">已停用</span>
+            </div>
+            <div class="bd-pcard__acts">
+              <span class="bd-link" @click="openEdit(p)"><icon-edit />编辑</span>
+              <span
+                v-if="!p.isDefault"
+                class="bd-link bd-link--danger"
+                @click="removePolicy(p)"
+              ><icon-delete />删除</span>
+              <span v-else class="bd-link bd-link--disabled" title="默认策略不可删除"><icon-lock />默认</span>
+            </div>
+          </div>
+          <div class="bd-pcard__scope">{{ p.scope }}</div>
+
+          <!-- 两端分栏 -->
+          <div class="bd-platgrid">
+            <div class="bd-plat">
+              <div class="bd-plat__h"><icon-desktop /> PC / WEB 端</div>
+              <div class="bd-plat__row">
+                <span class="bd-plat__k">主认证</span>
+                <span class="bd-tg" :style="tagStyle(primaryColor(p.pc.primary))">{{ primaryLabel(p.pc.primary) }}</span>
+              </div>
+              <div class="bd-plat__row">
+                <span class="bd-plat__k">二次认证</span>
+                <template v-if="p.pc.secondary.length">
+                  <span v-for="s in p.pc.secondary" :key="s" class="bd-tg bd-tg--sec">{{ secondaryLabel(s) }}</span>
+                </template>
+                <span v-else class="bd-plat__none">无（单因素）</span>
+              </div>
+            </div>
+            <div class="bd-plat">
+              <div class="bd-plat__h"><icon-mobile /> 移动端 APP</div>
+              <div class="bd-plat__row">
+                <span class="bd-plat__k">主认证</span>
+                <span class="bd-tg" :style="tagStyle(primaryColor(p.mobile.primary))">{{ primaryLabel(p.mobile.primary) }}</span>
+              </div>
+              <div class="bd-plat__row">
+                <span class="bd-plat__k">二次认证</span>
+                <template v-if="p.mobile.secondary.length">
+                  <span v-for="s in p.mobile.secondary" :key="s" class="bd-tg bd-tg--sec">{{ secondaryLabel(s) }}</span>
+                </template>
+                <span v-else class="bd-plat__none">无（单因素）</span>
+              </div>
+            </div>
+          </div>
+
+          <!-- 自适应摘要 -->
+          <div class="bd-pcard__foot">
+            <span class="bd-foot__k">自适应</span>
+            <span v-for="e in exemptChips(p)" :key="'ex-' + e" class="bd-mtg bd-mtg--ok"><icon-check-circle />{{ e }}</span>
+            <span v-if="p.oneClick" class="bd-mtg bd-mtg--ok"><icon-thunderbolt />一键上线</span>
+            <span v-for="e in enhanceChips(p)" :key="'en-' + e" class="bd-mtg bd-mtg--warn"><icon-exclamation-circle />{{ e }}</span>
+            <span v-if="!hasAdaptive(p)" class="bd-plat__none">未启用自适应</span>
+            <span class="bd-foot__authz"><icon-apps />{{ p.authzApps || '不授权' }}</span>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- 认证策略 编辑抽屉 -->
+    <a-drawer
+      v-model:visible="editVisible"
+      :width="560"
+      :title="editing.id ? '编辑认证策略' : '新增认证策略'"
+      ok-text="保存"
+      :on-before-ok="savePolicy"
+      @cancel="editVisible = false"
+    >
+      <div class="bd-form">
+        <div class="bd-form__row">
+          <label class="bd-form__lab">策略名称 <em>*</em></label>
+          <a-input v-model="editing.name" placeholder="如：财务部 · 高敏加严" allow-clear />
+        </div>
+        <div class="bd-form__2col">
+          <div class="bd-form__row">
+            <label class="bd-form__lab">所属用户目录 <em>*</em></label>
+            <a-select v-model="editing.directory" placeholder="选择目录" :disabled="editing.isDefault">
+              <a-option v-for="s in directorySources" :key="s.key" :value="s.key">{{ s.name }}</a-option>
+            </a-select>
+          </div>
+          <div class="bd-form__row">
+            <label class="bd-form__lab">优先级（小者先匹配）</label>
+            <a-input-number v-model="editing.priority" :min="1" :max="999" :disabled="editing.isDefault" />
+          </div>
+        </div>
+        <div class="bd-form__row">
+          <label class="bd-form__lab">适用范围</label>
+          <a-input v-model="editing.scope" placeholder="如：研发中心 / 架构组、外部协作安全组" allow-clear />
+        </div>
+
+        <!-- 两端认证方式 -->
+        <div class="bd-form__platgrid">
+          <div class="bd-form__plat">
+            <div class="bd-form__plath"><icon-desktop /> PC / WEB 端</div>
+            <label class="bd-form__lab">主认证 <em>*</em></label>
+            <a-select v-model="editing.pc.primary" placeholder="选择主认证方式">
+              <a-option v-for="m in PRIMARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+            </a-select>
+            <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
+            <a-select v-model="editing.pc.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
+              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+            </a-select>
+          </div>
+          <div class="bd-form__plat">
+            <div class="bd-form__plath"><icon-mobile /> 移动端 APP</div>
+            <label class="bd-form__lab">主认证 <em>*</em></label>
+            <a-select v-model="editing.mobile.primary" placeholder="选择主认证方式">
+              <a-option v-for="m in PRIMARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+            </a-select>
+            <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
+            <a-select v-model="editing.mobile.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
+              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+            </a-select>
+          </div>
+        </div>
+
+        <!-- 自适应认证 -->
+        <div class="bd-form__sec">
+          <div class="bd-form__sech">自适应 · 免二次认证 / 一键上线</div>
+          <div class="bd-form__checks">
+            <a-checkbox v-model="editing.exempt.trustedDevice">使用授信终端时</a-checkbox>
+            <a-checkbox v-model="editing.exempt.trustedNetwork">满足可信网络时</a-checkbox>
+            <a-checkbox v-model="editing.exempt.winDomain">Windows 域环境时</a-checkbox>
+            <a-checkbox v-model="editing.oneClick">一键上线（保存票据，下次免认证）</a-checkbox>
+          </div>
+        </div>
+        <div class="bd-form__sec">
+          <div class="bd-form__sech">自适应 · 增强认证（命中则强制追加）</div>
+          <div class="bd-form__checks">
+            <a-checkbox v-model="editing.enhance.weakPwd">弱密码</a-checkbox>
+            <a-checkbox v-model="editing.enhance.offHours">异常时间段</a-checkbox>
+            <a-checkbox v-model="editing.enhance.geoAnomaly">异地登录</a-checkbox>
+          </div>
+        </div>
+
+        <div class="bd-form__2col">
+          <div class="bd-form__row">
+            <label class="bd-form__lab">默认授权应用</label>
+            <a-input v-model="editing.authzApps" placeholder="如：默认授权全部应用 / 仅 OA / 不授权" allow-clear />
+          </div>
+          <div class="bd-form__row">
+            <label class="bd-form__lab">启用策略</label>
+            <a-switch v-model="editing.enabled" />
+          </div>
+        </div>
+      </div>
+    </a-drawer>
 
     <!-- ============ 自适应认证规则（P6 可视化规则构建器）============ -->
     <div v-show="tab === 'rule'" class="bd-rulewrap">
@@ -155,14 +327,17 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
-import { Message } from '@arco-design/web-vue';
-import { api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond } from '@/lib/api';
+import { Message, Modal } from '@arco-design/web-vue';
+import {
+  api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
+  type AuthPolicy, type AuthPolicyResp, type PrimaryMethod, type SecondaryMethod
+} from '@/lib/api';
 
 type SrcType = AuthSource['type'];
 type CondField = RuleCond['field'];
 type Action = AdaptiveRule['action'];
 
-const tab = ref<'source' | 'rule'>('source');
+const tab = ref<'source' | 'policy' | 'rule'>('source');
 const live = ref(false);
 
 /* ── 内置 mock（结构同后端 AuthSrcBundle）── */
@@ -282,6 +457,131 @@ function addRule() {
 }
 function addSource() { Message.info('接入认证源向导（演示）'); }
 
+/* ── 认证策略（FR-AUTH-12）── */
+const policies = ref<AuthPolicy[]>([]);
+
+const PRIMARY_OPTS: { value: PrimaryMethod; label: string }[] = [
+  { value: 'local', label: '本地账号密码' },
+  { value: 'ad', label: 'AD 域' },
+  { value: 'ldap', label: 'LDAP 目录' },
+  { value: 'radius', label: 'RADIUS 账号' },
+  { value: 'oauth', label: '企微/钉钉/飞书' },
+  { value: 'sms', label: '短信验证码' },
+  { value: 'cert', label: '证书 / USB-Key' }
+];
+const SECONDARY_OPTS: { value: SecondaryMethod; label: string }[] = [
+  { value: 'sms', label: '短信' },
+  { value: 'totp', label: 'TOTP 令牌' },
+  { value: 'radius', label: 'Radius 动态令牌' },
+  { value: 'cert', label: '证书 / USB-Key' },
+  { value: 'http', label: 'HTTP(S) 令牌' }
+];
+const PRIMARY_LABEL: Record<string, string> = Object.fromEntries(PRIMARY_OPTS.map((o) => [o.value, o.label]));
+const SECONDARY_LABEL: Record<string, string> = Object.fromEntries(SECONDARY_OPTS.map((o) => [o.value, o.label]));
+const PRIMARY_COLOR: Record<string, string> = {
+  local: '#165DFF', ad: '#165DFF', ldap: '#722ED1', radius: '#FF7D00', oauth: '#00B42A', sms: '#FF7D00', cert: '#722ED1'
+};
+function primaryLabel(m: string) { return PRIMARY_LABEL[m] ?? m ?? '—'; }
+function primaryColor(m: string) { return PRIMARY_COLOR[m] ?? '#86909C'; }
+function secondaryLabel(m: string) { return SECONDARY_LABEL[m] ?? m; }
+
+/** 目录 key → 友好名（取自认证源；缺失回退到类型名或 key） */
+function dirName(dir: string) {
+  const src = sources.value.find((s) => s.key === dir);
+  return src ? src.name : (TYPE_LABEL[dir as SrcType] ?? dir);
+}
+/** 可作为「用户目录」被策略绑定的认证源：仅主认证类（本地/AD/LDAP），排除纯二次因子源 */
+const directorySources = computed(() =>
+  sources.value.filter((s) => ['local', 'ad', 'ldap'].includes(s.type)).map((s) => ({ key: s.key, name: s.name }))
+);
+
+/** 按目录分组，组内按优先级升序（小者先匹配，默认策略优先级 100 自然沉底） */
+const grouped = computed(() => {
+  const map = new Map<string, AuthPolicy[]>();
+  for (const p of policies.value) {
+    if (!map.has(p.directory)) map.set(p.directory, []);
+    map.get(p.directory)!.push(p);
+  }
+  return [...map.entries()].map(([dir, list]) => ({
+    dir, name: dirName(dir),
+    list: [...list].sort((a, b) => a.priority - b.priority)
+  }));
+});
+
+function exemptChips(p: AuthPolicy): string[] {
+  const out: string[] = [];
+  if (p.exempt.trustedDevice) out.push('授信终端免二次');
+  if (p.exempt.trustedNetwork) out.push('可信网络免二次');
+  if (p.exempt.winDomain) out.push('Windows 域免二次');
+  return out;
+}
+function enhanceChips(p: AuthPolicy): string[] {
+  const out: string[] = [];
+  if (p.enhance.weakPwd) out.push('弱密码增强');
+  if (p.enhance.offHours) out.push('异常时段增强');
+  if (p.enhance.geoAnomaly) out.push('异地登录增强');
+  return out;
+}
+function hasAdaptive(p: AuthPolicy): boolean {
+  return p.oneClick || exemptChips(p).length > 0 || enhanceChips(p).length > 0;
+}
+
+/* 编辑抽屉 */
+const editVisible = ref(false);
+function blankPolicy(): AuthPolicy {
+  return {
+    id: '', name: '', directory: directorySources.value[0]?.key ?? 'local', isDefault: false,
+    scope: '', priority: 50, enabled: true,
+    pc: { primary: 'ad', secondary: [] }, mobile: { primary: 'ad', secondary: [] },
+    exempt: { trustedDevice: false, trustedNetwork: false, winDomain: false },
+    oneClick: false, enhance: { weakPwd: false, offHours: false, geoAnomaly: false }, authzApps: ''
+  };
+}
+const editing = ref<AuthPolicy>(blankPolicy());
+function openCreate() { editing.value = blankPolicy(); editVisible.value = true; }
+function openEdit(p: AuthPolicy) {
+  // 深拷贝，避免抽屉里编辑直接改到列表（取消时还能回滚）
+  editing.value = JSON.parse(JSON.stringify(p));
+  editVisible.value = true;
+}
+async function savePolicy(): Promise<boolean> {
+  const p = editing.value;
+  if (!p.name.trim()) { Message.warning('请填写策略名称'); return false; }
+  if (!p.directory) { Message.warning('请选择所属用户目录'); return false; }
+  if (!p.pc.primary || !p.mobile.primary) { Message.warning('PC 端与移动端均须配置主认证方式'); return false; }
+  try {
+    await api<{ ok: boolean; policy: AuthPolicy }>('/authpolicy', { method: 'POST', body: JSON.stringify(p) });
+    Message.success(p.id ? '策略已更新' : '策略已新增');
+    await loadPolicies();
+    return true;
+  } catch (e) {
+    Message.error('保存失败：' + (e as Error).message);
+    return false;
+  }
+}
+function removePolicy(p: AuthPolicy) {
+  Modal.warning({
+    title: '删除认证策略',
+    content: `确认删除「${p.name}」？该范围用户将回落到所属目录的默认策略。`,
+    hideCancel: false,
+    onOk: async () => {
+      try {
+        await api(`/authpolicy/${p.id}`, { method: 'DELETE' });
+        Message.success('策略已删除');
+        await loadPolicies();
+      } catch (e) {
+        Message.error('删除失败：' + (e as Error).message);
+      }
+    }
+  });
+}
+async function loadPolicies() {
+  try {
+    const r = await api<AuthPolicyResp>('/authpolicy');
+    policies.value = r.policies;
+  } catch { /* 后端不可用时保持空列表 */ }
+}
+
 /* ── 规则求值预览 ── */
 type CtxKey = CondField | 'highRisk';
 const CTX: { field: CtxKey; label: string; detail: string }[] = [
@@ -334,6 +634,7 @@ onMounted(async () => {
     rules.value = b.rules;
     live.value = true;
   } catch { live.value = false; }
+  await loadPolicies();
 });
 </script>
 
@@ -441,4 +742,54 @@ onMounted(async () => {
 .bd-evalout.warn .bd-evalout__act { color: var(--bd-warning); }
 .bd-evalout.allow { border-color: var(--bd-success); background: var(--bd-tag-green-bg); }
 .bd-evalout.allow .bd-evalout__act { color: var(--bd-success); }
+
+/* ── 认证策略 ── */
+.bd-pgroup { margin-bottom: 22px; }
+.bd-pgroup__head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+.bd-pgroup__ic { width: 30px; height: 30px; border-radius: 8px; font-size: 16px; }
+.bd-pgroup__name { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-pgroup__cnt { font-size: 12px; color: var(--bd-t3); background: var(--bd-fill-2); padding: 2px 9px; border-radius: 10px; }
+
+.bd-pcard { padding: 16px 18px; margin-bottom: 12px; transition: opacity .15s, box-shadow .15s; }
+.bd-pcard:hover { box-shadow: 0 4px 14px rgba(22, 93, 255, .06); }
+.bd-pcard.off { opacity: .62; }
+.bd-pcard__head { display: flex; align-items: flex-start; gap: 12px; }
+.bd-pcard__title { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; flex: 1; min-width: 0; }
+.bd-pcard__name { font-size: 14.5px; font-weight: 600; color: var(--bd-t1); }
+.bd-tg--default { color: var(--bd-primary); background: var(--bd-primary-1); font-weight: 600; }
+.bd-tg--pri { color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-tg--off { color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-tg--sec { color: var(--bd-purple); background: var(--bd-tag-purple-bg); }
+.bd-pcard__acts { display: flex; gap: 14px; flex: none; }
+.bd-pcard__acts .bd-link { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; }
+.bd-link--danger { color: var(--bd-danger); }
+.bd-link--disabled { color: var(--bd-t4); cursor: default; }
+.bd-pcard__scope { font-size: 12.5px; color: var(--bd-t3); margin: 4px 0 14px; }
+
+.bd-platgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.bd-plat { border: 1px solid var(--bd-fill-2); border-radius: 9px; padding: 12px 14px; background: var(--bd-fill-1); }
+.bd-plat__h { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 10px; }
+.bd-plat__row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
+.bd-plat__k { font-size: 12px; color: var(--bd-t3); width: 56px; flex: none; }
+.bd-plat__none { font-size: 12px; color: var(--bd-t4); }
+
+.bd-pcard__foot { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--bd-fill-2); }
+.bd-foot__k { font-size: 12px; color: var(--bd-t3); }
+.bd-foot__authz { margin-left: auto; display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--bd-t2); }
+.bd-mtg { display: inline-flex; align-items: center; gap: 4px; font-size: 11.5px; font-weight: 500; padding: 2px 9px; border-radius: 11px; }
+.bd-mtg--ok { color: var(--bd-success); background: var(--bd-tag-green-bg); }
+.bd-mtg--warn { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
+
+/* ── 编辑抽屉表单 ── */
+.bd-form { display: flex; flex-direction: column; gap: 16px; }
+.bd-form__row { display: flex; flex-direction: column; gap: 6px; }
+.bd-form__lab { font-size: 12.5px; color: var(--bd-t2); font-weight: 500; }
+.bd-form__lab em { color: var(--bd-danger); font-style: normal; }
+.bd-form__2col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.bd-form__platgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+.bd-form__plat { border: 1px solid var(--bd-border); border-radius: 9px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
+.bd-form__plath { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--bd-fill-2); }
+.bd-form__sec { border: 1px solid var(--bd-fill-2); border-radius: 9px; padding: 12px 14px; background: var(--bd-fill-1); }
+.bd-form__sech { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 10px; }
+.bd-form__checks { display: flex; flex-wrap: wrap; gap: 10px 18px; }
 </style>

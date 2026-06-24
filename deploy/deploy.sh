@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 一键部署：本地构建 → rsync 到服务器 → 远程 install-remote.sh（与烛龙共存，独立端口）
 # 先 cp config.env.example config.env 并填好，再运行本脚本。
-set -euo pipefail
+set -eo pipefail   # 不用 -u：旧 bash(如 macOS 3.2)对数组/参数展开会误报 unbound；下面用 := 兜底默认值
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 [ -f "$HERE/config.env" ] || { echo "缺少 $HERE/config.env（参考 config.env.example）"; exit 1; }
 # shellcheck disable=SC1091

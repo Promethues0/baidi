@@ -23,7 +23,7 @@ echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
     go build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
 
 echo "==> 携带部署脚本/模板"
-cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$OUT/"
+cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" "$OUT/"
 
 # 自检：交付 nginx 站点绝不得含 default_server（防旧模板混入毒化烛龙后续 reload）
 if sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'default_server'; then

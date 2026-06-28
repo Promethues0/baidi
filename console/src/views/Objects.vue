@@ -30,7 +30,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>名称</th><th>类型</th><th>值</th><th>描述</th><th class="r">操作</th></tr>
+          <tr><th>名称</th><th>类型</th><th>值</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownAddrs" :key="o.id">
@@ -38,6 +38,17 @@
             <td><span class="bd-tg" :style="tagStyle(addrKindColor(o.kind))">{{ addrKindText(o.kind) }}</span></td>
             <td><span class="bd-mono">{{ o.value }}</span></td>
             <td>{{ o.desc || '—' }}</td>
+            <td>
+              <a-popover v-if="refsOf(o.id).length" position="top">
+                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <template #content>
+                  <div class="bd-reflist">
+                    <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
+                  </div>
+                </template>
+              </a-popover>
+              <span v-else class="bd-ref-none">未被引用</span>
+            </td>
             <td class="r">
               <span class="bd-link" @click="openEdit('addr', o)">编辑</span>
               <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('addr', o.id)">
@@ -45,7 +56,7 @@
               </a-popconfirm>
             </td>
           </tr>
-          <tr v-if="!shownAddrs.length"><td colspan="5" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownAddrs.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -62,7 +73,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>名称</th><th>协议</th><th>端口</th><th>描述</th><th class="r">操作</th></tr>
+          <tr><th>名称</th><th>协议</th><th>端口</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownServices" :key="o.id">
@@ -70,6 +81,17 @@
             <td><span class="bd-tg" :style="tagStyle(protoColor(o.proto))">{{ o.proto.toUpperCase() }}</span></td>
             <td><span class="bd-mono">{{ o.ports || '—' }}</span></td>
             <td>{{ o.desc || '—' }}</td>
+            <td>
+              <a-popover v-if="refsOf(o.id).length" position="top">
+                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <template #content>
+                  <div class="bd-reflist">
+                    <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
+                  </div>
+                </template>
+              </a-popover>
+              <span v-else class="bd-ref-none">未被引用</span>
+            </td>
             <td class="r">
               <span class="bd-link" @click="openEdit('service', o)">编辑</span>
               <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('service', o.id)">
@@ -77,7 +99,7 @@
               </a-popconfirm>
             </td>
           </tr>
-          <tr v-if="!shownServices.length"><td colspan="5" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownServices.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -94,7 +116,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>名称</th><th>类型</th><th>时间规格</th><th>描述</th><th class="r">操作</th></tr>
+          <tr><th>名称</th><th>类型</th><th>时间规格</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownTimes" :key="o.id">
@@ -102,6 +124,17 @@
             <td><span class="bd-tg" :style="tagStyle(timeKindColor(o.kind))">{{ timeKindText(o.kind) }}</span></td>
             <td><span class="bd-mono">{{ o.spec }}</span></td>
             <td>{{ o.desc || '—' }}</td>
+            <td>
+              <a-popover v-if="refsOf(o.id).length" position="top">
+                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <template #content>
+                  <div class="bd-reflist">
+                    <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
+                  </div>
+                </template>
+              </a-popover>
+              <span v-else class="bd-ref-none">未被引用</span>
+            </td>
             <td class="r">
               <span class="bd-link" @click="openEdit('time', o)">编辑</span>
               <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('time', o.id)">
@@ -109,7 +142,7 @@
               </a-popconfirm>
             </td>
           </tr>
-          <tr v-if="!shownTimes.length"><td colspan="5" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownTimes.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
         </tbody>
       </table>
     </div>
@@ -179,8 +212,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
-import { Message } from '@arco-design/web-vue';
-import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle } from '@/lib/api';
+import { Message, Modal } from '@arco-design/web-vue';
+import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp } from '@/lib/api';
 
 type Kind = 'addr' | 'service' | 'time';
 
@@ -210,6 +243,12 @@ const tab = ref<Kind>('addr');
 const live = ref(false);
 const bundle = ref<ObjectBundle>({ addrs: [], services: [], times: [] });
 
+/* ── 「被引用」反查（objectId -> 引用方列表）── */
+const usage = ref<Record<string, ObjectRef[]>>({});
+const refKindText: Record<ObjectRef['kind'], string> = { resource: '资源', ipsec: 'IPSec组网' };
+function refsOf(id: string): ObjectRef[] { return usage.value[id] || []; }
+function refLabel(r: ObjectRef) { return `${refKindText[r.kind]} · ${r.name}`; }
+
 /* ── 关键词检索（按当前页签的相关字段过滤）── */
 const kw = ref('');
 function matches(...fields: string[]) {
@@ -233,7 +272,11 @@ async function load() {
     const b = await api<ObjectBundle>('/objects');
     bundle.value = { addrs: b.addrs || [], services: b.services || [], times: b.times || [] };
     live.value = true;
-  } catch { bundle.value = MOCK; live.value = false; }
+    try {
+      const u = await api<ObjectUsageResp>('/objects/usage');
+      usage.value = u.usage || {};
+    } catch { usage.value = {}; }
+  } catch { bundle.value = MOCK; usage.value = {}; live.value = false; }
 }
 
 /* ── 表单（单 reactive 容纳全字段）── */
@@ -316,11 +359,27 @@ async function save() {
 
 async function del(k: Kind, id: string) {
   if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  /* 主动防护：已被引用则拦截，不下发 DELETE */
+  const refs = refsOf(id);
+  if (refs.length) {
+    Modal.warning({
+      title: '对象被引用，无法删除',
+      content: `被 ${refs.length} 处引用，无法删除：${refs.map(refLabel).join('、')}；请先在引用方解除引用`
+    });
+    return;
+  }
   try {
     await api(`/objects/${k}/${id}`, { method: 'DELETE' });
     Message.success(`${kindLabel[k]}已删除`);
     await load();
-  } catch { Message.error('删除失败，请检查权限或后端连接'); }
+  } catch (e) {
+    /* 兜底：后端 409 表示并发出现了新引用 */
+    if (e instanceof Error && e.message.includes('409')) {
+      Modal.warning({ title: '对象被引用，无法删除', content: '该对象已被引用，无法删除；请先在引用方解除引用' });
+    } else {
+      Message.error('删除失败，请检查权限或后端连接');
+    }
+  }
 }
 
 onMounted(load);
@@ -345,6 +404,13 @@ onMounted(load);
 
 /* 空表 */
 .bd-empty { text-align: center; color: var(--bd-t3, #86909c); padding: 28px 0; }
+
+/* 「被引用」指示 */
+.bd-ref { cursor: pointer; }
+.bd-ref-none { font-size: 12px; color: var(--bd-t3, #86909c); }
+.bd-reflist { min-width: 140px; max-width: 280px; }
+.bd-reflist__i { font-size: 12.5px; color: var(--bd-t1); padding: 3px 0; line-height: 1.5; }
+.bd-reflist__i + .bd-reflist__i { border-top: 1px solid var(--bd-fill-2); }
 
 /* 表单（对齐 Resources.vue 的 .bd-uform） */
 .bd-uform { padding: 2px 0; }

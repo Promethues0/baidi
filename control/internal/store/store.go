@@ -21,6 +21,8 @@ type Store interface {
 	UserStates(ctx context.Context) (UserStateBundle, error)
 	Ipsec(ctx context.Context) ([]IpsecSite, error)
 	Objects(ctx context.Context) (ObjectBundle, error)
+	ObjectUsage(ctx context.Context) (map[string][]ObjectRef, error)
+	ObjectExists(ctx context.Context, kind, id string) (bool, error)
 	AuthPolicies(ctx context.Context) ([]AuthPolicy, error)
 }
 

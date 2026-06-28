@@ -137,10 +137,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)   // 删站点（admin）
 	mux.HandleFunc("POST /api/v1/ipsec/{id}/toggle", s.handleToggleIpsec) // 启停隧道（admin）
 
-	// 对象库：地址 / 服务 / 时间对象
+	// 对象库：地址 / 服务 / 时间对象 + 被引用反查（复用闭环）
 	mux.HandleFunc("GET /api/v1/objects", s.handleObjects)
+	mux.HandleFunc("GET /api/v1/objects/usage", s.handleObjectsUsage)          // 被引用反查（资源/IPSec）
 	mux.HandleFunc("POST /api/v1/objects/{kind}", s.handleSaveObject)       // 新增/改对象（admin）
-	mux.HandleFunc("DELETE /api/v1/objects/{kind}/{id}", s.handleDeleteObject) // 删对象（admin）
+	mux.HandleFunc("DELETE /api/v1/objects/{kind}/{id}", s.handleDeleteObject) // 删对象（admin，被引用拒删 409）
 
 	// 认证策略：PC/WEB 端与移动端分栏认证方式 + 自适应规则
 	mux.HandleFunc("GET /api/v1/authpolicy", s.handleAuthPolicies)
@@ -373,6 +374,25 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&res); err != nil || res.ID == "" || res.Backend == "" {
 		httpx.Error(w, http.StatusBadRequest, "id/backend 必填")
 		return
+	}
+	// 对象库引用须指向真实对象（backend 仍是权威拨号目标，refs 仅供编辑器回填 + 反查）。
+	if res.AddrRef != "" {
+		if ok, err := s.objectExists(r.Context(), "addr", res.AddrRef); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to validate addr ref")
+			return
+		} else if !ok {
+			httpx.Error(w, http.StatusBadRequest, "引用的地址对象不存在")
+			return
+		}
+	}
+	if res.SvcRef != "" {
+		if ok, err := s.objectExists(r.Context(), "service", res.SvcRef); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to validate svc ref")
+			return
+		} else if !ok {
+			httpx.Error(w, http.StatusBadRequest, "引用的服务对象不存在")
+			return
+		}
 	}
 	if err := s.writer.SaveResource(r.Context(), res); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save resource")

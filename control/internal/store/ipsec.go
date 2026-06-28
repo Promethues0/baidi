@@ -27,6 +27,10 @@ type IpsecSite struct {
 	RxBytes      int64      `json:"rxBytes"`
 	TxBytes      int64      `json:"txBytes"`
 	LastUp       string     `json:"lastUp"`
+	// 对象库引用（可选）：本端 / 对端网段引用地址对象（kind=cidr/ip/range），
+	// 支撑「定义一次、多处复用」与对象库「被引用」反查；网段值仍是权威配置。
+	LocalRef  string `json:"localRef,omitempty"`  // 地址对象 id → localSubnet
+	RemoteRef string `json:"remoteRef,omitempty"` // 地址对象 id → remoteSubnet
 }
 
 // Ipsec 返回演示用的 IPSec 站点清单（内存种子；SQLiteStore 覆盖为落库版）。

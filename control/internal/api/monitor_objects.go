@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"time"
@@ -8,6 +9,11 @@ import (
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 )
+
+// objectExists 报告对象库中是否存在给定 kind(addr|service|time) 的对象 id（点查，挡悬空引用）。
+func (s *Server) objectExists(ctx context.Context, kind, id string) (bool, error) {
+	return s.store.ObjectExists(ctx, kind, id)
+}
 
 // ── 监控中心 · 在线用户 ──
 
@@ -99,6 +105,19 @@ func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "name/peer 必填")
 		return
 	}
+	// 网段引用必须指向真实存在的地址对象，挡住悬空引用。
+	for _, ref := range []string{it.LocalRef, it.RemoteRef} {
+		if ref == "" {
+			continue
+		}
+		if ok, err := s.objectExists(r.Context(), "addr", ref); err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to validate addr ref")
+			return
+		} else if !ok {
+			httpx.Error(w, http.StatusBadRequest, "引用的地址对象不存在")
+			return
+		}
+	}
 	saved, err := s.writer.SaveIpsecSite(r.Context(), it)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save ipsec site")
@@ -141,6 +160,20 @@ func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, b)
+}
+
+// handleObjectsUsage 返回对象库「被引用」反查表：objectID → 引用它的消费者（资源 / IPSec）。
+// 引用拓扑属管理配置（与 handleResources 一致），仅 admin 可读。
+func (s *Server) handleObjectsUsage(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	usage, err := s.store.ObjectUsage(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load object usage")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"usage": usage})
 }
 
 func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
@@ -202,8 +235,22 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	if err := s.writer.DeleteObject(r.Context(), kind, id); err != nil {
+	// 删除守卫（事务内复核引用，原子互斥并发保存，杜绝 TOCTOU）：被引用则不删，返回 409。
+	deleted, err := s.writer.DeleteObjectIfUnreferenced(r.Context(), kind, id)
+	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete object")
+		return
+	}
+	if !deleted {
+		// 复读引用清单仅供前端展示「被谁引用」；权威判定已由上面的事务给出。
+		consumers := []store.ObjectRef{}
+		if usage, uerr := s.store.ObjectUsage(r.Context()); uerr == nil {
+			consumers = usage[id]
+		}
+		httpx.JSON(w, http.StatusConflict, map[string]any{
+			"error":     map[string]any{"message": "对象被引用，无法删除；请先在引用方解除引用"},
+			"consumers": consumers,
+		})
 		return
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind, "id": id})

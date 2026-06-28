@@ -44,7 +44,12 @@
           <tr v-for="r in resources" :key="r.id">
             <td><span class="bd-mono bd-rid">{{ r.id }}</span></td>
             <td>{{ r.name || '—' }}</td>
-            <td><span class="bd-mono">{{ r.backend }}</span></td>
+            <td>
+              <span class="bd-mono">{{ r.backend }}</span>
+              <a-tooltip v-if="r.addrRef || r.svcRef" :content="refLabel(r)">
+                <span class="bd-srctag"><icon-link />源自对象库</span>
+              </a-tooltip>
+            </td>
             <td>
               <template v-if="r.allowRoles && r.allowRoles.length">
                 <span v-for="role in r.allowRoles" :key="role" class="bd-rtag" :style="tagStyle(roleColor(role))">{{ role }}</span>
@@ -76,6 +81,17 @@
         <div class="bd-uform__f"><label>名称</label><a-input v-model="form.name" placeholder="如 OA 协同办公" /></div>
         <div class="bd-uform__f"><label>后端 host:port<i class="req">*</i></label>
           <a-input v-model="form.backend" placeholder="如 10.20.1.10:8080（仅源自此处，绝不取客户端值＝防 SSRF）" />
+          <div class="bd-uform__hint">backend 为权威拨号目标，选择对象仅自动回填、可手动覆盖（防 SSRF：数据面只认此值）</div>
+        </div>
+        <div class="bd-uform__f"><label>引用地址对象（可选）</label>
+          <a-select v-model="form.addrRef" allow-clear placeholder="不引用（手填 backend host）" @change="onRefChange">
+            <a-option v-for="a in addrs" :key="a.id" :value="a.id">{{ a.name }} · {{ a.value }}</a-option>
+          </a-select>
+        </div>
+        <div class="bd-uform__f"><label>引用服务对象（可选）</label>
+          <a-select v-model="form.svcRef" allow-clear placeholder="不引用（手填 backend port）" @change="onRefChange">
+            <a-option v-for="s in services" :key="s.id" :value="s.id">{{ s.name }} · {{ s.proto }}/{{ s.ports }}</a-option>
+          </a-select>
         </div>
         <div class="bd-uform__f"><label>授权角色（空＝不限）</label>
           <a-select v-model="form.allowRoles" multiple allow-clear placeholder="不限角色">
@@ -98,11 +114,13 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type Resource, type ResourcesResp, type GatewayReg, type GatewaysResp } from '@/lib/api';
+import { api, type Resource, type ResourcesResp, type GatewayReg, type GatewaysResp, type AddrObject, type ServiceObject, type ObjectBundle } from '@/lib/api';
 
 const live = ref(false);
 const resources = ref<Resource[]>([]);
 const gateways = ref<GatewayReg[]>([]);
+const addrs = ref<AddrObject[]>([]);
+const services = ref<ServiceObject[]>([]);
 const nowSec = ref(Math.floor(Date.now() / 1000));
 let timer: ReturnType<typeof setInterval>;
 
@@ -126,23 +144,48 @@ async function load() {
     const g = await api<GatewaysResp>('/gateways');
     gateways.value = g.gateways || [];
   } catch { /* 网关列表失败不影响资源管理 */ }
+  try {
+    const o = await api<ObjectBundle>('/objects');
+    addrs.value = o.addrs || []; services.value = o.services || [];
+  } catch { /* 对象库失败不影响资源管理 */ }
+}
+
+function refLabel(r: Resource) {
+  const parts: string[] = [];
+  if (r.addrRef) { const a = addrs.value.find((x) => x.id === r.addrRef); parts.push(`地址：${a ? `${a.name}（${a.value}）` : r.addrRef}`); }
+  if (r.svcRef) { const s = services.value.find((x) => x.id === r.svcRef); parts.push(`服务：${s ? `${s.name}（${s.proto}/${s.ports}）` : r.svcRef}`); }
+  return parts.join(' · ');
 }
 
 const formOpen = ref(false);
 const editing = ref(false);
 const saving = ref(false);
-const form = reactive<{ id: string; name: string; backend: string; allowRoles: string[] }>({ id: '', name: '', backend: '', allowRoles: [] });
+const form = reactive<{ id: string; name: string; backend: string; allowRoles: string[]; addrRef: string; svcRef: string }>({ id: '', name: '', backend: '', allowRoles: [], addrRef: '', svcRef: '' });
 const usersText = ref('');
+
+// 选择对象时自动回填 backend（保持可手动覆盖，backend 始终权威）
+function onRefChange() {
+  const addr = form.addrRef ? addrs.value.find((a) => a.id === form.addrRef) : undefined;
+  const svc = form.svcRef ? services.value.find((s) => s.id === form.svcRef) : undefined;
+  if (addr && svc) {
+    form.backend = `${addr.value}:${svc.ports}`;
+  } else if (addr) {
+    const port = form.backend.includes(':') ? form.backend.slice(form.backend.lastIndexOf(':') + 1) : '';
+    form.backend = port ? `${addr.value}:${port}` : addr.value;
+  }
+  // 清空选择仅清 ref，不动 backend（权威值）—— 由 a-select allow-clear 把 ref 置空后走此分支无操作
+}
 
 function openCreate() {
   editing.value = false;
-  form.id = ''; form.name = ''; form.backend = ''; form.allowRoles = []; usersText.value = '';
+  form.id = ''; form.name = ''; form.backend = ''; form.allowRoles = []; form.addrRef = ''; form.svcRef = ''; usersText.value = '';
   formOpen.value = true;
 }
 function openEdit(r: Resource) {
   editing.value = true;
   form.id = r.id; form.name = r.name; form.backend = r.backend;
   form.allowRoles = [...(r.allowRoles || [])];
+  form.addrRef = r.addrRef || ''; form.svcRef = r.svcRef || '';
   usersText.value = (r.allowUsers || []).join(', ');
   formOpen.value = true;
 }
@@ -154,7 +197,7 @@ async function save() {
   try {
     await api('/resources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: form.id, name: form.name, backend: form.backend, allowRoles: form.allowRoles, allowUsers })
+      body: JSON.stringify({ id: form.id, name: form.name, backend: form.backend, allowRoles: form.allowRoles, allowUsers, addrRef: form.addrRef || undefined, svcRef: form.svcRef || undefined })
     });
     Message.success(`资源「${form.id}」已落库，网关下次轮询即生效`);
     formOpen.value = false;
@@ -198,4 +241,6 @@ onUnmounted(() => clearInterval(timer));
 .bd-anyt { font-size: 12px; color: var(--bd-t4, #c9cdd4); }
 .bd-empty { text-align: center; color: var(--bd-t3, #86909c); padding: 28px 0; }
 .bd-uform__f .req { color: var(--bd-danger, #f53f3f); margin-left: 2px; }
+.bd-uform__hint { font-size: 12px; color: var(--bd-t3, #86909c); margin-top: 4px; line-height: 1.5; }
+.bd-srctag { display: inline-flex; align-items: center; gap: 3px; margin-left: 8px; padding: 0 7px; height: 18px; border-radius: 4px; font-size: 11px; color: var(--bd-accent, #165DFF); background: rgba(22, 93, 255, 0.08); vertical-align: middle; cursor: default; }
 </style>

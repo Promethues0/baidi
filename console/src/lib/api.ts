@@ -141,7 +141,7 @@ export interface BaselinePolicy { id: string; name: string; type: 'app-protect' 
 export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
 
 /* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
-export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[] }
+export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[]; addrRef?: string; svcRef?: string }
 export interface ResourcesResp { resources: Resource[] }
 export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number }
 export interface GatewaysResp { gateways: GatewayReg[] }
@@ -176,6 +176,7 @@ export interface IpsecSite {
   ikeVersion: string; auth: 'psk' | 'cert' | 'sm2cert'; suite: 'standard' | 'gm';
   phase1: IpsecPhase; phase2: IpsecPhase; pfs: boolean; pqHybrid: boolean;
   status: 'up' | 'down' | 'connecting'; rxBytes: number; txBytes: number; lastUp: string;
+  localRef?: string; remoteRef?: string; // 本端/对端网段引用的地址对象 id（对象库复用）
 }
 export interface IpsecResp { sites: IpsecSite[] }
 
@@ -184,6 +185,10 @@ export interface AddrObject { id: string; name: string; kind: 'ip' | 'cidr' | 'r
 export interface ServiceObject { id: string; name: string; proto: 'tcp' | 'udp' | 'icmp' | 'any'; ports: string; desc: string }
 export interface TimeObject { id: string; name: string; kind: 'periodic' | 'absolute'; spec: string; desc: string }
 export interface ObjectBundle { addrs: AddrObject[]; services: ServiceObject[]; times: TimeObject[] }
+
+/* ── 对象库「被引用」反查（复用闭环，store.ObjectRef）── */
+export interface ObjectRef { kind: 'resource' | 'ipsec'; id: string; name: string }
+export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 
 /* ── 终端用户门户 ── */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }

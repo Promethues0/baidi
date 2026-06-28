@@ -11,7 +11,7 @@ import (
 
 // Ipsec 从库读取 IPSec 站点清单。
 func (s *SQLiteStore) Ipsec(ctx context.Context) ([]IpsecSite, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up FROM ipsec_sites ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up,COALESCE(local_ref,''),COALESCE(remote_ref,'') FROM ipsec_sites ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -21,7 +21,7 @@ func (s *SQLiteStore) Ipsec(ctx context.Context) ([]IpsecSite, error) {
 		var it IpsecSite
 		var p1, p2 string
 		var pfs, pq int
-		if err := rows.Scan(&it.ID, &it.Name, &it.Peer, &it.LocalSubnet, &it.RemoteSubnet, &it.IkeVersion, &it.Auth, &it.Suite, &p1, &p2, &pfs, &pq, &it.Status, &it.RxBytes, &it.TxBytes, &it.LastUp); err != nil {
+		if err := rows.Scan(&it.ID, &it.Name, &it.Peer, &it.LocalSubnet, &it.RemoteSubnet, &it.IkeVersion, &it.Auth, &it.Suite, &p1, &p2, &pfs, &pq, &it.Status, &it.RxBytes, &it.TxBytes, &it.LastUp, &it.LocalRef, &it.RemoteRef); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(p1), &it.Phase1)
@@ -38,14 +38,15 @@ func (s *SQLiteStore) upsertIpsecSite(ctx context.Context, it IpsecSite) error {
 	p2, _ := json.Marshal(it.Phase2)
 	// 配置型 upsert：编辑站点只改配置字段，绝不回写运行态（status / last_up / rx_bytes / tx_bytes）。
 	// 运行态由 ToggleIpsecSite（启停）与数据面统计独占，避免编辑时用陈旧表单快照把在线隧道改成 down。
-	_, err := s.db.ExecContext(ctx, `INSERT INTO ipsec_sites(id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO ipsec_sites(id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up,local_ref,remote_ref,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, peer=excluded.peer, local_subnet=excluded.local_subnet,
   remote_subnet=excluded.remote_subnet, ike_version=excluded.ike_version, auth=excluded.auth, suite=excluded.suite,
   phase1=excluded.phase1, phase2=excluded.phase2, pfs=excluded.pfs, pq_hybrid=excluded.pq_hybrid,
-  updated_at=excluded.updated_at`,
+  local_ref=excluded.local_ref, remote_ref=excluded.remote_ref, updated_at=excluded.updated_at`,
 		it.ID, it.Name, it.Peer, it.LocalSubnet, it.RemoteSubnet, it.IkeVersion, it.Auth, it.Suite,
-		string(p1), string(p2), b2i(it.Pfs), b2i(it.PqHybrid), it.Status, it.RxBytes, it.TxBytes, it.LastUp, nowStr())
+		string(p1), string(p2), b2i(it.Pfs), b2i(it.PqHybrid), it.Status, it.RxBytes, it.TxBytes, it.LastUp,
+		it.LocalRef, it.RemoteRef, nowStr())
 	return err
 }
 

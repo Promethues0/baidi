@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -29,6 +30,7 @@ type Writer interface {
 	SaveServiceObject(ctx context.Context, o ServiceObject) (ServiceObject, error)
 	SaveTimeObject(ctx context.Context, o TimeObject) (TimeObject, error)
 	DeleteObject(ctx context.Context, kind, id string) error
+	DeleteObjectIfUnreferenced(ctx context.Context, kind, id string) (bool, error)
 	SaveAuthPolicy(ctx context.Context, p AuthPolicy) (AuthPolicy, error)
 	DeleteAuthPolicy(ctx context.Context, id string) error
 }
@@ -51,7 +53,8 @@ type SQLiteStore struct {
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
 func OpenSQLite(path string) (*SQLiteStore, error) {
-	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)", path)
+	// _txlock=immediate：事务起手即取写锁，让「检查后写」类守卫（如对象删除前的引用复核）原子化，杜绝 TOCTOU。
+	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate", path)
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -89,12 +92,12 @@ CREATE TABLE IF NOT EXISTS users (
   ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS resources (
-  id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, updated_at TEXT
+  id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS ipsec_sites (
   id TEXT PRIMARY KEY, name TEXT, peer TEXT, local_subnet TEXT, remote_subnet TEXT,
   ike_version TEXT, auth TEXT, suite TEXT, phase1 TEXT, phase2 TEXT, pfs INTEGER, pq_hybrid INTEGER,
-  status TEXT, rx_bytes INTEGER, tx_bytes INTEGER, last_up TEXT, updated_at TEXT
+  status TEXT, rx_bytes INTEGER, tx_bytes INTEGER, last_up TEXT, local_ref TEXT, remote_ref TEXT, updated_at TEXT
 );
 CREATE TABLE IF NOT EXISTS addr_objects (
   id TEXT PRIMARY KEY, name TEXT, kind TEXT, value TEXT, descr TEXT, updated_at TEXT
@@ -109,7 +112,28 @@ CREATE TABLE IF NOT EXISTS auth_policies (
   id TEXT PRIMARY KEY, name TEXT, directory TEXT, is_default INTEGER, scope TEXT, priority INTEGER, enabled INTEGER,
   pc TEXT, mobile TEXT, exempt TEXT, one_click INTEGER, enhance TEXT, authz_apps TEXT, updated_at TEXT
 );`)
-	return err
+	if err != nil {
+		return err
+	}
+	// 对象库引用列：旧库表已存在时 CREATE TABLE IF NOT EXISTS 不会补列，逐列幂等 ALTER（忽略已存在）。
+	for _, c := range []struct{ table, col string }{
+		{"resources", "addr_ref"}, {"resources", "svc_ref"},
+		{"ipsec_sites", "local_ref"}, {"ipsec_sites", "remote_ref"},
+	} {
+		if e := s.addColumnIfMissing(c.table, c.col); e != nil {
+			return e
+		}
+	}
+	return nil
+}
+
+// addColumnIfMissing 幂等地为表补一列 TEXT；列已存在（duplicate column name）视为成功。
+func (s *SQLiteStore) addColumnIfMissing(table, col string) error {
+	_, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` TEXT`)
+	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
+		return err
+	}
+	return nil
 }
 
 // seed 仅在表为空时把内存种子灌入（保证首启有内容、之后以库为准）。
@@ -211,7 +235,7 @@ func (s *SQLiteStore) seed() error {
 
 // Resources 从库读受控资源清单（覆盖 Memory 种子）。
 func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users FROM resources ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users,COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -220,7 +244,7 @@ func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 	for rows.Next() {
 		var r Resource
 		var roles, users string
-		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &r.AddrRef, &r.SvcRef); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(roles), &r.AllowRoles)
@@ -234,11 +258,12 @@ func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 func (s *SQLiteStore) SaveResource(ctx context.Context, r Resource) error {
 	roles, _ := json.Marshal(r.AllowRoles)
 	users, _ := json.Marshal(r.AllowUsers)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,updated_at)
-VALUES(?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,addr_ref,svc_ref,updated_at)
+VALUES(?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, backend=excluded.backend,
-  allow_roles=excluded.allow_roles, allow_users=excluded.allow_users, updated_at=excluded.updated_at`,
-		r.ID, r.Name, r.Backend, string(roles), string(users), nowStr())
+  allow_roles=excluded.allow_roles, allow_users=excluded.allow_users,
+  addr_ref=excluded.addr_ref, svc_ref=excluded.svc_ref, updated_at=excluded.updated_at`,
+		r.ID, r.Name, r.Backend, string(roles), string(users), r.AddrRef, r.SvcRef, nowStr())
 	return err
 }
 

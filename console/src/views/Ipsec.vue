@@ -170,10 +170,32 @@
         </div>
         <div class="bd-uform__row">
           <div class="bd-uform__f"><label>本端网段</label>
-            <a-input v-model="form.localSubnet" placeholder="如 10.10.0.0/16" />
+            <a-select
+              :model-value="form.localRef"
+              class="bd-uform__objpick"
+              placeholder="从对象库选择（可选）"
+              allow-clear
+              :disabled="!subnetObjs.length"
+              @change="(v) => pickLocalObj(v as string | undefined)"
+            >
+              <a-option v-for="o in subnetObjs" :key="o.id" :value="o.id">{{ objLabel(o) }}</a-option>
+            </a-select>
+            <a-input v-model="form.localSubnet" placeholder="如 10.10.0.0/16" @input="onLocalSubnetInput" />
+            <div v-if="form.localRef" class="bd-uform__refhint">引用地址对象：{{ refName(form.localRef) }}</div>
           </div>
           <div class="bd-uform__f"><label>对端网段</label>
-            <a-input v-model="form.remoteSubnet" placeholder="如 10.20.0.0/16" />
+            <a-select
+              :model-value="form.remoteRef"
+              class="bd-uform__objpick"
+              placeholder="从对象库选择（可选）"
+              allow-clear
+              :disabled="!subnetObjs.length"
+              @change="(v) => pickRemoteObj(v as string | undefined)"
+            >
+              <a-option v-for="o in subnetObjs" :key="o.id" :value="o.id">{{ objLabel(o) }}</a-option>
+            </a-select>
+            <a-input v-model="form.remoteSubnet" placeholder="如 10.20.0.0/16" @input="onRemoteSubnetInput" />
+            <div v-if="form.remoteRef" class="bd-uform__refhint">引用地址对象：{{ refName(form.remoteRef) }}</div>
           </div>
         </div>
 
@@ -237,7 +259,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type IpsecSite, type IpsecResp } from '@/lib/api';
+import { api, type IpsecSite, type IpsecResp, type AddrObject, type ObjectBundle } from '@/lib/api';
 
 const tab = ref<'topo' | 'list'>('topo');
 const live = ref(false);
@@ -286,6 +308,11 @@ const MOCK: IpsecResp = {
 };
 
 const sites = ref<IpsecSite[]>([]);
+
+/* ── 对象库地址对象（供本端/对端网段引用，仅子网类：cidr/ip/range，排除 domain）── */
+const subnetObjs = ref<AddrObject[]>([]);
+function objLabel(o: AddrObject) { return `${o.name} · ${o.value}`; }
+function refName(id?: string) { return subnetObjs.value.find((o) => o.id === id)?.name || ''; }
 
 /* ── 站点清单关键词检索（拓扑总览不受影响，始终展示全部）── */
 const kw = ref('');
@@ -363,6 +390,7 @@ function onSuiteChange(v: string | number | boolean) {
 function openCreate() {
   editing.value = false;
   form.id = ''; form.name = ''; form.peer = ''; form.localSubnet = ''; form.remoteSubnet = '';
+  form.localRef = undefined; form.remoteRef = undefined;
   form.ikeVersion = 'IKEv2'; form.auth = 'psk'; form.suite = 'standard';
   form.pfs = true; form.pqHybrid = false;
   form.status = 'down'; form.rxBytes = 0; form.txBytes = 0; form.lastUp = '';
@@ -373,12 +401,28 @@ function openEdit(s: IpsecSite) {
   editing.value = true;
   form.id = s.id; form.name = s.name; form.peer = s.peer;
   form.localSubnet = s.localSubnet; form.remoteSubnet = s.remoteSubnet;
+  form.localRef = s.localRef; form.remoteRef = s.remoteRef;
   form.ikeVersion = s.ikeVersion || 'IKEv2'; form.auth = s.auth; form.suite = s.suite;
   form.phase1 = { ...s.phase1 }; form.phase2 = { ...s.phase2 };
   form.pfs = s.pfs; form.pqHybrid = s.pqHybrid;
   form.status = s.status; form.rxBytes = s.rxBytes; form.txBytes = s.txBytes; form.lastUp = s.lastUp;
   formOpen.value = true;
 }
+
+/* ── 网段 ↔ 对象库引用联动 ── */
+function pickLocalObj(id: string | undefined) {
+  form.localRef = id || undefined;
+  const o = subnetObjs.value.find((x) => x.id === id);
+  if (o) form.localSubnet = o.value;
+}
+function pickRemoteObj(id: string | undefined) {
+  form.remoteRef = id || undefined;
+  const o = subnetObjs.value.find((x) => x.id === id);
+  if (o) form.remoteSubnet = o.value;
+}
+// 手动编辑网段输入即视为脱离对象库引用
+function onLocalSubnetInput() { form.localRef = undefined; }
+function onRemoteSubnetInput() { form.remoteRef = undefined; }
 
 async function save() {
   if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
@@ -388,7 +432,9 @@ async function save() {
     ...form,
     ikeVersion: 'IKEv2',
     phase1: { ...form.phase1 },
-    phase2: { ...form.phase2 }
+    phase2: { ...form.phase2 },
+    localRef: form.localRef || undefined,
+    remoteRef: form.remoteRef || undefined
   };
   try {
     await api('/ipsec', {
@@ -425,7 +471,15 @@ async function load() {
   } catch { sites.value = MOCK.sites; live.value = false; }
 }
 
-onMounted(load);
+async function loadObjects() {
+  try {
+    const b = await api<ObjectBundle>('/objects');
+    // 仅保留可作网段的地址对象（cidr/ip/range），排除 domain
+    subnetObjs.value = (b.addrs || []).filter((o) => o.kind === 'cidr' || o.kind === 'ip' || o.kind === 'range');
+  } catch { subnetObjs.value = []; }
+}
+
+onMounted(() => { load(); loadObjects(); });
 </script>
 
 <style scoped>
@@ -463,6 +517,8 @@ onMounted(load);
 .bd-uform__sw { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
 .bd-uform__sw label { margin-bottom: 0; }
 .bd-uform__note { font-size: 12px; color: var(--bd-t3); margin: -2px 0 6px; }
+.bd-uform__objpick { margin-bottom: 6px; }
+.bd-uform__refhint { font-size: 11.5px; color: var(--bd-t3); margin-top: 4px; }
 .bd-uform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
 .bd-empty { text-align: center; color: var(--bd-t3); padding: 28px 0; }
 </style>

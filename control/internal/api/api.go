@@ -183,11 +183,13 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Password != "baidi@123" {
+		s.auditAs(r, b.Username, "auth", "终端用户登录失败（密码错误）", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示口令：baidi@123）"})
 		return
 	}
 	risky := strings.HasPrefix(b.Username, "ext") || strings.Contains(b.Username, "外包")
 	if risky && b.MfaCode == "" {
+		s.auditAs(r, b.Username, "security", "终端用户登录触发自适应二次认证", "mfa")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "检测到未授信终端/异地登录，需短信二次认证"})
 		return
 	}
@@ -195,6 +197,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：123456）"})
 		return
 	}
+	s.auditAs(r, b.Username, "auth", "终端用户登录成功", "ok")
 	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "user", Name: b.Username}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": b.Username})
 }
@@ -244,6 +247,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
+	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+")", "ok")
 	httpx.JSON(w, http.StatusCreated, created)
 }
 
@@ -264,6 +268,8 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set user status")
 		return
 	}
+	statusZh := map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "挂起"}[body.Status]
+	s.audit(r, "admin", "用户 "+id+" 状态置「"+statusZh+"」", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": body.Status})
 }
 
@@ -278,9 +284,11 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if b.Username != "admin" || b.Password != "baidi@123" {
+		s.auditAs(r, b.Username, "auth", "管理员登录失败（用户名或密码错误）", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示账号 admin / baidi@123）"})
 		return
 	}
+	s.auditAs(r, "安全管理员", "auth", "管理员登录成功", "ok")
 	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "admin", Name: "安全管理员"}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": "安全管理员", "role": "admin"})
 }
@@ -398,6 +406,7 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save resource")
 		return
 	}
+	s.audit(r, "admin", "保存受控资源「"+res.ID+"」("+res.Backend+")", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "resource": res})
 }
 
@@ -411,6 +420,7 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete resource")
 		return
 	}
+	s.audit(r, "admin", "删除受控资源 "+id, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
@@ -428,6 +438,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to create app")
 		return
 	}
+	s.audit(r, "admin", "发布应用「"+created.Name+"」", "ok")
 	httpx.JSON(w, http.StatusCreated, created)
 }
 
@@ -448,6 +459,8 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to decide approval")
 		return
 	}
+	decZh := map[string]string{"approved": "通过", "rejected": "驳回"}[body.Decision]
+	s.audit(r, "admin", "设备绑定审批 "+id+"："+decZh, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "decision": body.Decision})
 }
 
@@ -470,6 +483,7 @@ func (s *Server) handleSavePolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save policy")
 		return
 	}
+	s.audit(r, "admin", "保存用户策略覆盖「"+body.Title+"」("+node+")", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "node": node})
 }
 

@@ -40,6 +40,7 @@ func (s *Server) handleSaveAuthPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save auth policy")
 		return
 	}
+	s.audit(r, "admin", "保存认证策略「"+saved.Name+"」", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "policy": saved})
 }
 
@@ -53,5 +54,6 @@ func (s *Server) handleDeleteAuthPolicy(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete auth policy")
 		return
 	}
+	s.audit(r, "admin", "删除认证策略 "+id, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

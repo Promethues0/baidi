@@ -72,6 +72,7 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.kicked[id] = reason
 	s.mu.Unlock()
+	s.audit(r, "security", "强制下线会话 "+id+"（"+reason+"）", "deny")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": "offline", "reason": reason})
 }
 
@@ -123,6 +124,7 @@ func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save ipsec site")
 		return
 	}
+	s.audit(r, "admin", "保存 IPSec 站点「"+saved.Name+"」", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "site": saved})
 }
 
@@ -135,6 +137,7 @@ func (s *Server) handleDeleteIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete ipsec site")
 		return
 	}
+	s.audit(r, "admin", "删除 IPSec 站点 "+id, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
@@ -148,6 +151,8 @@ func (s *Server) handleToggleIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to toggle ipsec site")
 		return
 	}
+	act := map[string]string{"up": "建立", "down": "断开"}[status]
+	s.audit(r, "admin", act+" IPSec 隧道 "+id, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": status})
 }
 
@@ -193,6 +198,7 @@ func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusInternalServerError, "failed to save addr object")
 			return
 		}
+		s.audit(r, "admin", "保存地址对象「"+saved.Name+"」", "ok")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "object": saved})
 	case "service":
 		var o store.ServiceObject
@@ -205,6 +211,7 @@ func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusInternalServerError, "failed to save service object")
 			return
 		}
+		s.audit(r, "admin", "保存服务对象「"+saved.Name+"」", "ok")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "object": saved})
 	case "time":
 		var o store.TimeObject
@@ -217,6 +224,7 @@ func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusInternalServerError, "failed to save time object")
 			return
 		}
+		s.audit(r, "admin", "保存时间对象「"+saved.Name+"」", "ok")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "object": saved})
 	default:
 		httpx.Error(w, http.StatusBadRequest, "kind must be addr|service|time")
@@ -247,11 +255,13 @@ func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
 		if usage, uerr := s.store.ObjectUsage(r.Context()); uerr == nil {
 			consumers = usage[id]
 		}
+		s.audit(r, "admin", "删除对象 "+id+" 被拒（被引用）", "deny")
 		httpx.JSON(w, http.StatusConflict, map[string]any{
 			"error":     map[string]any{"message": "对象被引用，无法删除；请先在引用方解除引用"},
 			"consumers": consumers,
 		})
 		return
 	}
+	s.audit(r, "admin", "删除"+map[string]string{"addr": "地址", "service": "服务", "time": "时间"}[kind]+"对象 "+id, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "kind": kind, "id": id})
 }

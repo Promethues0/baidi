@@ -76,6 +76,19 @@ restore_nginx() { # 有旧备份则还原可用配置，仅首装无备份才删
   else rm -f /etc/nginx/conf.d/baidi.conf; fi
 }
 render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
+# 独占标准端口(443)时补一个 80→443 跳转：具名 server（server_name=本机），非 default_server，
+# 与烛龙共存契约不冲突（名匹配，不抢兜底）；裸 IP / http:// 访问自动跳 https。非 443 端口(共存模式)不加。
+if [ "$BD_HTTPS_PORT" = "443" ]; then
+  cat >> /etc/nginx/conf.d/baidi.conf <<EOF
+
+# HTTP→HTTPS 跳转（具名，非 default_server）
+server {
+    listen 80;
+    server_name ${PUBLIC_HOST};
+    return 301 https://\$host\$request_uri;
+}
+EOF
+fi
 # 防御①：白帝绝不得声明 default_server（剥注释后再查，避免被说明性注释里的字样误伤）
 if sed 's/#.*//' /etc/nginx/conf.d/baidi.conf | grep -q 'default_server'; then
   restore_nginx; echo "✗ 拒绝：baidi nginx 站点含 default_server，已还原（绝不抢占烛龙 80/443）"; exit 1

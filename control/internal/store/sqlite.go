@@ -73,6 +73,9 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	return s, nil
 }
 
+// Ping 探测底层数据库连接健康（供运维自检 /diag 调用）。
+func (s *SQLiteStore) Ping(ctx context.Context) error { return s.db.PingContext(ctx) }
+
 func (s *SQLiteStore) Close() error { return s.db.Close() }
 
 func (s *SQLiteStore) migrate() error {

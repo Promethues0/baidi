@@ -17,8 +17,8 @@
       <span class="bd-top__divider" />
       <nav class="bd-modes">
         <span class="bd-mode on">控制台</span>
-        <span class="bd-mode">态势大屏</span>
-        <span class="bd-mode">运维诊断</span>
+        <span class="bd-mode" @click="router.push('/screen')">态势大屏</span>
+        <span class="bd-mode" @click="router.push('/diag')">运维诊断</span>
       </nav>
       <div class="bd-top__spacer" />
       <div class="bd-search"><icon-search /><span>搜索用户、应用、策略…</span></div>

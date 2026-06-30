@@ -36,6 +36,10 @@ const routes: RouteRecordRaw[] = [
   { path: '/portal/login', component: () => import('@/views/PortalLogin.vue') },
   { path: '/portal', redirect: '/portal/apps' },
   { path: '/portal/apps', component: () => import('@/views/PortalApps.vue') },
+  // 态势大屏（全屏 NOC，脱离控制台 chrome；非 public，受登录守卫保护）
+  { path: '/screen', component: () => import('@/views/BigScreen.vue') },
+  // 运维诊断（系统自检，脱离控制台 chrome；非 public，受登录守卫保护）
+  { path: '/diag', component: () => import('@/views/Diag.vue') },
   {
     path: '/',
     component: AppLayout,

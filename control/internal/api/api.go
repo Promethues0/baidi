@@ -125,6 +125,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
 	// 安全中心：安全基线 + SPA
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
+	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
+	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 
 	// 监控中心：在线用户（实时会话）+ 强制下线 + 用户状态
 	mux.HandleFunc("GET /api/v1/online", s.handleOnline)

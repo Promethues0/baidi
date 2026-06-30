@@ -194,3 +194,16 @@ export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
 export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
 export interface PortalAppsResp { apps: PortalTile[] }
+
+/* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
+export type DiagStatus = 'pass' | 'warn' | 'fail';
+export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';
+export interface DiagCheck {
+  key: string; category: DiagCategory; name: string;
+  status: DiagStatus; summary: string; metric: string; hint: string;
+}
+export interface DiagBundle {
+  generatedAt: string; component: string; version: string; env: string; uptime: string;
+  score: number; pass: number; warn: number; fail: number;
+  checks: DiagCheck[];
+}

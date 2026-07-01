@@ -26,6 +26,6 @@
   "bundle": {
     "active": true,
     "targets": "all",
-    "externalBin": ["binaries/baidi-knock"]
+    "externalBin": ["binaries/baidi-knock", "binaries/baidi-tun"]
   }
 }

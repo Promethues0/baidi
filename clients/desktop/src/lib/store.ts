@@ -1,27 +1,49 @@
 import { reactive } from 'vue';
 
+const ls = localStorage;
+
 /** 客户端会话与接入状态（终端 Agent 全局状态）。 */
 export const session = reactive({
-  token: localStorage.getItem('baidi_client_token') || '',
-  user: localStorage.getItem('baidi_client_user') || '',
-  connected: false,            // 是否已接入企业内网
-  serverAddr: localStorage.getItem('baidi_client_server') || 'sdp.baidi.local',
-  autostart: localStorage.getItem('baidi_client_autostart') === '1'
+  token: ls.getItem('baidi_client_token') || '',
+  user: ls.getItem('baidi_client_user') || '',
+  connected: false,             // 是否已接入（utun 数据面就绪）
+  autostart: ls.getItem('baidi_client_autostart') === '1'
 });
+
+/** 接入配置（设置页可改，持久化）。默认对准本机演示（control + gateway 跑在 localhost）。 */
+export const config = reactive({
+  control: ls.getItem('baidi_cfg_control') || 'http://127.0.0.1:8090', // 控制中心：登录/应用/短时效敲门令牌
+  gateway: ls.getItem('baidi_cfg_gateway') || '127.0.0.1',             // 安全代理网关主机
+  spaPort: ls.getItem('baidi_cfg_spaport') || '18201',                 // SPA 敲门端口（UDP）
+  proxyPort: ls.getItem('baidi_cfg_proxyport') || '18443',             // 隧道代理端口（TCP）
+  route: ls.getItem('baidi_cfg_route') || '10.99.0.0/24',             // 引流进隧道的受保护网段
+  ip: ls.getItem('baidi_cfg_ip') || '10.99.0.2',                       // utun 虚拟 IP
+  gm: (ls.getItem('baidi_cfg_gm') ?? '1') === '1'                      // 国密 TLCP 隧道
+});
+
+export function saveConfig(): void {
+  ls.setItem('baidi_cfg_control', config.control);
+  ls.setItem('baidi_cfg_gateway', config.gateway);
+  ls.setItem('baidi_cfg_spaport', config.spaPort);
+  ls.setItem('baidi_cfg_proxyport', config.proxyPort);
+  ls.setItem('baidi_cfg_route', config.route);
+  ls.setItem('baidi_cfg_ip', config.ip);
+  ls.setItem('baidi_cfg_gm', config.gm ? '1' : '0');
+}
 
 export function authed(): boolean { return !!session.token; }
 
 export function login(token: string, user: string): void {
   session.token = token;
   session.user = user;
-  localStorage.setItem('baidi_client_token', token);
-  localStorage.setItem('baidi_client_user', user);
+  ls.setItem('baidi_client_token', token);
+  ls.setItem('baidi_client_user', user);
 }
 
 export function logout(): void {
   session.token = '';
   session.user = '';
   session.connected = false;
-  localStorage.removeItem('baidi_client_token');
-  localStorage.removeItem('baidi_client_user');
+  ls.removeItem('baidi_client_token');
+  ls.removeItem('baidi_client_user');
 }

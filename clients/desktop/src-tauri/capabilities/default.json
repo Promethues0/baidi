@@ -1,10 +1,14 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "白帝桌面默认权限：主窗口 + baidi-knock sidecar（按需 SPA 敲门）",
+  "description": "白帝桌面默认权限：主窗口自定义标题栏窗控 + baidi-knock sidecar（按需 SPA 敲门）",
   "windows": ["main"],
   "permissions": [
     "core:default",
+    "core:window:allow-minimize",
+    "core:window:allow-toggle-maximize",
+    "core:window:allow-close",
+    "core:window:allow-start-dragging",
     {
       "identifier": "shell:allow-execute",
       "allow": [

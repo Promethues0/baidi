@@ -6,29 +6,29 @@
       <div class="st__h">接入配置</div>
       <div class="st__row">
         <div><div class="st__l">控制中心地址</div><div class="st__d">登录 / 拉应用 / 取短时效敲门令牌的入口</div></div>
-        <a-input v-model="config.control" style="width: 240px" placeholder="http://127.0.0.1:8090" @change="saveConfig" />
+        <a-input v-model="config.control" style="width: 240px" placeholder="http://127.0.0.1:8090" @change="onSave" />
       </div>
       <div class="st__row">
         <div><div class="st__l">安全代理网关</div><div class="st__d">SPA 敲门与加密隧道的网关主机</div></div>
-        <a-input v-model="config.gateway" style="width: 240px" placeholder="127.0.0.1" @change="saveConfig" />
+        <a-input v-model="config.gateway" style="width: 240px" placeholder="127.0.0.1" @change="onSave" />
       </div>
       <div class="st__row">
         <div><div class="st__l">受保护网段</div><div class="st__d">接入后该网段流量由 utun 接管进隧道</div></div>
-        <a-input v-model="config.route" style="width: 240px" placeholder="10.99.0.0/24" @change="saveConfig" />
+        <a-input v-model="config.route" style="width: 240px" placeholder="10.99.0.0/24" @change="onSave" />
       </div>
       <div class="st__row">
         <div><div class="st__l">虚拟 IP</div><div class="st__d">utun 虚拟网卡地址</div></div>
-        <a-input v-model="config.ip" style="width: 240px" placeholder="10.99.0.2" @change="saveConfig" />
+        <a-input v-model="config.ip" style="width: 240px" placeholder="10.99.0.2" @change="onSave" />
       </div>
       <div class="st__row">
         <div><div class="st__l">国密隧道（TLCP）</div><div class="st__d">隧道走国密 SM2/SM4/SM3（自签网关证书自动跳过校验）</div></div>
-        <a-switch v-model="config.gm" @change="saveConfig" />
+        <a-switch v-model="config.gm" @change="onSave" />
       </div>
       <div class="st__row">
         <div><div class="st__l">高级 · 端口</div><div class="st__d">SPA 敲门(UDP) / 隧道代理(TCP) 端口</div></div>
         <div style="display: flex; gap: 8px">
-          <a-input v-model="config.spaPort" style="width: 116px" placeholder="18201" @change="saveConfig" />
-          <a-input v-model="config.proxyPort" style="width: 116px" placeholder="18443" @change="saveConfig" />
+          <a-input v-model="config.spaPort" style="width: 116px" placeholder="18201" @change="onSave" />
+          <a-input v-model="config.proxyPort" style="width: 116px" placeholder="18443" @change="onSave" />
         </div>
       </div>
       <div class="st__row">
@@ -59,9 +59,11 @@
 </template>
 
 <script setup lang="ts">
-import { session, config, saveConfig } from '@/lib/store';
+import { Message } from '@arco-design/web-vue';
+import { session, config, saveConfig, validateConfig } from '@/lib/store';
 defineEmits<{ logout: [] }>();
 function save(k: string, v: string) { localStorage.setItem(k, v); }
+function onSave() { saveConfig(); const e = validateConfig(); if (e) Message.warning(e); }
 </script>
 
 <style scoped>

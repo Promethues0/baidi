@@ -39,8 +39,12 @@ func main() {
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	// 令牌优先取 -token；为空则回退 BAIDI_TOKEN 环境变量（避免出现在 ps 进程参数里泄露）。
 	if *token == "" {
-		log.Fatal("需 -token（baidi-control 签发的 JWT）")
+		*token = os.Getenv("BAIDI_TOKEN")
+	}
+	if *token == "" {
+		log.Fatal("需 -token 或 BAIDI_TOKEN 环境变量（baidi-control 签发的 JWT）")
 	}
 
 	// 国密隧道客户端配置：默认 CA 根校验，-insecure 仅排障

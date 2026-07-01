@@ -60,15 +60,16 @@ export async function tunnelStatus(): Promise<TunView> {
 function parse(s: TunStatusRaw): TunView {
   const log = s.log || '';
   const lines = log.split('\n').map((l) => l.trim()).filter(Boolean);
-  const dev = (log.match(/dev=(utun\d+|\S+0)/) || log.match(/dev=(\S+)/) || [])[1] || '';
-  const ready = /数据面就绪/.test(log);
-  const keepalive = /敲门保活/.test(log);
+  const dev = (log.match(/dev=(utun\d+)/) || [])[1] || '';
+  // ready/keepalive 仅在进程存活时才认（进程已退出=旧日志残留，不据此误判）
+  const ready = s.running && /数据面就绪/.test(log);
+  const keepalive = s.running && /敲门保活/.test(log);
   // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示
   const fails = lines.filter((l) => /失败|未敲门成功|panic|fatal|退出/i.test(l));
   const error = !s.running && fails.length ? stripTs(fails[fails.length - 1]) : '';
   return {
     running: s.running,
-    ready: s.running && ready,
+    ready,
     dev,
     vip: config.ip,
     route: config.route,

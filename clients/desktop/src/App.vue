@@ -2,7 +2,11 @@
   <div class="dk-win">
     <!-- 标题栏（Tauri 下为拖拽区） -->
     <header class="dk-titlebar" data-tauri-drag-region>
-      <span class="dk-dots"><i class="r" /><i class="y" /><i class="g" /></span>
+      <span class="dk-dots">
+        <button class="r" title="关闭" @click="win('close')"><span>✕</span></button>
+        <button class="y" title="最小化" @click="win('min')"><span>−</span></button>
+        <button class="g" title="最大化" @click="win('max')"><span>+</span></button>
+      </span>
       <span class="dk-brand">
         <span class="dk-brand__mark">
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none">
@@ -16,9 +20,6 @@
       <span class="dk-state" :class="{ on: session.connected }">
         <i class="dot" />{{ session.connected ? '已接入企业内网' : authedNow ? '已认证 · 待接入' : '未登录' }}
       </span>
-      <span class="dk-wbtn">—</span>
-      <span class="dk-wbtn">▢</span>
-      <span class="dk-wbtn dk-wbtn--x">✕</span>
     </header>
 
     <div class="dk-body">
@@ -47,6 +48,7 @@
 <script setup lang="ts">
 import { ref, computed } from 'vue';
 import { session, logout, authed } from '@/lib/store';
+import { tauriRuntime } from '@/lib/tunnel';
 import Connect from '@/views/Connect.vue';
 import Apps from '@/views/Apps.vue';
 import Diagnostics from '@/views/Diagnostics.vue';
@@ -54,6 +56,19 @@ import Settings from '@/views/Settings.vue';
 
 const tab = ref<'connect' | 'apps' | 'diag' | 'settings'>('connect');
 const authedNow = computed(() => authed());
+
+/* 自定义标题栏窗控（frameless）：经 Tauri 窗口 API 真实最小化/最大化/关闭 */
+async function win(a: 'min' | 'max' | 'close') {
+  if (!tauriRuntime()) return;
+  const mod = '@tauri-apps/api/window';
+  const { getCurrentWindow } = (await import(/* @vite-ignore */ mod)) as {
+    getCurrentWindow: () => { minimize: () => Promise<void>; toggleMaximize: () => Promise<void>; close: () => Promise<void> };
+  };
+  const w = getCurrentWindow();
+  if (a === 'min') await w.minimize();
+  else if (a === 'max') await w.toggleMaximize();
+  else await w.close();
+}
 
 const TABS = [
   { key: 'connect', label: '接入', icon: 'IconLink' },
@@ -72,9 +87,18 @@ function doLogout() { logout(); tab.value = 'connect'; }
   height: 38px; flex: none; display: flex; align-items: center; gap: 10px; padding: 0 12px;
   background: #fff; border-bottom: 1px solid var(--bd-border); user-select: none;
 }
-.dk-dots { display: flex; gap: 7px; }
-.dk-dots i { width: 11px; height: 11px; border-radius: 50%; display: inline-block; }
-.dk-dots .r { background: #FF5F57; } .dk-dots .y { background: #FEBC2E; } .dk-dots .g { background: #28C840; }
+.dk-dots { display: flex; gap: 8px; align-items: center; }
+.dk-dots button {
+  width: 12px; height: 12px; border-radius: 50%; border: none; padding: 0; cursor: pointer;
+  display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+  font-size: 9px; font-weight: 700; color: transparent; transition: filter .12s;
+}
+.dk-dots button > span { transform: translateY(-.5px); }
+.dk-dots:hover button { color: rgba(0, 0, 0, .55); }   /* macOS：悬停整组显符号 */
+.dk-dots button:active { filter: brightness(.85); }
+.dk-dots .r { background: #FF5F57; }
+.dk-dots .y { background: #FEBC2E; }
+.dk-dots .g { background: #28C840; }
 .dk-brand { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 600; margin-left: 6px; }
 .dk-brand__mark {
   width: 20px; height: 20px; border-radius: 6px; display: inline-flex; align-items: center; justify-content: center;
@@ -85,8 +109,6 @@ function doLogout() { logout(); tab.value = 'connect'; }
 .dk-state .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--bd-t4); }
 .dk-state.on { color: var(--bd-success); }
 .dk-state.on .dot { background: var(--bd-success); box-shadow: 0 0 0 3px rgba(0, 180, 42, .18); }
-.dk-wbtn { font-size: 12px; color: var(--bd-t3); width: 20px; text-align: center; cursor: default; }
-.dk-wbtn--x:hover { color: var(--bd-danger); }
 
 .dk-body { display: flex; flex: 1; overflow: hidden; }
 .dk-rail {

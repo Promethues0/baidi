@@ -21,6 +21,17 @@ export const config = reactive({
   gm: (ls.getItem('baidi_cfg_gm') ?? '1') === '1'                      // 国密 TLCP 隧道
 });
 
+/** 校验接入配置，返回第一条错误文案；全部合法则 null。接入前与保存时共用。 */
+export function validateConfig(): string | null {
+  const port = (p: string) => { const n = Number(p); return Number.isInteger(n) && n >= 1 && n <= 65535; };
+  if (!/^https?:\/\/.+/.test(config.control.trim())) return '控制中心地址须以 http:// 或 https:// 开头';
+  if (!config.gateway.trim()) return '网关地址不能为空';
+  if (!port(config.spaPort) || !port(config.proxyPort)) return '端口须为 1-65535 的整数';
+  if (!/^\d{1,3}(\.\d{1,3}){3}\/\d{1,2}$/.test(config.route.trim())) return '受保护网段须为 CIDR，如 10.99.0.0/24';
+  if (!/^\d{1,3}(\.\d{1,3}){3}$/.test(config.ip.trim())) return '虚拟 IP 须为 IPv4 地址，如 10.99.0.2';
+  return null;
+}
+
 export function saveConfig(): void {
   ls.setItem('baidi_cfg_control', config.control);
   ls.setItem('baidi_cfg_gateway', config.gateway);

@@ -49,6 +49,7 @@
 
         <button v-if="stage === 'idle'" class="dk-btn ck-cta" @click="connect"><icon-link />接入企业内网</button>
         <button v-else-if="stage === 'connected'" class="dk-btn dk-btn--ghost ck-cta" @click="disconnect"><icon-poweroff />断开连接</button>
+        <button v-else-if="connectTimedOut" class="dk-btn dk-btn--ghost ck-cta" @click="disconnect"><icon-poweroff />停止接入</button>
         <div v-else class="ck-connecting">接入中…</div>
 
         <div v-if="err2" class="ck-err2"><icon-exclamation-circle-fill /> {{ err2 }}</div>
@@ -91,7 +92,7 @@
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type PortalLoginResp } from '@/lib/api';
-import { session, login, authed } from '@/lib/store';
+import { session, login, authed, validateConfig } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, type TunView } from '@/lib/tunnel';
 
@@ -127,6 +128,10 @@ const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
 
 let pollTimer = 0;
+let pollGen = 0;         // 轮询代次：断开/重连后自增，令过期的在途轮询失效
+let connectTO = 0;      // 接入超时计时器
+const connectTimedOut = ref(false);
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', lines: [] };
 function stepFromTun(v: TunView): number {
   if (v.ready) return STEPS.length;
   if (v.keepalive) return 3;
@@ -135,8 +140,10 @@ function stepFromTun(v: TunView): number {
 }
 
 async function connect() {
-  err2.value = '';
+  err2.value = ''; connectTimedOut.value = false;
   if (!isTauri) { await connectDev(); return; }   // 浏览器联调：真敲门探测，不接管流量
+  const bad = validateConfig();
+  if (bad) { err2.value = bad; return; }          // 接入前配置校验（端口/网段/URL）
   stage.value = 'connecting'; step.value = 0;
   try {
     await tunnelStart();                            // 触发管理员授权 + 后台拉起 baidi-tun（root）
@@ -147,13 +154,23 @@ async function connect() {
   }
   step.value = 1;
   startPolling();
+  clearTimeout(connectTO);
+  connectTO = window.setTimeout(() => {
+    if (stage.value === 'connecting') {
+      connectTimedOut.value = true;
+      err2.value = '接入超时：数据面已启动但未就绪，请确认网关已运行、且「国密隧道」开关与网关一致';
+    }
+  }, 25000);
 }
 
 function startPolling() {
   clearInterval(pollTimer);
+  const gen = ++pollGen;
   pollTimer = window.setInterval(async () => {
+    if (gen !== pollGen) return;                 // 代次守卫：忽略过期轮询
     let v: TunView;
     try { v = await tunnelStatus(); } catch { return; }
+    if (gen !== pollGen) return;                 // await 期间可能已断开
     tun.value = v;
     if (!v.running) {
       clearInterval(pollTimer);
@@ -165,15 +182,18 @@ function startPolling() {
       return;
     }
     step.value = stepFromTun(v);
-    if (v.ready) { stage.value = 'connected'; session.connected = true; }
+    if (v.ready) {
+      stage.value = 'connected'; session.connected = true;
+      connectTimedOut.value = false; err2.value = ''; clearTimeout(connectTO);
+    }
   }, 1500);
 }
 
 async function disconnect() {
   try { await tunnelStop(); } catch (e) { err2.value = String((e as Error)?.message ?? e); return; }
-  clearInterval(pollTimer);
-  stage.value = 'idle'; session.connected = false;
-  tun.value = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', lines: [] };
+  pollGen++; clearInterval(pollTimer); clearTimeout(connectTO);
+  stage.value = 'idle'; session.connected = false; connectTimedOut.value = false; err2.value = '';
+  tun.value = { ...EMPTY_TUN };
 }
 
 /* 浏览器联调：经 knock-agent 真实敲门，UI 走通（不接管系统流量） */
@@ -207,7 +227,7 @@ onMounted(async () => {
     if (v.running) { tun.value = v; stage.value = v.ready ? 'connected' : 'connecting'; session.connected = v.ready; if (!v.ready) startPolling(); else startPolling(); }
   } catch { /* ignore */ }
 });
-onBeforeUnmount(() => clearInterval(pollTimer));
+onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); });
 </script>
 
 <style scoped>

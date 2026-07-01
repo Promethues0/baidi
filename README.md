@@ -1,97 +1,150 @@
+<div align="center">
+
 # 白帝 · 零信任访问控制系统
 
-> **以身份重塑边界，默认不信任、持续验证、最小授权、动态收缩。**
-> 白帝是基于深信服 aTrust 逆向分析、从「烛龙·统一安全接入平台」**分叉立项的独立产品**，聚焦零信任**访问控制**主线（ZTNA / SDP），
-> 对标深信服 aTrust / Zscaler / Cloudflare ZTNA，定位为 SSL VPN（EasyConnect 一代）的下一代演进。
+**以身份重塑边界 —— 默认不信任、持续验证、最小授权、动态收缩。**
 
-## 1. 白帝 ≠ 烛龙：范围边界
+零信任访问控制（ZTNA / SDP）全栈实现：SPA 服务隐身 · 国密加密隧道 · utun 真流量接管 · 身份/策略/审计闭环。
+对标深信服 aTrust / Zscaler / Cloudflare ZTNA，定位为 SSL VPN（EasyConnect 一代）的下一代演进。
 
-白帝**有意做减法**——相比烛龙主体，砍掉两类"非接入控制主线"的重模块，换取更聚焦、更易交付的产品形态：
+![Vue](https://img.shields.io/badge/Vue-3-42b883?logo=vue.js&logoColor=white)
+![Go](https://img.shields.io/badge/Go-golang-00ADD8?logo=go&logoColor=white)
+![Arco Design](https://img.shields.io/badge/Arco%20Design-Vue-165DFF)
+![Tauri](https://img.shields.io/badge/Tauri-2-FFC131?logo=tauri&logoColor=white)
+![国密 TLCP](https://img.shields.io/badge/国密-TLCP%20·%20SM2%2FSM4%2FSM3-C7000B)
+![Zero Trust](https://img.shields.io/badge/Zero%20Trust-ZTNA%20%2F%20SDP-6E56CF)
 
-| 模块 | 烛龙 | 白帝 | 说明 |
-|---|---|---|---|
-| UEM 统一终端数据安全（PRD ch11） | ✅ | ❌ **不做** | 移动/PC 数据安全、沙箱工作空间、外发审批等 DLP 能力整体移出范围 |
-| 安全中心 · 管理模块（PRD ch12） | ✅ | ❌ **不做** | 安全基线管理、虚拟网络域、可信应用等**管理页面**移出范围 |
-| **SPA 服务隐身** | ✅ | ✅ **保留** | 隐身是 ZTNA「网络隐身」价值主张的底座，作为**安全代理网关内建能力**保留，仅不暴露独立管理模块 |
-| 身份 / 认证 / 资源 / 策略 / 网关 / 审计 / 系统 | ✅ | ✅ **保留** | 零信任访问控制完整闭环，**白帝自有实现** |
+</div>
 
-> 边界是**刻意记录**的设计决策，详见 [`docs/SCOPE.md`](docs/SCOPE.md)（22 章 PRD → 白帝逐章取舍）。
-> 源 PRD = 飞书《白帝零信任访问控制系统—PRD V1.0》（aTrust v2.5.16 逆向，22 章；本地副本 [`docs/source-prd-zhulong.md`](docs/source-prd-zhulong.md)）。
+---
 
-## 2. 与烛龙的关系：分叉立项，自有全栈
+## ✨ 核心能力
 
-白帝是**独立仓库 + 独立 git 历史**。立项之初曾设想"fork 烛龙 console + 运行时复用 zhulong 引擎"，但已**整体退场**——白帝交互细节与烛龙不同、视觉走 **Arco Design 原生**、前后端与数据面**全部自有实现**：
-
-| 层 | 白帝现状 | 备注 |
+| | 能力 | 说明 |
 |---|---|---|
-| **Console 前端** | 自有 `console/`（Vue3 + Arco Design Vue），从 PRD 重做交互（范式 P1–P10） | 视觉 = **Arco 原生 ArcoBlue #165DFF**（非烛龙暖色系） |
-| **控制面** | 自有 `control/`（Go · `baidi-control` · :8090 · SQLite · JWT） | 不再依赖 `zhulong-control` |
-| **数据面网关** | 自有 `gateway/`（Go · `baidi-gateway`：SPA 敲门 + TLS/国密 TLCP 隧道 + 防火墙 DROP 隐身 + 动态拉策略） | 不再依赖 `zhulong-ssl-gw` |
-| **终端客户端** | 自有 `clients/`（桌面 Tauri 壳 + 移动端三端壳 + gomobile 数据面） | — |
+| 🕵️ | **SPA 服务隐身** | 受保护端口默认对外不可达（防火墙 DROP，扫描器见 `filtered`）；**先认证、后连接** |
+| 🎫 | **短时效一次性敲门令牌** | 控制面签发 90s + `jti` 去重令牌，根治重放攻击 |
+| 🔐 | **国密 TLCP 隧道** | SM2 双证书 + `ECC_SM4_GCM_SM3`；通用 TLS 1.3 亦可切换 |
+| 🚇 | **utun 真流量接管** | 桌面客户端以 utun 虚拟网卡真正接管受保护网段流量（gVisor 用户态栈 + 逐流敲门），非"演示动画" |
+| 🧭 | **零信任闭环** | 身份 / 认证（自适应 MFA）/ 资源 / 策略（继承树）/ 网关 / 审计 / 系统，**全自有实现** |
+| 📺 | **态势大屏** | 全屏 NOC：实时威胁雷达 + 三道防线仪表 + 实时安全事件 + 接入来源 TOP 地域（连真实接口，15s 轮询） |
+| 🩺 | **运维诊断** | 控制面 / 存储 / 数据面 / 隐身 / 集群 / 身份 / 密钥 八维**真实**自检 + 健康分 |
+| 📇 | **真实审计** | 每个管理写操作落库留痕，审计中心实时呈现 |
 
-烛龙留给白帝的是**需求与设计养分**（aTrust 逆向 PRD、IA 取舍、零信任范式），不是运行时进程。
+## 🏗 架构
 
-## 3. 目录结构
+```mermaid
+flowchart TB
+  subgraph 终端侧
+    direction LR
+    B["浏览器<br/>控制台 · 终端门户"]
+    D["桌面客户端<br/>Tauri · utun 真接管"]
+    M["移动端<br/>iOS · 安卓 · 鸿蒙"]
+  end
+
+  subgraph 控制面
+    N["nginx :443"] --> C["baidi-control :8090<br/>身份 · 策略 · 审计<br/>SQLite + JWT"]
+  end
+
+  subgraph 数据面
+    G["baidi-gateway<br/>SPA 隐身 :18201/udp<br/>国密/TLS 隧道 :18443/tcp"] --> R["受保护业务"]
+  end
+
+  B -->|HTTPS| N
+  D -->|登录 取敲门令牌| N
+  D -.->|① SPA 敲门 单包授权| G
+  D ==>|② 加密隧道| G
+  M -.-> G
+  M ==> G
+  G -->|注册心跳 动态拉策略| C
+```
+
+## 🔐 零信任接入链路
+
+```mermaid
+sequenceDiagram
+  participant U as 终端客户端
+  participant C as baidi-control
+  participant G as baidi-gateway
+  participant R as 受保护业务
+  U->>C: 1. 登录（口令 + 自适应 MFA）→ JWT
+  U->>C: 2. 换取短时效一次性敲门令牌
+  U-->>G: 3. SPA 敲门（UDP 单包，携带令牌）
+  Note over G: 校验身份 → 为源 IP 开 TTL 放行窗口
+  U->>G: 4. 建立国密 / TLS 加密隧道
+  G->>R: 5. 门控代理转发（资源级授权）
+  Note over U,G: 断开 / 超时 → 端口重新隐身（动态收缩）
+```
+
+## 📂 目录结构
 
 ```
 baidi/
-├── console/         # 控制台（Vue3 + Arco，dev :5193）— 管理台 + 态势大屏 + 终端用户门户
-│   └── src/{layout,views,lib,styles,nav.ts,router.ts}
+├── console/         # 控制台（Vue3 + Arco，dev :5193）— 管理台 + 态势大屏 + 运维诊断 + 终端门户
 ├── control/         # 控制面 baidi-control（Go，:8090，SQLite + JWT）
-│   ├── cmd/baidi-control/
-│   └── internal/{api,store,auth,...}
+│   └── internal/{api,store,auth}
 ├── gateway/         # 数据面 baidi-gateway（Go：SPA 敲门 / 隧道 / 防火墙隐身 / utun 引流）
-│   ├── cmd/{baidi-gateway,baidi-knock,baidi-tun,...}
-│   └── internal/{spa,proxy,gmcert,darkfw,dataplane,...}  +  mobile/  firewall/
-├── clients/         # 终端客户端
-│   ├── desktop/     #   桌面客户端（Vue + Arco，Tauri-ready，dev :5294）
-│   └── mobile/      #   移动端（iOS/安卓/鸿蒙，移动优先 UI + 原生 VPN 壳，dev :5295）
-├── deploy/          # systemd + nginx + build/install/wipe 脚本
+│   ├── cmd/{baidi-gateway,baidi-knock,baidi-tun,baidi-gmca,...}
+│   └── internal/{spa,proxy,gmcert,darkfw,dataplane,resource}  +  mobile/  firewall/
+├── clients/
+│   ├── desktop/     # 桌面客户端（Vue + Arco + Tauri，utun 真数据面，dev :5294）
+│   └── mobile/      # 移动端（iOS / 安卓 / 鸿蒙，移动优先 UI + 原生 VPN 壳，dev :5295）
+├── deploy/          # systemd + nginx + build / install / wipe 脚本
 ├── design-system/   # 设计 token
-├── docs/            # SCOPE.md 范围边界 · design/ 交互规范 · source-prd 副本
-└── README.md
+└── docs/            # SCOPE.md 范围边界 · design/ 交互规范
 ```
 
-## 4. 本地运行
+## 🚀 快速开始
 
-### 控制台 + 控制面
+### 控制面 + 控制台
 
 ```bash
-# 控制面（Go，:8090）
-cd control
-go run ./cmd/baidi-control          # SQLite 落 baidi.db（已 gitignore）；首启建表 + 播种
+# 控制面（Go，:8090，SQLite 首启自动建表 + 播种）
+cd control && go run ./cmd/baidi-control
 
-# 控制台（Vue，:5193）
-cd console
-npm install                         # 首次
-npm run dev                         # → http://localhost:5193
+# 控制台（Vue，:5193，vite /api → 127.0.0.1:8090）
+cd console && npm install && npm run dev     # → http://localhost:5193
 ```
 
-- 管理 API 经 vite 反代 **`/api → http://127.0.0.1:8090`**（自有后端 `baidi-control`）。未起后端时各页降级为内置演示数据（mock），UI 完整可点。
-- **登录**：管理台 `admin / baidi@123`（admin 角色）；终端用户门户 `/portal/login` 接受任意用户名 + 口令 `baidi@123`（如 `li.fang`），其中 `ext.*` 或含「外包」的账号（如 `ext.zhou`）触发自适应 MFA，验证码 `123456`。
-- **鉴权**：HS256 JWT（`BAIDI_JWT_SECRET`）。写操作强制 admin（否则 403）；非公开读无 token 401。前端 `lib/api` 自动带 Bearer，401 跳登录。
-- **视觉**：Hanken Grotesk + Arco 原生 **ArcoBlue #165DFF**（头像紫 #722ED1，侧栏底深色状态卡）。
+- **登录**：管理台 `admin / baidi@123`；终端门户 `/portal/login` 任意用户名 + 口令 `baidi@123`（如 `li.fang`），`ext.*` / 含「外包」账号（如 `ext.zhou`）触发自适应 MFA，验证码 `123456`。
+- 未起后端时各页降级为内置演示数据，UI 完整可点。
 
-### 控制台三模式（顶栏切换）
-
-| 模式 | 路由 | 说明 |
-|---|---|---|
-| **控制台** | `/`（监控中心 / 业务管理 / 安全防护 / 系统 四组侧栏 IA） | 管理主台 |
-| **态势大屏** | `/screen` | 全屏暗色 NOC：实时威胁雷达 + 三道防线仪表 + 实时安全事件 + 接入来源 TOP 地域（连真实接口，15s 轮询） |
-| **运维诊断** | `/diag` | 运维自检：控制面/数据面/隐身/集群/存储/身份多维一键体检 |
-
-### 数据面网关（可选）
+### 数据面网关
 
 ```bash
 cd gateway
-./demo.sh                           # 暗→敲门(SPA)→隧道→后端→TTL 自动重暗 的最小演示
-go run ./cmd/baidi-gateway -gm      # 国密 TLCP 隧道（SM2 双证书 + ECC_SM4_GCM_SM3）
+./demo.sh                        # 暗 → SPA 敲门 → 隧道 → 后端 → TTL 自动重暗 的最小闭环演示
+go run ./cmd/baidi-gateway -gm   # 国密 TLCP 隧道
 ```
 
-数据面默认对外不可达（隐身），收到 `baidi-control` 签发的短时效一次性 SPA 敲门令牌后，为源 IP 开 TTL 放行窗口，窗口内才接受 TLS 隧道；并向 `baidi-control` 注册心跳 + 动态拉取资源策略。详见 [`gateway/README.md`](gateway/README.md)。
+### 桌面客户端（真 utun 接入）
 
-## 5. 部署
+```bash
+cd clients/desktop
+./src-tauri/build-sidecars.sh    # 构建 baidi-knock / baidi-tun sidecar
+npm install && npm run tauri:build   # 产出 .app / .dmg（macOS，需 Rust 工具链）
+```
 
-`deploy/` 提供 systemd（`baidi-control@:8090`）+ nginx（80→443 + SPA 回退 + `/api` 反代透传 Bearer）+ `build.sh`（交叉编译 linux/amd64 静态 ELF + vite dist）+ `install-remote.sh` / `wipe-remote.sh` / `deploy.sh`。`WITH_GATEWAY=1` 一并装启 `baidi-gateway`（国密）。
+登录后点「接入」→ 授权管理员 → 客户端以 **utun 虚拟网卡**接管配置的受保护网段：逐流 SPA 敲门 + 加密隧道送达网关。**不接入时该网段路由不存在**（先认证后连接的直接证据）。
 
-**线上**：已独占部署到 `https://101.43.125.131/`（控制台 `admin/baidi@123`、门户 `/portal/login`），控制面 + 数据面公网全栈跑通（含国密 TLCP 真实接入实测）。注：当前为自签证书，生产需换正式证书。
+## 🖥 控制台三模式（顶栏切换）
+
+| 模式 | 路由 | 说明 |
+|---|---|---|
+| **控制台** | `/` | 监控中心 / 业务管理 / 安全防护 / 系统 四组侧栏 IA |
+| **态势大屏** | `/screen` | 全屏暗色 NOC 实时态势感知 |
+| **运维诊断** | `/diag` | 八维系统自检 + 健康分 |
+
+## ☁️ 部署与在线演示
+
+`deploy/` 提供 systemd + nginx（80→443 + SPA 回退 + `/api` 反代）+ 交叉编译/安装脚本；`WITH_GATEWAY=1` 一并装启国密网关。
+
+> **在线演示**：`https://101.43.125.131/`（控制台 `admin/baidi@123`）。当前为自签证书（浏览器会提示，可继续访问），控制面 + 数据面公网全栈跑通，含国密 TLCP 真实接入。生产需换正式证书。
+
+## 🧭 与「烛龙」的关系
+
+白帝基于深信服 aTrust 逆向 PRD、从统一安全接入平台**烛龙**分叉立项，**独立仓库 + 自有全栈**（前端、控制面、数据面、客户端均自实现，不复用烛龙运行时）。相比烛龙主体**有意做减法**：移出 UEM 终端数据安全与安全中心管理模块，聚焦零信任访问控制主线。逐章取舍见 [`docs/SCOPE.md`](docs/SCOPE.md)。
+
+---
+
+<div align="center"><sub>零信任 · 国密 · 自主可控 —— 默认不信任，持续验证。</sub></div>

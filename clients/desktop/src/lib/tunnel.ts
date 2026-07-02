@@ -52,6 +52,11 @@ export async function tunnelStop(): Promise<void> {
   await invoke('tunnel_stop');
 }
 
+/** 前端确认后真正退出应用（隧道运行中退出前的二次确认走此）。 */
+export async function forceQuit(): Promise<void> {
+  await invoke('force_quit');
+}
+
 export async function tunnelStatus(): Promise<TunView> {
   const s = await invoke<TunStatusRaw>('tunnel_status');
   return parse(s);

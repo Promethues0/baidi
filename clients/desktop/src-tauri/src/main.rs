@@ -8,7 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 const LOG: &str = "/tmp/baidi-tun.log";
 const PID: &str = "/tmp/baidi-tun.pid";
@@ -174,6 +174,12 @@ fn tunnel_stop() -> Result<(), String> {
     Ok(())
 }
 
+/// 前端确认后真正退出（隧道运行中退出前的二次确认走此命令）。
+#[tauri::command]
+fn force_quit(app: tauri::AppHandle) {
+    app.exit(0);
+}
+
 /// 显示并聚焦主窗口（从托盘唤起）。
 fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -190,7 +196,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop])
+        .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop, force_quit])
         .setup(|app| {
             // 托盘菜单：状态（禁用只读）/ 显示主窗口 / 退出
             let status = MenuItem::with_id(app, "status", "○ 未接入", false, None::<&str>)?;
@@ -205,7 +211,15 @@ fn main() {
                 .menu(&menu)
                 .on_menu_event(|app, event| match event.id.as_ref() {
                     "show" => show_main(app),
-                    "quit" => app.exit(0),
+                    "quit" => {
+                        // 隧道运行中直接退出会遗留无管控的 root 数据面 → 唤起窗口 + 请前端二次确认
+                        if tun_running() {
+                            show_main(app);
+                            let _ = app.emit("quit-request", ());
+                        } else {
+                            app.exit(0);
+                        }
+                    }
                     _ => {}
                 })
                 .build(app)?;

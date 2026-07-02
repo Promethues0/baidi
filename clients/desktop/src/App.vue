@@ -42,13 +42,23 @@
         <Settings v-else @logout="doLogout" />
       </main>
     </div>
+
+    <!-- 隧道运行中退出的二次确认（避免遗留无管控 root 数据面） -->
+    <a-modal v-model:visible="quitAsk" title="隧道仍在运行" :footer="false" :mask-closable="false" :width="380">
+      <p class="dk-quit__msg">接入仍在运行，直接退出会遗留一个无管控的数据面（root）进程。建议先断开再退出。</p>
+      <div class="dk-quit__btns">
+        <button class="dk-btn dk-btn--ghost" @click="quitAsk = false">取消</button>
+        <button class="dk-btn dk-btn--ghost" :disabled="quitting" @click="quitAnyway">仍要退出</button>
+        <button class="dk-btn" :disabled="quitting" @click="disconnectAndQuit">{{ quitting ? '断开中…' : '断开并退出' }}</button>
+      </div>
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, onMounted } from 'vue';
 import { session, logout, authed } from '@/lib/store';
-import { tauriRuntime } from '@/lib/tunnel';
+import { tauriRuntime, tunnelStop, forceQuit } from '@/lib/tunnel';
 import Connect from '@/views/Connect.vue';
 import Apps from '@/views/Apps.vue';
 import Diagnostics from '@/views/Diagnostics.vue';
@@ -56,6 +66,22 @@ import Settings from '@/views/Settings.vue';
 
 const tab = ref<'connect' | 'apps' | 'diag' | 'settings'>('connect');
 const authedNow = computed(() => authed());
+
+/* 退出确认（Rust 托盘「退出白帝」若隧道在跑会发 quit-request 事件） */
+const quitAsk = ref(false);
+const quitting = ref(false);
+onMounted(async () => {
+  if (!tauriRuntime()) return;
+  const mod = '@tauri-apps/api/event';
+  const { listen } = (await import(/* @vite-ignore */ mod)) as { listen: (e: string, cb: () => void) => Promise<unknown> };
+  await listen('quit-request', () => { quitAsk.value = true; });
+});
+async function disconnectAndQuit() {
+  quitting.value = true;
+  try { await tunnelStop(); } catch { /* ignore */ }
+  await forceQuit();
+}
+async function quitAnyway() { await forceQuit(); }
 
 /* 自定义标题栏窗控（frameless）：经 Tauri 窗口 API 真实最小化/最大化/关闭 */
 async function win(a: 'min' | 'max' | 'close') {
@@ -128,4 +154,8 @@ function doLogout() { logout(); tab.value = 'connect'; }
 .dk-rail__quit:hover { color: var(--bd-danger); }
 
 .dk-content { flex: 1; overflow-y: auto; }
+
+.dk-quit__msg { font-size: 13px; color: var(--bd-t2); line-height: 1.7; margin: 0 0 18px; }
+.dk-quit__btns { display: flex; justify-content: flex-end; gap: 10px; }
+.dk-quit__btns .dk-btn { height: 34px; padding: 0 16px; font-size: 13px; }
 </style>

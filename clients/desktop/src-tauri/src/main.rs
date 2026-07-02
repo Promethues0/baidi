@@ -8,6 +8,7 @@ use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 use std::process::Command;
+use tauri::Manager;
 
 const LOG: &str = "/tmp/baidi-tun.log";
 const PID: &str = "/tmp/baidi-tun.pid";
@@ -121,19 +122,24 @@ struct TunStatus {
     log: String,
 }
 
-/// 读 pid + 日志，判活（ps -p，避免 kill -0 对 root 进程 EPERM 误判），回最近日志供前端解析真实状态。
+/// 按 pid 判活（ps -p，避免 kill -0 对 root 进程 EPERM 误判）。供状态查询与托盘轮询共用。
+fn tun_running() -> bool {
+    let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
+    if pid.is_empty() {
+        return false;
+    }
+    Command::new("ps")
+        .args(["-p", &pid, "-o", "pid="])
+        .output()
+        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .unwrap_or(false)
+}
+
+/// 读 pid + 日志，回最近日志供前端解析真实状态。
 #[tauri::command]
 fn tunnel_status() -> TunStatus {
     let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
-    let running = if pid.is_empty() {
-        false
-    } else {
-        Command::new("ps")
-            .args(["-p", &pid, "-o", "pid="])
-            .output()
-            .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-            .unwrap_or(false)
-    };
+    let running = tun_running();
     let mut log = fs::read_to_string(LOG).unwrap_or_default();
     if log.len() > 4000 {
         log = log[log.len() - 4000..].to_string();
@@ -168,10 +174,76 @@ fn tunnel_stop() -> Result<(), String> {
     Ok(())
 }
 
+/// 显示并聚焦主窗口（从托盘唤起）。
+fn show_main(app: &tauri::AppHandle) {
+    if let Some(w) = app.get_webview_window("main") {
+        let _ = w.show();
+        let _ = w.unminimize();
+        let _ = w.set_focus();
+    }
+}
+
 fn main() {
+    use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
+    use tauri::tray::TrayIconBuilder;
+    use tauri::WindowEvent;
+
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop])
+        .setup(|app| {
+            // 托盘菜单：状态（禁用只读）/ 显示主窗口 / 退出
+            let status = MenuItem::with_id(app, "status", "○ 未接入", false, None::<&str>)?;
+            let show = MenuItem::with_id(app, "show", "显示主窗口", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "退出白帝", true, None::<&str>)?;
+            let sep = PredefinedMenuItem::separator(app)?;
+            let menu = Menu::with_items(app, &[&status, &sep, &show, &quit])?;
+
+            TrayIconBuilder::with_id("main")
+                .icon(app.default_window_icon().unwrap().clone())
+                .tooltip("白帝安全接入客户端 · 未接入")
+                .menu(&menu)
+                .on_menu_event(|app, event| match event.id.as_ref() {
+                    "show" => show_main(app),
+                    "quit" => app.exit(0),
+                    _ => {}
+                })
+                .build(app)?;
+
+            // 后台每 3s 按 pid 判活，刷新托盘状态（窗口隐藏也能看接入态）；
+            // UI 更新经 run_on_main_thread 回主线程，符合 macOS AppKit 主线程约束。
+            let handle = app.handle().clone();
+            std::thread::spawn(move || {
+                let mut last: Option<bool> = None;
+                loop {
+                    let running = tun_running();
+                    if last != Some(running) {
+                        last = Some(running);
+                        let status = status.clone();
+                        let h = handle.clone();
+                        let _ = handle.run_on_main_thread(move || {
+                            let _ = status.set_text(if running { "● 已接入企业内网" } else { "○ 未接入" });
+                            if let Some(tray) = h.tray_by_id("main") {
+                                let _ = tray.set_tooltip(Some(if running {
+                                    "白帝安全接入客户端 · 已接入"
+                                } else {
+                                    "白帝安全接入客户端 · 未接入"
+                                }));
+                            }
+                        });
+                    }
+                    std::thread::sleep(std::time::Duration::from_secs(3));
+                }
+            });
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            // 关闭 → 隐藏到托盘常驻，不退出（托盘「退出白帝」才真正退出）
+            if let WindowEvent::CloseRequested { api, .. } = event {
+                let _ = window.hide();
+                api.prevent_close();
+            }
+        })
         .run(tauri::generate_context!())
         .expect("运行白帝桌面客户端失败");
 }

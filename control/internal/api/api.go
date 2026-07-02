@@ -29,8 +29,9 @@ type Server struct {
 	secret   []byte
 	env      string
 	mu       sync.Mutex
-	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
-	kicked   map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户）
+	gateways map[string]GatewayInfo   // 已注册（在线）网关，按 id
+	gwSess   map[string][]GwSession   // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	kicked   map[string]string        // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户）
 }
 
 // GatewayInfo 一台已注册数据面网关的运行信息（含网关上报的真实活性指标）。
@@ -44,9 +45,17 @@ type GatewayInfo struct {
 	Uptime   int64  `json:"uptime"`  // 网关运行秒数
 }
 
+// GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
+type GwSession struct {
+	IP    string `json:"ip"`
+	User  string `json:"user"`
+	Role  string `json:"role"`
+	Since int64  `json:"since"`
+}
+
 // New 构造 Server。
 func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, kicked: map[string]string{}}
+	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
@@ -322,12 +331,13 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		ID      string `json:"id"`
-		Proxy   string `json:"proxy"`
-		SPA     string `json:"spa"`
-		Clients int    `json:"clients"`
-		Tunnels int    `json:"tunnels"`
-		Uptime  int64  `json:"uptime"`
+		ID       string      `json:"id"`
+		Proxy    string      `json:"proxy"`
+		SPA      string      `json:"spa"`
+		Clients  int         `json:"clients"`
+		Tunnels  int         `json:"tunnels"`
+		Uptime   int64       `json:"uptime"`
+		Sessions []GwSession `json:"sessions"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&b)
 	c, _ := auth.FromContext(r.Context())
@@ -340,6 +350,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime,
 	}
+	s.gwSess[id] = b.Sessions
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

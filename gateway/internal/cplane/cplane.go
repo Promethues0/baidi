@@ -58,12 +58,20 @@ func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	return c.httpc.Do(req)
 }
 
-// Register 向控制面注册/心跳，同时上报真实活性指标：clients=当前放行窗口内的已授权源数，
-// tunnels=活跃隧道连接数，uptimeSec=网关运行秒数。
-func (c *Client) Register(clients, tunnels int, uptimeSec int64) error {
+// Session 上报给控制面的一条活跃会话（真实在线用户来源）。
+type Session struct {
+	IP    string `json:"ip"`
+	User  string `json:"user"`
+	Role  string `json:"role"`
+	Since int64  `json:"since"` // 首次敲门放行的 Unix 时刻
+}
+
+// Register 向控制面注册/心跳，同时上报真实活性指标与活跃会话：clients=放行窗口内已授权源数，
+// tunnels=活跃隧道连接数，uptimeSec=网关运行秒数，sessions=当前活跃会话（供监控中心在线用户）。
+func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Session) error {
 	body, _ := json.Marshal(map[string]any{
 		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
-		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec,
+		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
 	})
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {

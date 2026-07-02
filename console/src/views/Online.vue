@@ -8,6 +8,9 @@
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
+        <a-tag v-if="live" :color="source === 'live' ? 'arcoblue' : 'gray'" bordered>
+          {{ source === 'live' ? '真实接入 · 网关上报' : '演示数据 · 无网关上报' }}
+        </a-tag>
         <a-button @click="load">
           <template #icon><icon-refresh /></template>刷新
         </a-button>
@@ -165,6 +168,7 @@ const MOCK: OnlineResp = {
 const sessions = ref<OnlineSession[]>(MOCK.sessions);
 const generatedAt = ref<string>(MOCK.generatedAt);
 const live = ref<boolean>(false);
+const source = ref<'live' | 'demo'>('demo'); // live=数据面网关上报的真实敲门会话；demo=演示种子
 const filter = ref<Filter>('all');
 const keyword = ref<string>('');
 
@@ -229,10 +233,12 @@ async function load(): Promise<void> {
     const r = await api<OnlineResp>('/online');
     sessions.value = r.sessions;
     generatedAt.value = r.generatedAt;
+    source.value = r.source ?? 'demo';
     live.value = true;
   } catch {
     sessions.value = MOCK.sessions;
     generatedAt.value = MOCK.generatedAt;
+    source.value = 'demo';
     live.value = false;
   }
 }

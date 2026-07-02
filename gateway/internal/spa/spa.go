@@ -22,16 +22,29 @@ type Allowlist struct {
 
 type entry struct {
 	until time.Time
+	since time.Time // 首次敲门放行时刻（供上报会话在线时长；重复敲门保活不重置）
 	user  string
 	role  string
 }
 
+// Session 一条活跃放行会话（供网关向控制面上报真实在线用户）。
+type Session struct {
+	IP    string
+	User  string
+	Role  string
+	Since time.Time
+}
+
 func NewAllowlist() *Allowlist { return &Allowlist{m: map[string]entry{}} }
 
-// Allow 放行某源 IP 一段时间（记录身份 user/role）。
+// Allow 放行某源 IP 一段时间（记录身份 user/role）。重复敲门刷新 until 但保留首次 since。
 func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) {
 	a.mu.Lock()
-	a.m[ip] = entry{until: time.Now().Add(ttl), user: user, role: role}
+	since := time.Now()
+	if prev, ok := a.m[ip]; ok && time.Now().Before(prev.until) {
+		since = prev.since // 保活续窗：保留首次敲门时刻
+	}
+	a.m[ip] = entry{until: time.Now().Add(ttl), since: since, user: user, role: role}
 	cb := a.OnAllow
 	a.mu.Unlock()
 	if cb != nil {
@@ -63,6 +76,20 @@ func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
 		return "", "", false
 	}
 	return e.user, e.role, true
+}
+
+// Sessions 返回当前仍在放行窗口内的活跃会话（供网关向控制面上报真实在线用户）。
+func (a *Allowlist) Sessions() []Session {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	out := make([]Session, 0, len(a.m))
+	for ip, e := range a.m {
+		if now.Before(e.until) {
+			out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since})
+		}
+	}
+	return out
 }
 
 // ActiveCount 返回当前仍在放行窗口内的源 IP 数（已授权客户端数，供网关向控制面上报）。

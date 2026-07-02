@@ -17,13 +17,45 @@ func (s *Server) objectExists(ctx context.Context, kind, id string) (bool, error
 
 // ── 监控中心 · 在线用户 ──
 
-// handleOnline 返回实时在线会话；叠加本进程内记录的"已强制下线"覆盖层。
+// handleOnline 返回实时在线会话：优先聚合在线数据面网关上报的真实敲门会话（source=live），
+// 无网关上报时回退演示种子（source=demo）；两者都叠加"已强制下线"覆盖层。
 func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
-	sessions, err := s.store.OnlineSessions(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
-		return
+	now := time.Now()
+	window := int64(gatewayOnlineWindow / time.Second)
+
+	// 聚合在线网关上报的真实会话（离线网关的会话不计入）
+	var real []store.OnlineSession
+	s.mu.Lock()
+	for id, sess := range s.gwSess {
+		gw, ok := s.gateways[id]
+		if !ok || now.Unix()-gw.LastSeen > window {
+			continue
+		}
+		for _, se := range sess {
+			loginT := time.Unix(se.Since, 0)
+			real = append(real, store.OnlineSession{
+				ID: id + ":" + se.IP, User: se.User, Account: se.User,
+				Org: "—", IP: se.IP, Location: "—", Device: "—", OS: "—",
+				Auth: "SPA 敲门", App: "—", Gateway: id,
+				LoginAt: loginT.Format("15:04"), Duration: humanizeDuration(now.Sub(loginT)),
+				Trust: "trusted", Risk: "none", Status: "online",
+			})
+		}
 	}
+	s.mu.Unlock()
+
+	source := "live"
+	sessions := real
+	if len(sessions) == 0 {
+		source = "demo"
+		var err error
+		sessions, err = s.store.OnlineSessions(r.Context())
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
+			return
+		}
+	}
+
 	s.mu.Lock()
 	for i := range sessions {
 		if reason, ok := s.kicked[sessions[i].ID]; ok {
@@ -34,7 +66,8 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"sessions":    sessions,
-		"generatedAt": time.Now().Format(time.RFC3339),
+		"generatedAt": now.Format(time.RFC3339),
+		"source":      source,
 	})
 }
 

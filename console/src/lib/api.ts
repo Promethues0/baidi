@@ -157,7 +157,7 @@ export interface OnlineSession {
   status: 'online' | 'offline';
   kickReason?: string;
 }
-export interface OnlineResp { sessions: OnlineSession[]; generatedAt: string }
+export interface OnlineResp { sessions: OnlineSession[]; generatedAt: string; source?: 'live' | 'demo' }
 
 /* ── 监控中心 · 用户状态（store.UserStateBundle）── */
 export interface UserStateBucket { key: string; label: string; count: number; tone: 'danger' | 'warning' | 'info' | 'normal' }

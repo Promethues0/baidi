@@ -27,12 +27,13 @@
       </div>
     </div>
 
-    <!-- 已接入信息 -->
+    <!-- 已接入信息（真实来自当前接入配置） -->
     <div v-else-if="stage === 'connected'" class="m-card cn__info">
-      <div class="cn__info-row"><span>安全网关</span><b class="m-mono">{{ session.serverAddr }}</b></div>
-      <div class="cn__info-row"><span>隧道加密</span><b>国密 TLCP · SM4</b></div>
+      <div class="cn__info-row"><span>安全网关</span><b class="m-mono">{{ ti.gateway }}</b></div>
+      <div class="cn__info-row"><span>隧道加密</span><b>{{ ti.cipher }}</b></div>
       <div class="cn__info-row"><span>SPA 隐身</span><b class="ok">端口对未授权者不可见</b></div>
-      <div class="cn__info-row"><span>虚拟 IP</span><b class="m-mono">10.99.0.2</b></div>
+      <div class="cn__info-row"><span>受保护网段</span><b class="m-mono">{{ ti.route }} → 隧道</b></div>
+      <div class="cn__info-row"><span>虚拟 IP</span><b class="m-mono">{{ ti.vip }}</b></div>
     </div>
 
     <!-- 终端环境检测 -->
@@ -52,10 +53,11 @@ import { Message } from '@arco-design/web-vue';
 import {
   IconPoweroff, IconCheckCircleFill, IconCloseCircleFill, IconCheck, IconLoading
 } from '@arco-design/web-vue/es/icon';
-import { session } from '@/lib/store';
-import { startTunnel, stopTunnel, platformLabel } from '@/lib/vpn';
+import { session, validateConfig } from '@/lib/store';
+import { startTunnel, stopTunnel, platformLabel, tunnelInfo } from '@/lib/vpn';
 
 const STEPS = ['终端环境检测上报', 'SPA 敲门（单包授权）', '建立国密 TLCP 隧道', '下发策略 / utun 引流'];
+const ti = computed(() => tunnelInfo());
 const stage = ref<'idle' | 'connecting' | 'connected'>(session.connected ? 'connected' : 'idle');
 const step = ref(0);
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入企业内网' : stage.value === 'connecting' ? '正在接入' : '未接入'));
@@ -76,6 +78,8 @@ function toggle() {
 }
 
 async function connect() {
+  const bad = validateConfig();
+  if (bad) { Message.warning(bad); return; }   // 接入前配置校验（端口/网段/虚拟IP/控制中心）
   stage.value = 'connecting'; step.value = 0;
   await sleep(500);                     // ① 终端环境检测上报
   step.value = 1;                       // ② SPA 敲门 —— 真实链路（携带 JWT 身份）

@@ -15,6 +15,16 @@
       <div class="pf__row"><span>客户端版本</span><b>v0.1.0</b></div>
     </div>
 
+    <div class="m-card pf__cfg">
+      <div class="pf__cfg-h"><icon-settings /> 接入配置</div>
+      <div class="pf__f"><label>控制中心</label><a-input v-model="config.control" size="small" placeholder="留空=按原生下发" @change="onCfg" /></div>
+      <div class="pf__f"><label>安全网关</label><a-input v-model="config.gateway" size="small" placeholder="如 gw.baidi.local" @change="onCfg" /></div>
+      <div class="pf__f"><label>受保护网段</label><a-input v-model="config.route" size="small" placeholder="10.99.0.0/24" @change="onCfg" /></div>
+      <div class="pf__f"><label>虚拟 IP</label><a-input v-model="config.ip" size="small" placeholder="10.99.0.2" @change="onCfg" /></div>
+      <div class="pf__f pf__f--sw"><label>国密隧道（TLCP）</label><a-switch v-model="config.gm" size="small" @change="onCfg" /></div>
+      <div class="pf__cfg-note">网段 / 虚拟 IP / 国密 由本端配置并经原生 VPN 扩展生效；控制中心 / 网关留空则用原生壳下发。</div>
+    </div>
+
     <div class="m-card pf__diag">
       <div class="pf__diag-h"><icon-pulse /> 链路诊断</div>
       <div v-for="d in results" :key="d.k" class="pf__d">
@@ -31,10 +41,13 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
+import { Message } from '@arco-design/web-vue';
 import { IconCheckCircleFill, IconCloseCircleFill } from '@arco-design/web-vue/es/icon';
 import { ping } from '@/lib/api';
-import { session, logout } from '@/lib/store';
+import { session, config, saveConfig, validateConfig, logout } from '@/lib/store';
 import { platformLabel } from '@/lib/vpn';
+
+function onCfg() { saveConfig(); const e = validateConfig(); if (e) Message.warning(e); }
 
 const router = useRouter();
 const initial = computed(() => (session.user || '?').slice(0, 1).toUpperCase());
@@ -71,6 +84,13 @@ onMounted(checkCtl);
 .pf__row b { color: var(--bd-t1); font-weight: 600; }
 .pf__row b.ok { color: var(--bd-success); }
 .pf__row b.bad { color: var(--bd-danger); }
+.pf__cfg { margin-bottom: 14px; }
+.pf__cfg-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--bd-t1); margin-bottom: 12px; }
+.pf__f { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.pf__f label { width: 92px; flex: none; font-size: 13px; color: var(--bd-t2); }
+.pf__f--sw { justify-content: space-between; }
+.pf__f--sw label { width: auto; }
+.pf__cfg-note { font-size: 11px; color: var(--bd-t3); line-height: 1.6; margin-top: 2px; }
 .pf__diag { margin-bottom: 16px; }
 .pf__diag-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
 .pf__d { display: flex; align-items: center; gap: 8px; padding: 7px 0; font-size: 13px; color: var(--bd-t2); }

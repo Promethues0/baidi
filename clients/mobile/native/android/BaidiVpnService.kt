@@ -12,28 +12,41 @@ import android.net.VpnService
 import baidimobile.Baidimobile
 import baidimobile.Config
 import baidimobile.Session
+import org.json.JSONObject
 
 class BaidiVpnService : VpnService() {
     private var session: Session? = null
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val token = intent?.getStringExtra("token") ?: return START_NOT_STICKY
+        // UI 下传的接入配置（gateway/spaPort/proxyPort/route/ip/gm/control）；缺省回退演示值
+        val c = try { JSONObject(intent.getStringExtra("cfg") ?: "{}") } catch (e: Exception) { JSONObject() }
+        val gateway = c.optString("gateway", "gw.baidi.local")
+        val spaPort = c.optString("spaPort", "18201")
+        val proxyPort = c.optString("proxyPort", "18443")
+        val route = c.optString("route", "10.99.0.0/24")
+        val vip = c.optString("ip", "10.99.0.2")
+        val gmOn = c.optBoolean("gm", true)
+        val ctl = c.optString("control", "")
+        val net = route.split("/")
+        val netAddr = net.getOrElse(0) { "10.99.0.0" }
+        val prefix = net.getOrElse(1) { "24" }.toIntOrNull() ?: 24
 
-        // 1) 建立 TUN：虚拟 IP + 把受保护网段路由进来
+        // 1) 建立 TUN：虚拟 IP + 把受保护网段（来自配置）路由进来
         val pfd = Builder()
             .setSession("白帝安全接入")
             .setMtu(1420)
-            .addAddress("10.99.0.2", 32)
-            .addRoute("10.99.0.0", 24)
+            .addAddress(vip, 32)
+            .addRoute(netAddr, prefix)
             .establish() ?: return START_NOT_STICKY
 
         // 2) 配置并启动 Go 引擎（fd 交给 baidimobile，Service 内不再碰包）
         val cfg = Config().apply {
-            spaAddr = intent.getStringExtra("spa") ?: "gw.baidi.local:18201"
-            proxyAddr = intent.getStringExtra("proxy") ?: "gw.baidi.local:18443"
+            spaAddr = "$gateway:$spaPort"
+            proxyAddr = "$gateway:$proxyPort"
             this.token = token
-            control = intent.getStringExtra("control") ?: ""   // 非空=短时效一次性令牌+保活
-            gm = true
+            control = ctl                 // 非空=短时效一次性令牌+保活
+            gm = gmOn
             caPEM = intent.getStringExtra("caPEM") ?: ""
             serverName = "baidi-gateway"
             mtu = 1420L

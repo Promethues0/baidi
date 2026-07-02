@@ -1,14 +1,14 @@
 /** 白帝移动客户端 · HTTP 客户端。dev 经 vite /api 反代到 baidi-control(:8090)；
  *  原生壳打包后由 __BAIDI_NATIVE__.apiBase 提供控制中心地址（生产按下发配置）。 */
-import { session } from './store';
+import { session, config } from './store';
 
-function apiBase(): string {
-  const nb = (window as unknown as { __BAIDI_NATIVE__?: { apiBase?: string } }).__BAIDI_NATIVE__;
-  return (nb?.apiBase || '') + '/api/v1';
-}
+// 控制中心地址优先级：原生壳注入 apiBase → 「我的」页配置 control → 空（dev 走 vite /api 代理）。
 function origin(): string {
   const nb = (window as unknown as { __BAIDI_NATIVE__?: { apiBase?: string } }).__BAIDI_NATIVE__;
-  return nb?.apiBase || '';
+  return (nb?.apiBase || config.control || '').replace(/\/+$/, '');
+}
+function apiBase(): string {
+  return origin() + '/api/v1';
 }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {

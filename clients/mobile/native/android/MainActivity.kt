@@ -31,36 +31,42 @@ class MainActivity : Activity() {
         web.loadUrl("https://appassets.local/index.html") // 由 WebViewAssetLoader 映射到打包的 dist
     }
 
+    private var pendingCfg: String? = null
+
     inner class Bridge {
         @JavascriptInterface fun apiBase(): String = "https://gw.baidi.local:9443" // 控制中心入口
-        @JavascriptInterface fun startTunnel(token: String) {
+        // cfgJson = UI 下传的接入配置（gateway/spaPort/proxyPort/route/ip/gm/control）
+        @JavascriptInterface fun startTunnel(token: String, cfgJson: String) {
             pendingToken = token
+            pendingCfg = cfgJson
             val prep = VpnService.prepare(this@MainActivity)
-            if (prep != null) startActivityForResult(prep, REQ_VPN) else startVpn(token)
+            if (prep != null) startActivityForResult(prep, REQ_VPN) else startVpn(token, cfgJson)
         }
         @JavascriptInterface fun stopTunnel() {
             stopService(Intent(this@MainActivity, BaidiVpnService::class.java))
         }
     }
 
-    private fun startVpn(token: String) {
-        val i = Intent(this, BaidiVpnService::class.java).putExtra("token", token)
-        // 也可透传 spa/proxy/control/caPEM
+    // 把 UI 配置透传给 VpnService：路由/虚拟IP/网关/国密由 cfg 决定，不再在原生侧写死
+    private fun startVpn(token: String, cfgJson: String?) {
+        val i = Intent(this, BaidiVpnService::class.java)
+            .putExtra("token", token)
+            .putExtra("cfg", cfgJson)
         startService(i)
     }
 
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
-        if (req == REQ_VPN && res == RESULT_OK) pendingToken?.let { startVpn(it) }
+        if (req == REQ_VPN && res == RESULT_OK) pendingToken?.let { startVpn(it, pendingCfg) }
     }
 
     companion object {
         private const val REQ_VPN = 0x42
-        // 注入到 webview 的桥：__BAIDI_NATIVE__.startTunnel 返回 Promise，apiBase 同步取
+        // 注入到 webview 的桥：startTunnel(token, cfg) 把配置 JSON 化下传，返回 Promise；apiBase 同步取
         private const val BRIDGE_JS = """
             window.__BAIDI_NATIVE__ = {
               apiBase: __baidiNativeRaw.apiBase(),
-              startTunnel: (token) => { __baidiNativeRaw.startTunnel(token);
+              startTunnel: (token, cfg) => { __baidiNativeRaw.startTunnel(token, JSON.stringify(cfg || {}));
                 return new Promise(r => setTimeout(() => r({ok:true, detail:'VpnService 已建立隧道'}), 600)); },
               stopTunnel: () => { __baidiNativeRaw.stopTunnel(); return Promise.resolve(); }
             };

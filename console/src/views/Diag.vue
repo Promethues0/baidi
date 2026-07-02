@@ -84,6 +84,30 @@
           <div v-if="c.hint" class="dg-card__hint"><icon-bulb />{{ c.hint }}</div>
         </article>
       </section>
+
+      <!-- 数据面网关明细（诊断联动真实上报指标） -->
+      <section v-if="gateways.length" class="dg-gws">
+        <div class="dg-gws__h"><icon-link /> 数据面网关明细<span class="dg-gws__sub">{{ gateways.length }} 台已注册 · 网关每 15s 上报活性</span></div>
+        <div class="dg-gws__grid">
+          <div v-for="g in gateways" :key="g.id" class="dg-gw" :class="{ off: !gwOnline(g) }">
+            <div class="dg-gw__top">
+              <span class="dg-gw__dot" :class="{ on: gwOnline(g) }" />
+              <b class="dg-gw__id">{{ g.id }}</b>
+              <span class="dg-gw__state">{{ gwOnline(g) ? '在线' : '心跳超时' }}</span>
+            </div>
+            <div class="dg-gw__nums">
+              <div class="dg-gw__n"><b>{{ g.clients }}</b><i>已授权客户端</i></div>
+              <div class="dg-gw__n"><b>{{ g.tunnels }}</b><i>活跃隧道</i></div>
+              <div class="dg-gw__n"><b>{{ fmtUptime(g.uptime) }}</b><i>运行时长</i></div>
+            </div>
+            <div class="dg-gw__meta">
+              <span class="dk-mono">代理 {{ g.proxy }}</span>
+              <span class="dk-mono">SPA {{ g.spa }}</span>
+              <span>心跳 {{ fmtAgo(g.lastSeen) }}</span>
+            </div>
+          </div>
+        </div>
+      </section>
     </div>
   </div>
 </template>
@@ -92,10 +116,27 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type DiagBundle, type DiagCheck, type DiagCategory, type DiagStatus } from '@/lib/api';
+import { api, type DiagBundle, type DiagCheck, type DiagCategory, type DiagStatus, type GatewaysResp, type GatewayReg } from '@/lib/api';
 import { FIRST_PATH } from '@/nav';
 
 const router = useRouter();
+
+/* 数据面网关明细（诊断联动：/gateways 上报的真实活性指标） */
+const gateways = ref<GatewayReg[]>([]);
+const GW_ONLINE_WINDOW = 120; // 秒，与后端一致
+function gwOnline(g: GatewayReg): boolean { return Date.now() / 1000 - g.lastSeen <= GW_ONLINE_WINDOW; }
+function fmtAgo(sec: number): string {
+  const d = Math.max(0, Math.floor(Date.now() / 1000 - sec));
+  if (d < 60) return `${d} 秒前`;
+  if (d < 3600) return `${Math.floor(d / 60)} 分钟前`;
+  return `${Math.floor(d / 3600)} 小时前`;
+}
+function fmtUptime(sec: number): string {
+  if (sec < 60) return `${sec}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
 
 /* 降级演示数据（对齐后端 DiagBundle，便于无后端时预览） */
 const MOCK: DiagBundle = {
@@ -167,7 +208,10 @@ async function load() {
     bundle.value = await api<DiagBundle>('/diag');
     live.value = true;
     denied.value = false;
+    // 联动拉取网关明细（best-effort，不阻断体检）
+    try { gateways.value = (await api<GatewaysResp>('/gateways')).gateways || []; } catch { gateways.value = []; }
   } catch (e) {
+    gateways.value = [];
     // 403=已登录但非 admin：如实提示需管理员权限，不伪装成"健康"演示数据
     if (String((e as Error)?.message ?? e).startsWith('403')) {
       denied.value = true;
@@ -316,6 +360,25 @@ onMounted(load);
 }
 .dg-card.is-fail .dg-card__hint { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
 .dg-card__hint :deep(svg), .dg-card__metric :deep(svg) { flex: none; margin-top: 2px; }
+
+/* 数据面网关明细 */
+.dg-gws { margin-top: 22px; }
+.dg-gws__h { display: flex; align-items: center; gap: 7px; font-size: 15px; font-weight: 700; color: var(--bd-t1); margin-bottom: 12px; }
+.dg-gws__sub { margin-left: auto; font-size: 12px; font-weight: 400; color: var(--bd-t3); }
+.dg-gws__grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(300px, 1fr)); gap: 14px; }
+.dg-gw { background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); padding: 15px 16px; border-left: 3px solid var(--bd-success); }
+.dg-gw.off { border-left-color: var(--bd-t4); opacity: .85; }
+.dg-gw__top { display: flex; align-items: center; gap: 8px; }
+.dg-gw__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bd-t4); flex: none; }
+.dg-gw__dot.on { background: var(--bd-success); box-shadow: 0 0 0 3px rgba(0, 180, 42, .18); }
+.dg-gw__id { font-size: 14px; color: var(--bd-t1); }
+.dg-gw__state { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
+.dg-gw.off .dg-gw__state { color: var(--bd-warning); }
+.dg-gw__nums { display: flex; gap: 10px; margin: 13px 0; }
+.dg-gw__n { flex: 1; text-align: center; background: var(--bd-fill-1); border-radius: 8px; padding: 8px 4px; }
+.dg-gw__n b { display: block; font-size: 20px; font-weight: 700; color: var(--bd-primary); }
+.dg-gw__n i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
+.dg-gw__meta { display: flex; flex-direction: column; gap: 4px; font-size: 12px; color: var(--bd-t3); }
 
 @media (max-width: 880px) {
   .dg-hero { grid-template-columns: 1fr; justify-items: center; text-align: center; }

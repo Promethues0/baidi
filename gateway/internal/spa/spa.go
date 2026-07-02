@@ -65,6 +65,20 @@ func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
 	return e.user, e.role, true
 }
 
+// ActiveCount 返回当前仍在放行窗口内的源 IP 数（已授权客户端数，供网关向控制面上报）。
+func (a *Allowlist) ActiveCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for _, e := range a.m {
+		if now.Before(e.until) {
+			n++
+		}
+	}
+	return n
+}
+
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
 func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 	conn, err := net.ListenPacket("udp", addr)

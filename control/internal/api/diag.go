@@ -160,14 +160,16 @@ func (s *Server) checkGateways() DiagCheck {
 	window := int64(gatewayOnlineWindow / time.Second)
 	s.mu.Lock()
 	total := len(s.gateways)
-	online := 0
+	online, clients, tunnels := 0, 0, 0
 	for _, g := range s.gateways {
 		if now-g.LastSeen <= window {
 			online++
+			clients += g.Clients
+			tunnels += g.Tunnels
 		}
 	}
 	s.mu.Unlock()
-	c.Metric = fmt.Sprintf("在线 %d / 注册 %d", online, total)
+	c.Metric = fmt.Sprintf("在线 %d / 注册 %d · 客户端 %d · 隧道 %d", online, total, clients, tunnels)
 	switch {
 	case total == 0:
 		c.Status = "warn"

@@ -23,6 +23,7 @@
           <div class="bd-gw__main">
             <div class="bd-gw__id">{{ g.id }}</div>
             <div class="bd-gw__meta"><span class="bd-mono">proxy {{ g.proxy }}</span> · <span class="bd-mono">spa {{ g.spa }}</span></div>
+            <div class="bd-gw__nums">已授权客户端 <b>{{ g.clients }}</b> · 活跃隧道 <b>{{ g.tunnels }}</b> · 运行 <b>{{ upt(g.uptime) }}</b></div>
           </div>
           <span class="bd-gw__seen">{{ seenAgo(g.lastSeen) }}</span>
         </div>
@@ -127,6 +128,12 @@ let timer: ReturnType<typeof setInterval>;
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 function roleColor(r: string) { return r === 'admin' ? '#F53F3F' : r === 'gateway' ? '#0FC6C2' : '#165DFF'; }
 function isStale(g: GatewayReg) { return nowSec.value - g.lastSeen > 60; }
+function upt(sec: number) {
+  if (!sec || sec < 60) return `${sec || 0}s`;
+  if (sec < 3600) return `${Math.floor(sec / 60)}m`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)}h`;
+  return `${Math.floor(sec / 86400)}d`;
+}
 function seenAgo(ts: number) {
   const d = nowSec.value - ts;
   if (d < 5) return '刚刚';
@@ -235,6 +242,8 @@ onUnmounted(() => clearInterval(timer));
 .bd-gw__main { flex: 1; min-width: 0; }
 .bd-gw__id { font-weight: 600; color: var(--bd-t1, #1d2129); }
 .bd-gw__meta { font-size: 12px; color: var(--bd-t3, #86909c); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-gw__nums { font-size: 12px; color: var(--bd-t3, #86909c); margin-top: 3px; }
+.bd-gw__nums b { color: var(--bd-primary, #165DFF); font-weight: 600; }
 .bd-gw__seen { font-size: 12px; color: var(--bd-t3, #86909c); flex: none; }
 .bd-rid { color: var(--bd-accent, #165DFF); font-weight: 600; }
 .bd-rtag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; margin-right: 6px; }

@@ -33,12 +33,15 @@ type Server struct {
 	kicked   map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户）
 }
 
-// GatewayInfo 一台已注册数据面网关的运行信息。
+// GatewayInfo 一台已注册数据面网关的运行信息（含网关上报的真实活性指标）。
 type GatewayInfo struct {
 	ID       string `json:"id"`
 	Proxy    string `json:"proxy"`
 	SPA      string `json:"spa"`
 	LastSeen int64  `json:"lastSeen"`
+	Clients  int    `json:"clients"` // 当前放行窗口内已授权源数
+	Tunnels  int    `json:"tunnels"` // 活跃隧道连接数
+	Uptime   int64  `json:"uptime"`  // 网关运行秒数
 }
 
 // New 构造 Server。
@@ -319,9 +322,12 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var b struct {
-		ID    string `json:"id"`
-		Proxy string `json:"proxy"`
-		SPA   string `json:"spa"`
+		ID      string `json:"id"`
+		Proxy   string `json:"proxy"`
+		SPA     string `json:"spa"`
+		Clients int    `json:"clients"`
+		Tunnels int    `json:"tunnels"`
+		Uptime  int64  `json:"uptime"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&b)
 	c, _ := auth.FromContext(r.Context())
@@ -330,7 +336,10 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		id = c.Sub
 	}
 	s.mu.Lock()
-	s.gateways[id] = GatewayInfo{ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix()}
+	s.gateways[id] = GatewayInfo{
+		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
+		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime,
+	}
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

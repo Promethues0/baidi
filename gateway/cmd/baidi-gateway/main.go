@@ -61,8 +61,13 @@ func main() {
 
 	// 控制面对接：注册自身 + 周期拉取资源授权策略（动态替代静态 resources.json）
 	if *control != "" {
+		started := time.Now()
+		// 真实活性指标：已授权源数（SPA 放行表）+ 活跃隧道数（代理）+ 运行秒数
+		metrics := func() (int, int, int64) {
+			return al.ActiveCount(), proxy.Active(), int64(time.Since(started).Seconds())
+		}
 		cp := cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
-		if err := cp.Register(); err != nil {
+		if err := cp.Register(metrics()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
 		if rs, err := cp.Policy(); err != nil {
@@ -75,7 +80,7 @@ func main() {
 			t := time.NewTicker(*poll)
 			defer t.Stop()
 			for range t.C {
-				_ = cp.Register() // 心跳
+				_ = cp.Register(metrics()) // 心跳 + 上报真实活性指标
 				if rs, err := cp.Policy(); err == nil {
 					reg.Replace(rs)
 				} else {

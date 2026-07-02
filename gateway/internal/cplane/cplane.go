@@ -58,9 +58,13 @@ func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	return c.httpc.Do(req)
 }
 
-// Register 向控制面注册/心跳（上报 proxy/spa 地址）。
-func (c *Client) Register() error {
-	body, _ := json.Marshal(map[string]string{"id": c.gwID, "proxy": c.proxy, "spa": c.spa})
+// Register 向控制面注册/心跳，同时上报真实活性指标：clients=当前放行窗口内的已授权源数，
+// tunnels=活跃隧道连接数，uptimeSec=网关运行秒数。
+func (c *Client) Register(clients, tunnels int, uptimeSec int64) error {
+	body, _ := json.Marshal(map[string]any{
+		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
+		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec,
+	})
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {
 		return err

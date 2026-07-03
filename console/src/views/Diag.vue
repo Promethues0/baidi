@@ -82,6 +82,18 @@
           <div class="dg-card__summary">{{ c.summary }}</div>
           <div v-if="c.metric" class="dg-card__metric"><icon-info-circle />{{ c.metric }}</div>
           <div v-if="c.hint" class="dg-card__hint"><icon-bulb />{{ c.hint }}</div>
+          <div v-if="c.items?.length" class="dg-card__more">
+            <div class="dg-card__more-h" @click="toggleItems(c.key)">
+              <icon-down :class="{ up: openItems.has(c.key) }" />{{ c.items.length }} 项明细
+            </div>
+            <ul v-if="openItems.has(c.key)" class="dg-items">
+              <li v-for="it in c.items" :key="it.label" class="dg-item">
+                <span class="dg-item__dot" :class="'is-' + (it.status || 'pass')" />
+                <span class="dg-item__l">{{ it.label }}</span>
+                <span class="dg-item__v">{{ it.value }}</span>
+              </li>
+            </ul>
+          </div>
         </article>
       </section>
 
@@ -156,6 +168,8 @@ const MOCK: DiagBundle = {
 };
 
 const bundle = ref<DiagBundle>(MOCK);
+const openItems = ref<Set<string>>(new Set());
+function toggleItems(k: string) { const e = new Set(openItems.value); e.has(k) ? e.delete(k) : e.add(k); openItems.value = e; }
 const live = ref(false);
 const loading = ref(false);
 const denied = ref(false); // 后端 403（非 admin）：显式提示而非静默降级演示
@@ -245,6 +259,7 @@ function exportReport() {
     lines.push(`- 结论：${c.summary}`);
     if (c.metric) lines.push(`- 指标：${c.metric}`);
     if (c.hint) lines.push(`- 建议：${c.hint}`);
+    if (c.items?.length) for (const it of c.items) lines.push(`  · ${it.label}：${it.value}`);
     lines.push('');
   }
   const blob = new Blob([lines.join('\n')], { type: 'text/markdown;charset=utf-8' });
@@ -360,6 +375,18 @@ onMounted(load);
 }
 .dg-card.is-fail .dg-card__hint { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
 .dg-card__hint :deep(svg), .dg-card__metric :deep(svg) { flex: none; margin-top: 2px; }
+.dg-card__more { margin-top: 10px; }
+.dg-card__more-h { display: flex; align-items: center; gap: 5px; font-size: 12.5px; color: var(--bd-t2); cursor: pointer; user-select: none; }
+.dg-card__more-h :deep(svg) { font-size: 13px; transition: transform 0.2s; }
+.dg-card__more-h :deep(svg.up) { transform: rotate(180deg); }
+.dg-items { list-style: none; margin: 8px 0 0; padding: 0; display: flex; flex-direction: column; gap: 2px; }
+.dg-item { display: flex; align-items: center; gap: 8px; font-size: 12.5px; padding: 5px 0; border-top: 1px solid var(--bd-fill-2); }
+.dg-item__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; background: var(--bd-t4); }
+.dg-item__dot.is-pass { background: var(--bd-success); }
+.dg-item__dot.is-warn { background: var(--bd-warning); }
+.dg-item__dot.is-fail { background: var(--bd-danger); }
+.dg-item__l { font-weight: 600; color: var(--bd-t1); font-family: ui-monospace, monospace; }
+.dg-item__v { margin-left: auto; color: var(--bd-t3); }
 
 /* 数据面网关明细 */
 .dg-gws { margin-top: 22px; }

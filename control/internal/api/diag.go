@@ -17,15 +17,23 @@ var bootTime = time.Now()
 // gatewayOnlineWindow 网关心跳新鲜度窗口：超过则视为离线。
 const gatewayOnlineWindow = 120 * time.Second
 
+// DiagItem 一项检查的明细行（可展开，如每台网关的在线态/会话数）。
+type DiagItem struct {
+	Label  string `json:"label"`
+	Value  string `json:"value"`
+	Status string `json:"status,omitempty"` // pass | warn | fail（明细行着色，可空）
+}
+
 // DiagCheck 一项运维自检结果。
 type DiagCheck struct {
-	Key      string `json:"key"`
-	Category string `json:"category"` // control | storage | dataplane | stealth | cluster | identity | posture | security
-	Name     string `json:"name"`
-	Status   string `json:"status"` // pass | warn | fail
-	Summary  string `json:"summary"`
-	Metric   string `json:"metric"`
-	Hint     string `json:"hint"` // 处置建议（warn/fail 时）
+	Key      string     `json:"key"`
+	Category string     `json:"category"` // control | storage | dataplane | stealth | cluster | identity | posture | security
+	Name     string     `json:"name"`
+	Status   string     `json:"status"` // pass | warn | fail
+	Summary  string     `json:"summary"`
+	Metric   string     `json:"metric"`
+	Hint     string     `json:"hint"`             // 处置建议（warn/fail 时）
+	Items    []DiagItem `json:"items,omitempty"`  // 可展开明细（如每台网关）
 }
 
 // DiagBundle 一次运维体检的完整结果（控制面真实探测，非种子）。
@@ -161,12 +169,23 @@ func (s *Server) checkGateways() DiagCheck {
 	s.mu.Lock()
 	total := len(s.gateways)
 	online, clients, tunnels := 0, 0, 0
-	for _, g := range s.gateways {
-		if now-g.LastSeen <= window {
+	for id, g := range s.gateways {
+		up := now-g.LastSeen <= window
+		if up {
 			online++
 			clients += g.Clients
 			tunnels += g.Tunnels
 		}
+		st := "pass"
+		state := "在线"
+		if !up {
+			st, state = "fail", "心跳超时"
+		}
+		c.Items = append(c.Items, DiagItem{
+			Label:  id,
+			Value:  fmt.Sprintf("%s · 会话 %d · 隧道 %d · 客户端 %d", state, len(s.gwSess[id]), g.Tunnels, g.Clients),
+			Status: st,
+		})
 	}
 	s.mu.Unlock()
 	c.Metric = fmt.Sprintf("在线 %d / 注册 %d · 客户端 %d · 隧道 %d", online, total, clients, tunnels)

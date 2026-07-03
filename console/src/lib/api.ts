@@ -199,9 +199,11 @@ export interface PortalAppsResp { apps: PortalTile[] }
 /* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
 export type DiagStatus = 'pass' | 'warn' | 'fail';
 export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';
+export interface DiagItem { label: string; value: string; status?: DiagStatus }
 export interface DiagCheck {
   key: string; category: DiagCategory; name: string;
   status: DiagStatus; summary: string; metric: string; hint: string;
+  items?: DiagItem[];
 }
 export interface DiagBundle {
   generatedAt: string; component: string; version: string; env: string; uptime: string;

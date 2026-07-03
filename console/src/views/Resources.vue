@@ -18,14 +18,32 @@
         暂无网关注册 —— 启动 <span class="bd-mono">baidi-gateway -control http://…:8090</span> 即上线
       </div>
       <div v-else class="bd-gws__list">
-        <div v-for="g in gateways" :key="g.id" class="bd-gw">
-          <span class="bd-gw__dot" :class="{ stale: isStale(g) }" />
-          <div class="bd-gw__main">
-            <div class="bd-gw__id">{{ g.id }}</div>
-            <div class="bd-gw__meta"><span class="bd-mono">proxy {{ g.proxy }}</span> · <span class="bd-mono">spa {{ g.spa }}</span></div>
-            <div class="bd-gw__nums">已授权客户端 <b>{{ g.clients }}</b> · 活跃隧道 <b>{{ g.tunnels }}</b> · 运行 <b>{{ upt(g.uptime) }}</b></div>
+        <div v-for="g in gateways" :key="g.id" class="bd-gw" :class="{ open: expanded.has(g.id) }">
+          <div class="bd-gw__row" @click="toggleGw(g.id)">
+            <span class="bd-gw__dot" :class="{ stale: isStale(g) }" />
+            <div class="bd-gw__main">
+              <div class="bd-gw__id">{{ g.id }}<span v-if="g.sessions?.length" class="bd-gw__badge">会话 {{ g.sessions.length }}</span></div>
+              <div class="bd-gw__meta"><span class="bd-mono">proxy {{ g.proxy }}</span> · <span class="bd-mono">spa {{ g.spa }}</span></div>
+              <div class="bd-gw__nums">已授权客户端 <b>{{ g.clients }}</b> · 活跃隧道 <b>{{ g.tunnels }}</b> · 运行 <b>{{ upt(g.uptime) }}</b></div>
+            </div>
+            <span class="bd-gw__seen">{{ seenAgo(g.lastSeen) }}</span>
+            <icon-down class="bd-gw__chev" :class="{ up: expanded.has(g.id) }" />
           </div>
-          <span class="bd-gw__seen">{{ seenAgo(g.lastSeen) }}</span>
+          <div v-if="expanded.has(g.id)" class="bd-gw__sessions">
+            <div v-if="!g.sessions?.length" class="bd-gw__nosess">当前无活跃放行会话（无客户端敲门）</div>
+            <table v-else class="bd-gw__stab">
+              <thead><tr><th>用户</th><th>源 IP</th><th>角色</th><th>敲门时刻</th><th>在线时长</th></tr></thead>
+              <tbody>
+                <tr v-for="s in g.sessions" :key="s.ip + s.user">
+                  <td>{{ s.user || '—' }}</td>
+                  <td class="bd-mono">{{ s.ip }}</td>
+                  <td><span :style="{ color: roleColor(s.role) }">{{ s.role || 'user' }}</span></td>
+                  <td>{{ atOf(s.since) }}</td>
+                  <td>{{ durOf(s.since) }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
     </div>
@@ -123,11 +141,25 @@ const gateways = ref<GatewayReg[]>([]);
 const addrs = ref<AddrObject[]>([]);
 const services = ref<ServiceObject[]>([]);
 const nowSec = ref(Math.floor(Date.now() / 1000));
+const expanded = ref<Set<string>>(new Set());
 let timer: ReturnType<typeof setInterval>;
 
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 function roleColor(r: string) { return r === 'admin' ? '#F53F3F' : r === 'gateway' ? '#0FC6C2' : '#165DFF'; }
 function isStale(g: GatewayReg) { return nowSec.value - g.lastSeen > 60; }
+function toggleGw(id: string) { const e = new Set(expanded.value); e.has(id) ? e.delete(id) : e.add(id); expanded.value = e; }
+function atOf(unix: number) {
+  if (!unix) return '—';
+  const d = new Date(unix * 1000);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+function durOf(unix: number) {
+  if (!unix) return '—';
+  const s = Math.max(0, nowSec.value - unix);
+  if (s < 60) return `${s}s`;
+  if (s < 3600) return `${Math.floor(s / 60)}m ${s % 60}s`;
+  return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
+}
 function upt(sec: number) {
   if (!sec || sec < 60) return `${sec || 0}s`;
   if (sec < 3600) return `${Math.floor(sec / 60)}m`;
@@ -236,7 +268,17 @@ onUnmounted(() => clearInterval(timer));
 .bd-gws__h em { font-style: normal; color: var(--bd-accent, #165DFF); font-weight: 700; }
 .bd-gws__empty { font-size: 13px; color: var(--bd-t3, #86909c); }
 .bd-gws__list { display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); gap: 10px; }
-.bd-gw { display: flex; align-items: center; gap: 10px; border: 1px solid var(--bd-border, #e5e6eb); border-radius: 8px; padding: 10px 12px; background: var(--bd-surface-2, #f7f8fa); }
+.bd-gw { border: 1px solid var(--bd-border, #e5e6eb); border-radius: 8px; background: var(--bd-surface-2, #f7f8fa); }
+.bd-gw.open { grid-column: 1 / -1; }
+.bd-gw__row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; cursor: pointer; }
+.bd-gw__badge { font-size: 11px; font-weight: 600; color: var(--bd-primary, #165DFF); background: rgba(22, 93, 255, 0.1); padding: 1px 7px; border-radius: 10px; margin-left: 7px; }
+.bd-gw__chev { font-size: 14px; color: var(--bd-t3, #86909c); flex: none; transition: transform 0.2s; }
+.bd-gw__chev.up { transform: rotate(180deg); }
+.bd-gw__sessions { border-top: 1px dashed var(--bd-border, #e5e6eb); padding: 8px 12px 12px; overflow-x: auto; }
+.bd-gw__nosess { font-size: 12.5px; color: var(--bd-t3, #86909c); padding: 6px 0; }
+.bd-gw__stab { width: 100%; border-collapse: collapse; font-size: 12.5px; }
+.bd-gw__stab th { text-align: left; color: var(--bd-t3, #86909c); font-weight: 500; padding: 5px 10px 5px 0; white-space: nowrap; }
+.bd-gw__stab td { padding: 5px 10px 5px 0; color: var(--bd-t1, #1d2129); border-top: 1px solid var(--bd-fill-2, #f2f3f5); white-space: nowrap; }
 .bd-gw__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bd-success, #00b42a); box-shadow: 0 0 0 3px rgba(0, 180, 42, 0.14); flex: none; }
 .bd-gw__dot.stale { background: var(--bd-warning, #ff7d00); box-shadow: 0 0 0 3px rgba(255, 125, 0, 0.14); }
 .bd-gw__main { flex: 1; min-width: 0; }

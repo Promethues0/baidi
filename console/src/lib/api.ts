@@ -143,7 +143,8 @@ export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
 /* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
 export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[]; addrRef?: string; svcRef?: string }
 export interface ResourcesResp { resources: Resource[] }
-export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number; clients: number; tunnels: number; uptime: number }
+export interface GwSess { ip: string; user: string; role: string; since: number }
+export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number; clients: number; tunnels: number; uptime: number; sessions?: GwSess[] }
 export interface GatewaysResp { gateways: GatewayReg[] }
 
 /* ── 监控中心 · 在线用户（store.OnlineSession）── */

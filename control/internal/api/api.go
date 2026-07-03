@@ -368,15 +368,25 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
 }
 
-// handleGateways 返回当前已注册（在线）的数据面网关清单（管理台用）。
+// GatewayDetail 网关清单条目：注册信息 + 该网关上报的活跃会话明细（就近处置/审计用）。
+type GatewayDetail struct {
+	GatewayInfo
+	Sessions []GwSession `json:"sessions"`
+}
+
+// handleGateways 返回当前已注册（在线）的数据面网关清单 + 每网关活跃会话明细（管理台用）。
 func (s *Server) handleGateways(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	s.mu.Lock()
-	list := make([]GatewayInfo, 0, len(s.gateways))
-	for _, g := range s.gateways {
-		list = append(list, g)
+	list := make([]GatewayDetail, 0, len(s.gateways))
+	for id, g := range s.gateways {
+		sess := s.gwSess[id]
+		if sess == nil {
+			sess = []GwSession{}
+		}
+		list = append(list, GatewayDetail{GatewayInfo: g, Sessions: sess})
 	}
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{"gateways": list})

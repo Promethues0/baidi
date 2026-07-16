@@ -5,12 +5,18 @@ package spa
 import (
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"time"
 
 	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/knock"
 )
+
+// normUser 规范化账号（去首尾空格 + 小写），用作封禁/切断的匹配键——
+// 企业身份（AD sAMAccountName、邮箱）通常大小写不敏感，规范化后杜绝
+// "换大小写/加空格重登即绕过强制下线"。放行表仍存原始显示名，仅键规范化。
+func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // Allowlist 源 IP → 放行到期时间 的并发安全表。
 type Allowlist struct {
@@ -40,31 +46,34 @@ func NewAllowlist() *Allowlist {
 	return &Allowlist{m: map[string]entry{}, deny: map[string]time.Time{}}
 }
 
-// DenyUser 封禁某账号至 until（强制下线）。返回是否为新封禁/延长封禁——
-// 轮询会反复下发同一撤销条目，调用方据此只在首次应用时执行撤窗/断隧道等处置。
+// DenyUser 封禁某账号至 until（强制下线：封禁期内拒绝后续敲门）。返回是否为新封禁/延长封禁。
+// 注意：数据面处置（撤窗/断隧道）的幂等由调用方按 until 自管，不依赖本返回值——
+// 避免网关本地时钟快于控制面时 until 被判过期、导致处置被整段跳过。
 func (a *Allowlist) DenyUser(user string, until time.Time) bool {
 	if !time.Now().Before(until) {
 		return false
 	}
+	key := normUser(user)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if prev, ok := a.deny[user]; ok && !until.After(prev) {
+	if prev, ok := a.deny[key]; ok && !until.After(prev) {
 		return false
 	}
-	a.deny[user] = until
+	a.deny[key] = until
 	return true
 }
 
 // UserDenied 报告某账号是否在封禁期内（懒清理过期条目）。
 func (a *Allowlist) UserDenied(user string) bool {
+	key := normUser(user)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	until, ok := a.deny[user]
+	until, ok := a.deny[key]
 	if !ok {
 		return false
 	}
 	if !time.Now().Before(until) {
-		delete(a.deny, user)
+		delete(a.deny, key)
 		return false
 	}
 	return true
@@ -72,11 +81,12 @@ func (a *Allowlist) UserDenied(user string) bool {
 
 // RevokeUser 撤销某账号的全部放行窗口，返回被撤的源 IP（供 -pf 模式回收内核放行规则）。
 func (a *Allowlist) RevokeUser(user string) []string {
+	key := normUser(user)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var ips []string
 	for ip, e := range a.m {
-		if e.user == user {
+		if normUser(e.user) == key {
 			ips = append(ips, ip)
 			delete(a.m, ip)
 		}
@@ -85,8 +95,17 @@ func (a *Allowlist) RevokeUser(user string) []string {
 }
 
 // Allow 放行某源 IP 一段时间（记录身份 user/role）。重复敲门刷新 until 但保留首次 since。
-func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) {
+// 封禁期内的账号一律拒绝放行（返回 false）——封禁检查与写入放行表在同一把锁内完成，
+// 杜绝"UserDenied 检查通过 → 并发封禁 → 仍写入放行窗口"的重开窗竞态。
+func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) bool {
 	a.mu.Lock()
+	if until, ok := a.deny[normUser(user)]; ok {
+		if time.Now().Before(until) {
+			a.mu.Unlock()
+			return false
+		}
+		delete(a.deny, normUser(user)) // 懒清理过期封禁
+	}
 	since := time.Now()
 	if prev, ok := a.m[ip]; ok && time.Now().Before(prev.until) {
 		since = prev.since // 保活续窗：保留首次敲门时刻
@@ -97,6 +116,7 @@ func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) {
 	if cb != nil {
 		cb(ip, user)
 	}
+	return true
 }
 
 // Reap 删除并返回已过期的源 IP（供防火墙模式回收 pf 放行规则）。
@@ -195,11 +215,11 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 		if !protected {
 			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放防护，建议客户端升级敲门信封", "src", ip)
 		}
-		if al.UserDenied(claims.Name) {
+		// Allow 内在同一把锁下复核封禁：即便与并发强制下线相撞，也不会重开放行窗口。
+		if !al.Allow(ip, claims.Name, claims.Role, ttl) {
 			slog.Warn("SPA 敲门拒绝（用户已被强制下线，封禁期内）", "src", ip, "user", claims.Name)
 			continue
 		}
-		al.Allow(ip, claims.Name, claims.Role, ttl)
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())
 	}
 }

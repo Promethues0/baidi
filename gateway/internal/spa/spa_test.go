@@ -48,6 +48,29 @@ func TestDenyUserExpiry(t *testing.T) {
 	}
 }
 
+func TestDenyNormalized(t *testing.T) {
+	al := NewAllowlist()
+	al.DenyUser("li.fang", time.Now().Add(time.Hour))
+
+	// 换大小写/加空格重登不得绕过封禁
+	for _, variant := range []string{"Li.Fang", "LI.FANG", " li.fang ", "li.fang"} {
+		if !al.UserDenied(variant) {
+			t.Fatalf("变体 %q 应命中封禁（规范化匹配）", variant)
+		}
+		if al.Allow("10.0.0.9", variant, "user", time.Minute) {
+			t.Fatalf("变体 %q 敲门应被封禁拒绝（Allow 返回 false）", variant)
+		}
+	}
+
+	// 撤窗按规范化匹配：以变体形态登记的放行窗口也应被撤销
+	al2 := NewAllowlist()
+	al2.deny = map[string]time.Time{} // 无封禁，直接放行
+	al2.Allow("10.0.0.1", "Li.Fang ", "user", time.Minute)
+	if ips := al2.RevokeUser("li.fang"); len(ips) != 1 {
+		t.Fatalf("规范化撤窗应命中变体登记的窗口，实际 %v", ips)
+	}
+}
+
 func TestRevokeUser(t *testing.T) {
 	al := NewAllowlist()
 	al.Allow("10.0.0.1", "li.fang", "user", time.Minute)

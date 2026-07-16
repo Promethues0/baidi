@@ -72,18 +72,23 @@ func main() {
 			return al.ActiveCount(), proxy.Active(), int64(time.Since(started).Seconds()), out
 		}
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
-		// DenyUser 幂等（轮询反复下发同一条目只在首次/续封时为 true），处置动作只执行一次。
+		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关
+		// 本地时钟快于控制面时会把 until 判过期而返回 false，若据此 continue 会连撤窗/断隧道
+		// 一并跳过（安全动作静默失效）。这里无论 until 是否"已过期"都执行一次撤窗+断隧道。
+		applied := map[string]int64{}
 		applyRevoked := func(revoked []cplane.Revoked) {
 			for _, rv := range revoked {
-				until := time.Unix(rv.Until, 0)
-				if !al.DenyUser(rv.User, until) {
-					continue
+				if applied[rv.User] >= rv.Until {
+					continue // 该账号该封禁窗口已处置过
 				}
+				applied[rv.User] = rv.Until
+				until := time.Unix(rv.Until, 0)
+				al.DenyUser(rv.User, until) // 封禁后续敲门（时钟正常时生效）
 				ips := al.RevokeUser(rv.User)
 				n := proxy.KillUser(rv.User)
 				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
 					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n,
-					"until", until.Format("15:04:05"), "reason", rv.Reason)
+					"until", until.Format("15:04:05"))
 				if *pf {
 					for _, ip := range ips {
 						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过

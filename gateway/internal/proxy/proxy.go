@@ -33,24 +33,30 @@ var conns = struct {
 	m  map[string]map[net.Conn]struct{}
 }{m: map[string]map[net.Conn]struct{}{}}
 
+// normUser 与 spa.normUser 同义：账号匹配键规范化（去首尾空格 + 小写），
+// 保证按账号切断隧道对大小写/空格变体一致命中，杜绝换形态绕过强制下线。
+func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
 func track(user string, c net.Conn) {
+	key := normUser(user)
 	conns.mu.Lock()
 	defer conns.mu.Unlock()
-	set := conns.m[user]
+	set := conns.m[key]
 	if set == nil {
 		set = map[net.Conn]struct{}{}
-		conns.m[user] = set
+		conns.m[key] = set
 	}
 	set[c] = struct{}{}
 }
 
 func untrack(user string, c net.Conn) {
+	key := normUser(user)
 	conns.mu.Lock()
 	defer conns.mu.Unlock()
-	if set := conns.m[user]; set != nil {
+	if set := conns.m[key]; set != nil {
 		delete(set, c)
 		if len(set) == 0 {
-			delete(conns.m, user)
+			delete(conns.m, key)
 		}
 	}
 }
@@ -59,12 +65,13 @@ func untrack(user string, c net.Conn) {
 // Close 会打断双向 io.Copy，隧道立即真实断开。摘除与关闭同步完成，
 // 幂等（重复调用返回 0）；handle 退出时的 defer untrack 对已摘除连接是无害空操作。
 func KillUser(user string) int {
+	key := normUser(user)
 	conns.mu.Lock()
-	list := make([]net.Conn, 0, len(conns.m[user]))
-	for c := range conns.m[user] {
+	list := make([]net.Conn, 0, len(conns.m[key]))
+	for c := range conns.m[key] {
 		list = append(list, c)
 	}
-	delete(conns.m, user)
+	delete(conns.m, key)
 	conns.mu.Unlock()
 	for _, c := range list {
 		_ = c.Close()
@@ -129,6 +136,13 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 	defer active.Add(-1)
 	track(user, c)
 	defer untrack(user, c)
+	// 登记后复核放行窗口：若在 Allowed→track 空档遭强制下线（applyRevoked 先撤窗再 KillUser，
+	// 本连接恰在 KillUser 扫描后落表则漏杀），此处 Allowed 已为 false → 立即断开，杜绝连接逃逸切断。
+	if _, _, ok := al.Allowed(ip); !ok {
+		slog.Warn("代理拒绝（登记后放行窗口已失效，疑似强制下线竞态）", "src", ip, "user", user)
+		_ = c.Close()
+		return
+	}
 
 	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 的 Accept 不在 Accept 内握手，
 	// 若把握手推迟到带 3s deadline 的前导 Peek 里触发会与之卡死（gotlcp 在 Accept 即握手故无此问题）。

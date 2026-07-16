@@ -38,10 +38,15 @@ type Server struct {
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
+// s.revoked 以规范化账号（normUser）为键，杜绝换大小写/空格重登绕过封禁；Display 保留原始显示形态。
 type revokeInfo struct {
-	Reason string
-	Until  int64 // 封禁截止 Unix 秒
+	Reason  string
+	Until   int64  // 封禁截止 Unix 秒
+	Display string // 原始账号显示形态（下发网关 / 审计用）
 }
+
+// normUser 规范化账号（去首尾空格 + 小写），与数据面 spa/proxy 的 normUser 同义。
+func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // GatewayInfo 一台已注册数据面网关的运行信息（含网关上报的真实活性指标）。
 type GatewayInfo struct {
@@ -340,16 +345,17 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
 }
 
-// revokedActive 报告某账号是否在强制下线封禁期内（懒清理过期条目）。
+// revokedActive 报告某账号是否在强制下线封禁期内（懒清理过期条目）。按规范化账号匹配。
 func (s *Server) revokedActive(user string) (revokeInfo, bool) {
+	key := normUser(user)
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	ri, ok := s.revoked[user]
+	ri, ok := s.revoked[key]
 	if !ok {
 		return revokeInfo{}, false
 	}
 	if time.Now().Unix() >= ri.Until {
-		delete(s.revoked, user)
+		delete(s.revoked, key)
 		return revokeInfo{}, false
 	}
 	return ri, true
@@ -395,20 +401,24 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
 		return
 	}
+	// 数据面执行只需 user + until；reason 为运营敏感文本，按最小披露不下发网关。
 	type revokedDTO struct {
-		User   string `json:"user"`
-		Until  int64  `json:"until"`
-		Reason string `json:"reason"`
+		User  string `json:"user"`
+		Until int64  `json:"until"`
 	}
 	now := time.Now().Unix()
 	s.mu.Lock()
 	revoked := make([]revokedDTO, 0, len(s.revoked))
-	for u, ri := range s.revoked {
+	for k, ri := range s.revoked {
 		if now >= ri.Until {
-			delete(s.revoked, u) // 懒清理过期封禁
+			delete(s.revoked, k) // 懒清理过期封禁
 			continue
 		}
-		revoked = append(revoked, revokedDTO{User: u, Until: ri.Until, Reason: ri.Reason})
+		u := ri.Display
+		if u == "" {
+			u = k
+		}
+		revoked = append(revoked, revokedDTO{User: u, Until: ri.Until})
 	}
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs, "revoked": revoked})

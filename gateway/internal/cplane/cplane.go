@@ -94,10 +94,10 @@ type resourceDTO struct {
 }
 
 // Revoked 控制面下发的一条强制下线封禁（封禁期内拒绝敲门，并撤窗/切断该账号隧道）。
+// 数据面执行只需 user + until；处置原因（reason）为运营敏感文本，按最小披露原则不下发网关。
 type Revoked struct {
-	User   string `json:"user"`
-	Until  int64  `json:"until"` // 封禁截止 Unix 秒
-	Reason string `json:"reason"`
+	User  string `json:"user"`
+	Until int64  `json:"until"` // 封禁截止 Unix 秒
 }
 
 // Policy 拉取当前资源授权策略 + 强制下线撤销名单（旧控制面无 revoked 字段则为空，向后兼容）。

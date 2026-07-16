@@ -20,6 +20,9 @@ func (s *Server) objectExists(ctx context.Context, kind, id string) (bool, error
 // handleOnline 返回实时在线会话：优先聚合在线数据面网关上报的真实敲门会话（source=live），
 // 无网关上报时回退演示种子（source=demo）；两者都叠加"已强制下线"覆盖层。
 func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) { // 在线会话（账号/IP/网关/踢人原因）属监控中心敏感数据，仅 admin 可见
+		return
+	}
 	now := time.Now()
 	window := int64(gatewayOnlineWindow / time.Second)
 
@@ -122,7 +125,7 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	until := time.Now().Add(kickBanTTL).Unix()
 	s.mu.Lock()
 	s.kicked[id] = reason
-	s.revoked[user] = revokeInfo{Reason: reason, Until: until}
+	s.revoked[normUser(user)] = revokeInfo{Reason: reason, Until: until, Display: user}
 	s.mu.Unlock()
 	s.audit(r, "security", "强制下线 "+user+"（会话 "+id+" · "+reason+"；封禁接入至 "+time.Unix(until, 0).Format("15:04")+"）", "deny")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "user": user, "status": "offline", "reason": reason, "banUntil": until})
@@ -130,6 +133,9 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 
 // handleUserState 返回用户态势（分桶聚合 + 受关注用户清单）。
 func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) { // 用户态势属监控中心敏感数据，仅 admin 可见
+		return
+	}
 	b, err := s.store.UserStates(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load user state")

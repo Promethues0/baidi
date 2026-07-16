@@ -93,25 +93,33 @@ type resourceDTO struct {
 	AllowUsers []string `json:"allowUsers"`
 }
 
-// Policy 拉取当前资源授权策略。
-func (c *Client) Policy() ([]resource.Resource, error) {
+// Revoked 控制面下发的一条强制下线封禁（封禁期内拒绝敲门，并撤窗/切断该账号隧道）。
+type Revoked struct {
+	User   string `json:"user"`
+	Until  int64  `json:"until"` // 封禁截止 Unix 秒
+	Reason string `json:"reason"`
+}
+
+// Policy 拉取当前资源授权策略 + 强制下线撤销名单（旧控制面无 revoked 字段则为空，向后兼容）。
+func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 	resp, err := c.do(http.MethodGet, "/api/v1/gateways/policy", nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("control 拉策略返回 %d", resp.StatusCode)
+		return nil, nil, fmt.Errorf("control 拉策略返回 %d", resp.StatusCode)
 	}
 	var r struct {
 		Resources []resourceDTO `json:"resources"`
+		Revoked   []Revoked     `json:"revoked"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	out := make([]resource.Resource, 0, len(r.Resources))
 	for _, d := range r.Resources {
 		out = append(out, resource.Resource{ID: d.ID, Backend: d.Backend, AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers})
 	}
-	return out, nil
+	return out, r.Revoked, nil
 }

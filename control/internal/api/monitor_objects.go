@@ -71,26 +71,43 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// handleKickSession 强制下线一条会话（admin）。记录在内存覆盖层，重启后会话视为已重连。
+// handleKickSession 强制下线一条会话（admin）——真实的数据面处置：
+// 除显示覆盖层外，把账号记入封禁表（kickBanTTL）；网关下次轮询即撤销放行窗口、
+// 切断该账号活跃隧道、封禁期内拒绝重新敲门，控制面同时拒发敲门令牌。
 func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
 	id := r.PathValue("id")
-	// 仅允许下线真实存在的会话：既是正确的 404 语义，也避免 kicked 覆盖层被任意 id 无限撑大。
-	sessions, err := s.store.OnlineSessions(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
-		return
-	}
-	found := false
-	for _, ss := range sessions {
-		if ss.ID == id {
-			found = true
-			break
+	// 解析会话账号：先查网关上报的真实会话（id 形如 gwid:ip），未命中再退演示种子。
+	// 仅允许下线真实存在的会话：既是正确的 404 语义，也避免覆盖层/封禁表被任意 id 无限撑大。
+	var user string
+	s.mu.Lock()
+	for gwid, sess := range s.gwSess {
+		for _, se := range sess {
+			if gwid+":"+se.IP == id {
+				user = se.User
+			}
 		}
 	}
-	if !found {
+	s.mu.Unlock()
+	if user == "" {
+		sessions, err := s.store.OnlineSessions(r.Context())
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
+			return
+		}
+		for _, ss := range sessions {
+			if ss.ID == id {
+				user = ss.Account
+				if user == "" {
+					user = ss.User
+				}
+				break
+			}
+		}
+	}
+	if user == "" {
 		httpx.Error(w, http.StatusNotFound, "session not found")
 		return
 	}
@@ -102,11 +119,13 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "管理员强制下线"
 	}
+	until := time.Now().Add(kickBanTTL).Unix()
 	s.mu.Lock()
 	s.kicked[id] = reason
+	s.revoked[user] = revokeInfo{Reason: reason, Until: until}
 	s.mu.Unlock()
-	s.audit(r, "security", "强制下线会话 "+id+"（"+reason+"）", "deny")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": "offline", "reason": reason})
+	s.audit(r, "security", "强制下线 "+user+"（会话 "+id+" · "+reason+"；封禁接入至 "+time.Unix(until, 0).Format("15:04")+"）", "deny")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "user": user, "status": "offline", "reason": reason, "banUntil": until})
 }
 
 // handleUserState 返回用户态势（分桶聚合 + 受关注用户清单）。

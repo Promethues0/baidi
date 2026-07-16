@@ -16,10 +16,12 @@ import (
 // Version 控制中心版本号。
 const Version = "0.3.0"
 
-// tokenTTL 会话令牌有效期；knockTTL 短时效一次性敲门令牌有效期。
+// tokenTTL 会话令牌有效期；knockTTL 短时效一次性敲门令牌有效期；
+// kickBanTTL 强制下线后的接入封禁时长（期内拒发敲门令牌、网关拒敲门，到期自然恢复）。
 const (
-	tokenTTL = 8 * time.Hour
-	knockTTL = 90 * time.Second
+	tokenTTL   = 8 * time.Hour
+	knockTTL   = 90 * time.Second
+	kickBanTTL = 5 * time.Minute
 )
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
@@ -31,7 +33,14 @@ type Server struct {
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo   // 已注册（在线）网关，按 id
 	gwSess   map[string][]GwSession   // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
-	kicked   map[string]string        // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户）
+	kicked   map[string]string        // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	revoked  map[string]revokeInfo    // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+}
+
+// revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
+type revokeInfo struct {
+	Reason string
+	Until  int64 // 封禁截止 Unix 秒
 }
 
 // GatewayInfo 一台已注册数据面网关的运行信息（含网关上报的真实活性指标）。
@@ -55,7 +64,7 @@ type GwSession struct {
 
 // New 构造 Server。
 func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}}
+	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
@@ -315,14 +324,35 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 
 // handleKnockToken 为已登录会话签发短时效一次性敲门令牌（带随机 jti）。
 // 客户端用它敲门、网关按 jti 一次性放行，杜绝令牌被解出后主动重放（90s 内也仅一次）。
+// 强制下线封禁期内拒发——掐断客户端 reknock 保活的令牌来源。
 func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	c, ok := auth.FromContext(r.Context())
 	if !ok {
 		httpx.Error(w, http.StatusUnauthorized, "未认证")
 		return
 	}
+	if ri, banned := s.revokedActive(c.Name); banned {
+		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 在强制下线封禁期内（"+ri.Reason+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "已被强制下线，暂时无法接入")
+		return
+	}
 	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
+}
+
+// revokedActive 报告某账号是否在强制下线封禁期内（懒清理过期条目）。
+func (s *Server) revokedActive(user string) (revokeInfo, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ri, ok := s.revoked[user]
+	if !ok {
+		return revokeInfo{}, false
+	}
+	if time.Now().Unix() >= ri.Until {
+		delete(s.revoked, user)
+		return revokeInfo{}, false
+	}
+	return ri, true
 }
 
 // handleGatewayRegister 记录一台数据面网关上线/心跳（网关用自签 gateway 令牌认证）。
@@ -355,7 +385,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
-// handleGatewayPolicy 网关拉取当前资源授权策略（替代静态 resources.json）。
+// handleGatewayPolicy 网关拉取当前资源授权策略（替代静态 resources.json）+ 强制下线撤销名单。
 func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	if !s.requireGateway(w, r) {
 		return
@@ -365,7 +395,23 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
+	type revokedDTO struct {
+		User   string `json:"user"`
+		Until  int64  `json:"until"`
+		Reason string `json:"reason"`
+	}
+	now := time.Now().Unix()
+	s.mu.Lock()
+	revoked := make([]revokedDTO, 0, len(s.revoked))
+	for u, ri := range s.revoked {
+		if now >= ri.Until {
+			delete(s.revoked, u) // 懒清理过期封禁
+			continue
+		}
+		revoked = append(revoked, revokedDTO{User: u, Until: ri.Until, Reason: ri.Reason})
+	}
+	s.mu.Unlock()
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs, "revoked": revoked})
 }
 
 // GatewayDetail 网关清单条目：注册信息 + 该网关上报的活跃会话明细（就近处置/审计用）。

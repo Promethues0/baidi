@@ -11,6 +11,7 @@ import (
 	"log/slog"
 	"net"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -25,6 +26,51 @@ var active atomic.Int64
 
 // Active 返回当前活跃隧道连接数。
 func Active() int { return int(active.Load()) }
+
+// conns 活跃隧道连接登记表：账号 → 连接集合（强制下线按账号切断）。
+var conns = struct {
+	mu sync.Mutex
+	m  map[string]map[net.Conn]struct{}
+}{m: map[string]map[net.Conn]struct{}{}}
+
+func track(user string, c net.Conn) {
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	set := conns.m[user]
+	if set == nil {
+		set = map[net.Conn]struct{}{}
+		conns.m[user] = set
+	}
+	set[c] = struct{}{}
+}
+
+func untrack(user string, c net.Conn) {
+	conns.mu.Lock()
+	defer conns.mu.Unlock()
+	if set := conns.m[user]; set != nil {
+		delete(set, c)
+		if len(set) == 0 {
+			delete(conns.m, user)
+		}
+	}
+}
+
+// KillUser 关闭某账号的全部活跃隧道连接（强制下线的数据面执行），返回切断条数。
+// Close 会打断双向 io.Copy，隧道立即真实断开。摘除与关闭同步完成，
+// 幂等（重复调用返回 0）；handle 退出时的 defer untrack 对已摘除连接是无害空操作。
+func KillUser(user string) int {
+	conns.mu.Lock()
+	list := make([]net.Conn, 0, len(conns.m[user]))
+	for c := range conns.m[user] {
+		list = append(list, c)
+	}
+	delete(conns.m, user)
+	conns.mu.Unlock()
+	for _, c := range list {
+		_ = c.Close()
+	}
+	return len(list)
+}
 
 const (
 	preamblePrefix  = "CONNECT " // 8 字节
@@ -78,9 +124,11 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 		_ = c.Close()
 		return
 	}
-	// 已授权连接计入活跃隧道数（供上报控制面）；handle 返回即回落
+	// 已授权连接计入活跃隧道数（供上报控制面）并按账号登记（强制下线可按账号切断）；handle 返回即回落
 	active.Add(1)
 	defer active.Add(-1)
+	track(user, c)
+	defer untrack(user, c)
 
 	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 的 Accept 不在 Accept 内握手，
 	// 若把握手推迟到带 3s deadline 的前导 Peek 里触发会与之卡死（gotlcp 在 Accept 即握手故无此问题）。

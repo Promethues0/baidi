@@ -14,8 +14,9 @@ import (
 
 // Allowlist 源 IP → 放行到期时间 的并发安全表。
 type Allowlist struct {
-	mu sync.Mutex
-	m  map[string]entry
+	mu   sync.Mutex
+	m    map[string]entry
+	deny map[string]time.Time // 账号 → 封禁截止（强制下线：封禁期内拒绝敲门）
 	// OnAllow 在放行某 IP 时回调（如向防火墙 pf 表写入 pass 规则）。可空。
 	OnAllow func(ip, user string)
 }
@@ -35,7 +36,53 @@ type Session struct {
 	Since time.Time
 }
 
-func NewAllowlist() *Allowlist { return &Allowlist{m: map[string]entry{}} }
+func NewAllowlist() *Allowlist {
+	return &Allowlist{m: map[string]entry{}, deny: map[string]time.Time{}}
+}
+
+// DenyUser 封禁某账号至 until（强制下线）。返回是否为新封禁/延长封禁——
+// 轮询会反复下发同一撤销条目，调用方据此只在首次应用时执行撤窗/断隧道等处置。
+func (a *Allowlist) DenyUser(user string, until time.Time) bool {
+	if !time.Now().Before(until) {
+		return false
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	if prev, ok := a.deny[user]; ok && !until.After(prev) {
+		return false
+	}
+	a.deny[user] = until
+	return true
+}
+
+// UserDenied 报告某账号是否在封禁期内（懒清理过期条目）。
+func (a *Allowlist) UserDenied(user string) bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	until, ok := a.deny[user]
+	if !ok {
+		return false
+	}
+	if !time.Now().Before(until) {
+		delete(a.deny, user)
+		return false
+	}
+	return true
+}
+
+// RevokeUser 撤销某账号的全部放行窗口，返回被撤的源 IP（供 -pf 模式回收内核放行规则）。
+func (a *Allowlist) RevokeUser(user string) []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	var ips []string
+	for ip, e := range a.m {
+		if e.user == user {
+			ips = append(ips, ip)
+			delete(a.m, ip)
+		}
+	}
+	return ips
+}
 
 // Allow 放行某源 IP 一段时间（记录身份 user/role）。重复敲门刷新 until 但保留首次 since。
 func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) {
@@ -147,6 +194,10 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 		}
 		if !protected {
 			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放防护，建议客户端升级敲门信封", "src", ip)
+		}
+		if al.UserDenied(claims.Name) {
+			slog.Warn("SPA 敲门拒绝（用户已被强制下线，封禁期内）", "src", ip, "user", claims.Name)
+			continue
 		}
 		al.Allow(ip, claims.Name, claims.Role, ttl)
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())

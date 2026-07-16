@@ -71,14 +71,41 @@ func main() {
 			}
 			return al.ActiveCount(), proxy.Active(), int64(time.Since(started).Seconds()), out
 		}
+		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
+		// DenyUser 幂等（轮询反复下发同一条目只在首次/续封时为 true），处置动作只执行一次。
+		applyRevoked := func(revoked []cplane.Revoked) {
+			for _, rv := range revoked {
+				until := time.Unix(rv.Until, 0)
+				if !al.DenyUser(rv.User, until) {
+					continue
+				}
+				ips := al.RevokeUser(rv.User)
+				n := proxy.KillUser(rv.User)
+				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
+					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n,
+					"until", until.Format("15:04:05"), "reason", rv.Reason)
+				if *pf {
+					for _, ip := range ips {
+						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过
+						if _, _, ok := al.Allowed(ip); ok {
+							continue
+						}
+						if err := darkfw.DenyIP(ip); err == nil {
+							slog.Info("pf 放行回收（强制下线）", "ip", ip)
+						}
+					}
+				}
+			}
+		}
 		cp := cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
-		if rs, err := cp.Policy(); err != nil {
+		if rs, rv, err := cp.Policy(); err != nil {
 			slog.Warn("首次拉取策略失败，暂用本地默认/静态策略", "err", err.Error())
 		} else {
 			reg.Replace(rs)
+			applyRevoked(rv)
 			slog.Info("控制面策略已拉取", "control", *control, "count", reg.Count())
 		}
 		go func() {
@@ -86,8 +113,9 @@ func main() {
 			defer t.Stop()
 			for range t.C {
 				_ = cp.Register(report()) // 心跳 + 上报真实活性指标与活跃会话
-				if rs, err := cp.Policy(); err == nil {
+				if rs, rv, err := cp.Policy(); err == nil {
 					reg.Replace(rs)
+					applyRevoked(rv)
 				} else {
 					slog.Warn("轮询拉策略失败（保留上次策略）", "err", err.Error())
 				}

@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/store"
@@ -132,6 +133,51 @@ func TestKnockTokenDeniedForBlockedAccounts(t *testing.T) {
 	if code != http.StatusOK || out["token"] == "" {
 		t.Fatalf("knock-token for li.fang http %d out %v, want 200+token", code, out)
 	}
+}
+
+// 会话令牌回退洞：目录中 disabled/locked 账号即便没有被显式踢下线，
+// 网关策略的 revoked 名单也应持续包含它们（滚动续期），
+// 否则 5min 限时封禁到期后，其 8h 会话令牌可直连网关重新放行。
+func TestGatewayPolicyIncludesDisabledDirectoryAccounts(t *testing.T) {
+	h := newTestServer(t)
+	now := time.Now().Unix()
+
+	rev := policyRevoked(t, h)
+	// 种子：zhao.min(locked) / ext.zhou(disabled) 应在名单里，且 until 在未来（滚动）
+	for _, u := range []string{"zhao.min", "ext.zhou"} {
+		until, ok := rev[u]
+		if !ok {
+			t.Errorf("disabled/locked 账号 %q 未进网关 revoked 名单", u)
+			continue
+		}
+		if until <= now {
+			t.Errorf("%q 的 until=%d 未来化失败（now=%d）", u, until, now)
+		}
+	}
+	// active 账号未被踢，不应出现
+	if _, ok := rev["li.fang"]; ok {
+		t.Errorf("active 账号 li.fang 不该出现在 revoked 名单")
+	}
+}
+
+// policyRevoked 拉一次网关策略，返回 revoked 名单 账号→until。
+func policyRevoked(t *testing.T, h http.Handler) map[string]int64 {
+	t.Helper()
+	code, out := doJSON(t, h, "GET", "/api/v1/gateways/policy", gatewayToken(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("gateways/policy http %d", code)
+	}
+	m := map[string]int64{}
+	if arr, ok := out["revoked"].([]any); ok {
+		for _, it := range arr {
+			if r, ok := it.(map[string]any); ok {
+				u, _ := r["user"].(string)
+				until, _ := r["until"].(float64)
+				m[u] = int64(until)
+			}
+		}
+	}
+	return m
 }
 
 func TestDisableUserRevokesDataPlaneAndEnableLifts(t *testing.T) {

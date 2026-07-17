@@ -494,6 +494,26 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		revoked = append(revoked, revokedDTO{User: u, Until: ri.Until})
 	}
 	s.mu.Unlock()
+
+	// 目录中 disabled/locked 账号动态并入撤销名单（滚动续期至 now+kickBanTTL）：
+	// 补上"5min 限时封禁到期后，被禁账号的 8h 会话令牌仍可直连网关"的洞——
+	// 只要账号保持禁用，每次轮询都续窗，网关就一直拒；账号恢复 active 后自然从名单消失。
+	seen := make(map[string]bool, len(revoked))
+	for _, d := range revoked {
+		seen[normUser(d.User)] = true
+	}
+	if b, err := s.store.Users(r.Context()); err == nil {
+		until := now + int64(kickBanTTL.Seconds())
+		for _, u := range b.Users {
+			if !accountBlocked(u.Status) {
+				continue
+			}
+			if k := normUser(u.Account); !seen[k] {
+				seen[k] = true
+				revoked = append(revoked, revokedDTO{User: u.Account, Until: until})
+			}
+		}
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs, "revoked": revoked})
 }
 

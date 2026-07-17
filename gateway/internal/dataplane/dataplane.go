@@ -9,11 +9,13 @@ package dataplane
 import (
 	"context"
 	"crypto/tls"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
 	"net"
 	"strconv"
+	"sync"
 	"time"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
@@ -78,7 +80,7 @@ func Run(dev tun.Device, cfg *Config) error {
 		{Destination: header.IPv6EmptySubnet, NIC: 1},
 	})
 
-	t := &tunneler{cfg: cfg}
+	t := &tunneler{cfg: cfg, deny: make(chan error, 1)}
 	fwd := tcp.NewForwarder(s, 0, 2048, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		dst := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
@@ -117,20 +119,44 @@ func Run(dev tun.Device, cfg *Config) error {
 	}
 
 	go pumpOutbound(ctx, dev, linkEP, offset)
-	err := pumpInbound(dev, linkEP, mtu) // 阻塞；dev 读错（关闭）即返回
-	cancel()
-	return err
+
+	// pumpInbound 阻塞在 dev.Read；放 goroutine 里，主协程同时监听 control 定性拒绝。
+	inbound := make(chan error, 1)
+	go func() { inbound <- pumpInbound(dev, linkEP, mtu) }()
+
+	select {
+	case err := <-inbound: // dev 关闭/读错（含调用方主动停）
+		cancel()
+		return err
+	case derr := <-t.deny: // 强制下线/账号禁用：停掉数据面并带出原因
+		slog.Warn("接入被控制面拒绝，停止数据面", "err", derr.Error())
+		cancel()
+		_ = dev.Close() // 打断 pumpInbound
+		<-inbound       // 等其退出
+		return derr
+	}
 }
 
-type tunneler struct{ cfg *Config }
+type tunneler struct {
+	cfg      *Config
+	deny     chan error // control 定性拒绝（403：强制下线/账号禁用）单次上报，供 Run 停机
+	denyOnce sync.Once
+}
 
 // knock 发一次 SPA 敲门：有 Control 则换取短时效一次性令牌，否则用会话令牌。
+// 遇 control 定性拒绝（ErrDenied）不回退会话令牌，改为向 deny 通道上报一次并放弃本次敲门——
+// 让 Run 停掉整个数据面并带出原因，而不是被封禁后继续徒劳空转。
 func (t *tunneler) knock() {
 	tok := t.cfg.Token
 	if t.cfg.Control != "" {
-		if kt, err := knock.FetchToken(t.cfg.Control, t.cfg.Token); err == nil {
+		kt, err := knock.FetchToken(t.cfg.Control, t.cfg.Token)
+		switch {
+		case err == nil:
 			tok = kt
-		} else {
+		case errors.Is(err, knock.ErrDenied):
+			t.denyOnce.Do(func() { t.deny <- err })
+			return
+		default:
 			slog.Warn("取短时效敲门令牌失败，回退会话令牌", "err", err.Error())
 		}
 	}

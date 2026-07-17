@@ -10,6 +10,7 @@ package baidimobile
 import (
 	"errors"
 	"os"
+	"sync"
 	"time"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
@@ -17,6 +18,7 @@ import (
 
 	"baidi.dev/gateway/internal/dataplane"
 	"baidi.dev/gateway/internal/gmcert"
+	"baidi.dev/gateway/internal/knock"
 )
 
 // Config 移动端数据面配置（全 gomobile 友好类型；CA 以 PEM 字符串下发）。
@@ -32,9 +34,41 @@ type Config struct {
 	Mtu             int    // 链路 MTU（默认 1420）
 }
 
-// Session 运行中的隧道句柄。
+// Session 运行中的隧道句柄。移动端 UI 轮询 Running()/Reason() 观察终态——
+// 引擎因强制下线/账号禁用而停机时，Reason() 带出可显示的原因（区别于用户主动 Stop）。
 type Session struct {
-	dev tun.Device
+	dev     tun.Device
+	mu      sync.Mutex
+	stopped bool
+	reason  string
+}
+
+// markStopped 记录引擎终止。err 非 nil（含被拒）→ 记原因；nil（正常关闭）→ 停机但无原因。
+func (s *Session) markStopped(err error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.stopped = true
+	if err != nil {
+		if errors.Is(err, knock.ErrDenied) {
+			s.reason = err.Error() // 定性拒绝：原文已含「接入被拒：<原因>」
+		} else {
+			s.reason = "隧道中断：" + err.Error()
+		}
+	}
+}
+
+// Running 报告引擎是否仍在运行（供移动端轮询）。
+func (s *Session) Running() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return !s.stopped
+}
+
+// Reason 返回引擎的终止原因（运行中或正常关闭为空；被拒/异常为可显示文案）。
+func (s *Session) Reason() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reason
 }
 
 // Start 用平台 VPN 扩展建立的 TUN fd 启动数据面；引擎在后台 goroutine 运行。
@@ -75,8 +109,9 @@ func Start(tunFd int, c *Config) (*Session, error) {
 		Gm: c.Gm, TLCPConfig: tlcpCfg, DefaultRes: c.DefaultResource,
 		Reknock: 15 * time.Second, MTU: mtu,
 	}
-	go func() { _ = dataplane.Run(dev, cfg) }()
-	return &Session{dev: dev}, nil
+	sess := &Session{dev: dev}
+	go func() { sess.markStopped(dataplane.Run(dev, cfg)) }()
+	return sess, nil
 }
 
 // Stop 关闭隧道（关 TUN → 引擎双向泵退出）。

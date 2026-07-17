@@ -15,13 +15,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
 )
 
+// ErrDenied 表示 control 定性拒绝签发敲门令牌（HTTP 403：强制下线 / 账号禁用锁定）。
+// 与瞬时错误（网络抖动、5xx）区别对待：调用方遇 ErrDenied 应停止接入并向用户显示原因，
+// 绝不回退会话令牌继续重试——回退只会让被封禁的客户端徒劳空转。
+var ErrDenied = errors.New("接入被拒")
+
 // FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti）。
+// 遇 403 返回包裹 ErrDenied 的错误并带出服务端原因；其余非 200 视为瞬时错误。
 func FetchToken(control, sessionToken string) (string, error) {
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", nil)
 	if err != nil {
@@ -33,6 +40,9 @@ func FetchToken(control, sessionToken string) (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusForbidden {
+		return "", fmt.Errorf("%w：%s", ErrDenied, decodeErrMsg(resp.Body))
+	}
 	if resp.StatusCode != http.StatusOK {
 		return "", fmt.Errorf("control 返回 %d", resp.StatusCode)
 	}
@@ -46,6 +56,19 @@ func FetchToken(control, sessionToken string) (string, error) {
 		return "", errors.New("control 返回空令牌")
 	}
 	return r.Token, nil
+}
+
+// decodeErrMsg 从 control 统一错误信封 {"error":{"message":...}} 取原因，取不到给兜底文案。
+func decodeErrMsg(body io.Reader) string {
+	var e struct {
+		Error struct {
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if json.NewDecoder(body).Decode(&e) == nil && e.Error.Message != "" {
+		return e.Error.Message
+	}
+	return "已被管理员禁止接入"
 }
 
 type packet struct {

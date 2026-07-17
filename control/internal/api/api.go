@@ -880,5 +880,39 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
+	// 在线会话数只有 api 层掌握（网关上报的真实敲门会话）；有真实会话时覆盖种子，
+	// 并把在线设备数按真实会话对齐（无真实会话则保留种子，诚实降级）。
+	if n := s.onlineSessionCount(); n >= 0 {
+		ov.Sessions = n
+		if n > ov.Devices.Total {
+			ov.Devices.Total = n
+		}
+		ov.Devices.Online = n
+		if ov.Devices.Total > 0 {
+			ov.Devices.Rate = float64(n) / float64(ov.Devices.Total)
+		}
+	}
 	httpx.JSON(w, http.StatusOK, ov)
+}
+
+// onlineSessionCount 返回在线数据面网关上报的真实敲门会话数；无任何在线网关会话则返回 -1
+// （表示"无真实来源"，调用方保留种子值）。
+func (s *Server) onlineSessionCount() int {
+	now := time.Now()
+	window := int64(gatewayOnlineWindow / time.Second)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	count, hasLiveGw := 0, false
+	for id, sess := range s.gwSess {
+		gw, ok := s.gateways[id]
+		if !ok || now.Unix()-gw.LastSeen > window {
+			continue
+		}
+		hasLiveGw = true
+		count += len(sess)
+	}
+	if !hasLiveGw {
+		return -1
+	}
+	return count
 }

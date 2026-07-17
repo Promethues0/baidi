@@ -23,6 +23,11 @@ func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	cfg := config.Load()
+	// 生产环境拒绝用默认/空 JWT 密钥启动：密钥可猜则任何人都能伪造 admin 令牌。
+	if config.InsecureProdSecret(cfg.Env, cfg.JWTSecret) {
+		slog.Error("拒绝启动：BAIDI_ENV=prod 但 BAIDI_JWT_SECRET 未设置或仍为默认值，请注入强随机密钥")
+		os.Exit(1)
+	}
 	st, err := store.OpenSQLite(cfg.DBPath)
 	if err != nil {
 		slog.Error("open sqlite failed", "path", cfg.DBPath, "err", err)

@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 )
@@ -351,7 +352,7 @@ func (s *Server) checkPosture(ctx context.Context) DiagCheck {
 // checkSecurity 检查 JWT 密钥强度与传输加密拓扑（诚实反映控制面回环 HTTP + nginx 前置 TLS）。
 func (s *Server) checkSecurity() DiagCheck {
 	c := DiagCheck{Key: "secret", Category: "security", Name: "密钥与传输安全"}
-	defaultSecret := string(s.secret) == "baidi-dev-secret-change-me"
+	defaultSecret := string(s.secret) == config.DefaultJWTSecret
 	switch {
 	case defaultSecret && s.env == "prod":
 		c.Status, c.Metric = "fail", "默认密钥 · 生产"

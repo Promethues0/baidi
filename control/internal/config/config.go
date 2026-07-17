@@ -7,6 +7,15 @@ import (
 	"time"
 )
 
+// DefaultJWTSecret 是未注入 BAIDI_JWT_SECRET 时的开发用默认密钥（可猜，仅限 dev）。
+const DefaultJWTSecret = "baidi-dev-secret-change-me"
+
+// InsecureProdSecret 报告"生产环境仍在用默认/空 JWT 密钥"——这是致命错配：
+// 密钥可猜则任何人都能伪造 admin 令牌，控制面形同虚设。main 据此拒绝启动（fail-closed）。
+func InsecureProdSecret(env, secret string) bool {
+	return env == "prod" && (secret == "" || secret == DefaultJWTSecret)
+}
+
 // Config 控制中心服务端配置。
 type Config struct {
 	Addr            string        // 监听地址，默认 :8090
@@ -25,7 +34,7 @@ func Load() Config {
 		ShutdownTimeout: envDuration("BAIDI_SHUTDOWN_TIMEOUT", 10*time.Second),
 		Env:             env("BAIDI_ENV", "dev"),
 		DBPath:          env("BAIDI_DB", "baidi.db"),
-		JWTSecret:       env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"),
+		JWTSecret:       env("BAIDI_JWT_SECRET", DefaultJWTSecret),
 	}
 }
 

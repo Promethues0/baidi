@@ -30,6 +30,8 @@ export interface TunView {
   cipher: string;       // 隧道密码学
   keepalive: boolean;   // 敲门保活已起
   error: string;        // 最近的失败原因（若有）
+  denied: boolean;      // 被控制面定性拒绝（强制下线 / 账号禁用锁定）——不可自愈，别重试
+  deniedReason: string; // 拒绝原因（人话，供 UI 显著呈现）
   lines: string[];      // 最近日志尾巴
 }
 
@@ -72,6 +74,11 @@ function parse(s: TunStatusRaw): TunView {
   // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示
   const fails = lines.filter((l) => /失败|未敲门成功|panic|fatal|退出/i.test(l));
   const error = !s.running && fails.length ? stripTs(fails[fails.length - 1]) : '';
+  // 控制面定性拒绝：dataplane 的 knock.ErrDenied 原文含「接入被拒」，Run 停机前会 warn「接入被控制面拒绝」。
+  // 与瞬时失败区别对待——被强制下线/账号禁用不可自愈，UI 应显著提示且不诱导重试。
+  const denyLine = lines.filter((l) => /接入被拒|接入被控制面拒绝/.test(l)).pop() || '';
+  const denied = !s.running && !!denyLine;
+  const deniedReason = denied ? (stripTs(denyLine).match(/接入被拒[：:]\s*(.+)$/)?.[1] || '已被管理员禁止接入').trim() : '';
   return {
     running: s.running,
     ready,
@@ -82,6 +89,8 @@ function parse(s: TunStatusRaw): TunView {
     cipher: config.gm ? '国密 TLCP（SM2 / SM4-GCM / SM3）' : '通用 TLS 1.3',
     keepalive,
     error,
+    denied,
+    deniedReason,
     lines: lines.slice(-8)
   };
 }

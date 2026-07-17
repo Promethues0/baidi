@@ -47,6 +47,15 @@
           </div>
         </div>
 
+        <div v-if="denied" class="ck-denied">
+          <icon-stop class="ck-denied__ic" />
+          <div class="ck-denied__b">
+            <div class="ck-denied__t">接入已被管理员终止</div>
+            <div class="ck-denied__r">{{ deniedReason }}</div>
+            <div class="ck-denied__h">隧道已断开。请联系管理员解除后重试——重复接入不会成功。</div>
+          </div>
+        </div>
+
         <button v-if="stage === 'idle'" class="dk-btn ck-cta" @click="connect"><icon-link />接入企业内网</button>
         <button v-else-if="stage === 'connected'" class="dk-btn dk-btn--ghost ck-cta" @click="disconnect"><icon-poweroff />断开连接</button>
         <button v-else-if="connectTimedOut" class="dk-btn dk-btn--ghost ck-cta" @click="disconnect"><icon-poweroff />停止接入</button>
@@ -124,14 +133,16 @@ const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
 const showLog = ref(false);
-const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', lines: [] });
+const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', lines: [] });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
 
 let pollTimer = 0;
 let pollGen = 0;         // 轮询代次：断开/重连后自增，令过期的在途轮询失效
 let connectTO = 0;      // 接入超时计时器
 const connectTimedOut = ref(false);
-const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', lines: [] };
+const denied = ref(false);            // 被控制面强制下线 / 账号禁用（不可自愈）
+const deniedReason = ref('');
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', lines: [] };
 function stepFromTun(v: TunView): number {
   if (v.ready) return STEPS.length;
   if (v.keepalive) return 3;
@@ -140,7 +151,7 @@ function stepFromTun(v: TunView): number {
 }
 
 async function connect() {
-  err2.value = ''; connectTimedOut.value = false;
+  err2.value = ''; connectTimedOut.value = false; denied.value = false; deniedReason.value = '';
   if (!isTauri) { await connectDev(); return; }   // 浏览器联调：真敲门探测，不接管流量
   const bad = validateConfig();
   if (bad) { err2.value = bad; return; }          // 接入前配置校验（端口/网段/URL）
@@ -177,8 +188,12 @@ function startPolling() {
       session.connected = false;
       if (stage.value !== 'idle') {
         stage.value = 'idle';
-        if (v.error) { err2.value = '数据面退出：' + v.error; }
+        clearTimeout(connectTO); connectTimedOut.value = false;
+        if (v.denied) { err2.value = ''; }               // 定性拒绝走专属提示条，不占通用错误位
+        else if (v.error) { err2.value = '数据面退出：' + v.error; }
       }
+      denied.value = v.denied;
+      deniedReason.value = v.deniedReason;
       return;
     }
     step.value = stepFromTun(v);
@@ -193,6 +208,7 @@ async function disconnect() {
   try { await tunnelStop(); } catch (e) { err2.value = String((e as Error)?.message ?? e); return; }
   pollGen++; clearInterval(pollTimer); clearTimeout(connectTO);
   stage.value = 'idle'; session.connected = false; connectTimedOut.value = false; err2.value = '';
+  denied.value = false; deniedReason.value = '';
   tun.value = { ...EMPTY_TUN };
 }
 
@@ -204,7 +220,7 @@ async function connectDev() {
   const r = await knock(session.token);
   if (!r.ok) { stage.value = 'idle'; err2.value = 'SPA 敲门失败：' + (r.detail || '网关不可达'); return; }
   step.value = 3; await sleep(300); step.value = STEPS.length;
-  tun.value = { running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', keepalive: false, error: '', lines: [(r.detail || 'SPA 敲门成功')] };
+  tun.value = { running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', keepalive: false, error: '', denied: false, deniedReason: '', lines: [(r.detail || 'SPA 敲门成功')] };
   stage.value = 'connected'; session.connected = true;
   Message.success('（联调）已敲门 · 真 utun 接管需打包运行');
 }
@@ -269,6 +285,11 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-cta { height: 42px; padding: 0 28px; font-size: 14px; margin-top: 10px; }
 .ck-connecting { font-size: 13px; color: var(--bd-primary); margin-top: 12px; }
 .ck-err2 { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-danger); margin-top: 12px; max-width: 280px; text-align: left; }
+.ck-denied { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; max-width: 300px; text-align: left; padding: 12px 14px; border-radius: 10px; background: rgba(245, 63, 63, .08); border: 1px solid rgba(245, 63, 63, .28); }
+.ck-denied__ic { font-size: 20px; color: var(--bd-danger); flex: none; margin-top: 1px; }
+.ck-denied__t { font-size: 13px; font-weight: 600; color: var(--bd-danger); }
+.ck-denied__r { font-size: 12px; color: var(--bd-t1); margin-top: 4px; line-height: 1.5; }
+.ck-denied__h { font-size: 11px; color: var(--bd-t3); margin-top: 6px; line-height: 1.6; }
 .ck-devnote { font-size: 11px; color: var(--bd-t3); margin-top: 14px; max-width: 260px; text-align: center; line-height: 1.6; }
 
 .ck-side { width: 320px; flex: none; display: flex; flex-direction: column; gap: 16px; }

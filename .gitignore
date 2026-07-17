@@ -11,3 +11,6 @@ dist/
 
 # 本地测试生成的 SM2 证书/私钥（gmca EnsureGateway 产物），绝不入库
 certs/
+
+# gomobile 绑定产物（.xcframework/.aar，各上百 MB 的编译产物），本地按需重建，不入库
+clients/mobile/native/out/

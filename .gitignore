@@ -8,3 +8,6 @@ dist/
 *.db
 *.db-wal
 *.db-shm
+
+# 本地测试生成的 SM2 证书/私钥（gmca EnsureGateway 产物），绝不入库
+certs/

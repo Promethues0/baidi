@@ -2,6 +2,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strings"
@@ -47,6 +48,38 @@ type revokeInfo struct {
 
 // normUser 规范化账号（去首尾空格 + 小写），与数据面 spa/proxy 的 normUser 同义。
 func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
+
+// statusZh 目录账号状态中文名（审计/提示文案共用）。
+var statusZh = map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "挂起"}
+
+// accountBlocked 报告目录状态是否禁止接入（禁用/锁定拒登录、拒发敲门令牌）。
+func accountBlocked(status string) bool { return status == "disabled" || status == "locked" }
+
+// lookupDirUser 按谓词查目录用户。store 读失败时返回 error——调用方须 fail-closed，
+// 不得把"查不到状态"当"状态正常"放行。
+func (s *Server) lookupDirUser(ctx context.Context, match func(store.DirUser) bool) (store.DirUser, bool, error) {
+	b, err := s.store.Users(ctx)
+	if err != nil {
+		return store.DirUser{}, false, err
+	}
+	for _, u := range b.Users {
+		if match(u) {
+			return u, true, nil
+		}
+	}
+	return store.DirUser{}, false, nil
+}
+
+// blockedDirAccount 按账号（规范化匹配）查目录，报告该账号是否处于禁用/锁定态。
+// 不在目录中的账号视为不受限（演示模式门户接受任意用户名）。
+func (s *Server) blockedDirAccount(ctx context.Context, account string) (store.DirUser, bool, error) {
+	key := normUser(account)
+	u, found, err := s.lookupDirUser(ctx, func(du store.DirUser) bool { return normUser(du.Account) == key })
+	if err != nil {
+		return store.DirUser{}, false, err
+	}
+	return u, found && accountBlocked(u.Status), nil
+}
 
 // GatewayInfo 一台已注册数据面网关的运行信息（含网关上报的真实活性指标）。
 type GatewayInfo struct {
@@ -215,6 +248,15 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示口令：baidi@123）"})
 		return
 	}
+	// 账号状态门：禁用/锁定的目录账号密码对了也不放行（也不进 MFA 流程）
+	if u, blocked, err := s.blockedDirAccount(r.Context(), b.Username); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to check account status")
+		return
+	} else if blocked {
+		s.auditAs(r, b.Username, "auth", "终端用户登录被拒（账号已"+statusZh[u.Status]+"）", "deny")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[u.Status] + "，请联系管理员"})
+		return
+	}
 	risky := strings.HasPrefix(b.Username, "ext") || strings.Contains(b.Username, "外包")
 	if risky && b.MfaCode == "" {
 		s.auditAs(r, b.Username, "security", "终端用户登录触发自适应二次认证", "mfa")
@@ -296,8 +338,30 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set user status")
 		return
 	}
-	statusZh := map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "挂起"}[body.Status]
-	s.audit(r, "admin", "用户 "+id+" 状态置「"+statusZh+"」", "ok")
+	// 数据面联动：禁用/锁定 → 入封禁表（经网关策略轮询捎带撤窗+断隧道，同强制下线管道）；
+	// 恢复启用 → 立即解除封禁（管理员显式信任动作，同时豁免残余的强制下线封禁）。
+	// 新令牌来源由登录/knock-token 的账号状态门永久把守，限时封禁只负责掐掉存量在线。
+	zh := statusZh[body.Status]
+	detail := ""
+	if u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id }); err != nil {
+		// 状态已落库但目录回查失败：数据面封禁没挂上，留痕告警。
+		// 兜底：登录/knock-token 的账号状态门 fail-closed，该账号拿不到新令牌。
+		if accountBlocked(body.Status) {
+			s.audit(r, "security", "用户 "+id+" 置「"+zh+"」后目录回查失败，数据面即时封禁未生效（存量隧道待自然过期）", "fail")
+		}
+	} else if found {
+		key := normUser(u.Account)
+		s.mu.Lock()
+		switch body.Status {
+		case "disabled", "locked":
+			s.revoked[key] = revokeInfo{Reason: "账号已" + zh, Until: time.Now().Add(kickBanTTL).Unix(), Display: u.Account}
+			detail = "（" + u.Account + " 数据面撤窗断隧道）"
+		case "active":
+			delete(s.revoked, key)
+		}
+		s.mu.Unlock()
+	}
+	s.audit(r, "admin", "用户 "+id+" 状态置「"+zh+"」"+detail, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": body.Status})
 }
 
@@ -339,6 +403,15 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	if ri, banned := s.revokedActive(c.Name); banned {
 		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 在强制下线封禁期内（"+ri.Reason+"）", "deny")
 		httpx.Error(w, http.StatusForbidden, "已被强制下线，暂时无法接入")
+		return
+	}
+	// 账号状态门（永久闸，区别于上面的限时封禁）：禁用/锁定账号拒发，掐断 reknock 保活令牌来源
+	if u, blocked, err := s.blockedDirAccount(r.Context(), c.Name); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to check account status")
+		return
+	} else if blocked {
+		s.audit(r, "security", "拒发敲门令牌："+u.Account+" 账号已"+statusZh[u.Status], "deny")
+		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[u.Status]+"，无法接入")
 		return
 	}
 	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)

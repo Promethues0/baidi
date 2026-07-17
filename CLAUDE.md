@@ -53,7 +53,7 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - gateway/ 根目录 tracked 了两个 13MB 预编译二进制 baidi-tun(.exe)——是历史提交的产物非源码（源码在 gateway/cmd/baidi-tun/），别当文本处理也别轻易删。
 - `design-system/` 是烛龙黏土橙**遗留目录**（fork 残留），白帝不消费它——改主题只动 console/src/styles/tokens.css。
 - **烛龙共存契约**：nginx 站点绝不允许 default_server（build.sh/install-remote.sh 有自检，检出即中止）；deploy/wipe-remote.sh + WIPE=1 会铲目标机原有业务，慎开。
-- certs/（SM2 双证 pem）未跟踪也未 ignore，git status 常年 ?? ——别顺手 add。
+- certs/（SM2 双证 pem，含私钥）已进 .gitignore——是本地 gmca 产物，任何情况下不入库。
 - Go 版本不一致：control 要 go 1.25，gateway 要 go 1.26.3；交叉编译全程 CGO_ENABLED=0。
 - curl 不支持国密 TLCP，验证 -gm 隧道用 gateway/cmd/baidi-tlcp-probe。
 - 重置数据：删 control/baidi.db 重启即重灌种子。

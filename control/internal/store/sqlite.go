@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"baidi.dev/control/internal/auth"
 	"github.com/google/uuid"
 	_ "modernc.org/sqlite"
 )
@@ -21,6 +22,7 @@ type Writer interface {
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
+	SetUserPassword(ctx context.Context, id, hash string) error
 	SaveResource(ctx context.Context, r Resource) error
 	DeleteResource(ctx context.Context, id string) error
 	SaveIpsecSite(ctx context.Context, s IpsecSite) (IpsecSite, error)
@@ -70,7 +72,76 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err := s.seed(); err != nil {
 		return nil, err
 	}
+	if err := s.ensureCredentials(); err != nil {
+		return nil, err
+	}
 	return s, nil
+}
+
+// seedPassword 演示口令；种子/回填用它生成真实 bcrypt 哈希，demo 登录体验不变但机制真实。
+const seedPassword = "baidi@123"
+
+// ensureCredentials 幂等回填旧库的凭据地基（迁移场景）：
+//   - 权威 role 列空的用户按展示角色推断补齐；
+//   - pass_hash 空的用户回填 demo 口令哈希（否则迁移后无人能登录）；
+//   - admin 账号不存在则补建（role=admin）。
+// 全新库 seed() 已设好，这里对其为幂等空操作。
+func (s *SQLiteStore) ensureCredentials() error {
+	ctx := context.Background()
+	// role 回填
+	rows, err := s.db.QueryContext(ctx, `SELECT id,roles FROM users WHERE role IS NULL OR role=''`)
+	if err != nil {
+		return err
+	}
+	type ru struct{ id, roles string }
+	var pending []ru
+	for rows.Next() {
+		var r ru
+		if err := rows.Scan(&r.id, &r.roles); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	for _, r := range pending {
+		var roles []string
+		_ = json.Unmarshal([]byte(r.roles), &roles)
+		if _, err := s.db.ExecContext(ctx, `UPDATE users SET role=? WHERE id=?`, roleFromDisplay(roles), r.id); err != nil {
+			return err
+		}
+	}
+	// pass_hash 回填（迁移库的历史用户从来没有口令）
+	var missing int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE pass_hash IS NULL OR pass_hash=''`).Scan(&missing); err != nil {
+		return err
+	}
+	if missing > 0 {
+		hash, err := auth.HashPassword(seedPassword)
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=? WHERE pass_hash IS NULL OR pass_hash=''`, hash); err != nil {
+			return err
+		}
+	}
+	// admin 账号兜底
+	var adminN int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE lower(trim(account))='admin'`).Scan(&adminN); err != nil {
+		return err
+	}
+	if adminN == 0 {
+		hash, err := auth.HashPassword(seedPassword)
+		if err != nil {
+			return err
+		}
+		return s.insertUser(DirUser{
+			ID: "u-admin", Name: "安全管理员", Account: "admin", Org: "安全运营", OrgKey: "sec",
+			Device: "—", IP: "—", Auth: "口令+MFA", LastLogin: "—", Status: "active", Risk: "none",
+			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash,
+		})
+	}
+	return nil
 }
 
 // Ping 探测底层数据库连接健康（供运维自检 /diag 调用）。
@@ -93,7 +164,8 @@ CREATE TABLE IF NOT EXISTS policy_overrides (
 );
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT, account TEXT, org TEXT, org_key TEXT, device TEXT,
-  ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT
+  ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT,
+  pass_hash TEXT, role TEXT
 );
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
@@ -126,6 +198,7 @@ CREATE TABLE IF NOT EXISTS audit_log (
 	for _, c := range []struct{ table, col string }{
 		{"resources", "addr_ref"}, {"resources", "svc_ref"},
 		{"ipsec_sites", "local_ref"}, {"ipsec_sites", "remote_ref"},
+		{"users", "pass_hash"}, {"users", "role"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col); e != nil {
 			return e
@@ -177,10 +250,24 @@ func (s *SQLiteStore) seed() error {
 	}
 	if n == 0 {
 		b, _ := s.Memory.Users(ctx)
+		hash, herr := auth.HashPassword(seedPassword) // demo 口令 baidi@123 的真实 bcrypt 哈希（复用同一哈希）
+		if herr != nil {
+			return herr
+		}
 		for _, u := range b.Users {
+			u.PassHash = hash
+			u.Role = roleFromDisplay(u.Roles)
 			if err := s.insertUser(u); err != nil {
 				return err
 			}
+		}
+		// 管理员账号纳入统一用户体系（role=admin），登录走真实哈希校验而非硬编码
+		if err := s.insertUser(DirUser{
+			ID: "u-admin", Name: "安全管理员", Account: "admin", Org: "安全运营", OrgKey: "sec",
+			Device: "—", IP: "—", Auth: "口令+MFA", LastLogin: "—", Status: "active", Risk: "none",
+			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash,
+		}); err != nil {
+			return err
 		}
 	}
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM resources`).Scan(&n); err != nil {
@@ -294,10 +381,20 @@ func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) insertUser(u DirUser) error {
 	roles, _ := json.Marshal(u.Roles)
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr())
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role)
 	return err
+}
+
+// roleFromDisplay 从展示角色推断权威鉴权角色：含"管理员"→admin，否则 user。
+func roleFromDisplay(roles []string) string {
+	for _, r := range roles {
+		if strings.Contains(r, "管理员") {
+			return "admin"
+		}
+	}
+	return "user"
 }
 
 func b2i(b bool) int {
@@ -349,10 +446,38 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error
 	if u.Roles == nil {
 		u.Roles = []string{}
 	}
+	if u.Role == "" {
+		u.Role = roleFromDisplay(u.Roles)
+	}
 	if err := s.insertUser(u); err != nil {
 		return DirUser{}, err
 	}
 	return u, nil
+}
+
+// Credential 按账号（规范化匹配）取登录凭据（含口令哈希）。not found → ok=false 无错。
+func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credential, bool, error) {
+	key := strings.ToLower(strings.TrimSpace(account))
+	row := s.db.QueryRowContext(ctx,
+		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,'') FROM users WHERE lower(trim(account))=? LIMIT 1`, key)
+	var c Credential
+	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash); err {
+	case nil:
+		if c.Role == "" {
+			c.Role = "user"
+		}
+		return c, true, nil
+	case sql.ErrNoRows:
+		return Credential{}, false, nil
+	default:
+		return Credential{}, false, err
+	}
+}
+
+// SetUserPassword 重置某用户口令哈希（bcrypt）落库。
+func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=? WHERE id=?`, hash, id)
+	return err
 }
 
 // SetUserStatus 改用户状态（禁用/启用/解锁）落库。

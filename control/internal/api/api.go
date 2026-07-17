@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"io"
 	"net/http"
 	"strings"
 	"sync"
@@ -23,6 +24,8 @@ const (
 	tokenTTL   = 8 * time.Hour
 	knockTTL   = 90 * time.Second
 	kickBanTTL = 5 * time.Minute
+	// seedInitialPassword 新建用户未指定初始口令时的 demo 默认口令。
+	seedInitialPassword = "baidi@123"
 )
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
@@ -216,6 +219,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)             // 读取用户策略覆盖
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                     // 新增用户
 	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)      // 禁用/启用/解锁
+	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
+	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)          // 自助改密
 
 	// ── 网关数据面：注册 + 拉策略（需 gateway/admin 身份）；资源 CRUD（admin）──
 	mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister) // 网关注册/心跳
@@ -243,23 +248,26 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
 		return
 	}
-	if b.Password != "baidi@123" {
-		s.auditAs(r, b.Username, "auth", "终端用户登录失败（密码错误）", "fail")
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示口令：baidi@123）"})
+	// 真实凭据校验：查目录账号 + bcrypt 口令哈希（不再是"任意用户名 + baidi@123"）
+	cred, found, err := s.store.Credential(r.Context(), b.Username)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
 		return
 	}
-	// 账号状态门：禁用/锁定的目录账号密码对了也不放行（也不进 MFA 流程）
-	if u, blocked, err := s.blockedDirAccount(r.Context(), b.Username); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to check account status")
-		return
-	} else if blocked {
-		s.auditAs(r, b.Username, "auth", "终端用户登录被拒（账号已"+statusZh[u.Status]+"）", "deny")
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[u.Status] + "，请联系管理员"})
+	if !found || !auth.VerifyPassword(cred.PassHash, b.Password) {
+		s.auditAs(r, b.Username, "auth", "终端用户登录失败（账号或口令错误）", "fail")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
 		return
 	}
-	risky := strings.HasPrefix(b.Username, "ext") || strings.Contains(b.Username, "外包")
+	// 账号状态门：禁用/锁定的目录账号口令对了也不放行（也不进 MFA 流程）
+	if accountBlocked(cred.Status) {
+		s.auditAs(r, cred.Account, "auth", "终端用户登录被拒（账号已"+statusZh[cred.Status]+"）", "deny")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[cred.Status] + "，请联系管理员"})
+		return
+	}
+	risky := strings.HasPrefix(cred.Account, "ext") || strings.Contains(cred.Account, "外包")
 	if risky && b.MfaCode == "" {
-		s.auditAs(r, b.Username, "security", "终端用户登录触发自适应二次认证", "mfa")
+		s.auditAs(r, cred.Account, "security", "终端用户登录触发自适应二次认证", "mfa")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "检测到未授信终端/异地登录，需短信二次认证"})
 		return
 	}
@@ -267,9 +275,11 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：123456）"})
 		return
 	}
-	s.auditAs(r, b.Username, "auth", "终端用户登录成功", "ok")
-	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "user", Name: b.Username}, tokenTTL)
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": b.Username})
+	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
+	// 令牌 Name=账号（数据面网关按 claims.Name 做放行/封禁匹配，必须是规范账号，不能放显示名）；
+	// 显示名单独经响应体 displayName 回给前端。
+	tok := auth.Sign(s.secret, auth.Claims{Sub: cred.Account, Role: cred.Role, Name: cred.Account}, tokenTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name})
 }
 
 // PortalTile 应用门户卡片。
@@ -308,10 +318,30 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var u store.DirUser
-	if err := json.NewDecoder(r.Body).Decode(&u); err != nil || u.Name == "" || u.Account == "" {
+	// PassHash 是 json:"-" 不从请求体解，改由独立 password 字段承接后哈希落库
+	var extra struct {
+		Password string `json:"password"`
+	}
+	raw, _ := io.ReadAll(r.Body)
+	if err := json.Unmarshal(raw, &u); err != nil || u.Name == "" || u.Account == "" {
 		httpx.Error(w, http.StatusBadRequest, "用户名/账号不能为空")
 		return
 	}
+	_ = json.Unmarshal(raw, &extra)
+	pw := extra.Password
+	if pw == "" {
+		pw = seedInitialPassword // 未指定初始口令时给 demo 默认，保证新用户可登录
+	}
+	if len(pw) < 6 {
+		httpx.Error(w, http.StatusBadRequest, "初始口令至少 6 位")
+		return
+	}
+	hash, err := auth.HashPassword(pw)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+	u.PassHash = hash
 	created, err := s.writer.CreateUser(r.Context(), u)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to create user")
@@ -365,7 +395,71 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": body.Status})
 }
 
-// handleAdminLogin 管理员登录（演示：admin / baidi@123）→ 签发 admin 角色 JWT。
+// handleResetUserPassword 管理员重置指定用户口令（admin 门）。
+func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		Password string `json:"password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Password) < 6 {
+		httpx.Error(w, http.StatusBadRequest, "口令至少 6 位")
+		return
+	}
+	hash, err := auth.HashPassword(body.Password)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+	if err := s.writer.SetUserPassword(r.Context(), id, hash); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
+		return
+	}
+	s.audit(r, "admin", "重置用户 "+id+" 的登录口令", "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// handleChangePassword 当前登录用户自助改密（校验旧口令）。
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	c, ok := auth.FromContext(r.Context())
+	if !ok {
+		httpx.Error(w, http.StatusUnauthorized, "未认证")
+		return
+	}
+	var body struct {
+		Old string `json:"old"`
+		New string `json:"new"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.New) < 6 {
+		httpx.Error(w, http.StatusBadRequest, "新口令至少 6 位")
+		return
+	}
+	cred, found, err := s.store.Credential(r.Context(), c.Sub) // Sub=规范账号
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
+		return
+	}
+	if !found || !auth.VerifyPassword(cred.PassHash, body.Old) {
+		s.audit(r, "auth", "自助改密失败（旧口令错误）", "fail")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "旧口令错误"})
+		return
+	}
+	hash, err := auth.HashPassword(body.New)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
+		return
+	}
+	if err := s.writer.SetUserPassword(r.Context(), cred.ID, hash); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
+		return
+	}
+	s.audit(r, "auth", "自助修改登录口令", "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+}
+
+// handleAdminLogin 管理员登录（真实凭据校验，要求 admin 角色）→ 签发 admin 角色 JWT。
 func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Username string `json:"username"`
@@ -375,14 +469,31 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
 		return
 	}
-	if b.Username != "admin" || b.Password != "baidi@123" {
-		s.auditAs(r, b.Username, "auth", "管理员登录失败（用户名或密码错误）", "fail")
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误（演示账号 admin / baidi@123）"})
+	// 真实凭据校验 + 要求 admin 角色（普通账号口令对也拿不到管理台）
+	cred, found, err := s.store.Credential(r.Context(), b.Username)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
 		return
 	}
-	s.auditAs(r, "安全管理员", "auth", "管理员登录成功", "ok")
-	tok := auth.Sign(s.secret, auth.Claims{Sub: b.Username, Role: "admin", Name: "安全管理员"}, tokenTTL)
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": "安全管理员", "role": "admin"})
+	if !found || !auth.VerifyPassword(cred.PassHash, b.Password) {
+		s.auditAs(r, b.Username, "auth", "管理员登录失败（用户名或密码错误）", "fail")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
+		return
+	}
+	if cred.Role != "admin" {
+		s.auditAs(r, cred.Account, "auth", "管理员登录被拒（非管理员角色）", "deny")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "该账号无管理台权限"})
+		return
+	}
+	if accountBlocked(cred.Status) {
+		s.auditAs(r, cred.Account, "auth", "管理员登录被拒（账号已"+statusZh[cred.Status]+"）", "deny")
+		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[cred.Status]})
+		return
+	}
+	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
+	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
+	tok := auth.Sign(s.secret, auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name, "role": "admin"})
 }
 
 // handleMe 返回当前令牌身份。

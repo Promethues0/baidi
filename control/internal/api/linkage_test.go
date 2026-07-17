@@ -96,6 +96,80 @@ func revokedUsers(t *testing.T, h http.Handler) map[string]bool {
 	return users
 }
 
+// 门户登录走真实凭据校验：正确口令过、错误口令拒、目录中不存在的账号拒
+//（不再是"任意用户名 + baidi@123"）。
+func TestPortalLoginVerifiesRealCredentials(t *testing.T) {
+	h := newTestServer(t)
+
+	// 种子用户 li.fang 正确口令
+	if out := portalLogin(t, h, "li.fang", ""); !out["ok"].(bool) {
+		t.Fatalf("li.fang 正确口令应过: %v", out)
+	}
+	// 错误口令
+	code, out := doJSON(t, h, "POST", "/api/v1/portal/login", "", map[string]string{"username": "li.fang", "password": "wrong-pw"})
+	if code != http.StatusOK || out["ok"] == true {
+		t.Fatalf("错误口令应被拒: %v", out)
+	}
+	// 目录中不存在的账号（旧逻辑会放行任意用户名）
+	code, out = doJSON(t, h, "POST", "/api/v1/portal/login", "", map[string]string{"username": "ghost.user", "password": "baidi@123"})
+	if code != http.StatusOK || out["ok"] == true {
+		t.Fatalf("不存在账号应被拒（不再任意用户名放行）: %v", out)
+	}
+}
+
+// 管理员登录走真实凭据校验且要求 admin 角色：普通账号即便口令对也拿不到 admin。
+func TestAdminLoginRequiresAdminRole(t *testing.T) {
+	h := newTestServer(t)
+
+	// admin 正确口令 → admin 角色
+	code, out := doJSON(t, h, "POST", "/api/v1/auth/login", "", map[string]string{"username": "admin", "password": "baidi@123"})
+	if code != http.StatusOK || out["ok"] != true || out["role"] != "admin" {
+		t.Fatalf("admin 登录应过且 role=admin: %v", out)
+	}
+	// 普通用户 li.fang 走管理员登录口 → 拒（角色不足）
+	code, out = doJSON(t, h, "POST", "/api/v1/auth/login", "", map[string]string{"username": "li.fang", "password": "baidi@123"})
+	if code != http.StatusOK || out["ok"] == true {
+		t.Fatalf("普通账号不应能从管理员口登录: %v", out)
+	}
+	// admin 错误口令 → 拒
+	code, out = doJSON(t, h, "POST", "/api/v1/auth/login", "", map[string]string{"username": "admin", "password": "nope"})
+	if code != http.StatusOK || out["ok"] == true {
+		t.Fatalf("admin 错误口令应拒: %v", out)
+	}
+}
+
+// 管理员重置他人口令：旧口令失效、新口令生效（真实改密）。
+func TestAdminResetsUserPassword(t *testing.T) {
+	h := newTestServer(t)
+	admin := adminToken()
+
+	// 重置 u2(li.fang) 口令
+	code, _ := doJSON(t, h, "POST", "/api/v1/users/u2/password", admin, map[string]string{"password": "Reset-9x!"})
+	if code != http.StatusOK {
+		t.Fatalf("重置口令 http %d, want 200", code)
+	}
+	// 新口令登录成功
+	if !mustLogin(t, h, "li.fang", "Reset-9x!") {
+		t.Fatal("新口令应能登录")
+	}
+	// 旧口令失效
+	code, out := doJSON(t, h, "POST", "/api/v1/portal/login", "", map[string]string{"username": "li.fang", "password": "baidi@123"})
+	if code != http.StatusOK || out["ok"] == true {
+		t.Fatalf("旧口令应失效: %v", out)
+	}
+	// 非 admin 不能重置他人口令
+	code, _ = doJSON(t, h, "POST", "/api/v1/users/u2/password", userToken("li.fang"), map[string]string{"password": "x"})
+	if code != http.StatusForbidden {
+		t.Fatalf("非 admin 重置口令应 403, 得到 %d", code)
+	}
+}
+
+func mustLogin(t *testing.T, h http.Handler, user, pw string) bool {
+	t.Helper()
+	code, out := doJSON(t, h, "POST", "/api/v1/portal/login", "", map[string]string{"username": user, "password": pw})
+	return code == http.StatusOK && out["ok"] == true
+}
+
 func TestPortalLoginRefusesDisabledAndLockedAccounts(t *testing.T) {
 	h := newTestServer(t)
 

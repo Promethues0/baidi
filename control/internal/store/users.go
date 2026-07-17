@@ -40,6 +40,18 @@ type DirUser struct {
 	Status    string   `json:"status"` // active | locked | disabled | idle
 	Risk      string   `json:"risk"`   // none | low | high
 	Roles     []string `json:"roles"`
+	Role      string   `json:"role,omitempty"` // 权威鉴权角色 admin | user（≠展示用 Roles）
+	PassHash  string   `json:"-"`              // bcrypt 口令哈希；绝不序列化进 API 响应
+}
+
+// Credential 登录校验所需的账号凭据（含口令哈希，仅内部使用）。
+type Credential struct {
+	ID       string
+	Name     string
+	Account  string
+	Role     string // admin | user
+	Status   string // active | locked | disabled | idle
+	PassHash string
 }
 
 func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {

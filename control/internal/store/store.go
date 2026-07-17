@@ -24,6 +24,7 @@ type Store interface {
 	ObjectUsage(ctx context.Context) (map[string][]ObjectRef, error)
 	ObjectExists(ctx context.Context, kind, id string) (bool, error)
 	AuthPolicies(ctx context.Context) ([]AuthPolicy, error)
+	Credential(ctx context.Context, account string) (Credential, bool, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

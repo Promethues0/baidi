@@ -23,12 +23,34 @@
       <div class="bd-top__spacer" />
       <div class="bd-search"><icon-search /><span>搜索用户、应用、策略…</span></div>
       <button class="bd-bell"><icon-notification /><span class="bd-bell__dot">6</span></button>
-      <div class="bd-acct" title="退出登录" @click="logout">
-        <span class="bd-acct__av">管</span>
-        <span class="bd-acct__txt"><b>安全管理员</b><i>security-admin</i></span>
-        <icon-export class="bd-acct__out" />
-      </div>
+      <a-dropdown trigger="click" @select="onAcctSelect">
+        <div class="bd-acct">
+          <span class="bd-acct__av">管</span>
+          <span class="bd-acct__txt"><b>安全管理员</b><i>security-admin</i></span>
+          <icon-down class="bd-acct__out" />
+        </div>
+        <template #content>
+          <a-doption value="password"><icon-lock /> 修改密码</a-doption>
+          <a-doption value="logout"><icon-export /> 退出登录</a-doption>
+        </template>
+      </a-dropdown>
     </header>
+
+    <!-- 自助修改密码（校验旧口令，落库改哈希） -->
+    <a-modal v-model:visible="pwOpen" title="修改登录口令" :width="420" :footer="false">
+      <div class="bd-pwform">
+        <div class="bd-pwform__f"><label>当前口令</label>
+          <a-input-password v-model="oldPw" placeholder="请输入当前登录口令" />
+        </div>
+        <div class="bd-pwform__f"><label>新口令</label>
+          <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doChangePw" />
+        </div>
+        <div class="bd-pwform__foot">
+          <button class="bd-mbtn bd-mbtn--ghost" @click="pwOpen = false">取消</button>
+          <button class="bd-mbtn" :disabled="changing" @click="doChangePw">确认修改</button>
+        </div>
+      </div>
+    </a-modal>
 
     <div class="bd-body">
       <!-- 侧栏：分组导航 + 底部深色状态卡 -->
@@ -60,18 +82,53 @@
 </template>
 
 <script setup lang="ts">
+import { ref } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+import { Message } from '@arco-design/web-vue';
 import { NAV } from '@/nav';
-import { clearToken } from '@/lib/api';
+import { api, clearToken } from '@/lib/api';
 
 const route = useRoute();
 const router = useRouter();
 function go(path: string) { if (path !== route.path) router.push(path); }
 function logout() { clearToken(); router.push('/login'); }
+
+// 账户菜单 + 自助改密
+const pwOpen = ref(false);
+const changing = ref(false);
+const oldPw = ref('');
+const newPw = ref('');
+function onAcctSelect(v: string | number | Record<string, unknown> | undefined) {
+  if (v === 'logout') logout();
+  else if (v === 'password') { oldPw.value = ''; newPw.value = ''; pwOpen.value = true; }
+}
+async function doChangePw() {
+  if (!oldPw.value) { Message.warning('请输入当前口令'); return; }
+  if (newPw.value.length < 6) { Message.warning('新口令至少 6 位'); return; }
+  changing.value = true;
+  try {
+    const r = await api<{ ok: boolean; reason?: string }>('/auth/password', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ old: oldPw.value, new: newPw.value })
+    });
+    if (r.ok) { Message.success('登录口令已修改'); pwOpen.value = false; }
+    else Message.error(r.reason || '修改失败');
+  } catch { Message.error('修改失败，请检查网络或重新登录'); }
+  finally { changing.value = false; }
+}
 </script>
 
 <style scoped>
 .bd-shell { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+
+/* 自助改密弹窗 */
+.bd-pwform__f { margin-bottom: 16px; }
+.bd-pwform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
+.bd-pwform__f :deep(.arco-input-wrapper) { width: 100%; }
+.bd-pwform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
+.bd-mbtn { height: 34px; padding: 0 18px; border-radius: 8px; border: none; background: var(--bd-primary); color: #fff; font-size: 13px; cursor: pointer; }
+.bd-mbtn--ghost { background: var(--bd-fill-2); color: var(--bd-t1); }
+.bd-mbtn[disabled] { opacity: .6; cursor: not-allowed; }
 
 /* 顶栏 */
 .bd-top {

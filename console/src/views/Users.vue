@@ -113,8 +113,7 @@
         <div class="bd-ud__acts">
           <button v-if="sel.status === 'locked'" class="bd-btn" @click="setStatus('active', '已解锁账号')"><icon-unlock />解锁账号</button>
           <button v-if="sel.status === 'disabled'" class="bd-btn" @click="setStatus('active', '已启用账号')"><icon-check />启用账号</button>
-          <button class="bd-btn bd-btn--ghost" @click="act('密码重置链接已发送')">重置密码</button>
-          <button v-if="sel.online" class="bd-btn bd-btn--ghost" @click="act('已强制下线')">强制下线</button>
+          <button class="bd-btn bd-btn--ghost" @click="openReset"><icon-lock />重置密码</button>
           <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
         </div>
       </div>
@@ -137,9 +136,26 @@
             <a-option value="密码+UKey">密码+UKey</a-option><a-option value="SAML SSO">SAML SSO</a-option>
           </a-select>
         </div>
+        <div class="bd-uform__f"><label>初始登录口令</label>
+          <a-input-password v-model="form.password" placeholder="留空则用默认 baidi@123（至少 6 位）" />
+        </div>
         <div class="bd-uform__foot">
           <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
           <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 重置口令（管理员，落库改 bcrypt 哈希） -->
+    <a-modal v-model:visible="resetOpen" title="重置登录口令" :width="420" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-uform__hint">为「{{ sel?.name }}」({{ sel?.account }}) 设置新的登录口令，立即生效、旧口令失效。</div>
+        <div class="bd-uform__f"><label>新口令</label>
+          <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doReset" />
+        </div>
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="resetOpen = false">取消</button>
+          <button class="bd-btn" :disabled="resetting" @click="doReset">重置口令</button>
         </div>
       </div>
     </a-modal>
@@ -196,7 +212,6 @@ function riskColor(r: string) { return r === 'high' ? '#F53F3F' : r === 'low' ? 
 function riskLabel(r: string) { return r === 'high' ? '高风险' : r === 'low' ? '低风险' : '正常'; }
 
 function open(u: DirUser) { sel.value = u; drawer.value = true; }
-function act(msg: string) { Message.success(`${sel.value?.name}：${msg}`); }
 
 async function load() {
   try {
@@ -222,9 +237,10 @@ async function setStatus(status: string, label: string) {
 // 新增用户 → 落库
 const createOpen = ref(false);
 const creating = ref(false);
-const form = reactive({ name: '', account: '', org: '研发部', orgKey: 'dev', auth: '密码+短信' });
+const form = reactive({ name: '', account: '', org: '研发部', orgKey: 'dev', auth: '密码+短信', password: '' });
 async function createUser() {
   if (!form.name || !form.account) { Message.warning('请填写姓名与账号'); return; }
+  if (form.password && form.password.length < 6) { Message.warning('初始口令至少 6 位'); return; }
   creating.value = true;
   try {
     await api('/users', {
@@ -233,13 +249,33 @@ async function createUser() {
     });
     Message.success(`已新增用户「${form.name}」并落库`);
     createOpen.value = false;
-    form.name = ''; form.account = '';
+    form.name = ''; form.account = ''; form.password = '';
     await load();
   } catch {
     Message.error('新增失败，请检查权限或后端连接');
   } finally {
     creating.value = false;
   }
+}
+
+// 重置口令 → 落库改哈希
+const resetOpen = ref(false);
+const resetting = ref(false);
+const newPw = ref('');
+function openReset() { newPw.value = ''; resetOpen.value = true; }
+async function doReset() {
+  if (!sel.value) return;
+  if (newPw.value.length < 6) { Message.warning('口令至少 6 位'); return; }
+  resetting.value = true;
+  try {
+    await api(`/users/${sel.value.id}/password`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: newPw.value })
+    });
+    Message.success(`已重置「${sel.value.name}」的登录口令`);
+    resetOpen.value = false;
+  } catch { Message.error('重置失败，请检查权限或后端连接'); }
+  finally { resetting.value = false; }
 }
 
 onMounted(load);
@@ -293,6 +329,7 @@ onMounted(load);
 .bd-roles { display: flex; gap: 8px; flex-wrap: wrap; }
 .bd-ud__acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 
+.bd-uform__hint { font-size: 12.5px; color: var(--bd-t3); line-height: 1.6; margin-bottom: 16px; }
 .bd-uform__f { margin-bottom: 16px; }
 .bd-uform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
 .bd-uform__f :deep(.arco-input-wrapper), .bd-uform__f :deep(.arco-select-view) { width: 100%; }

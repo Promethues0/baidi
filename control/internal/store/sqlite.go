@@ -36,6 +36,9 @@ type Writer interface {
 	SaveAuthPolicy(ctx context.Context, p AuthPolicy) (AuthPolicy, error)
 	DeleteAuthPolicy(ctx context.Context, id string) error
 	RecordAudit(ctx context.Context, e AuditEntry) error
+	SaveBaseline(ctx context.Context, b BaselinePolicy) (BaselinePolicy, error)
+	DeleteBaseline(ctx context.Context, id string) error
+	SavePostureReport(ctx context.Context, r PostureReport) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -190,6 +193,15 @@ CREATE TABLE IF NOT EXISTS auth_policies (
 );
 CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, category TEXT, actor TEXT, src_ip TEXT, event TEXT, verdict TEXT
+);
+CREATE TABLE IF NOT EXISTS baseline_policies (
+  id TEXT PRIMARY KEY, name TEXT, type TEXT, scope TEXT, disposal TEXT, status TEXT,
+  platforms_json TEXT, checks_json TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS posture_reports (
+  user TEXT, device TEXT, platform TEXT, os TEXT, client_version TEXT,
+  checks_json TEXT, verdict TEXT, score INTEGER, level TEXT, reasons_json TEXT, ts INTEGER,
+  PRIMARY KEY(user, device)
 );`)
 	if err != nil {
 		return err
@@ -320,6 +332,17 @@ func (s *SQLiteStore) seed() error {
 		pols, _ := s.Memory.AuthPolicies(ctx)
 		for _, p := range pols {
 			if err := s.upsertAuthPolicy(ctx, p); err != nil {
+				return err
+			}
+		}
+	}
+	if err := s.db.QueryRow(`SELECT COUNT(*) FROM baseline_policies`).Scan(&n); err != nil {
+		return err
+	}
+	if n == 0 {
+		bls, _ := s.Memory.Baselines(ctx)
+		for _, b := range bls {
+			if err := s.upsertBaseline(ctx, b); err != nil {
 				return err
 			}
 		}

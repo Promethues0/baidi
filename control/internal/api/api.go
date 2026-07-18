@@ -187,6 +187,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
 	// 安全中心：安全基线 + SPA
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
+	mux.HandleFunc("POST /api/v1/security/baselines", s.handleSaveBaseline)          // 保存基线（admin）
+	mux.HandleFunc("DELETE /api/v1/security/baselines/{id}", s.handleDeleteBaseline) // 删基线（admin）
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 

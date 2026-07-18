@@ -62,6 +62,49 @@ func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
 		Failed:    byVerdict["fail"],
 		Secondary: byVerdict["mfa"],
 	}
+
+	// 3) posture 高危并入账号防线 TOP（风险引擎判定 block/high 的账号），终端防线由最差报告真实化。
+	if reports, err := s.PostureReports(ctx); err == nil && len(reports) > 0 {
+		rank := map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 3}
+		worstUser := map[string]PostureReport{}
+		for _, r := range reports {
+			w, ok := worstUser[r.User]
+			if !ok || rank[r.Verdict] > rank[w.Verdict] {
+				worstUser[r.User] = r
+			}
+		}
+		var epTop []string
+		epRisk := 0
+		for _, r := range worstUser {
+			if (r.Verdict == "block" || r.Level == "high") && len(epTop) < 3 {
+				epTop = append(epTop, r.User)
+			}
+			if r.Score > epRisk {
+				epRisk = r.Score
+			}
+		}
+		for i := range ov.Defense {
+			if ov.Defense[i].Key == "endpoint" {
+				ov.Defense[i].Risk = epRisk
+				if len(epTop) > 0 {
+					ov.Defense[i].Top = epTop
+				}
+			}
+			if ov.Defense[i].Key == "account" && len(epTop) > 0 {
+				// posture 高危账号补入账号防线 TOP（去重，cap 3）
+				seen := map[string]bool{}
+				for _, a := range ov.Defense[i].Top {
+					seen[a] = true
+				}
+				for _, a := range epTop {
+					if !seen[a] && len(ov.Defense[i].Top) < 3 {
+						ov.Defense[i].Top = append(ov.Defense[i].Top, a)
+						seen[a] = true
+					}
+				}
+			}
+		}
+	}
 	return ov, nil
 }
 

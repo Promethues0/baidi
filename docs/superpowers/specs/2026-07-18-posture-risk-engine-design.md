@@ -39,7 +39,7 @@
 
 - **DP-01 判定权在控制面**（方案 A）：客户端上报 `{key, ok, value}` 布尔信号，`ok` 映射是机械转换非策略；引擎在控制面比对基线。
 - **DP-02 规则源 = 安全中心基线，落库可编辑**：`baseline_policies` 表持久化（照 authpolicy 范式），前端既有编辑器（分平台 AND 条件、处置、启停）接真实保存。这同时把 `/security` 从纯种子真实化（SPA 隐身块仍种子）。
-- **DP-03 判定语义**：某启用基线中任一平台适用检查失败 ⇒ 该基线 violated ⇒ 其 `disposal` 生效；多基线取最严（block > gray > degrade > allow）。严重度只喂评分：high=25 / medium=10 / low=5，cap 100；level：≥60 high、≥30 medium、否则 low。全部可解释（reasons = 失败检查 label 列表）。
+- **DP-03 判定语义**：某启用基线中任一平台适用检查失败 ⇒ 该基线 violated ⇒ 其 `disposal` 生效；多基线取最严（block > gray > degrade > allow）。严重度只喂评分：high=25 / medium=10 / low=5，cap 100；level：违反 block 基线强制 high，否则 ≥60 high、≥30 medium、其余 low。全部可解释（reasons = 失败检查 label 列表）。
 - **DP-04 block 判定持久，不看新鲜度**：最新报告判定为 block 就一直拦，直到**被更新的合规报告替换**——防"停止上报以逃逸"。新鲜度（10 分钟 `postureFreshTTL`）只用于 strict 模式的缺报处理。
 - **DP-05 缺报策略默认 observe**：无报告/过期报告默认放行（兼容门户、移动端、探针、既有 E2E 与云端 demo），`BAIDI_POSTURE_ENFORCE=strict` 时缺报也 403（fail-closed，生产可开）。有新鲜坏报告则**任何模式都执行**。
 - **DP-06 多设备取最差**：同账号任一设备最新判定为 block 即视为 block。

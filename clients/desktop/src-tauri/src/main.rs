@@ -229,8 +229,13 @@ fn device_fingerprint() -> String {
 
 /// 终端环境真实采集（macOS）：机械布尔化 + 原始值，策略判定在控制面（风险引擎按安全基线评估）。
 /// async：Tauri 2 会把它挪到线程池执行，串行 spawn 的几个探测子进程不再卡主线程（每 60s 一轮）。
+/// 采集逻辑抽到同步 gather_posture 以便单元测试；async 壳只负责让 Tauri 挪线程。
 #[tauri::command]
 async fn collect_posture() -> PostureInfo {
+    gather_posture()
+}
+
+fn gather_posture() -> PostureInfo {
     let os_ver = probe("sw_vers", &["-productVersion"]);
     let filevault = probe("fdesetup", &["status"]); // "FileVault is On."
     let sip = probe("csrutil", &["status"]); // "... status: enabled."
@@ -356,4 +361,32 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("运行白帝桌面客户端失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // 采集器契约：6 个检查项、key 与控制面基线/风险引擎一致、client_version 取包版本、
+    // 设备指纹非空。ok 值依真机环境而定，故只断言结构与键，保证稳定不 flaky。
+    #[test]
+    fn gather_posture_shape() {
+        let info = gather_posture();
+        assert_eq!(info.platform, "macOS");
+        assert!(info.os.starts_with("macOS"));
+        assert!(!info.device.is_empty());
+        assert_eq!(info.client_version, env!("CARGO_PKG_VERSION"));
+        let keys: Vec<&str> = info.checks.iter().map(|c| c.key.as_str()).collect();
+        assert_eq!(
+            keys,
+            vec!["disk_encrypted", "sys_integrity", "firewall_on", "os_version", "edr_online", "client_version"],
+            "采集键须与控制面基线检查键逐一对齐"
+        );
+    }
+
+    // 设备指纹 OnceLock 缓存：同进程内多次调用返回同一值（避免每轮 spawn ioreg）。
+    #[test]
+    fn device_fingerprint_is_stable() {
+        assert_eq!(device_fingerprint(), device_fingerprint());
+    }
 }

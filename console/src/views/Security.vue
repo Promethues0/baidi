@@ -13,6 +13,7 @@
     <!-- Tab 切换 -->
     <div class="bd-tabs">
       <span class="bd-tab" :class="{ on: tab === 'baseline' }" @click="tab = 'baseline'">安全基线</span>
+      <span class="bd-tab" :class="{ on: tab === 'posture' }" @click="tab = 'posture'; loadPosture()">终端合规</span>
       <span class="bd-tab" :class="{ on: tab === 'spa' }" @click="tab = 'spa'">SPA 服务隐身</span>
     </div>
 
@@ -48,8 +49,8 @@
         <!-- 概要卡 -->
         <div class="bd-card bd-bhead">
           <div class="bd-bhead__top">
-            <div>
-              <span class="bd-bhead__name">{{ cur.name }}</span>
+            <div style="display: flex; align-items: center; gap: 10px">
+              <a-input v-model="cur.name" size="small" style="width: 220px; font-weight: 700" />
               <span class="bd-bhead__type bd-tg" :style="tagStyle('#165DFF')">{{ typeText(cur.type) }}</span>
             </div>
             <div class="bd-bhead__sw">
@@ -57,8 +58,10 @@
               <a-switch
                 :model-value="cur.status === 'enabled'"
                 size="small"
-                @change="(v: boolean) => cur && (cur.status = v ? 'enabled' : 'disabled')"
+                @change="(v: string | number | boolean) => cur && (cur.status = v ? 'enabled' : 'disabled')"
               />
+              <a-button type="primary" size="small" :loading="saving" @click="saveBaseline">保存</a-button>
+              <a-button size="small" status="danger" @click="removeBaseline">删除</a-button>
             </div>
           </div>
           <div class="bd-kv"><span>适用范围</span><b>{{ cur.scope }}</b></div>
@@ -150,6 +153,37 @@
       </div>
     </div>
 
+    <!-- ============ 终端合规（最新 posture 上报 × 风险引擎判定）============ -->
+    <div v-show="tab === 'posture'" class="bd-card" style="padding: 16px 20px">
+      <div class="bd-section-title" style="display: flex; justify-content: space-between; align-items: center">
+        终端合规状态（最新上报）
+        <a-button size="small" @click="loadPosture"><icon-refresh /> 刷新</a-button>
+      </div>
+      <div v-if="postureErr" class="bd-empty" style="display: block">{{ postureErr }}</div>
+      <table v-else class="bd-table">
+        <thead>
+          <tr><th>账号</th><th>设备指纹</th><th>平台 / 系统</th><th>客户端</th><th>检查</th><th>判定</th><th>评分</th><th>最后上报</th></tr>
+        </thead>
+        <tbody>
+          <tr v-for="p in postureRows" :key="p.user + p.device">
+            <td><b style="color: var(--bd-t1)">{{ p.user }}</b></td>
+            <td><span class="bd-mono">{{ p.device }}</span></td>
+            <td>{{ p.platform }} · {{ p.os || '—' }}</td>
+            <td>{{ p.clientVersion || '—' }}</td>
+            <td>
+              <span v-for="c in p.checks" :key="c.key" class="bd-tg" :style="tagStyle(c.ok ? '#00B42A' : '#F53F3F')" style="margin: 1px 3px 1px 0">{{ c.label }}</span>
+            </td>
+            <td><span class="bd-tg" :style="tagStyle(verdictColor(p.verdict))">{{ verdictText(p.verdict) }}</span></td>
+            <td><b :style="{ color: p.score >= 60 ? '#F53F3F' : p.score >= 30 ? '#FF7D00' : 'var(--bd-t1)' }">{{ p.score }}</b></td>
+            <td style="color: var(--bd-t3)">{{ tsText(p.ts) }}</td>
+          </tr>
+          <tr v-if="postureRows.length === 0">
+            <td colspan="8" class="bd-empty">尚无终端上报——桌面客户端登录后每 60s 自动上报</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+
     <!-- ============ SPA 服务隐身 ============ -->
     <div v-show="tab === 'spa'">
       <div class="bd-spa">
@@ -223,12 +257,12 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type SpaStatus } from '@/lib/api';
+import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type SpaStatus, type PostureRow, type PostureResp } from '@/lib/api';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
 
-const tab = ref<'baseline' | 'spa'>('baseline');
+const tab = ref<'baseline' | 'spa' | 'posture'>('baseline');
 const live = ref(false);
 
 /* ── 内置 mock（结构同后端 SecurityBundle）── */
@@ -309,8 +343,39 @@ function severityColor(s: BaselineCheck['severity']) {
 }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
-/* ── 编辑动作（仅本地态，演示）── */
-function addBaseline() { Message.info('新建安全基线 · 演示态'); }
+/* ── 编辑动作（真实落库：整条基线 POST /security/baselines）── */
+const saving = ref(false);
+async function saveBaseline() {
+  if (!cur.value) return;
+  saving.value = true;
+  try {
+    await api('/security/baselines', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur.value) });
+    Message.success('基线已保存，风险引擎即时生效');
+  } catch { Message.error('保存失败（需管理员登录 / 后端在线）'); } finally { saving.value = false; }
+}
+async function addBaseline() {
+  const nb: BaselinePolicy = {
+    id: '', name: '新建基线', type: 'onboarding', scope: '全体访问者', disposal: 'degrade', status: 'enabled',
+    platforms: ['Windows', 'macOS', 'Linux'], checks: []
+  };
+  try {
+    const r = await api<{ ok: boolean; baseline: BaselinePolicy }>('/security/baselines', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(nb) });
+    baselines.value.push(r.baseline);
+    selected.value = r.baseline.id;
+    Message.success('已创建，可继续编辑后保存');
+  } catch { Message.error('创建失败（需管理员登录 / 后端在线）'); }
+}
+async function removeBaseline() {
+  if (!cur.value) return;
+  const id = cur.value.id;
+  try {
+    await api(`/security/baselines/${id}`, { method: 'DELETE' });
+    baselines.value = baselines.value.filter((b) => b.id !== id);
+    if (baselines.value.length) selected.value = baselines.value[0].id;
+    Message.success('基线已删除');
+  } catch { Message.error('删除失败'); }
+}
 function addCheck() {
   if (!cur.value) return;
   cur.value.checks.push({
@@ -326,6 +391,19 @@ function removeCheck(key: string) {
   cur.value.checks = cur.value.checks.filter((c) => c.key !== key);
 }
 
+/* ── 终端合规（GET /posture，admin）── */
+const postureRows = ref<PostureRow[]>([]);
+const postureErr = ref('');
+async function loadPosture() {
+  try {
+    postureRows.value = (await api<PostureResp>('/posture')).reports;
+    postureErr.value = '';
+  } catch { postureErr.value = '暂无法读取（需管理员登录 / 后端在线）'; }
+}
+function verdictText(v: string) { return v === 'allow' ? '合规' : v === 'degrade' ? '降权' : v === 'gray' ? '灰度' : '阻断'; }
+function verdictColor(v: string) { return v === 'allow' ? '#00B42A' : v === 'degrade' ? '#FF7D00' : v === 'gray' ? '#86909C' : '#F53F3F'; }
+function tsText(ts: number) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+
 onMounted(async () => {
   try {
     const b = await api<SecurityBundle>('/security');
@@ -336,6 +414,7 @@ onMounted(async () => {
   } catch {
     live.value = false;
   }
+  loadPosture();
 });
 </script>
 

@@ -8,13 +8,15 @@ export function clearToken(): void { localStorage.removeItem(TOKEN_KEY); }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const t = getToken();
+  // headers 必须在 ...rest 之后合并：否则调用方传入 headers 会把 Authorization 整体顶掉（静默 401）
+  const { headers: extra, ...rest } = init ?? {};
   const res = await fetch(BASE + path, {
+    ...rest,
     headers: {
       Accept: 'application/json',
       ...(t ? { Authorization: `Bearer ${t}` } : {}),
-      ...(init?.headers ?? {})
-    },
-    ...init
+      ...(extra ?? {})
+    }
   });
   if (res.status === 401) {
     clearToken();
@@ -139,6 +141,15 @@ export interface AuthPolicyResp { policies: AuthPolicy[] }
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
 export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
 export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
+
+/* ── 终端 posture（安全中心 · 终端合规） ── */
+export interface PostureCheckRow { key: string; label: string; ok: boolean; value: string }
+export interface PostureRow {
+  user: string; device: string; platform: string; os: string; clientVersion: string;
+  checks: PostureCheckRow[]; verdict: 'allow' | 'degrade' | 'gray' | 'block';
+  score: number; level: 'low' | 'medium' | 'high'; reasons: string[]; ts: number;
+}
+export interface PostureResp { reports: PostureRow[] }
 
 /* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
 export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[]; addrRef?: string; svcRef?: string }

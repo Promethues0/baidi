@@ -1,0 +1,19 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "baidi-console",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "console",
+      "port": 5193
+    },
+    {
+      "name": "baidi-desktop",
+      "runtimeExecutable": "npm",
+      "runtimeArgs": ["run", "dev"],
+      "cwd": "clients/desktop",
+      "port": 5294
+    }
+  ]
+}

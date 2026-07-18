@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -30,15 +31,16 @@ const (
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
-	store    store.Store
-	writer   store.Writer
-	secret   []byte
-	env      string
-	mu       sync.Mutex
-	gateways map[string]GatewayInfo   // 已注册（在线）网关，按 id
-	gwSess   map[string][]GwSession   // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
-	kicked   map[string]string        // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
-	revoked  map[string]revokeInfo    // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	store         store.Store
+	writer        store.Writer
+	secret        []byte
+	env           string
+	postureStrict bool // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
+	mu            sync.Mutex
+	gateways      map[string]GatewayInfo // 已注册（在线）网关，按 id
+	gwSess        map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	kicked        map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	revoked       map[string]revokeInfo  // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
@@ -103,9 +105,11 @@ type GwSession struct {
 	Since int64  `json:"since"`
 }
 
-// New 构造 Server。
+// New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
 func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, gateways: map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
+	return &Server{store: st, writer: wr, secret: secret, env: env,
+		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
+		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
@@ -202,14 +206,14 @@ func (s *Server) Routes() http.Handler {
 
 	// IPSec VPN 组网：站点清单 + CRUD + 启停
 	mux.HandleFunc("GET /api/v1/ipsec", s.handleIpsec)
-	mux.HandleFunc("POST /api/v1/ipsec", s.handleSaveIpsec)            // 新增/改站点（admin）
-	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)   // 删站点（admin）
+	mux.HandleFunc("POST /api/v1/ipsec", s.handleSaveIpsec)               // 新增/改站点（admin）
+	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)      // 删站点（admin）
 	mux.HandleFunc("POST /api/v1/ipsec/{id}/toggle", s.handleToggleIpsec) // 启停隧道（admin）
 
 	// 对象库：地址 / 服务 / 时间对象 + 被引用反查（复用闭环）
 	mux.HandleFunc("GET /api/v1/objects", s.handleObjects)
 	mux.HandleFunc("GET /api/v1/objects/usage", s.handleObjectsUsage)          // 被引用反查（资源/IPSec）
-	mux.HandleFunc("POST /api/v1/objects/{kind}", s.handleSaveObject)       // 新增/改对象（admin）
+	mux.HandleFunc("POST /api/v1/objects/{kind}", s.handleSaveObject)          // 新增/改对象（admin）
 	mux.HandleFunc("DELETE /api/v1/objects/{kind}/{id}", s.handleDeleteObject) // 删对象（admin，被引用拒删 409）
 
 	// 认证策略：PC/WEB 端与移动端分栏认证方式 + 自适应规则
@@ -218,12 +222,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
 
 	// ── 写操作（落 SQLite）──
-	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                       // 发布应用
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval) // 设备绑定审批
-	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)            // 保存用户策略覆盖
-	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)             // 读取用户策略覆盖
-	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                     // 新增用户
-	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)      // 禁用/启用/解锁
+	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                        // 发布应用
+	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)  // 设备绑定审批
+	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)             // 保存用户策略覆盖
+	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)              // 读取用户策略覆盖
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                      // 新增用户
+	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)       // 禁用/启用/解锁
 	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
 	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)          // 自助改密
 
@@ -530,6 +534,20 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[u.Status]+"，无法接入")
 		return
 	}
+	// 终端环境闸（第三道）：最新判定 block 一直拦（不看新鲜度，直到被合规报告替换——防停报逃逸）；
+	// strict 模式下无新鲜报告也拒（fail-closed，生产开 BAIDI_POSTURE_ENFORCE=strict）。
+	if rep, found, err := s.store.PostureVerdict(r.Context(), c.Name); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to check posture")
+		return
+	} else if found && rep.Verdict == "block" {
+		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 终端环境不合规（"+strings.Join(rep.Reasons, "、")+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "终端环境不合规："+strings.Join(rep.Reasons, "、"))
+		return
+	} else if s.postureStrict && (!found || time.Now().Unix()-rep.TS > int64(postureFreshTTL.Seconds())) {
+		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 无有效终端环境报告（strict）", "deny")
+		httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
+		return
+	}
 	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
 }
@@ -618,8 +636,8 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	for _, d := range revoked {
 		seen[normUser(d.User)] = true
 	}
+	until := now + int64(kickBanTTL.Seconds())
 	if b, err := s.store.Users(r.Context()); err == nil {
-		until := now + int64(kickBanTTL.Seconds())
 		for _, u := range b.Users {
 			if !accountBlocked(u.Status) {
 				continue
@@ -627,6 +645,16 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 			if k := normUser(u.Account); !seen[k] {
 				seen[k] = true
 				revoked = append(revoked, revokedDTO{User: u.Account, Until: until})
+			}
+		}
+	}
+	// posture-blocked 用户同款并入（滚动续期）：即使持 8h 会话令牌直敲网关也被拒；
+	// 合规报告替换判定后自然从名单消失（读失败静默跳过，与目录并入同策略；令牌闸仍 fail-closed 把守新令牌）。
+	if blocked, err := s.store.PostureBlockedUsers(r.Context()); err == nil {
+		for _, acc := range blocked {
+			if k := normUser(acc); !seen[k] {
+				seen[k] = true
+				revoked = append(revoked, revokedDTO{User: acc, Until: until})
 			}
 		}
 	}

@@ -2,7 +2,11 @@ package api
 
 import (
 	"net/http"
+	"path/filepath"
 	"testing"
+
+	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/store"
 )
 
 // 基线 CRUD：admin 可保存/删除；非法枚举 400；非 admin 403。
@@ -97,5 +101,62 @@ func TestPostureReportAndList(t *testing.T) {
 	}
 	if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, map[string]any{"device": "D", "platform": "macOS", "checks": many}); code != http.StatusBadRequest {
 		t.Fatalf("检查超 32 应 400, got %d", code)
+	}
+}
+
+// 持续验证闭环：坏报告 → 拒发敲门令牌 + 网关策略并入撤销名单 → 合规报告 → 双双解除。
+func TestPostureBlockClosesLoop(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+
+	// 初始：可拿令牌、不在撤销名单
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
+		t.Fatalf("初始应可拿令牌, got %d", code)
+	}
+	if revokedUsers(t, h)["li.fang"] {
+		t.Fatal("初始不应在撤销名单")
+	}
+	// 坏报告（磁盘未加密 → block）
+	if code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, badPosture()); code != 200 || out["verdict"] != "block" {
+		t.Fatalf("坏报告应 block: %v", out)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("block 后应 403, got %d", code)
+	}
+	if !revokedUsers(t, h)["li.fang"] {
+		t.Fatal("block 用户应并入网关撤销名单（堵 8h 会话令牌直连洞）")
+	}
+	// 合规报告 → 恢复
+	if code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, goodPosture()); code != 200 || out["verdict"] != "allow" {
+		t.Fatalf("合规报告应 allow: %v", out)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
+		t.Fatalf("恢复后应可拿令牌, got %d", code)
+	}
+	if revokedUsers(t, h)["li.fang"] {
+		t.Fatal("恢复后应移出撤销名单")
+	}
+}
+
+// strict 模式：无新鲜报告拒发令牌；observe（默认）放行（上面闭环用例已覆盖默认放行）。
+func TestPostureStrictMode(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	s := New(st, st, testSecret, "test")
+	s.postureStrict = true
+	h := auth.Middleware(testSecret, s.IsOpen)(s.Routes())
+	tok := userToken("li.fang")
+
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("strict 缺报应 403, got %d", code)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, goodPosture()); code != 200 {
+		t.Fatal("上报失败")
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
+		t.Fatalf("strict 有新鲜合规报告应 200, got %d", code)
 	}
 }

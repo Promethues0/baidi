@@ -105,13 +105,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type PortalLoginResp } from '@/lib/api';
 import { session, login, authed, validateConfig } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, type TunView } from '@/lib/tunnel';
-import { reportPosture, type PostureInfo, type PostureVerdict } from '@/lib/posture';
+import { postureState } from '@/lib/posture';
 
 const authedNow = computed(() => authed());
 const isTauri = tauriRuntime();
@@ -233,21 +233,11 @@ async function connectDev() {
   Message.success('（联调）已敲门 · 真 utun 接管需打包运行');
 }
 
-/* 环境检测：真实采集 + 控制面判定（每 60s 上报，判定权在控制面） */
-const postureInfo = ref<PostureInfo | null>(null);
-const postureVerdict = ref<PostureVerdict | null>(null);
-const posture = computed(() => postureInfo.value?.checks ?? []);
+/* 环境检测：读 App 级共享状态（上报循环脱离视图，切 Tab 不中断） */
+const postureVerdict = computed(() => postureState.verdict);
+const posture = computed(() => postureState.info?.checks ?? []);
 const allOk = computed(() => posture.value.length > 0 && posture.value.every((p) => p.ok));
 const VERDICT_ZH: Record<string, string> = { allow: '合规', degrade: '降权', gray: '灰度', block: '阻断' };
-let postureTimer = 0;
-async function postureTick() {
-  const r = await reportPosture();
-  if (r) { postureInfo.value = r.info; postureVerdict.value = r.verdict; }
-}
-watch(authedNow, (v) => {
-  clearInterval(postureTimer);
-  if (v) { postureTick(); postureTimer = window.setInterval(postureTick, 60_000); }
-}, { immediate: true });
 
 /* 重开 app 时若隧道仍在跑，恢复已接入态 */
 onMounted(async () => {
@@ -257,7 +247,7 @@ onMounted(async () => {
     if (v.running) { tun.value = v; stage.value = v.ready ? 'connected' : 'connecting'; session.connected = v.ready; if (!v.ready) startPolling(); else startPolling(); }
   } catch { /* ignore */ }
 });
-onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); clearInterval(postureTimer); });
+onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); });
 </script>
 
 <style scoped>

@@ -56,9 +56,10 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { session, logout, authed } from '@/lib/store';
 import { tauriRuntime, tunnelStop, forceQuit } from '@/lib/tunnel';
+import { startPostureLoop, stopPostureLoop } from '@/lib/posture';
 import Connect from '@/views/Connect.vue';
 import Apps from '@/views/Apps.vue';
 import Diagnostics from '@/views/Diagnostics.vue';
@@ -66,6 +67,11 @@ import Settings from '@/views/Settings.vue';
 
 const tab = ref<'connect' | 'apps' | 'diag' | 'settings'>('connect');
 const authedNow = computed(() => authed());
+
+/* posture 上报循环绑登录态、脱离视图——切走接入 Tab 也持续上报，
+   否则 strict 模式下报告过期会掐断隧道。 */
+watch(authedNow, (v) => { if (v) startPostureLoop(); else stopPostureLoop(); }, { immediate: true });
+onBeforeUnmount(stopPostureLoop);
 
 /* 退出确认（Rust 托盘「退出白帝」若隧道在跑会发 quit-request 事件） */
 const quitAsk = ref(false);

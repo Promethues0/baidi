@@ -1,5 +1,8 @@
 /** 终端环境采集与上报：Tauri 真实采集（Rust collect_posture）/ 浏览器联调模拟采集；
- *  登录期间每 60s 上报控制中心（把接入页那行文案变成真的）。判定权在控制面。 */
+ *  登录期间每 60s 上报控制中心（把接入页那行文案变成真的）。判定权在控制面。
+ *  上报循环由 App 级（随登录态）启停，不绑视图——切走接入 Tab 也持续上报，
+ *  否则 strict 模式下 10 分钟后报告过期会掐断隧道。共享状态供各视图读取。 */
+import { reactive } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { api } from './api';
 import { tauriRuntime } from './tunnel';
@@ -7,6 +10,9 @@ import { tauriRuntime } from './tunnel';
 export interface PostureCheck { key: string; label: string; ok: boolean; value: string }
 export interface PostureInfo { platform: string; os: string; clientVersion: string; device: string; checks: PostureCheck[] }
 export interface PostureVerdict { ok: boolean; verdict: 'allow' | 'degrade' | 'gray' | 'block'; score: number; level: string; reasons: string[] }
+
+/** 最近一次采集结果与控制面判定（全局共享，各视图读取渲染）。 */
+export const postureState = reactive<{ info: PostureInfo | null; verdict: PostureVerdict | null }>({ info: null, verdict: null });
 
 /** 采集：Tauri 走 Rust 真实探测；浏览器联调回退模拟（标注 DEV-BROWSER，仍走真实上报管道）。 */
 export async function collectPosture(): Promise<PostureInfo> {
@@ -24,13 +30,30 @@ export async function collectPosture(): Promise<PostureInfo> {
   };
 }
 
-/** 采集并上报一轮；网络失败返回 null（下轮重试），不打断 UI。 */
+/** 采集并上报一轮，写入共享状态；网络失败保留上轮值（下轮重试），不打断 UI。 */
 export async function reportPosture(): Promise<{ info: PostureInfo; verdict: PostureVerdict } | null> {
   try {
     const info = await collectPosture();
     const verdict = await api<PostureVerdict>('/posture', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(info)
     });
+    postureState.info = info;
+    postureState.verdict = verdict;
     return { info, verdict };
   } catch { return null; }
+}
+
+let loopTimer = 0;
+/** 启动 60s 上报循环（幂等；随登录态由 App 级调用）。 */
+export function startPostureLoop(): void {
+  stopPostureLoop();
+  reportPosture();
+  loopTimer = window.setInterval(reportPosture, 60_000);
+}
+/** 停止上报循环并清空共享状态（登出时调用）。 */
+export function stopPostureLoop(): void {
+  clearInterval(loopTimer);
+  loopTimer = 0;
+  postureState.info = null;
+  postureState.verdict = null;
 }

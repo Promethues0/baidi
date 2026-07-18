@@ -121,7 +121,6 @@
                 <th>期望值</th>
                 <th>风险等级</th>
                 <th>适用</th>
-                <th class="r">启用</th>
                 <th class="r">操作</th>
               </tr>
             </thead>
@@ -136,14 +135,11 @@
                   <span class="bd-tg" :style="tagStyle(c.platform === 'All' ? '#722ED1' : '#86909C')">{{ c.platform === 'All' ? '全平台' : c.platform }}</span>
                 </td>
                 <td class="r">
-                  <a-switch v-model="(c as any)._on" size="small" :default-checked="true" />
-                </td>
-                <td class="r">
                   <span class="bd-link bd-link--danger" @click="removeCheck(c.key)">删除</span>
                 </td>
               </tr>
               <tr v-if="checksFor(plat).length === 0">
-                <td colspan="6" class="bd-empty">该平台暂无检测项，可点击下方按钮添加</td>
+                <td colspan="5" class="bd-empty">该平台暂无检测项，可点击下方按钮添加</td>
               </tr>
             </tbody>
           </table>

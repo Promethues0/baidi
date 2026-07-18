@@ -39,3 +39,9 @@ func (m *Memory) PostureReportFor(_ context.Context, _, _ string) (PostureReport
 }
 
 func (m *Memory) PostureBlockedUsers(_ context.Context) ([]string, error) { return nil, nil }
+
+func (m *Memory) PostureFreshest(_ context.Context, _ string) (PostureReport, bool, error) {
+	return PostureReport{}, false, nil
+}
+
+func (m *Memory) PostureDeviceCount(_ context.Context, _ string) (int, error) { return 0, nil }

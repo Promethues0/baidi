@@ -20,6 +20,8 @@ type Store interface {
 	PostureReports(ctx context.Context) ([]PostureReport, error)
 	PostureVerdict(ctx context.Context, account string) (PostureReport, bool, error)
 	PostureReportFor(ctx context.Context, user, device string) (PostureReport, bool, error)
+	PostureFreshest(ctx context.Context, account string) (PostureReport, bool, error)
+	PostureDeviceCount(ctx context.Context, user string) (int, error)
 	PostureBlockedUsers(ctx context.Context) ([]string, error)
 	Resources(ctx context.Context) ([]Resource, error)
 	OnlineSessions(ctx context.Context) ([]OnlineSession, error)

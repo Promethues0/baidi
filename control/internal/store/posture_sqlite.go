@@ -107,3 +107,26 @@ func (s *SQLiteStore) PostureBlockedUsers(ctx context.Context) ([]string, error)
 	}
 	return out, rows.Err()
 }
+
+// PostureFreshest 某账号最新一条报告（按 ts）。strict 新鲜度判断用它——不能用 PostureVerdict
+// 返回的「最差」报告的 ts（一台旧设备的陈旧 degrade 行会永久判为过期，把持续合规的用户永久拒之门外）。
+func (s *SQLiteStore) PostureFreshest(ctx context.Context, account string) (PostureReport, bool, error) {
+	key := strings.ToLower(strings.TrimSpace(account))
+	rows, err := s.db.QueryContext(ctx, `SELECT `+postureCols+` FROM posture_reports WHERE user=? ORDER BY ts DESC LIMIT 1`, key)
+	if err != nil {
+		return PostureReport{}, false, err
+	}
+	reports, err := scanPostureRows(rows)
+	if err != nil || len(reports) == 0 {
+		return PostureReport{}, false, err
+	}
+	return reports[0], true, nil
+}
+
+// PostureDeviceCount 某账号已存报告的设备数（防单账号用随机 device 无界撑大 posture_reports）。
+func (s *SQLiteStore) PostureDeviceCount(ctx context.Context, user string) (int, error) {
+	key := strings.ToLower(strings.TrimSpace(user))
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM posture_reports WHERE user=?`, key).Scan(&n)
+	return n, err
+}

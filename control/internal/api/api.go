@@ -543,10 +543,19 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 终端环境不合规（"+strings.Join(rep.Reasons, "、")+"）", "deny")
 		httpx.Error(w, http.StatusForbidden, "终端环境不合规："+strings.Join(rep.Reasons, "、"))
 		return
-	} else if s.postureStrict && (!found || time.Now().Unix()-rep.TS > int64(postureFreshTTL.Seconds())) {
-		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 无有效终端环境报告（strict）", "deny")
-		httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
-		return
+	} else if s.postureStrict {
+		// strict 缺报/过期拒发。新鲜度须按「最新」报告判（不是上面 rep 那条跨设备最差——
+		// 一台旧设备的陈旧 degrade 行会把当前持续合规的用户永久拒之门外）。
+		fresh, found, err := s.store.PostureFreshest(r.Context(), c.Name)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to check posture freshness")
+			return
+		}
+		if !found || time.Now().Unix()-fresh.TS > int64(postureFreshTTL.Seconds()) {
+			s.audit(r, "security", "拒发敲门令牌："+c.Name+" 无有效终端环境报告（strict）", "deny")
+			httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
+			return
+		}
 	}
 	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})

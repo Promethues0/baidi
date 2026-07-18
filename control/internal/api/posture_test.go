@@ -1,9 +1,12 @@
 package api
 
 import (
+	"context"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/store"
@@ -158,5 +161,65 @@ func TestPostureStrictMode(t *testing.T) {
 	}
 	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
 		t.Fatalf("strict 有新鲜合规报告应 200, got %d", code)
+	}
+}
+
+// 上报 platform 必须是合法枚举——未知平台会跳过全部种子基线、allow 顶掉 block（旁路服务端 fail-closed）。
+func TestPostureRejectsUnknownPlatform(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	for _, p := range []string{"macos", "iOS", "", "Solaris"} {
+		body := map[string]any{"device": "D1", "platform": p, "checks": []map[string]any{{"key": "disk_encrypted", "label": "磁盘已加密", "ok": false}}}
+		if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body); code != http.StatusBadRequest {
+			t.Fatalf("platform=%q 应 400, got %d", p, code)
+		}
+	}
+}
+
+// 设备基数上限：单账号超过 maxPostureDevices 台新设备被拒（防无界撑大 posture_reports）。
+func TestPostureDeviceCap(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	post := func(dev string) int {
+		body := map[string]any{"device": dev, "platform": "macOS", "checks": []map[string]any{{"key": "disk_encrypted", "label": "磁盘已加密", "ok": true}}}
+		code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body)
+		return code
+	}
+	for i := 0; i < maxPostureDevices; i++ {
+		if code := post(fmt.Sprintf("DEV-%d", i)); code != http.StatusOK {
+			t.Fatalf("第 %d 台应 200, got %d", i, code)
+		}
+	}
+	if code := post("DEV-OVERFLOW"); code != http.StatusForbidden {
+		t.Fatalf("超限新设备应 403, got %d", code)
+	}
+	// 已存设备再上报（upsert，不增行）仍放行
+	if code := post("DEV-0"); code != http.StatusOK {
+		t.Fatalf("已存设备 upsert 应 200, got %d", code)
+	}
+}
+
+// strict 新鲜度按「最新」报告判：一台旧设备的陈旧 degrade 行不应把持续合规的用户永久拒之门外。
+func TestPostureStrictUsesFreshestNotWorst(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	s := New(st, st, testSecret, "test")
+	s.postureStrict = true
+	h := auth.Middleware(testSecret, s.IsOpen)(s.Routes())
+
+	ctx := context.Background()
+	old := time.Now().Add(-20 * time.Minute).Unix()
+	// 旧设备：陈旧 degrade（20 分钟前，过期）；PostureVerdict 会因 rank 更高而返回它
+	_ = st.SavePostureReport(ctx, store.PostureReport{User: "li.fang", Device: "OLD", Platform: "macOS",
+		Verdict: "degrade", Score: 10, Level: "low", Reasons: []string{}, TS: old})
+	// 新设备：新鲜 allow
+	_ = st.SavePostureReport(ctx, store.PostureReport{User: "li.fang", Device: "NEW", Platform: "macOS",
+		Verdict: "allow", Score: 0, Level: "low", Reasons: []string{}, TS: time.Now().Unix()})
+
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", userToken("li.fang"), nil); code != http.StatusOK {
+		t.Fatalf("有新鲜合规报告时 strict 应放行（旧 degrade 不应永久拒），got %d", code)
 	}
 }

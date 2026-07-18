@@ -45,9 +45,10 @@ func Evaluate(platform string, checks []store.PostureCheckResult, baselines []st
 				w = severityWeight["medium"]
 			}
 			v.Score += w
-			reason := c.Label
+			// reason 是失败陈述而非检查项名（"磁盘已加密"单独出现会读反）
+			reason := c.Label + " 未通过"
 			if !present {
-				reason += "（未上报）"
+				reason = c.Label + "（未上报）"
 			}
 			v.Reasons = append(v.Reasons, reason)
 		}

@@ -38,10 +38,10 @@ func TestEvaluate(t *testing.T) {
 			Verdict{Score: 0, Level: "low", Disposal: "allow", Reasons: []string{}}},
 		{"高危失败触发 block 且 level 强制 high", "macOS", []store.PostureCheckResult{bad("disk"), ok("sip"), ok("fw"), ok("edr")},
 			[]store.BaselinePolicy{admission, health},
-			Verdict{Score: 25, Level: "high", Disposal: "block", Reasons: []string{"检查-disk"}}},
+			Verdict{Score: 25, Level: "high", Disposal: "block", Reasons: []string{"检查-disk 未通过"}}},
 		{"降权基线失败只 degrade", "macOS", []store.PostureCheckResult{ok("disk"), ok("sip"), bad("fw"), bad("edr")},
 			[]store.BaselinePolicy{admission, health},
-			Verdict{Score: 15, Level: "low", Disposal: "degrade", Reasons: []string{"检查-fw", "检查-edr"}}},
+			Verdict{Score: 15, Level: "low", Disposal: "degrade", Reasons: []string{"检查-fw 未通过", "检查-edr 未通过"}}},
 		{"缺失 key 视为失败", "macOS", []store.PostureCheckResult{ok("disk"), ok("sip"), ok("edr")},
 			[]store.BaselinePolicy{admission, health},
 			Verdict{Score: 10, Level: "low", Disposal: "degrade", Reasons: []string{"检查-fw（未上报）"}}},
@@ -53,7 +53,7 @@ func TestEvaluate(t *testing.T) {
 			Verdict{Score: 0, Level: "low", Disposal: "allow", Reasons: []string{}}},
 		{"空 Platforms 视为全平台适用", "Linux", []store.PostureCheckResult{bad("disk")},
 			[]store.BaselinePolicy{bl("b-any", "gray", "enabled", nil, chk("disk", "All", "medium"))},
-			Verdict{Score: 10, Level: "low", Disposal: "gray", Reasons: []string{"检查-disk"}}},
+			Verdict{Score: 10, Level: "low", Disposal: "gray", Reasons: []string{"检查-disk 未通过"}}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {

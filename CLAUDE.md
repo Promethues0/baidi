@@ -44,6 +44,7 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 
 - 鉴权：JWT Role ∈ admin|user|gateway；写操作 handler 内 requireAdmin()，数据面拉策略 requireGateway()。
 - 配置全走 `BAIDI_*` 环境变量（BAIDI_ADDR/BAIDI_DB/BAIDI_JWT_SECRET/BAIDI_GW_SPA…）。
+- **终端 posture / 风险引擎**：`POST /api/v1/posture` 上报（登录用户，platform 枚举 Windows|macOS|Linux，每账号 ≤20 台设备）→ `internal/risk.Evaluate` 按安全中心基线（`baseline_policies` 表，安全中心页可编辑）评估 → 最新判定 block 则 knock-token 403 + 经 `gateways/policy` revoked 捎带撤窗断隧道；判定权全在控制面，网关零改动。缺报默认放行（observe），`BAIDI_POSTURE_ENFORCE=strict` 缺报/过期（10min）也拒。基线检查 key 与桌面采集器对齐：disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version。
 - **control 与 gateway 必须共用同一 BAIDI_JWT_SECRET**，不一致则 SPA 敲门校验全挂。
 - 演示口令：管理台 admin/baidi@123；门户任意用户+baidi@123；ext.*/含「外包」账号触发自适应 MFA，验证码 123456。
 - 未起后端时 console 各页降级为内置演示数据，UI 完整可点。

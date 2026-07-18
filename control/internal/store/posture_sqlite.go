@@ -46,9 +46,10 @@ func scanPostureRows(rows *sql.Rows) ([]PostureReport, error) {
 	return out, rows.Err()
 }
 
-// PostureReports 全部设备的最新报告（ts 新者在前，供安全中心「终端合规」）。
+// PostureReports 最新报告清单（ts 新者在前，供安全中心「终端合规」与态势聚合）。
+// 行数已由"每账号 ≤20 台"钳制，这里再加读取上限兜底（防未来放宽上限后列表面被拖垮）。
 func (s *SQLiteStore) PostureReports(ctx context.Context) ([]PostureReport, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+postureCols+` FROM posture_reports ORDER BY ts DESC`)
+	rows, err := s.db.QueryContext(ctx, `SELECT `+postureCols+` FROM posture_reports ORDER BY ts DESC LIMIT 500`)
 	if err != nil {
 		return nil, err
 	}

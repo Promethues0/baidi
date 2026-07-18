@@ -46,7 +46,23 @@ func (s *Server) handleSaveBaseline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "policy", "保存安全基线「"+saved.Name+"」（处置："+saved.Disposal+"）", "ok")
+	s.warnIfNoEnabledBaseline(r)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "baseline": saved})
+}
+
+// warnIfNoEnabledBaseline 「无规则即放行」留痕：当前已无任何启用基线时落审计警示。
+// best-effort（读失败不打扰主操作）。
+func (s *Server) warnIfNoEnabledBaseline(r *http.Request) {
+	bls, err := s.store.Baselines(r.Context())
+	if err != nil {
+		return
+	}
+	for _, b := range bls {
+		if b.Status == "enabled" {
+			return
+		}
+	}
+	s.audit(r, "security", "已无启用的安全基线，风险引擎将对所有终端环境放行（无规则即放行）", "fail")
 }
 
 // handleDeleteBaseline 删除一条安全基线（admin）。
@@ -60,5 +76,6 @@ func (s *Server) handleDeleteBaseline(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "policy", "删除安全基线 "+id, "ok")
+	s.warnIfNoEnabledBaseline(r)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

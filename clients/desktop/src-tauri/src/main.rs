@@ -210,21 +210,27 @@ fn probe(cmd: &str, args: &[&str]) -> String {
 }
 
 /// 设备指纹：IOPlatformUUID 去连字符取前 16 位，按 4 段冒号分隔（对齐控制台设备指纹形制）。
+/// 硬件 UUID 不会变——进程生命周期内缓存，免得每轮上报都 spawn ioreg。
 fn device_fingerprint() -> String {
-    let raw = probe(
-        "sh",
-        &["-c", "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/{print $4}'"],
-    );
-    let hex: String = raw.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
-    if hex.len() < 16 {
-        return "UNKNOWN-DEVICE".into();
-    }
-    format!("{}:{}:{}:{}", &hex[0..4], &hex[4..8], &hex[8..12], &hex[12..16])
+    static FP: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+    FP.get_or_init(|| {
+        let raw = probe(
+            "sh",
+            &["-c", "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/{print $4}'"],
+        );
+        let hex: String = raw.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+        if hex.len() < 16 {
+            return "UNKNOWN-DEVICE".into();
+        }
+        format!("{}:{}:{}:{}", &hex[0..4], &hex[4..8], &hex[8..12], &hex[12..16])
+    })
+    .clone()
 }
 
 /// 终端环境真实采集（macOS）：机械布尔化 + 原始值，策略判定在控制面（风险引擎按安全基线评估）。
+/// async：Tauri 2 会把它挪到线程池执行，串行 spawn 的几个探测子进程不再卡主线程（每 60s 一轮）。
 #[tauri::command]
-fn collect_posture() -> PostureInfo {
+async fn collect_posture() -> PostureInfo {
     let os_ver = probe("sw_vers", &["-productVersion"]);
     let filevault = probe("fdesetup", &["status"]); // "FileVault is On."
     let sip = probe("csrutil", &["status"]); // "... status: enabled."

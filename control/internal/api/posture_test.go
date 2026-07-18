@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -221,5 +222,47 @@ func TestPostureStrictUsesFreshestNotWorst(t *testing.T) {
 
 	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", userToken("li.fang"), nil); code != http.StatusOK {
 		t.Fatalf("有新鲜合规报告时 strict 应放行（旧 degrade 不应永久拒），got %d", code)
+	}
+}
+
+// 「无规则即放行」须留痕：删光/停用全部启用基线时落审计警示（风险引擎将对所有终端放行）。
+func TestNoEnabledBaselineAuditWarn(t *testing.T) {
+	h := newTestServer(t)
+	adm := adminToken()
+	// 删掉两条种子基线
+	for _, id := range []string{"bl-admission", "bl-health"} {
+		if code, _ := doJSON(t, h, "DELETE", "/api/v1/security/baselines/"+id, adm, nil); code != http.StatusOK {
+			t.Fatalf("删基线 %s 失败 %d", id, code)
+		}
+	}
+	_, audit := doJSON(t, h, "GET", "/api/v1/audit", adm, nil)
+	found := false
+	for _, l := range audit["logs"].([]any) {
+		if m, ok := l.(map[string]any); ok {
+			if ev, _ := m["event"].(string); strings.Contains(ev, "已无启用的安全基线") {
+				found = true
+			}
+		}
+	}
+	if !found {
+		t.Fatal("删光基线后应有「已无启用的安全基线」审计警示")
+	}
+	// 停用（而非删除）同样触发：重建一条 disabled 基线不改变"无启用"事实，但保存动作应再次警示
+	body := map[string]any{"name": "停用基线", "type": "onboarding", "disposal": "block", "status": "disabled", "platforms": []string{"macOS"},
+		"checks": []map[string]string{{"key": "disk_encrypted", "label": "磁盘已加密", "platform": "All", "severity": "high"}}}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/security/baselines", adm, body); code != http.StatusOK {
+		t.Fatal("保存停用基线失败")
+	}
+	_, audit = doJSON(t, h, "GET", "/api/v1/audit", adm, nil)
+	n := 0
+	for _, l := range audit["logs"].([]any) {
+		if m, ok := l.(map[string]any); ok {
+			if ev, _ := m["event"].(string); strings.Contains(ev, "已无启用的安全基线") {
+				n++
+			}
+		}
+	}
+	if n < 2 {
+		t.Fatalf("保存后仍无启用基线应再次警示, got %d 条", n)
 	}
 }

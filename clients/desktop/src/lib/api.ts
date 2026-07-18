@@ -9,13 +9,15 @@ function inTauri(): boolean {
 function origin(): string { return inTauri() ? config.control.replace(/\/+$/, '') : ''; }
 
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
+  // headers 必须在 ...rest 之后合并：否则调用方传入 headers 会把 Authorization 整体顶掉（静默 401）
+  const { headers: extra, ...rest } = init ?? {};
   const res = await fetch(origin() + '/api/v1' + path, {
+    ...rest,
     headers: {
       Accept: 'application/json',
       ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
-      ...(init?.headers ?? {})
-    },
-    ...init
+      ...(extra ?? {})
+    }
   });
   if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
   return (await res.json()) as T;

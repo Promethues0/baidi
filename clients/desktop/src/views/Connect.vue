@@ -50,7 +50,7 @@
         <div v-if="denied" class="ck-denied">
           <icon-stop class="ck-denied__ic" />
           <div class="ck-denied__b">
-            <div class="ck-denied__t">接入已被管理员终止</div>
+            <div class="ck-denied__t">接入已被控制面拒绝</div>
             <div class="ck-denied__r">{{ deniedReason }}</div>
             <div class="ck-denied__h">隧道已断开。请联系管理员解除后重试——重复接入不会成功。</div>
           </div>
@@ -68,13 +68,20 @@
       <!-- 右：环境检测 + 接入信息 -->
       <div class="ck-side">
         <div class="dk-card ck-posture">
-          <div class="ck-card__h">终端环境检测<span class="ck-trust" :class="{ bad: !allOk }">{{ allOk ? '终端可信' : '存在风险' }}</span></div>
-          <div v-for="p in posture" :key="p.label" class="ck-pi">
+          <div class="ck-card__h">终端环境检测
+            <span class="ck-trust" :class="{ bad: postureVerdict?.verdict === 'block' || !allOk }">
+              {{ postureVerdict ? (postureVerdict.verdict === 'block' ? '接入受限' : postureVerdict.verdict === 'allow' && allOk ? '终端可信' : '存在风险') : '采集中…' }}
+            </span>
+          </div>
+          <div v-for="p in posture" :key="p.key" class="ck-pi">
             <component :is="p.ok ? 'IconCheckCircleFill' : 'IconExclamationCircleFill'" :style="{ color: p.ok ? '#00B42A' : '#FF7D00' }" />
             <span class="ck-pi__l">{{ p.label }}</span>
             <span class="ck-pi__v" :class="{ warn: !p.ok }">{{ p.ok ? '通过' : '关注' }}</span>
           </div>
-          <div class="ck-report">每 60s 周期上报控制中心 · 风险驱动动态收缩权限</div>
+          <div v-if="posture.length === 0" class="ck-pi" style="color: var(--bd-t3)">正在采集终端环境…</div>
+          <div class="ck-report">
+            {{ postureVerdict ? `已上报控制中心 · 判定 ${VERDICT_ZH[postureVerdict.verdict]} · 评分 ${postureVerdict.score}` : '每 60s 周期上报控制中心 · 风险驱动动态收缩权限' }}
+          </div>
         </div>
 
         <div class="dk-card ck-conn" :class="{ off: stage !== 'connected' }">
@@ -98,12 +105,13 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type PortalLoginResp } from '@/lib/api';
 import { session, login, authed, validateConfig } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, type TunView } from '@/lib/tunnel';
+import { reportPosture, type PostureInfo, type PostureVerdict } from '@/lib/posture';
 
 const authedNow = computed(() => authed());
 const isTauri = tauriRuntime();
@@ -225,15 +233,21 @@ async function connectDev() {
   Message.success('（联调）已敲门 · 真 utun 接管需打包运行');
 }
 
-/* 环境检测（终端本地研判，演示位） */
-const posture = reactive([
-  { label: '磁盘已加密', ok: true },
-  { label: '系统未越狱 / 未 root', ok: true },
-  { label: '系统版本合规', ok: true },
-  { label: 'EDR 终端防护在线', ok: true },
-  { label: '客户端为最新版本 v0.1.0', ok: true }
-]);
-const allOk = computed(() => posture.every((p) => p.ok));
+/* 环境检测：真实采集 + 控制面判定（每 60s 上报，判定权在控制面） */
+const postureInfo = ref<PostureInfo | null>(null);
+const postureVerdict = ref<PostureVerdict | null>(null);
+const posture = computed(() => postureInfo.value?.checks ?? []);
+const allOk = computed(() => posture.value.length > 0 && posture.value.every((p) => p.ok));
+const VERDICT_ZH: Record<string, string> = { allow: '合规', degrade: '降权', gray: '灰度', block: '阻断' };
+let postureTimer = 0;
+async function postureTick() {
+  const r = await reportPosture();
+  if (r) { postureInfo.value = r.info; postureVerdict.value = r.verdict; }
+}
+watch(authedNow, (v) => {
+  clearInterval(postureTimer);
+  if (v) { postureTick(); postureTimer = window.setInterval(postureTick, 60_000); }
+}, { immediate: true });
 
 /* 重开 app 时若隧道仍在跑，恢复已接入态 */
 onMounted(async () => {
@@ -243,7 +257,7 @@ onMounted(async () => {
     if (v.running) { tun.value = v; stage.value = v.ready ? 'connected' : 'connecting'; session.connected = v.ready; if (!v.ready) startPolling(); else startPolling(); }
   } catch { /* ignore */ }
 });
-onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); });
+onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); clearInterval(postureTimer); });
 </script>
 
 <style scoped>

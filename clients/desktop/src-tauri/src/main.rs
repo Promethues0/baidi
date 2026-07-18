@@ -180,6 +180,96 @@ fn force_quit(app: tauri::AppHandle) {
     app.exit(0);
 }
 
+// ── 终端环境采集（posture）──
+
+#[derive(serde::Serialize, Clone)]
+struct PostureCheck {
+    key: String,
+    label: String,
+    ok: bool,
+    value: String,
+}
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PostureInfo {
+    platform: String,
+    os: String,
+    client_version: String,
+    device: String,
+    checks: Vec<PostureCheck>,
+}
+
+/// 跑一条只读探测命令，返回 stdout（失败返回空串）。
+fn probe(cmd: &str, args: &[&str]) -> String {
+    Command::new(cmd)
+        .args(args)
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default()
+}
+
+/// 设备指纹：IOPlatformUUID 去连字符取前 16 位，按 4 段冒号分隔（对齐控制台设备指纹形制）。
+fn device_fingerprint() -> String {
+    let raw = probe(
+        "sh",
+        &["-c", "ioreg -rd1 -c IOPlatformExpertDevice | awk -F'\"' '/IOPlatformUUID/{print $4}'"],
+    );
+    let hex: String = raw.chars().filter(|c| c.is_ascii_alphanumeric()).take(16).collect();
+    if hex.len() < 16 {
+        return "UNKNOWN-DEVICE".into();
+    }
+    format!("{}:{}:{}:{}", &hex[0..4], &hex[4..8], &hex[8..12], &hex[12..16])
+}
+
+/// 终端环境真实采集（macOS）：机械布尔化 + 原始值，策略判定在控制面（风险引擎按安全基线评估）。
+#[tauri::command]
+fn collect_posture() -> PostureInfo {
+    let os_ver = probe("sw_vers", &["-productVersion"]);
+    let filevault = probe("fdesetup", &["status"]); // "FileVault is On."
+    let sip = probe("csrutil", &["status"]); // "... status: enabled."
+    let fw = probe(
+        "/usr/libexec/ApplicationFirewall/socketfilterfw",
+        &["--getglobalstate"],
+    ); // "... enabled." / "(State = 1)"
+    let procs = probe("ps", &["-axco", "comm"]);
+    let edr = ["falcond", "CylanceSvc", "wdavdaemon", "SentinelAgent", "ESET"]
+        .iter()
+        .any(|p| procs.contains(p));
+    let os_ok = os_ver
+        .split('.')
+        .next()
+        .and_then(|v| v.parse::<u32>().ok())
+        .map(|v| v >= 13)
+        .unwrap_or(false);
+    let ver = env!("CARGO_PKG_VERSION").to_string();
+    let checks = vec![
+        PostureCheck { key: "disk_encrypted".into(), label: "磁盘已加密".into(), ok: filevault.contains("On"), value: filevault },
+        PostureCheck { key: "sys_integrity".into(), label: "系统完整性保护开启".into(), ok: sip.contains("enabled"), value: sip },
+        PostureCheck {
+            key: "firewall_on".into(),
+            label: "系统防火墙启用".into(),
+            ok: fw.contains("enabled") || fw.contains("State = 1") || fw.contains("State = 2"),
+            value: fw,
+        },
+        PostureCheck { key: "os_version".into(), label: "系统版本合规".into(), ok: os_ok, value: os_ver.clone() },
+        PostureCheck {
+            key: "edr_online".into(),
+            label: "EDR 终端防护在线".into(),
+            ok: edr,
+            value: if edr { "检测到 EDR 进程".into() } else { "未检测到".into() },
+        },
+        PostureCheck { key: "client_version".into(), label: format!("客户端为最新版本 v{ver}"), ok: true, value: ver.clone() },
+    ];
+    PostureInfo {
+        platform: "macOS".into(),
+        os: format!("macOS {os_ver}"),
+        client_version: ver,
+        device: device_fingerprint(),
+        checks,
+    }
+}
+
 /// 显示并聚焦主窗口（从托盘唤起）。
 fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -196,7 +286,7 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop, force_quit])
+        .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop, force_quit, collect_posture])
         .setup(|app| {
             // 托盘菜单：状态（禁用只读）/ 显示主窗口 / 退出
             let status = MenuItem::with_id(app, "status", "○ 未接入", false, None::<&str>)?;

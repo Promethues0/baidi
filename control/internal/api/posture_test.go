@@ -46,3 +46,56 @@ func TestBaselineCRUD(t *testing.T) {
 		t.Fatal("删后应回 2 条")
 	}
 }
+
+// goodPosture / badPosture 上报体 helper（bad = 磁盘未加密 → 接入准入基线 block）。
+func posturePayload(diskOK bool) map[string]any {
+	return map[string]any{"device": "DEV-A", "platform": "macOS", "os": "macOS 14.4", "clientVersion": "0.1.0",
+		"checks": []map[string]any{
+			{"key": "disk_encrypted", "label": "磁盘已加密", "ok": diskOK, "value": "x"},
+			{"key": "sys_integrity", "label": "系统完整性保护开启", "ok": true, "value": "enabled"},
+			{"key": "firewall_on", "label": "系统防火墙启用", "ok": true, "value": "enabled"},
+			{"key": "os_version", "label": "系统版本合规", "ok": true, "value": "14.4"},
+			{"key": "edr_online", "label": "EDR 终端防护在线", "ok": true, "value": "falcond"},
+			{"key": "client_version", "label": "客户端为最新版本", "ok": true, "value": "0.1.0"},
+		}}
+}
+func goodPosture() map[string]any { return posturePayload(true) }
+func badPosture() map[string]any  { return posturePayload(false) }
+
+// 上报→评估落库→verdict 回传；gateway 角色拒；非 admin 读 403；输入校验。
+func TestPostureReportAndList(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+
+	code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, goodPosture())
+	if code != http.StatusOK || out["verdict"] != "allow" {
+		t.Fatalf("合规上报应 allow: %d %v", code, out)
+	}
+	code, out = doJSON(t, h, "POST", "/api/v1/posture", tok, badPosture())
+	if code != http.StatusOK || out["verdict"] != "block" || out["level"] != "high" {
+		t.Fatalf("磁盘未加密应 block/high: %v", out)
+	}
+
+	// admin 读清单；user 读 403；gateway 上报 403
+	code, list := doJSON(t, h, "GET", "/api/v1/posture", adminToken(), nil)
+	if code != http.StatusOK || len(list["reports"].([]any)) != 1 {
+		t.Fatalf("清单应 1 行: %d %v", code, list)
+	}
+	if code, _ := doJSON(t, h, "GET", "/api/v1/posture", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("user 读清单应 403, got %d", code)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/posture", gatewayToken(), goodPosture()); code != http.StatusForbidden {
+		t.Fatalf("gateway 角色上报应 403, got %d", code)
+	}
+	// 校验：device 缺失 400、检查数超限 400
+	if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, map[string]any{"platform": "macOS"}); code != http.StatusBadRequest {
+		t.Fatalf("缺 device 应 400, got %d", code)
+	}
+	many := make([]map[string]any, 33)
+	for i := range many {
+		many[i] = map[string]any{"key": "k", "label": "l", "ok": true}
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, map[string]any{"device": "D", "platform": "macOS", "checks": many}); code != http.StatusBadRequest {
+		t.Fatalf("检查超 32 应 400, got %d", code)
+	}
+}

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"baidi.dev/control/internal/httpx"
 )
@@ -58,4 +59,32 @@ func (s *Server) loadManifest() downloadsManifest {
 
 func (s *Server) handleDownloadsManifest(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, s.loadManifest())
+}
+
+// handleDownloadFile 只分发 manifest 中 available 条目列出的文件——白名单即防穿越。
+func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
+	name := r.PathValue("file")
+	if name == "" || strings.ContainsAny(name, `/\`) || strings.Contains(name, "..") {
+		httpx.Error(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	listed := false
+	for _, c := range s.loadManifest().Clients {
+		if c.Available && c.File == name {
+			listed = true
+			break
+		}
+	}
+	if !listed {
+		httpx.Error(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	full := filepath.Join(s.downloadsDir, name)
+	if fi, err := os.Stat(full); err != nil || fi.IsDir() {
+		log.Printf("downloads: manifest 列出但盘上缺失 %s", name)
+		httpx.Error(w, http.StatusNotFound, "文件不存在")
+		return
+	}
+	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	http.ServeFile(w, r, full)
 }

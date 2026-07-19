@@ -113,10 +113,14 @@ func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDi
 		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
 
-// IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单）。供 auth 中间件使用。
+// IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单/安装包分发）。供 auth 中间件使用。
 func (s *Server) IsOpen(_, path string) bool {
 	switch path {
 	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads":
+		return true
+	}
+	// /downloads/{file} 路径可变，前缀豁免；白名单校验在 handler 内（manifest available 条目）。
+	if strings.HasPrefix(path, "/downloads/") {
 		return true
 	}
 	return false
@@ -245,6 +249,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
 	mux.HandleFunc("GET /api/v1/portal/apps", s.handlePortalApps)
 	mux.HandleFunc("GET /api/v1/portal/downloads", s.handleDownloadsManifest) // 客户端下载清单（免认证）
+	mux.HandleFunc("GET /downloads/{file}", s.handleDownloadFile)             // 客户端安装包分发（公开；白名单校验在 handler 内）
 
 	return mux
 }

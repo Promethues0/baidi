@@ -17,68 +17,83 @@
 
     <main class="bd-pmain">
       <div class="bd-pwrap">
-        <!-- 推荐下载（按访问端识别） -->
-        <section v-if="recommended" class="bd-hero">
-          <div class="bd-hero__txt">
-            <p class="bd-hero__kicker">为你推荐 · 已识别当前设备</p>
-            <h1 class="bd-hero__title">{{ recommended.label }}</h1>
-            <p class="bd-hero__meta">
-              <template v-if="recommended.available">
-                版本 {{ recommended.version }}
-                <template v-if="recommended.arch"> · {{ recommended.arch }}</template>
-                · {{ fmtSize(recommended.size) }}
-              </template>
-              <template v-else>{{ recommended.note || '构建中，敬请期待' }}</template>
-            </p>
-            <button v-if="recommended.available" class="bd-hero__btn" @click="download(recommended)">
-              <icon-download /> 立即下载
-            </button>
-          </div>
-        </section>
-
-        <!-- 全平台栅格 -->
-        <h2 class="bd-sect">全部平台</h2>
-        <div class="bd-grid">
-          <article v-for="c in clients" :key="c.platform" class="bd-dtile" :class="{ 'bd-dtile--off': !c.available }">
-            <header class="bd-dtile__head">
-              <span class="bd-dtile__icon"><component :is="platformIcon(c.platform)" /></span>
-              <div>
-                <h3 class="bd-dtile__name">{{ c.label }}</h3>
-                <p class="bd-dtile__arch">{{ c.available ? (c.arch || '') : (c.note || '构建中，敬请期待') }}</p>
-              </div>
-            </header>
-            <template v-if="c.available">
-              <dl class="bd-dtile__meta">
-                <div><dt>版本</dt><dd>{{ c.version }}</dd></div>
-                <div><dt>大小</dt><dd>{{ fmtSize(c.size) }}</dd></div>
-                <div class="bd-dtile__sha">
-                  <dt>SHA256</dt>
-                  <dd class="bd-mono" :title="c.sha256">{{ shortSha(c.sha256) }}
-                    <button class="bd-copybtn" title="复制完整校验值" @click="copySha(c.sha256)"><icon-copy /></button>
-                  </dd>
-                </div>
-              </dl>
-              <p v-if="c.note" class="bd-dtile__note">{{ c.note }}</p>
-              <div class="bd-dtile__act">
-                <button class="bd-dtile__btn" @click="download(c)"><icon-download /> 下载</button>
-                <div v-if="c.platform === 'android'" class="bd-qr">
-                  <img v-if="qr" :src="qr" alt="扫码下载 Android 客户端" width="84" height="84" />
-                  <span v-else class="bd-mono bd-qr__fallback">{{ fileUrl(c) }}</span>
-                  <span class="bd-qr__cap">手机扫码直接下载</span>
-                </div>
-              </div>
-            </template>
-            <template v-else>
-              <div class="bd-dtile__act">
-                <button class="bd-dtile__btn bd-dtile__btn--ghost" disabled>暂未提供</button>
-              </div>
-            </template>
-          </article>
+        <!-- 加载态 -->
+        <div v-if="loading" class="bd-state">
+          <icon-loading spin />
+          <p>正在获取下载清单…</p>
         </div>
 
-        <p class="bd-foot">
-          安装包由控制中心统一分发，下载后请核对 SHA256 校验值。iOS / 鸿蒙分发请联系管理员。
-        </p>
+        <!-- 错误态（持久，非一次性 toast；可重试） -->
+        <div v-else-if="failed" class="bd-state bd-state--err">
+          <icon-exclamation-circle-fill />
+          <p>下载清单获取失败，请稍后重试</p>
+          <button class="bd-state__retry" @click="load"><icon-refresh /> 重试</button>
+        </div>
+
+        <template v-else>
+          <!-- 推荐下载（按访问端识别） -->
+          <section v-if="recommended" class="bd-hero">
+            <div class="bd-hero__txt">
+              <p class="bd-hero__kicker">为你推荐 · 已识别当前设备</p>
+              <h1 class="bd-hero__title">{{ recommended.label }}</h1>
+              <p class="bd-hero__meta">
+                <template v-if="recommended.available">
+                  版本 {{ recommended.version }}
+                  <template v-if="recommended.arch"> · {{ recommended.arch }}</template>
+                  · {{ fmtSize(recommended.size) }}
+                </template>
+                <template v-else>{{ recommended.note || '构建中，敬请期待' }}</template>
+              </p>
+              <button v-if="recommended.available" class="bd-hero__btn" @click="download(recommended)">
+                <icon-download /> 立即下载
+              </button>
+            </div>
+          </section>
+
+          <!-- 全平台栅格 -->
+          <h2 class="bd-sect">全部平台</h2>
+          <div class="bd-grid">
+            <article v-for="c in clients" :key="c.platform" class="bd-dtile" :class="{ 'bd-dtile--off': !c.available }">
+              <header class="bd-dtile__head">
+                <span class="bd-dtile__icon"><component :is="platformIcon(c.platform)" /></span>
+                <div>
+                  <h3 class="bd-dtile__name">{{ c.label }}</h3>
+                  <p class="bd-dtile__arch">{{ c.available ? (c.arch || '') : (c.note || '构建中，敬请期待') }}</p>
+                </div>
+              </header>
+              <template v-if="c.available">
+                <dl class="bd-dtile__meta">
+                  <div><dt>版本</dt><dd>{{ c.version }}</dd></div>
+                  <div><dt>大小</dt><dd>{{ fmtSize(c.size) }}</dd></div>
+                  <div class="bd-dtile__sha">
+                    <dt>SHA256</dt>
+                    <dd class="bd-mono" :title="c.sha256">{{ shortSha(c.sha256) }}
+                      <button class="bd-copybtn" title="复制完整校验值" @click="copySha(c.sha256)"><icon-copy /></button>
+                    </dd>
+                  </div>
+                </dl>
+                <p v-if="c.note" class="bd-dtile__note">{{ c.note }}</p>
+                <div class="bd-dtile__act">
+                  <button class="bd-dtile__btn" @click="download(c)"><icon-download /> 下载</button>
+                  <div v-if="c.platform === 'android'" class="bd-qr">
+                    <img v-if="qr" :src="qr" alt="扫码下载 Android 客户端" width="84" height="84" />
+                    <span v-else class="bd-mono bd-qr__fallback">{{ fileUrl(c) }}</span>
+                    <span class="bd-qr__cap">手机扫码直接下载</span>
+                  </div>
+                </div>
+              </template>
+              <template v-else>
+                <div class="bd-dtile__act">
+                  <button class="bd-dtile__btn bd-dtile__btn--ghost" disabled>暂未提供</button>
+                </div>
+              </template>
+            </article>
+          </div>
+
+          <p class="bd-foot">
+            安装包由控制中心统一分发，下载后请核对 SHA256 校验值。iOS / 鸿蒙分发请联系管理员。
+          </p>
+        </template>
       </div>
     </main>
   </div>
@@ -95,6 +110,8 @@ import { IconDesktop, IconMobile } from '@arco-design/web-vue/es/icon';
 const router = useRouter();
 const clients = ref<ClientDownload[]>([]);
 const qr = ref('');
+const loading = ref(true);
+const failed = ref(false);
 
 function detectPlatform(): string {
   const ua = navigator.userAgent;
@@ -135,18 +152,25 @@ function shortSha(s?: string): string {
 
 async function copySha(s?: string) {
   if (!s) return;
-  await navigator.clipboard.writeText(s);
-  Message.success('SHA256 已复制');
+  try {
+    await navigator.clipboard.writeText(s);
+    Message.success('SHA256 已复制');
+  } catch {
+    Message.error('复制失败，请手动复制完整校验值');
+  }
 }
 
 function goBack() {
   router.push(getToken() ? '/portal/apps' : '/portal/login');
 }
 
-onMounted(async () => {
+async function load() {
+  loading.value = true;
+  failed.value = false;
   try {
     const resp = await api<DownloadsResp>('/portal/downloads');
     clients.value = resp.clients;
+    qr.value = '';
     const android = resp.clients.find((c) => c.platform === 'android' && c.available && c.file);
     if (android) {
       try {
@@ -156,9 +180,14 @@ onMounted(async () => {
       }
     }
   } catch {
+    failed.value = true;
     Message.error('下载清单获取失败，请稍后重试');
+  } finally {
+    loading.value = false;
   }
-});
+}
+
+onMounted(load);
 </script>
 
 <style scoped>
@@ -182,6 +211,19 @@ onMounted(async () => {
 .bd-pquit:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
 .bd-pmain { flex: 1; padding: 28px 24px 48px; }
 .bd-pwrap { max-width: 1080px; margin: 0 auto; }
+.bd-state {
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 12px; padding: 96px 20px; color: var(--bd-t3); font-size: 13.5px;
+}
+.bd-state :deep(.arco-icon) { font-size: 28px; }
+.bd-state--err :deep(.arco-icon) { color: var(--bd-danger); }
+.bd-state--err p { color: var(--bd-t2); }
+.bd-state__retry {
+  margin-top: 4px; display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 18px;
+  background: #fff; color: var(--bd-t2); border: 1px solid var(--bd-border); border-radius: 7px; font-size: 13px;
+  cursor: pointer; transition: all .15s;
+}
+.bd-state__retry:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
 .bd-hero {
   background: linear-gradient(135deg, var(--bd-dark-1), var(--bd-dark-2));
   border-radius: var(--bd-radius); padding: 30px 34px; color: #fff; margin-bottom: 30px;

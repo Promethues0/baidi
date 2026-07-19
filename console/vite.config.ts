@@ -12,7 +12,8 @@ export default defineConfig({
     host: true,
     port: 5193,
     proxy: {
-      '/api': { target: 'http://127.0.0.1:8090', changeOrigin: true }
+      '/api': { target: 'http://127.0.0.1:8090', changeOrigin: true },
+      '/downloads': { target: 'http://127.0.0.1:8090', changeOrigin: true }
     }
   },
   preview: { port: 4193 }

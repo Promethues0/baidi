@@ -12,6 +12,9 @@
         <span class="bd-plogo__txt">白帝 · 应用门户</span>
       </div>
       <div class="bd-pbar__spacer" />
+      <button class="bd-pquit" @click="router.push('/portal/downloads')">
+        <icon-download /><span>下载客户端</span>
+      </button>
       <div class="bd-pacct">
         <span class="bd-pacct__av">{{ avatarText }}</span>
         <span class="bd-pacct__name">{{ displayName }}</span>

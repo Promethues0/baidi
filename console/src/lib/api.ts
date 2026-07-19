@@ -207,6 +207,20 @@ export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: stri
 export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
 export interface PortalAppsResp { apps: PortalTile[] }
 
+/** 客户端下载中心（公开端点 GET /portal/downloads；文件走 /downloads/<file>） */
+export interface ClientDownload {
+  platform: string;
+  label: string;
+  version?: string;
+  file?: string;
+  size?: number;
+  sha256?: string;
+  available: boolean;
+  arch?: string;
+  note?: string;
+}
+export interface DownloadsResp { clients: ClientDownload[] }
+
 /* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
 export type DiagStatus = 'pass' | 'warn' | 'fail';
 export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';

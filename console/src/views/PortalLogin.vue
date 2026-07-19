@@ -144,6 +144,12 @@
           演示提示：口令 <code class="bd-mono">baidi@123</code>；外包 / 未授信账号（如
           <code class="bd-mono">ext.zhou</code>）将触发短信验证码 <code class="bd-mono">123456</code>。
         </p>
+
+        <p class="bd-getcli">
+          <router-link class="bd-getcli__link" to="/portal/downloads">
+            <icon-download /> 下载桌面 / 移动客户端
+          </router-link>
+        </p>
       </div>
 
       <p class="bd-copy">白帝零信任 · ZTNA / SDP Control Center</p>
@@ -377,6 +383,13 @@ function backToLogin() {
   background: var(--bd-fill-2); color: var(--bd-t2);
   padding: 1px 5px; border-radius: 4px; font-size: 11px;
 }
+
+.bd-getcli { margin: 14px 0 0; text-align: center; }
+.bd-getcli__link {
+  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
+  color: var(--bd-t3); text-decoration: none; transition: color .15s;
+}
+.bd-getcli__link:hover { color: var(--bd-primary); }
 
 .bd-copy { margin-top: 26px; font-size: 12px; color: var(--bd-t4); }
 

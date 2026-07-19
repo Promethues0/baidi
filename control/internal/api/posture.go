@@ -108,3 +108,27 @@ func (s *Server) handlePostureList(w http.ResponseWriter, r *http.Request) {
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"reports": reports})
 }
+
+// handleDeletePostureReport 删除某设备的终端报告（admin，设备退役 / 清理陈旧记录）。
+// ★安全语义：删掉一条 block 报告会把该用户从"跨设备最差"判定里摘除 → 若无其他 block 设备，
+// 该用户即刻解除接入收缩（等价于"退役问题设备后放行"）。故审计为 security 事件留痕。
+func (s *Server) handleDeletePostureReport(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
+	user := r.PathValue("user")
+	device := r.PathValue("device")
+	if strings.TrimSpace(user) == "" || strings.TrimSpace(device) == "" {
+		httpx.Error(w, http.StatusBadRequest, "user/device 必填")
+		return
+	}
+	deleted, err := s.writer.DeletePostureReport(r.Context(), user, device)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to delete posture report")
+		return
+	}
+	if deleted {
+		s.audit(r, "security", "删除终端报告："+user+" / 设备 "+device+"（设备退役，若为 block 报告则解除该设备触发的接入收缩）", "ok")
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}

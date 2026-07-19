@@ -39,6 +39,7 @@ type Writer interface {
 	SaveBaseline(ctx context.Context, b BaselinePolicy) (BaselinePolicy, error)
 	DeleteBaseline(ctx context.Context, id string) error
 	SavePostureReport(ctx context.Context, r PostureReport) error
+	DeletePostureReport(ctx context.Context, user, device string) (bool, error)
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。

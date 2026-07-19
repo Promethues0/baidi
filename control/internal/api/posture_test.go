@@ -266,3 +266,43 @@ func TestNoEnabledBaselineAuditWarn(t *testing.T) {
 		t.Fatalf("保存后仍无启用基线应再次警示, got %d 条", n)
 	}
 }
+
+// 删除设备报告：admin 门；删掉 block 报告后 knock-token 恢复 200（解除接入收缩）；
+// 设备指纹含冒号能正确路由；非 admin 403。
+func TestDeletePostureReportEndpoint(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+
+	// li.fang 从设备 CAFE:BABE 上报坏 posture → block
+	bad := map[string]any{"device": "CAFE:BABE:1234:5678", "platform": "macOS",
+		"checks": []map[string]any{{"key": "disk_encrypted", "label": "磁盘已加密", "ok": false, "value": "Off"}}}
+	if code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, bad); code != 200 || out["verdict"] != "block" {
+		t.Fatalf("坏报告应 block: %v", out)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("block 后应 403, got %d", code)
+	}
+
+	// 非 admin 删除 403
+	if code, _ := doJSON(t, h, "DELETE", "/api/v1/posture/li.fang/CAFE:BABE:1234:5678", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("user 删除应 403, got %d", code)
+	}
+	// admin 删除该设备报告（含冒号的指纹路由正确）
+	code, out := doJSON(t, h, "DELETE", "/api/v1/posture/li.fang/CAFE:BABE:1234:5678", adminToken(), nil)
+	if code != http.StatusOK || out["deleted"] != true {
+		t.Fatalf("admin 删除应 200+deleted: %d %v", code, out)
+	}
+	// 退役问题设备后，无其他 block → knock-token 恢复
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
+		t.Fatalf("删掉 block 报告后应恢复 200, got %d", code)
+	}
+	// 清单为空
+	_, list := doJSON(t, h, "GET", "/api/v1/posture", adminToken(), nil)
+	if len(list["reports"].([]any)) != 0 {
+		t.Fatalf("删后清单应空: %v", list["reports"])
+	}
+	// 幂等：再删返回 deleted=false
+	if _, out := doJSON(t, h, "DELETE", "/api/v1/posture/li.fang/CAFE:BABE:1234:5678", adminToken(), nil); out["deleted"] != false {
+		t.Fatalf("重复删应 deleted=false: %v", out)
+	}
+}

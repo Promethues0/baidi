@@ -24,6 +24,18 @@ ON CONFLICT(user,device) DO UPDATE SET platform=excluded.platform, os=excluded.o
 	return err
 }
 
+// DeletePostureReport 删除某 (user,device) 的报告（设备退役 / 清理陈旧记录）。
+// user 规范化匹配（与落库键一致），device 精确匹配。返回是否真的删了一行（幂等）。
+func (s *SQLiteStore) DeletePostureReport(ctx context.Context, user, device string) (bool, error) {
+	key := strings.ToLower(strings.TrimSpace(user))
+	res, err := s.db.ExecContext(ctx, `DELETE FROM posture_reports WHERE user=? AND device=?`, key, device)
+	if err != nil {
+		return false, err
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
 func scanPostureRows(rows *sql.Rows) ([]PostureReport, error) {
 	defer rows.Close()
 	out := []PostureReport{}

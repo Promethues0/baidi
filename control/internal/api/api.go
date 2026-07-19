@@ -193,9 +193,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
 	mux.HandleFunc("POST /api/v1/security/baselines", s.handleSaveBaseline)          // 保存基线（admin）
 	mux.HandleFunc("DELETE /api/v1/security/baselines/{id}", s.handleDeleteBaseline) // 删基线（admin）
-	// 终端 posture：上报评估（登录用户）+ 最新报告清单（admin）
+	// 终端 posture：上报评估（登录用户）+ 最新报告清单（admin）+ 删除设备报告（admin，设备退役）
 	mux.HandleFunc("POST /api/v1/posture", s.handlePostureReport)
 	mux.HandleFunc("GET /api/v1/posture", s.handlePostureList)
+	mux.HandleFunc("DELETE /api/v1/posture/{user}/{device}", s.handleDeletePostureReport)
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 

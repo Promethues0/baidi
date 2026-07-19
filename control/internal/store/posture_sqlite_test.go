@@ -62,3 +62,31 @@ func TestPostureVerdictWorstAcrossDevices(t *testing.T) {
 		t.Fatalf("blocked 名单: %v", blocked)
 	}
 }
+
+// 删除设备报告：精确删 (user,device)、user 规范化匹配、幂等、删掉 block 行即解除该用户 block。
+func TestDeletePostureReport(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	_ = s.SavePostureReport(ctx, rep("li.fang", "DEV-A", "block", 25, 100))
+	_ = s.SavePostureReport(ctx, rep("li.fang", "DEV-B", "allow", 0, 200))
+
+	// 规范化匹配 + 只删指定设备
+	deleted, err := s.DeletePostureReport(ctx, "  Li.Fang ", "DEV-A")
+	if err != nil || !deleted {
+		t.Fatalf("应删掉 DEV-A: deleted=%v err=%v", deleted, err)
+	}
+	all, _ := s.PostureReports(ctx)
+	if len(all) != 1 || all[0].Device != "DEV-B" {
+		t.Fatalf("应只剩 DEV-B: %+v", all)
+	}
+	// 删掉唯一的 block 行 → 用户不再 block
+	blocked, _ := s.PostureBlockedUsers(ctx)
+	if len(blocked) != 0 {
+		t.Fatalf("删掉 block 报告后不应再 block: %v", blocked)
+	}
+	// 幂等：再删同一行返回 false 无错
+	deleted, err = s.DeletePostureReport(ctx, "li.fang", "DEV-A")
+	if err != nil || deleted {
+		t.Fatalf("重复删应 false 无错: deleted=%v err=%v", deleted, err)
+	}
+}

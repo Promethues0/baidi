@@ -158,7 +158,7 @@
       <div v-if="postureErr" class="bd-empty" style="display: block">{{ postureErr }}</div>
       <table v-else class="bd-table">
         <thead>
-          <tr><th>账号</th><th>设备指纹</th><th>平台 / 系统</th><th>客户端</th><th>检查</th><th>判定</th><th>评分</th><th>最后上报</th></tr>
+          <tr><th>账号</th><th>设备指纹</th><th>平台 / 系统</th><th>客户端</th><th>检查</th><th>判定</th><th>评分</th><th>最后上报</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="p in postureRows" :key="p.user + p.device">
@@ -172,9 +172,17 @@
             <td><span class="bd-tg" :style="tagStyle(verdictColor(p.verdict))">{{ verdictText(p.verdict) }}</span></td>
             <td><b :style="{ color: p.score >= 60 ? '#F53F3F' : p.score >= 30 ? '#FF7D00' : 'var(--bd-t1)' }">{{ p.score }}</b></td>
             <td style="color: var(--bd-t3)">{{ tsText(p.ts) }}</td>
+            <td class="r">
+              <a-popconfirm
+                :content="p.verdict === 'block' ? '该设备为阻断状态，退役后将解除其触发的接入收缩。确认删除？' : '删除该设备的终端报告（设备退役）？'"
+                type="warning" @ok="removePosture(p)"
+              >
+                <span class="bd-link bd-link--danger">退役</span>
+              </a-popconfirm>
+            </td>
           </tr>
           <tr v-if="postureRows.length === 0">
-            <td colspan="8" class="bd-empty">尚无终端上报——桌面客户端登录后每 60s 自动上报</td>
+            <td colspan="9" class="bd-empty">尚无终端上报——桌面客户端登录后每 60s 自动上报</td>
           </tr>
         </tbody>
       </table>
@@ -399,6 +407,13 @@ async function loadPosture() {
 function verdictText(v: string) { return v === 'allow' ? '合规' : v === 'degrade' ? '降权' : v === 'gray' ? '灰度' : '阻断'; }
 function verdictColor(v: string) { return v === 'allow' ? '#00B42A' : v === 'degrade' ? '#FF7D00' : v === 'gray' ? '#86909C' : '#F53F3F'; }
 function tsText(ts: number) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
+async function removePosture(p: PostureRow) {
+  try {
+    await api(`/posture/${encodeURIComponent(p.user)}/${encodeURIComponent(p.device)}`, { method: 'DELETE' });
+    postureRows.value = postureRows.value.filter((r) => !(r.user === p.user && r.device === p.device));
+    Message.success('终端报告已删除（设备退役）');
+  } catch { Message.error('删除失败（需管理员登录 / 后端在线）'); }
+}
 
 onMounted(async () => {
   try {

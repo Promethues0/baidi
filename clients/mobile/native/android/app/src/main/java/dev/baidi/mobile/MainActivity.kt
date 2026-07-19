@@ -9,7 +9,11 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Bundle
 import android.webkit.JavascriptInterface
+import android.webkit.WebResourceRequest
+import android.webkit.WebResourceResponse
 import android.webkit.WebView
+import androidx.webkit.WebViewAssetLoader
+import androidx.webkit.WebViewClientCompat
 
 class MainActivity : Activity() {
     private lateinit var web: WebView
@@ -23,7 +27,14 @@ class MainActivity : Activity() {
         web.addJavascriptInterface(Bridge(), "__baidiNativeRaw")
         setContentView(web)
         // 注入 __BAIDI_NATIVE__：把原生 raw 接口包成 UI 期望的 Promise 形态
-        web.webViewClient = object : android.webkit.WebViewClient() {
+        // WebViewAssetLoader：https://appassets.local/ → app assets 根（dist 平铺其中）
+        val assets = WebViewAssetLoader.Builder()
+            .setDomain("appassets.local")
+            .addPathHandler("/", WebViewAssetLoader.AssetsPathHandler(this))
+            .build()
+        web.webViewClient = object : WebViewClientCompat() {
+            override fun shouldInterceptRequest(v: WebView, req: WebResourceRequest): WebResourceResponse? =
+                assets.shouldInterceptRequest(req.url)
             override fun onPageFinished(v: WebView?, url: String?) {
                 v?.evaluateJavascript(BRIDGE_JS, null)
             }
@@ -34,7 +45,7 @@ class MainActivity : Activity() {
     private var pendingCfg: String? = null
 
     inner class Bridge {
-        @JavascriptInterface fun apiBase(): String = "https://gw.baidi.local:9443" // 控制中心入口
+        @JavascriptInterface fun apiBase(): String = BuildConfig.BAIDI_API_BASE // 控制中心入口
         // cfgJson = UI 下传的接入配置（gateway/spaPort/proxyPort/route/ip/gm/control）
         @JavascriptInterface fun startTunnel(token: String, cfgJson: String) {
             pendingToken = token

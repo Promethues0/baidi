@@ -36,6 +36,11 @@ echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
 echo "==> 携带部署脚本/模板"
 cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" "$OUT/"
 
+if [ -d "$HERE/artifacts/downloads" ]; then
+  echo "==> 携带客户端安装包（deploy/artifacts/downloads）"
+  cp -R "$HERE/artifacts/downloads" "$OUT/downloads"
+fi
+
 # 自检：交付 nginx 站点绝不得含 default_server（防旧模板混入毒化烛龙后续 reload）
 if sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'default_server'; then
   echo "✗ 交付 nginx/baidi.conf 含 default_server 指令，构建中止"; exit 1

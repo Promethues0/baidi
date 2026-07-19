@@ -6,8 +6,9 @@ appliance 式单机部署：`baidi-control`（Go 单二进制，监听 127.0.0.1
 
 ```
 浏览器 ──HTTPS──> nginx(:443) ──┬─ /            → @PREFIX@/web（SPA：管理台 + /portal/*）
-                                └─ /api/        → 127.0.0.1:8090（baidi-control）
-                                                       └─ SQLite @PREFIX@/data/baidi.db
+                                ├─ /api/        → 127.0.0.1:8090（baidi-control）
+                                │                      └─ SQLite @PREFIX@/data/baidi.db
+                                └─ /downloads/  → control 白名单分发客户端安装包（产物先跑 clients/build-artifacts.sh 汇集）
 ```
 
 ## 产物布局（_out/ 与服务器 @PREFIX@）
@@ -18,6 +19,7 @@ web/                    console 构建产物（vite dist）
 data/baidi.db           SQLite（首启自动建表+播种，WAL）
 etc/baidi.env           BAIDI_JWT_SECRET（install 时随机生成，0600）
 etc/tls/server.{crt,key} TLS（首装自签，生产换正式证书）
+downloads/              客户端安装包 + manifest.json（先跑 clients/build-artifacts.sh 汇集到 deploy/artifacts/downloads，build.sh 携带进 _out）
 ```
 
 ## 一键部署

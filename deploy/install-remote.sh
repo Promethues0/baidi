@@ -22,6 +22,12 @@ install -m 0755 "$HERE/bin/baidi-control" "$BD_PREFIX/bin/baidi-control"
 rm -rf "$BD_PREFIX/web"; mkdir -p "$BD_PREFIX/web"
 cp -R "$HERE/web/." "$BD_PREFIX/web/"
 
+# 客户端安装包（有则整目录替换；manifest 白名单由 control 校验）
+if [ -d "$HERE/downloads" ]; then
+  rm -rf "$BD_PREFIX/downloads"; mkdir -p "$BD_PREFIX/downloads"
+  cp -R "$HERE/downloads/." "$BD_PREFIX/downloads/"
+fi
+
 # JWT 密钥（仅首次生成，保密 0600）
 if [ ! -f "$BD_PREFIX/etc/baidi.env" ]; then
   echo "BAIDI_JWT_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/')" > "$BD_PREFIX/etc/baidi.env"

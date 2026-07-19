@@ -8,6 +8,7 @@ User=@BD_USER@
 WorkingDirectory=@BD_PREFIX@
 Environment=BAIDI_ADDR=127.0.0.1:@CONTROL_PORT@
 Environment=BAIDI_DB=@BD_PREFIX@/data/baidi.db
+Environment=BAIDI_DOWNLOADS=@BD_PREFIX@/downloads
 Environment=BAIDI_ENV=prod
 # 公网来源（CORS）；同源经 nginx 反代时可留默认
 Environment=BAIDI_CORS_ORIGIN=@PUBLIC_ORIGIN@

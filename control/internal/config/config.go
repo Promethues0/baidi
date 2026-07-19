@@ -24,6 +24,7 @@ type Config struct {
 	Env             string        // dev / prod
 	DBPath          string        // SQLite 数据库文件路径
 	JWTSecret       string        // JWT 签名密钥（生产务必经 BAIDI_JWT_SECRET 注入）
+	DownloadsDir    string        // 客户端安装包目录（manifest.json + 安装包）
 }
 
 // Load 从环境变量装载配置。
@@ -35,6 +36,7 @@ func Load() Config {
 		Env:             env("BAIDI_ENV", "dev"),
 		DBPath:          env("BAIDI_DB", "baidi.db"),
 		JWTSecret:       env("BAIDI_JWT_SECRET", DefaultJWTSecret),
+		DownloadsDir:    env("BAIDI_DOWNLOADS", "downloads"), // 客户端安装包目录（manifest.json + 安装包）
 	}
 }
 

@@ -35,7 +35,7 @@ func main() {
 	}
 	defer st.Close()
 	secret := []byte(cfg.JWTSecret)
-	srv := api.New(st, st, secret, cfg.Env)
+	srv := api.New(st, st, secret, cfg.Env, cfg.DownloadsDir)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

@@ -35,7 +35,8 @@ type Server struct {
 	writer        store.Writer
 	secret        []byte
 	env           string
-	postureStrict bool // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
+	downloadsDir  string // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
+	postureStrict bool   // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
 	mu            sync.Mutex
 	gateways      map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess        map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -106,16 +107,16 @@ type GwSession struct {
 }
 
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
-func New(st store.Store, wr store.Writer, secret []byte, env string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env,
+func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDir string) *Server {
+	return &Server{store: st, writer: wr, secret: secret, env: env, downloadsDir: downloadsDir,
 		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
 
-// IsOpen 报告某路径是否免认证（登录/健康检查/门户登录）。供 auth 中间件使用。
+// IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单）。供 auth 中间件使用。
 func (s *Server) IsOpen(_, path string) bool {
 	switch path {
-	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login":
+	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads":
 		return true
 	}
 	return false
@@ -243,6 +244,7 @@ func (s *Server) Routes() http.Handler {
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
 	mux.HandleFunc("GET /api/v1/portal/apps", s.handlePortalApps)
+	mux.HandleFunc("GET /api/v1/portal/downloads", s.handleDownloadsManifest) // 客户端下载清单（免认证）
 
 	return mux
 }

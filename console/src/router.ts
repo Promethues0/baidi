@@ -4,7 +4,7 @@ import { NAV, FIRST_PATH } from '@/nav';
 import { getToken } from '@/lib/api';
 
 // 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
-const BUILT: Record<string, () => Promise<unknown>> = {
+const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
   '/monitor/online': () => import('@/views/Online.vue'),
   '/monitor/userstate': () => import('@/views/UserState.vue'),
@@ -23,9 +23,9 @@ const BUILT: Record<string, () => Promise<unknown>> = {
 };
 
 const leafRoutes: RouteRecordRaw[] = NAV.flatMap((g) =>
-  g.children.map((c) => ({
+  g.children.map((c): RouteRecordRaw => ({
     path: c.path.slice(1),
-    component: (BUILT[c.path] ?? (() => import('@/views/ComingSoon.vue'))) as RouteRecordRaw['component']
+    component: BUILT[c.path] ?? (() => import('@/views/ComingSoon.vue'))
   }))
 );
 

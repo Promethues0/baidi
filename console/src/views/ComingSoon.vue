@@ -21,7 +21,7 @@ import { locate } from '@/nav';
 
 const route = useRoute();
 const loc = computed(() => locate(route.path));
-const groupTitle = computed(() => loc.value.group?.title ?? '');
+const groupTitle = computed(() => loc.value.group?.label ?? '');
 const leafTitle = computed(() => loc.value.leaf?.title ?? '');
 const title = computed(() => (leafTitle.value ? `${leafTitle.value}` : '建设中'));
 </script>

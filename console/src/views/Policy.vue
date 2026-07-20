@@ -81,7 +81,7 @@
             <template v-else>
               <span class="bd-row__ctrl">
                 <a-switch v-if="row.type === 'toggle'" v-model="row.value" size="small" />
-                <a-input-number v-else-if="row.type === 'number'" v-model="row.value" :min="0" size="small" style="width: 92px" />
+                <a-input-number v-else-if="row.type === 'number'" v-model="numRow(row).value" :min="0" size="small" style="width: 92px" />
                 <a-select v-else-if="row.type === 'select'" v-model="row.value" size="small" style="width: 150px">
                   <a-option v-for="o in row.options" :key="o" :value="o">{{ o }}</a-option>
                 </a-select>
@@ -188,10 +188,11 @@ import { Message } from '@arco-design/web-vue';
 import { api, type PolicyBundle, type OrgNode } from '@/lib/api';
 
 type Src = 'inherited' | 'custom';
+type Val = string | number | boolean;
 interface Row {
   key: string; label: string; desc: string;
   type: 'toggle' | 'number' | 'select';
-  source: Src; value: unknown; inherited: unknown;
+  source: Src; value: Val; inherited: Val;
   unit?: string; options?: string[]; risk?: boolean;
 }
 interface Section { title: string; rows: Row[] }
@@ -286,6 +287,15 @@ async function select(key: string) {
 function fmt(row: Row, v: unknown) {
   if (row.type === 'toggle') return v ? '开启' : '关闭';
   return `${v}${row.unit ?? ''}`;
+}
+/**
+ * Arco a-input-number 的 modelValue 严格类型为 number|undefined（第三方组件类型限制）；
+ * Row.value/inherited 是 toggle/number/select 三种控件共用的 Val 联合类型，
+ * MOCK 数据保证 row.type === 'number' 分支下其值恒为 number。仅此处按最窄范围断言收窄，
+ * 不改变运行时取值/赋值语义（同一 row 引用，读写均直达原属性）。
+ */
+function numRow(row: Row) {
+  return row as Row & { value: number };
 }
 
 /* ── 打破继承（P3）── */

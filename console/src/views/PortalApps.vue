@@ -1,17 +1,7 @@
 <template>
   <div class="bd-portal">
     <!-- 顶部细 bar -->
-    <header class="bd-pbar">
-      <div class="bd-plogo">
-        <span class="bd-plogo__mark">
-          <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95" />
-            <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
-          </svg>
-        </span>
-        <span class="bd-plogo__txt">白帝 · 应用门户</span>
-      </div>
-      <div class="bd-pbar__spacer" />
+    <PortalBar title="白帝 · 应用门户">
       <button class="bd-pquit" @click="router.push('/portal/downloads')">
         <icon-download /><span>下载客户端</span>
       </button>
@@ -20,7 +10,7 @@
         <span class="bd-pacct__name">{{ displayName }}</span>
       </div>
       <button class="bd-pquit" @click="logout"><icon-export /><span>退出</span></button>
-    </header>
+    </PortalBar>
 
     <!-- 主体 -->
     <main class="bd-pmain">
@@ -93,6 +83,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, clearToken, type PortalAppsResp, type PortalTile } from '@/lib/api';
+import PortalBar from '@/components/PortalBar.vue';
 
 const router = useRouter();
 
@@ -169,19 +160,6 @@ onMounted(() => {
 <style scoped>
 .bd-portal { min-height: 100vh; background: var(--bd-fill-1); display: flex; flex-direction: column; }
 
-/* 顶部细 bar */
-.bd-pbar {
-  height: 56px; flex: none; background: #fff; border-bottom: 1px solid var(--bd-border);
-  display: flex; align-items: center; padding: 0 24px; gap: 14px; position: sticky; top: 0; z-index: 10;
-}
-.bd-plogo { display: flex; align-items: center; gap: 10px; }
-.bd-plogo__mark {
-  width: 30px; height: 30px; border-radius: 7px; flex: none;
-  background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d));
-  display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(22, 93, 255, .35);
-}
-.bd-plogo__txt { font-size: 15px; font-weight: 700; letter-spacing: .3px; color: var(--bd-t1); }
-.bd-pbar__spacer { flex: 1; }
 .bd-pacct { display: flex; align-items: center; gap: 9px; }
 .bd-pacct__av {
   width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 13px; font-weight: 600;

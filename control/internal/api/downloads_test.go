@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"baidi.dev/control/internal/auth"
@@ -147,7 +148,7 @@ func TestDownloadFileUnavailable(t *testing.T) {
 	}
 }
 
-// 穿越攻击：..、编码 ..、绝对路径式 → 全部 404，绝不读出 manifest 外内容
+// 穿越攻击：..、编码 ..、绝对路径式 → 全部 404/301/400，绝不读出 manifest 外内容
 func TestDownloadFileTraversal(t *testing.T) {
 	h, _ := downloadsFixture(t)
 	for _, p := range []string{
@@ -157,9 +158,12 @@ func TestDownloadFileTraversal(t *testing.T) {
 		"/downloads/..%5Cmanifest.json",
 	} {
 		rec := getFile(t, h, p)
-		// 标准库 mux 对 .. 会 301 清洗或本 handler 404，二者都不得 200
-		if rec.Code == http.StatusOK {
-			t.Fatalf("%s 不应成功 (code=%d body=%q)", p, rec.Code, rec.Body.String())
+		if rec.Code != http.StatusNotFound && rec.Code != http.StatusMovedPermanently && rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s code = %d, want 404/301/400", p, rec.Code)
+		}
+		body := rec.Body.String()
+		if strings.Contains(body, "baidi-desktop_0.1.0") || strings.Contains(body, "baidi-mobile_0.1.0") || strings.Contains(body, "APKBYTES") {
+			t.Fatalf("%s 响应泄露 manifest/文件内容: %q", p, body)
 		}
 	}
 }
@@ -169,5 +173,21 @@ func TestDownloadFileMissingOnDisk(t *testing.T) {
 	h, _ := downloadsFixture(t)
 	if rec := getFile(t, h, "/downloads/baidi-desktop_0.1.0_universal.dmg"); rec.Code != http.StatusNotFound {
 		t.Fatalf("code = %d, want 404", rec.Code)
+	}
+}
+
+// 文件名含引号（只可能来自被污染的 manifest）时，Content-Disposition 中剔除引号防头畸形
+func TestDownloadFileQuoteStripped(t *testing.T) {
+	h, dir := newDownloadsServer(t)
+	weird := `evil"name.apk`
+	os.WriteFile(filepath.Join(dir, weird), []byte("X"), 0o644)
+	m := `{"clients":[{"platform":"android","label":"a","version":"0.1.0","file":"evil\"name.apk","size":1,"sha256":"x","available":true}]}`
+	os.WriteFile(filepath.Join(dir, "manifest.json"), []byte(m), 0o644)
+	rec := getFile(t, h, "/downloads/evil%22name.apk")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("code = %d, want 200 (%s)", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); cd != `attachment; filename="evilname.apk"` {
+		t.Fatalf("Content-Disposition = %q, 引号未剔除", cd)
 	}
 }

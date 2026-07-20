@@ -5,7 +5,7 @@ package api
 
 import (
 	"encoding/json"
-	"log"
+	"log/slog"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -50,8 +50,12 @@ func (s *Server) loadManifest() downloadsManifest {
 		return placeholderManifest()
 	}
 	var m downloadsManifest
-	if err := json.Unmarshal(b, &m); err != nil || len(m.Clients) == 0 {
-		log.Printf("downloads: manifest.json 损坏或为空，回占位清单: %v", err)
+	if err := json.Unmarshal(b, &m); err != nil {
+		slog.Warn("downloads: manifest.json 损坏，回占位清单", "err", err)
+		return placeholderManifest()
+	}
+	if len(m.Clients) == 0 {
+		slog.Warn("downloads: manifest.json 为空，回占位清单")
 		return placeholderManifest()
 	}
 	return m
@@ -81,10 +85,10 @@ func (s *Server) handleDownloadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	full := filepath.Join(s.downloadsDir, name)
 	if fi, err := os.Stat(full); err != nil || fi.IsDir() {
-		log.Printf("downloads: manifest 列出但盘上缺失 %s", name)
+		slog.Warn("downloads: manifest 列出但盘上缺失", "file", name)
 		httpx.Error(w, http.StatusNotFound, "文件不存在")
 		return
 	}
-	w.Header().Set("Content-Disposition", `attachment; filename="`+name+`"`)
+	w.Header().Set("Content-Disposition", `attachment; filename="`+strings.ReplaceAll(name, `"`, "")+`"`)
 	http.ServeFile(w, r, full)
 }

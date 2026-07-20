@@ -22,10 +22,14 @@ install -m 0755 "$HERE/bin/baidi-control" "$BD_PREFIX/bin/baidi-control"
 rm -rf "$BD_PREFIX/web"; mkdir -p "$BD_PREFIX/web"
 cp -R "$HERE/web/." "$BD_PREFIX/web/"
 
-# 客户端安装包（有则整目录替换；manifest 白名单由 control 校验）
+# 客户端安装包（先落新目录再瞬时切换，重部署期间进行中的下载不中断于拷贝窗口）
 if [ -d "$HERE/downloads" ]; then
-  rm -rf "$BD_PREFIX/downloads"; mkdir -p "$BD_PREFIX/downloads"
-  cp -R "$HERE/downloads/." "$BD_PREFIX/downloads/"
+  rm -rf "$BD_PREFIX/downloads.new"
+  mkdir -p "$BD_PREFIX/downloads.new"
+  cp -R "$HERE/downloads/." "$BD_PREFIX/downloads.new/"
+  chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX/downloads.new"
+  rm -rf "$BD_PREFIX/downloads"
+  mv "$BD_PREFIX/downloads.new" "$BD_PREFIX/downloads"
 fi
 
 # JWT 密钥（仅首次生成，保密 0600）

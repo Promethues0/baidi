@@ -52,7 +52,8 @@ clients = [
     entry("linux", "Linux 桌面客户端", "", note="构建中，敬请期待"),
     entry("ios", "iOS 客户端", "", note="需企业签名 / TestFlight 分发，请联系管理员"),
     entry("android", "Android 客户端", os.environ["AND_FILE"],
-          "armeabi-v7a / arm64-v8a / x86 / x86_64", "调试签名版，安装时需允许「未知来源应用」"),
+          "armeabi-v7a / arm64-v8a / x86 / x86_64",
+          "调试签名版，安装时需允许「未知来源应用」" if os.environ["AND_FILE"] else "构建中，敬请期待"),
     entry("harmony", "鸿蒙客户端", "", note="构建中，敬请期待"),
 ]
 with open(os.path.join(out, "manifest.json"), "w") as f:

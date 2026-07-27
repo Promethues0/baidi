@@ -20,14 +20,22 @@ sleep 1
 echo ""; echo "① 敲门前：curl 隧道端口（期望失败=对未授权者隐身）"
 if curl -k -s --max-time 3 -o /dev/null "https://$PROXY/"; then echo "   ✗ 异常：竟然连上了"; else echo "   ✓ 被拒绝（隐身）"; fi
 
-echo "② 取 baidi-control 签发的 JWT 并 SPA 敲门"
-TOK=$(curl -s -X POST localhost:8090/api/v1/portal/login -H 'Content-Type: application/json' -d '{"username":"li.ming","password":"baidi@123"}' | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
+echo "② 登录取会话令牌 → 经 control 换短时效一次性敲门令牌 → SPA 敲门"
+echo "   （会话令牌自身敲不开门：网关只认 use=knock 令牌，故敲门必过控制面的封禁/账号/合规三道闸）"
+TOK=$(curl -s -X POST localhost:8090/api/v1/portal/login -H 'Content-Type: application/json' -d '{"username":"li.fang","password":"baidi@123"}' | python3 -c "import sys,json;print(json.load(sys.stdin).get('token',''))" 2>/dev/null)
 [ -z "$TOK" ] && { echo "   ✗ 取不到 token，请确认 baidi-control 在 :8090 运行"; exit 1; }
-"$KNOCK" -spa "$SPA" -token "$TOK"; sleep 0.6
+"$KNOCK" -spa "$SPA" -token "$TOK" -control http://127.0.0.1:8090; sleep 0.6
 
 echo "③ 敲门后：curl 隧道端口（期望成功，经 TLS 隧道代理到后端 OA）"
 OUT=$(curl -k -s --max-time 4 "https://$PROXY/" | head -2)
 [ -n "$OUT" ] && echo "   ✓ 成功，后端响应：" && echo "$OUT" | sed 's/^/     /' || echo "   ✗ 失败"
 
-echo ""; echo "==> 网关日志："; tail -4 /tmp/baidi-gateway.log
+echo "④ 用会话令牌直接敲门（期望被拒：strict 模式只认 control 签发的一次性敲门令牌）"
+"$KNOCK" -spa "$SPA" -token "$TOK" 2>/dev/null && echo "   ✗ 异常：会话令牌竟被接受" || echo "   ✓ 客户端拒绝直发（-control 必填）"
+
+echo "⑤ 等放行窗口(30s TTL)过期后再 curl（期望失败=重新隐身）"
+sleep 32
+if curl -k -s --max-time 3 -o /dev/null "https://$PROXY/"; then echo "   ✗ 异常：窗口没关"; else echo "   ✓ 窗口已关，恢复隐身"; fi
+
+echo ""; echo "==> 网关日志："; tail -6 /tmp/baidi-gateway.log
 echo "==> 清理：pkill -f $GW ; pkill -f 'http.server 19999'"

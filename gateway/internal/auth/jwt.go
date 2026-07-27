@@ -12,6 +12,10 @@ import (
 	"time"
 )
 
+// UseKnock 敲门令牌的用途标记（Claims.Use）。必须与 control/internal/auth 的同名常量一致——
+// 两份 Claims 是手抄的，字段/取值不同步会导致解析静默丢失、strict 校验全线拒绝。
+const UseKnock = "knock"
+
 type Claims struct {
 	Sub  string `json:"sub"`
 	Role string `json:"role"`
@@ -19,6 +23,7 @@ type Claims struct {
 	Exp  int64  `json:"exp"`
 	Iat  int64  `json:"iat,omitempty"`
 	Jti  string `json:"jti,omitempty"` // 短时效敲门令牌的唯一 id，网关据此一次性去重
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；空=会话令牌/MFA 票据（strict 下拒绝）
 }
 
 var b64 = base64.RawURLEncoding

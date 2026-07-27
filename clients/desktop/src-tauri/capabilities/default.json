@@ -15,7 +15,7 @@
         {
           "name": "binaries/baidi-knock",
           "sidecar": true,
-          "args": ["-spa", { "validator": "\\S+" }, "-token", { "validator": ".+" }]
+          "args": ["-spa", { "validator": "\\S+" }, "-token", { "validator": ".+" }, "-control", { "validator": "https?://\\S+" }]
         }
       ]
     }

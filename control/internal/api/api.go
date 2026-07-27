@@ -608,7 +608,12 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	tok := auth.Sign(s.secret, auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI()}, knockTTL)
+	// Use=knock 是给数据面的用途自证：网关 strict 模式只接受本处签发的令牌，
+	// 会话令牌/MFA 票据（Use 为空）一律拒绝敲门——堵死"持 8h 会话令牌直连数据面、
+	// 绕过封禁/账号状态/终端合规三道闸"的旁路。改 knockTTL 须同步网关 -knock-max-ttl 上界。
+	tok := auth.Sign(s.secret, auth.Claims{
+		Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI(), Use: auth.UseKnock,
+	}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
 }
 

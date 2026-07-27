@@ -46,6 +46,7 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - 配置全走 `BAIDI_*` 环境变量（BAIDI_ADDR/BAIDI_DB/BAIDI_JWT_SECRET/BAIDI_GW_SPA…）。
 - **终端 posture / 风险引擎**：`POST /api/v1/posture` 上报（登录用户，platform 枚举 Windows|macOS|Linux，每账号 ≤20 台设备）→ `internal/risk.Evaluate` 按安全中心基线（`baseline_policies` 表，安全中心页可编辑）评估 → 最新判定 block 则 knock-token 403 + 经 `gateways/policy` revoked 捎带撤窗断隧道；判定权全在控制面，网关零改动。缺报默认放行（observe），`BAIDI_POSTURE_ENFORCE=strict` 缺报/过期（10min）也拒。基线检查 key 与桌面采集器对齐：disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version。
 - **control 与 gateway 必须共用同一 BAIDI_JWT_SECRET**，不一致则 SPA 敲门校验全挂。
+- **严格敲门（strict knock，默认开）**：网关只接受 control `/knock-token` 签发的短时效一次性令牌（`use=knock` + jti + ≤`-knock-max-ttl`，见 `spa.checkKnock`）。长效会话令牌**不能**再直接敲门——那会绕过强制下线/账号禁用/终端合规三道闸。因此**所有敲门客户端必须能访问 control**（`baidi-knock`/`baidi-tun`/`tlcp-probe` 的 `-control` 已必填，knock-agent 有默认值）。逃生舱 `BAIDI_GW_KNOCK_STRICT=0` 仅限过渡。副作用：control 不可达超过网关 `-ttl`(30s) 时窗口自然关闭（fail-closed，零信任下是正确姿态，不再回退长效令牌硬撑）。
 - 演示口令：管理台 admin/baidi@123；门户任意用户+baidi@123。
 - **二次认证 = WebAuthn/passkey**（`BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 驱动，门户与管理台都覆盖）：已注册 passkey 的账号登录强制断言；风险账号（ext.*/含「外包」）未注册则拒绝登录并引导录入。**RP ID 必须是可注册域名或 localhost——浏览器规范不允许裸 IP**，故 IP 演示站（101.43.125.131）无法启用，未配置时回落 legacy 演示验证码 123456（仅此路径可达）。passkey 管理页 /portal/security。
 - 未起后端时 console 各页降级为内置演示数据，UI 完整可点。

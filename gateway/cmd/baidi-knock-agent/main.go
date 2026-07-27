@@ -21,20 +21,34 @@ func main() {
 	addr := flag.String("addr", ":8091", "HTTP 监听")
 	spa := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址")
 	proxy := flag.String("proxy", "127.0.0.1:18443", "网关 TLS 代理地址")
+	control := flag.String("control", "http://127.0.0.1:8090", "baidi-control 地址（换取短时效敲门令牌；请求体 control 可覆盖）")
 	flag.Parse()
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
 	http.HandleFunc("POST /knock", func(w http.ResponseWriter, r *http.Request) {
 		var b struct {
-			Token string `json:"token"`
+			Token   string `json:"token"`
+			Control string `json:"control"` // 可覆盖启动期 -control（前端设置页可能指向非本机 control）
 		}
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Token == "" {
 			writeJSON(w, 400, map[string]any{"ok": false, "detail": "缺少身份令牌"})
 			return
 		}
-		// ① 真实 SPA 敲门（UDP，携带 JWT，封防重放信封）
+		// ① 用会话令牌换短时效一次性敲门令牌——网关 strict 模式只认它。
+		//    control 的拒绝原因（账号禁用/强制下线/终端不合规）原样透出，dev 联调才看得见。
+		ctrl := b.Control
+		if ctrl == "" {
+			ctrl = *control
+		}
+		knockTok, err := knock.FetchToken(ctrl, b.Token)
+		if err != nil {
+			slog.Warn("dev 敲门取令牌失败", "err", err.Error())
+			writeJSON(w, 200, map[string]any{"ok": false, "detail": err.Error()})
+			return
+		}
+		// ② 真实 SPA 敲门（UDP，携带敲门令牌，封防重放信封）
 		if c, err := net.Dial("udp", *spa); err == nil {
-			if sealed, e := knock.Seal(b.Token); e == nil {
+			if sealed, e := knock.Seal(knockTok); e == nil {
 				_, _ = c.Write(sealed)
 			}
 			_ = c.Close()
@@ -43,7 +57,7 @@ func main() {
 			return
 		}
 		time.Sleep(350 * time.Millisecond)
-		// ② 验证隧道是否真开放（TLS 连到代理并取后端响应）
+		// ③ 验证隧道是否真开放（TLS 连到代理并取后端响应）
 		ok, detail := probe(*proxy)
 		slog.Info("dev 敲门", "ok", ok, "detail", detail)
 		writeJSON(w, 200, map[string]any{"ok": ok, "detail": detail})

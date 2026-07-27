@@ -28,7 +28,8 @@
 
 ```bash
 baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -secret <与control一致> -ttl 30s
-baidi-knock   -spa 127.0.0.1:18201 -token <baidi-control 签发的 JWT>
+baidi-knock   -spa 127.0.0.1:18201 -token <会话 JWT> -control http://127.0.0.1:8090
+# -control 必填：网关默认 strict，只认 control 签发的 use=knock 短时效一次性令牌
 ```
 
 ## 进阶数据面（已落地）
@@ -39,7 +40,7 @@ baidi-knock   -spa 127.0.0.1:18201 -token <baidi-control 签发的 JWT>
 
 ```bash
 baidi-gateway -gm -spa :18201 -proxy :18443 -backend 127.0.0.1:19999
-baidi-tlcp-probe -spa 127.0.0.1:18201 -proxy 127.0.0.1:18443 -token <JWT>
+baidi-tlcp-probe -spa 127.0.0.1:18201 -proxy 127.0.0.1:18443 -token <JWT> -control http://127.0.0.1:8090
 # ✓ 国密 TLCP 握手成功  version=0x0101(TLCP1.1)  cipher=0xE053(ECC_SM4_GCM_SM3)
 # ✓ 经国密隧道取到后端响应：HTTP/1.0 200 OK …
 ```

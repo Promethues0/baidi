@@ -15,7 +15,7 @@
       <div v-if="err" class="lg__err">{{ err }}</div>
 
       <button class="m-btn" :disabled="loading" @click="submit">{{ loading ? '登录中…' : '登 录' }}</button>
-      <div class="lg__demo">演示 <b>li.ming</b> / <b>baidi@123</b> · passkey 二次认证请用浏览器门户</div>
+      <div class="lg__demo">演示 <b>li.fang</b> / <b>baidi@123</b> · passkey 二次认证请用浏览器门户</div>
     </div>
   </div>
 </template>
@@ -27,7 +27,7 @@ import { api, type PortalLoginResp } from '@/lib/api';
 import { login } from '@/lib/store';
 
 const router = useRouter();
-const form = reactive({ username: 'li.ming', password: '', mfaCode: '' });
+const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
 const needMfa = ref(false);
 const mfaReason = ref('');
 const err = ref('');

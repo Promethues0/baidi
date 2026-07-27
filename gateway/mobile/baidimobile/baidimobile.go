@@ -26,7 +26,7 @@ type Config struct {
 	SpaAddr         string // 网关 SPA 敲门 host:port
 	ProxyAddr       string // 网关隧道代理 host:port
 	Token           string // baidi-control 签发的会话 JWT
-	Control         string // baidi-control 地址（非空=换短时效一次性令牌 + 保活）
+	Control         string // baidi-control 地址（必填）：换短时效一次性敲门令牌 + 保活续窗
 	Gm              bool   // 国密 TLCP 隧道
 	CaPEM           string // 国密 CA 根证书 PEM（空且 Gm 时退化为跳过校验，仅排障）
 	ServerName      string // 校验的服务器名（须命中网关证书 SAN）
@@ -78,6 +78,11 @@ func Start(tunFd int, c *Config) (*Session, error) {
 	}
 	if c.Token == "" {
 		return nil, errors.New("缺少身份令牌")
+	}
+	// 与 dataplane.Run 的入口校验形成双保险：原生壳（Android/iOS）取不到配置时会回退空串，
+	// 在 Start 就同步返回人话错误，好过等 goroutine 起来后经 Session.Reason() 才浮现。
+	if c.Control == "" {
+		return nil, errors.New("缺少控制中心地址（敲门令牌的唯一合规来源）")
 	}
 	mtu := c.Mtu
 	if mtu <= 0 {

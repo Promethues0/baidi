@@ -47,10 +47,14 @@ export function platformLabel(): string {
   return 'dev 浏览器（knock-agent）';
 }
 
-/** 由当前配置组装下传给原生扩展的隧道配置。 */
+/** 由当前配置组装下传给原生扩展的隧道配置。
+ *  control 的优先级与 api.ts 一致：原生壳注入 apiBase →「我的」页配置 control。
+ *  真机上用户常把 control 留空（由壳注入），只读 config.control 会传空串——
+ *  而网关 strict 模式下没有 control 就换不到敲门令牌，隧道直接连不上。 */
 export function tunnelConfig(): TunnelConfig {
+  const nb = (window as unknown as { __BAIDI_NATIVE__?: { apiBase?: string } }).__BAIDI_NATIVE__;
   return {
-    control: config.control.replace(/\/+$/, ''),
+    control: (nb?.apiBase || config.control || '').replace(/\/+$/, ''),
     gateway: config.gateway,
     spaPort: config.spaPort,
     proxyPort: config.proxyPort,

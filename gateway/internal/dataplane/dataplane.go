@@ -15,6 +15,7 @@ import (
 	"log/slog"
 	"net"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -46,7 +47,7 @@ type Config struct {
 	SpaAddr    string            // 网关 SPA 敲门 host:port
 	ProxyAddr  string            // 网关隧道代理 host:port
 	Token      string            // baidi-control 签发的会话 JWT
-	Control    string            // baidi-control 地址；非空则换短时效一次性令牌 + 保活续窗
+	Control    string            // baidi-control 地址（必填）：敲门令牌的唯一合规来源
 	Gm         bool              // 隧道用国密 TLCP
 	TLCPConfig *tlcp.Config      // 调用方预构建（CA 池 + ServerName）
 	Resmap     map[string]string // VIP:port → 资源 id
@@ -57,6 +58,11 @@ type Config struct {
 
 // Run 启动数据面，阻塞直到 dev 关闭/出错（关闭 dev 即可优雅停止）。
 func Run(dev tun.Device, cfg *Config) error {
+	// Control 是敲门令牌的唯一合规来源：网关 strict 模式只认 /knock-token 签发的
+	// use=knock 短时效令牌，没有 control 就无从取得，早失败好过起来后静默连不通。
+	if strings.TrimSpace(cfg.Control) == "" {
+		return errors.New("必须配置控制中心地址（敲门令牌的唯一合规来源）")
+	}
 	mtu := cfg.MTU
 	if mtu <= 0 {
 		mtu = 1420
@@ -100,23 +106,21 @@ func Run(dev tun.Device, cfg *Config) error {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Control 模式：短时效一次性令牌敲门 + 定期保活续窗（逐流不再敲）
-	if cfg.Control != "" {
-		t.knock()
-		go func() {
-			tk := time.NewTicker(cfg.Reknock)
-			defer tk.Stop()
-			for {
-				select {
-				case <-ctx.Done():
-					return
-				case <-tk.C:
-					t.knock()
-				}
+	// 短时效一次性令牌敲门 + 定期保活续窗（逐流不再敲）
+	t.knock()
+	go func() {
+		tk := time.NewTicker(cfg.Reknock)
+		defer tk.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-tk.C:
+				t.knock()
 			}
-		}()
-		slog.Info("敲门保活：定期换短时效一次性令牌续窗", "control", cfg.Control, "interval", cfg.Reknock.String())
-	}
+		}
+	}()
+	slog.Info("敲门保活：定期换短时效一次性令牌续窗", "control", cfg.Control, "interval", cfg.Reknock.String())
 
 	go pumpOutbound(ctx, dev, linkEP, offset)
 
@@ -143,22 +147,24 @@ type tunneler struct {
 	denyOnce sync.Once
 }
 
-// knock 发一次 SPA 敲门：有 Control 则换取短时效一次性令牌，否则用会话令牌。
-// 遇 control 定性拒绝（ErrDenied）不回退会话令牌，改为向 deny 通道上报一次并放弃本次敲门——
-// 让 Run 停掉整个数据面并带出原因，而不是被封禁后继续徒劳空转。
+// knock 发一次 SPA 敲门：向 control 换取短时效一次性令牌（use=knock），换不到就不敲。
+//
+// ★绝不回退会话令牌：网关 strict 模式只认 control 签发的敲门令牌，回退包必被丢弃，
+// 只会制造"日志显示已敲门、实际窗口到期即断"的假象。控制面不可达时窗口自然过期
+// 是 fail-closed 的正确姿态——零信任下失去策略源就该收窗，而不是拿长效令牌硬撑。
+// 遇 control 定性拒绝（ErrDenied）向 deny 通道上报一次，让 Run 停机并带出原因。
 func (t *tunneler) knock() {
-	tok := t.cfg.Token
-	if t.cfg.Control != "" {
-		kt, err := knock.FetchToken(t.cfg.Control, t.cfg.Token)
-		switch {
-		case err == nil:
-			tok = kt
-		case errors.Is(err, knock.ErrDenied):
-			t.denyOnce.Do(func() { t.deny <- err })
-			return
-		default:
-			slog.Warn("取短时效敲门令牌失败，回退会话令牌", "err", err.Error())
-		}
+	tok, err := knock.FetchToken(t.cfg.Control, t.cfg.Token)
+	switch {
+	case err == nil:
+	case errors.Is(err, knock.ErrDenied):
+		t.denyOnce.Do(func() { t.deny <- err })
+		return
+	default:
+		// 瞬时错误：本轮不敲门，等下一次 reknock 重试（间隔须显著小于网关 SPA 放行 TTL，
+		// 否则 control 抖动会直接关窗——这是 fail-closed 的代价，须靠 reknock 频度补偿）。
+		slog.Warn("取短时效敲门令牌失败，本轮放弃敲门（等待下轮 reknock 重试）", "err", err.Error())
+		return
 	}
 	uc, err := net.Dial("udp", t.cfg.SpaAddr)
 	if err != nil {
@@ -175,10 +181,6 @@ func (t *tunneler) knock() {
 func (t *tunneler) tunnel(local net.Conn, dst string) {
 	defer local.Close()
 	c := t.cfg
-	if c.Control == "" { // 无 Control 时逐流敲门（会话令牌）
-		t.knock()
-		time.Sleep(120 * time.Millisecond)
-	}
 
 	var remote net.Conn
 	var err error

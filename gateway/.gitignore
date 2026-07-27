@@ -1,1 +1,8 @@
 certs/
+# go build ./cmd/xxx 会把二进制输出到当前目录——防止再次误入库
+# （仓库里 baidi-tun / baidi-tun.exe 是历史已提交的产物，不在此列，勿删）
+/baidi-gateway
+/baidi-knock
+/baidi-knock-agent
+/baidi-gmca
+/baidi-tlcp-probe

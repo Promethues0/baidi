@@ -34,7 +34,7 @@ func main() {
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障）")
 	resmapPath := flag.String("resmap", "", "VIP:port→资源id 映射 JSON（多资源路由；空=用 -resource 默认）")
 	defaultRes := flag.String("resource", "", "默认资源 id（resmap 未命中时用；空=网关回退默认后端）")
-	control := flag.String("control", "", "baidi-control 地址；设了则换短时效一次性令牌 + 定期保活续窗（推荐）")
+	control := flag.String("control", "", "baidi-control 地址（必填）：换短时效一次性敲门令牌 + 定期保活续窗")
 	reknock := flag.Duration("reknock", 15*time.Second, "敲门保活间隔（须 < 网关 SPA TTL；-control 模式生效）")
 	flag.Parse()
 
@@ -45,6 +45,11 @@ func main() {
 	}
 	if *token == "" {
 		log.Fatal("需 -token 或 BAIDI_TOKEN 环境变量（baidi-control 签发的 JWT）")
+	}
+	// 网关 strict 模式只接受 control 签发的 use=knock 短时效令牌，会话令牌敲不开门；
+	// 没有 control 就无从取得，早失败好过起来后静默连不通。
+	if *control == "" {
+		log.Fatal("需 -control（baidi-control 地址）：敲门令牌的唯一合规来源")
 	}
 
 	// 国密隧道客户端配置：默认 CA 根校验，-insecure 仅排障

@@ -18,20 +18,27 @@ import (
 func main() {
 	spaAddr := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址")
 	proxyAddr := flag.String("proxy", "127.0.0.1:18443", "网关 TLCP 代理地址")
-	token := flag.String("token", "", "baidi-control 签发的 JWT")
+	token := flag.String("token", "", "baidi-control 签发的会话 JWT")
+	control := flag.String("control", "http://127.0.0.1:8090", "baidi-control 地址（换取短时效敲门令牌；必填）")
 	caDir := flag.String("ca", "certs", "CA 证书目录（校验网关证书链到 CA 根）")
 	serverName := flag.String("servername", "baidi-gateway", "校验的服务器名（须在网关证书 SAN 内）")
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障，不校 CA）")
 	resource := flag.String("resource", "", "目标资源 id（多资源路由；空=默认后端）")
 	flag.Parse()
 
-	if *token == "" {
-		fmt.Fprintln(os.Stderr, "需 -token")
+	if *token == "" || *control == "" {
+		fmt.Fprintln(os.Stderr, "需 -token 与 -control")
 		os.Exit(2)
 	}
-	// ① SPA 敲门
+	// ① 换短时效一次性敲门令牌（网关 strict 模式只认它，会话令牌敲不开）
+	knockTok, err := knock.FetchToken(*control, *token)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "获取短时效敲门令牌失败:", err)
+		os.Exit(1)
+	}
+	// ② SPA 敲门
 	if c, err := net.Dial("udp", *spaAddr); err == nil {
-		if sealed, e := knock.Seal(*token); e == nil {
+		if sealed, e := knock.Seal(knockTok); e == nil {
 			_, _ = c.Write(sealed)
 		}
 		_ = c.Close()
@@ -41,7 +48,7 @@ func main() {
 	}
 	time.Sleep(400 * time.Millisecond)
 
-	// ② 国密 TLCP 握手：默认用 CA 根校验网关证书链 + 主机名（-insecure 仅排障）
+	// ③ 国密 TLCP 握手：默认用 CA 根校验网关证书链 + 主机名（-insecure 仅排障）
 	cfg := &tlcp.Config{ServerName: *serverName}
 	if *insecure {
 		cfg.InsecureSkipVerify = true

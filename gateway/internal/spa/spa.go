@@ -3,6 +3,8 @@
 package spa
 
 import (
+	"errors"
+	"fmt"
 	"log/slog"
 	"net"
 	"strings"
@@ -173,13 +175,44 @@ func (a *Allowlist) ActiveCount() int {
 	return n
 }
 
+// checkKnock 校验一个已验签的令牌是否真是「control 签发的短时效一次性敲门令牌」。
+//
+// 这是根治旁路的判据：在此之前，任何持 8h 会话令牌的人都能直接敲门，完全绕过控制面的
+// 强制下线封禁 / 账号禁用锁定 / 终端合规(posture) 三道闸——因为那三道闸只在 control 的
+// /knock-token 签发处执行，而数据面从不要求令牌来自那里。
+//
+// 判据用 Use 字段而非 jti 有无：passkey 登录签发的 8h 会话令牌同样带 jti，
+// 按 jti 区分等于给 passkey 用户留后门。maxTTL 作为纵深防御（令牌寿命上界），
+// 由调用方以 flag 传入而非硬编码，避免与 control 的 knockTTL 常量隐式耦合。
+func checkKnock(c auth.Claims, protected bool, maxTTL time.Duration) error {
+	if c.Use != auth.UseKnock {
+		return fmt.Errorf("非敲门令牌（use=%q，需 %q）", c.Use, auth.UseKnock)
+	}
+	if c.Jti == "" {
+		return errors.New("敲门令牌缺 jti（无法做一次性去重）")
+	}
+	if c.Iat == 0 || time.Duration(c.Exp-c.Iat)*time.Second > maxTTL {
+		return fmt.Errorf("敲门令牌寿命超上界（%ds > %s）", c.Exp-c.Iat, maxTTL)
+	}
+	// 角色白名单与 control 的 requireUser 一致：网关身份、MFA 半程票据都不得开数据面窗口。
+	if c.Role != "admin" && c.Role != "user" {
+		return fmt.Errorf("角色 %q 不得敲门", c.Role)
+	}
+	if !protected {
+		return errors.New("旧式裸令牌无被动重放防护")
+	}
+	return nil
+}
+
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
-func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
+// strict=true 时只接受 control /knock-token 签发的短时效一次性敲门令牌（见 checkKnock）；
+// false 为过渡兼容姿态，仅告警不拒绝——生产务必开启。
+func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist, strict bool, knockMaxTTL time.Duration) error {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return err
 	}
-	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String())
+	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String(), "strict", strict, "knockMaxTTL", knockMaxTTL.String())
 	cache := knock.NewCache()
 	const skew = 30 * time.Second // 允许时钟偏移 / 重放窗口
 	buf := make([]byte, 8192)
@@ -199,21 +232,28 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist) error {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
 			continue
 		}
+		// 用途闸：只认 control 签发的短时效一次性敲门令牌。
+		if err := checkKnock(claims, protected, knockMaxTTL); err != nil {
+			if strict {
+				slog.Warn("SPA 敲门拒绝（令牌用途不符）", "src", ip, "user", claims.Name,
+					"role", claims.Role, "use", claims.Use, "err", err.Error())
+				continue
+			}
+			slog.Warn("SPA 敲门放行了非规范令牌（strict 已关闭，长效会话令牌可绕过控制面三道闸——仅限过渡）",
+				"src", ip, "user", claims.Name, "err", err.Error())
+		}
 		// 一次性敲门令牌（带 jti）：同一 jti 只放行一次——杜绝令牌被解出后用新信封主动重放。
+		// 去重窗按令牌实际剩余寿命 + 偏移，不再固定 10min 上界（敲门令牌只有 90s，
+		// 固定上界会让每张用过的令牌在缓存里多躺 8 分半，放大 UDP 洪泛的内存占用）。
 		if claims.Jti != "" {
 			dedupTTL := time.Until(time.Unix(claims.Exp, 0)) + skew
-			if dedupTTL > 10*time.Minute {
-				dedupTTL = 10 * time.Minute
+			if max := knockMaxTTL + skew; dedupTTL > max {
+				dedupTTL = max
 			}
-			if cache.Seen("j:"+claims.Jti, dedupTTL) {
+			if dedupTTL > 0 && cache.Seen("j:"+claims.Jti, dedupTTL) {
 				slog.Warn("SPA 敲门拒绝（一次性令牌已用，主动重放被拒）", "src", ip, "jti", claims.Jti)
 				continue
 			}
-		} else {
-			slog.Warn("SPA 敲门为长效会话令牌（无 jti，仅被动重放防护），建议改用 /knock-token 短时效一次性令牌", "src", ip)
-		}
-		if !protected {
-			slog.Warn("SPA 敲门为旧式裸令牌、无被动重放防护，建议客户端升级敲门信封", "src", ip)
 		}
 		// Allow 内在同一把锁下复核封禁：即便与并发强制下线相撞，也不会重开放行窗口。
 		if !al.Allow(ip, claims.Name, claims.Role, ttl) {

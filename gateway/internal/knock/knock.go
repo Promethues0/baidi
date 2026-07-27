@@ -4,9 +4,10 @@
 // 网关校验 ts 在允许时钟偏移内、且 nonce 在窗口内未用过——passively 嗅探到的整包再次重放会因
 // nonce 重复 / ts 陈旧被拒。无需客户端持有共享密钥（nonce 只是随机数）。
 //
-// 残留风险（需另案）：主动攻击者若从捕获包里**解出 JWT**，可自造新 ts+nonce 重新敲门——
-// 这要靠 control 签发**短时效一次性敲门令牌**（分钟级 + jti，网关按 jti 去重）来根治，属后续工作。
-// 兼容：非 JSON 包按旧式裸 JWT 处理（无重放保护，网关会告警）。
+// 主动重放（攻击者从捕获包里解出 JWT、自造新 ts+nonce 重敲）由 control 签发的
+// **短时效一次性敲门令牌**根治：90s TTL + jti，网关按 jti 去重、并强制 use=knock
+// （见 spa.checkKnock）——长效会话令牌自此无法用于敲门。
+// 兼容：非 JSON 包按旧式裸 JWT 处理（无重放保护，strict 模式下直接拒绝）。
 package knock
 
 import (
@@ -27,7 +28,11 @@ import (
 // 绝不回退会话令牌继续重试——回退只会让被封禁的客户端徒劳空转。
 var ErrDenied = errors.New("接入被拒")
 
-// FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti）。
+// fetchClient 取令牌用的 HTTP 客户端。必须带超时：strict 模式下这是数据面保活的热路径
+// （每 reknock 一次），control 慢响应若无上界会把整轮保活拖过网关放行窗口而静默断连。
+var fetchClient = &http.Client{Timeout: 5 * time.Second}
+
+// FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti + use=knock）。
 // 遇 403 返回包裹 ErrDenied 的错误并带出服务端原因；其余非 200 视为瞬时错误。
 func FetchToken(control, sessionToken string) (string, error) {
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", nil)
@@ -35,7 +40,7 @@ func FetchToken(control, sessionToken string) (string, error) {
 		return "", err
 	}
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := fetchClient.Do(req)
 	if err != nil {
 		return "", err
 	}

@@ -15,6 +15,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strings"
 	"time"
 
 	"baidi.dev/gateway/internal/cplane"
@@ -38,6 +39,11 @@ func main() {
 	control := flag.String("control", env("BAIDI_GW_CONTROL", ""), "baidi-control 地址；设了则向控制面注册并周期拉取资源策略（动态，优先于静态 -resources）")
 	gwid := flag.String("gwid", env("BAIDI_GW_ID", "gw-1"), "本网关 id（控制面注册标识）")
 	poll := flag.Duration("poll", 15*time.Second, "控制面策略轮询/心跳间隔")
+	strictKnock := flag.Bool("strict-knock", envBool("BAIDI_GW_KNOCK_STRICT", true),
+		"严格敲门：只接受 control /knock-token 签发的短时效一次性令牌（use=knock）；"+
+			"关闭则兼容长效会话令牌直接敲门——那会绕过封禁/账号状态/终端合规三道闸，仅限过渡")
+	knockMaxTTL := flag.Duration("knock-max-ttl", 5*time.Minute,
+		"敲门令牌寿命上界（纵深防御；须 ≥ control 的 knockTTL）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -47,7 +53,11 @@ func main() {
 	if *secret == "baidi-dev-secret-change-me" {
 		slog.Warn("⚠ 正在使用开发默认 JWT 密钥，生产务必经 BAIDI_JWT_SECRET 配置独立密钥（须与 baidi-control 一致）")
 	}
-	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend, "ttl", ttl.String())
+	if !*strictKnock {
+		slog.Warn("⚠ 严格敲门已关闭：长效会话令牌可直接敲门，绕过强制下线/账号禁用/终端合规三道闸，仅限过渡期")
+	}
+	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
+		"ttl", ttl.String(), "strictKnock", *strictKnock)
 
 	al := spa.NewAllowlist()
 
@@ -158,7 +168,7 @@ func main() {
 	}
 
 	go func() {
-		if err := spa.Serve(*spaAddr, []byte(*secret), *ttl, al); err != nil {
+		if err := spa.Serve(*spaAddr, []byte(*secret), *ttl, al, *strictKnock, *knockMaxTTL); err != nil {
 			log.Fatalf("SPA 监听失败: %v", err)
 		}
 	}()
@@ -183,6 +193,17 @@ func main() {
 func env(k, def string) string {
 	if v, ok := os.LookupEnv(k); ok && v != "" {
 		return v
+	}
+	return def
+}
+
+// envBool 读布尔环境变量（1/true/yes/on 为真，0/false/no/off 为假，其余取默认）。
+func envBool(k string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
 	}
 	return def
 }

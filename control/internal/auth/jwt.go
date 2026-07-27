@@ -12,7 +12,15 @@ import (
 	"time"
 )
 
+// UseKnock 敲门令牌的用途标记（Claims.Use）。数据面据此拒绝一切非敲门令牌，
+// 见 gateway/internal/spa.checkKnock——这是"长效会话令牌可直接敲门"旁路的根治判据。
+const UseKnock = "knock"
+
 // Claims 令牌载荷。
+//
+// Use 字段是令牌的用途自证：只有 /knock-token 签发的短时效一次性敲门令牌填 UseKnock，
+// 会话令牌与 MFA 半程票据一律留空。故意不用 jti 有无做判据——passkey 登录签发的 8h
+// 会话令牌也带 jti（见 api/webauthn.go 断言成功处），按 jti 区分会给 passkey 用户留后门。
 type Claims struct {
 	Sub  string `json:"sub"`           // 账号
 	Role string `json:"role"`          // admin | user
@@ -20,6 +28,7 @@ type Claims struct {
 	Exp  int64  `json:"exp"`           // 过期 Unix 秒
 	Iat  int64  `json:"iat,omitempty"` // 签发 Unix 秒
 	Jti  string `json:"jti,omitempty"` // 令牌唯一 id（短时效敲门令牌用，网关按它一次性去重）
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；空=会话令牌/MFA 票据
 }
 
 var b64 = base64.RawURLEncoding

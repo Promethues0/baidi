@@ -28,7 +28,7 @@ func newTestServer(t *testing.T) http.Handler {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", t.TempDir())
+	s := New(st, st, testSecret, "test", t.TempDir(), nil)
 	return auth.Middleware(testSecret, s.IsOpen)(s.Routes())
 }
 
@@ -97,7 +97,7 @@ func revokedUsers(t *testing.T, h http.Handler) map[string]bool {
 }
 
 // 门户登录走真实凭据校验：正确口令过、错误口令拒、目录中不存在的账号拒
-//（不再是"任意用户名 + baidi@123"）。
+// （不再是"任意用户名 + baidi@123"）。
 func TestPortalLoginVerifiesRealCredentials(t *testing.T) {
 	h := newTestServer(t)
 

@@ -15,7 +15,7 @@
       <div v-if="err" class="lg__err">{{ err }}</div>
 
       <button class="m-btn" :disabled="loading" @click="submit">{{ loading ? '登录中…' : '登 录' }}</button>
-      <div class="lg__demo">演示 <b>li.ming</b> / <b>baidi@123</b> · 外包账号 <b>ext.zhou</b> 触发验证码 <b>123456</b></div>
+      <div class="lg__demo">演示 <b>li.ming</b> / <b>baidi@123</b> · passkey 二次认证请用浏览器门户</div>
     </div>
   </div>
 </template>

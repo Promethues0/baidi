@@ -203,7 +203,25 @@ export interface ObjectRef { kind: 'resource' | 'ipsec'; id: string; name: strin
 export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 
 /* ── 终端用户门户 ── */
-export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
+export interface PortalLoginResp {
+  ok: boolean;
+  needMfa?: boolean;        // legacy 演示验证码路径（未配置 WebAuthn RP 时回落）
+  needWebauthn?: boolean;   // 需 passkey 断言；配合 ticket 走 /webauthn/login/*
+  needEnroll?: boolean;     // 风险账号尚未注册 passkey，须先录入
+  ticket?: string;          // 「口令已验」一次性票据（3min），断言两回合凭它绑定账号
+  reason?: string;
+  token?: string;
+  displayName?: string;
+  role?: string;
+}
+
+/* ── WebAuthn / passkey（store.WebauthnCredential）── */
+export interface WebauthnCredential {
+  id: string; userId: string; account: string; credentialId: string;
+  signCount: number; transports: string; aaguid: string;
+  name: string; createdAt: string; lastUsedAt: string;
+}
+export interface WebauthnCredentialsResp { credentials: WebauthnCredential[]; enabled: boolean }
 export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean; resourceId: string }
 export interface PortalAppsResp { apps: PortalTile[] }
 

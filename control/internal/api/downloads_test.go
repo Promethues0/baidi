@@ -22,7 +22,7 @@ func newDownloadsServer(t *testing.T) (http.Handler, string) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", dir)
+	s := New(st, st, testSecret, "test", dir, nil)
 	return auth.Middleware(testSecret, s.IsOpen)(s.Routes()), dir
 }
 

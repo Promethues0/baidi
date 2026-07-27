@@ -25,6 +25,8 @@ type Config struct {
 	DBPath          string        // SQLite 数据库文件路径
 	JWTSecret       string        // JWT 签名密钥（生产务必经 BAIDI_JWT_SECRET 注入）
 	DownloadsDir    string        // 客户端安装包目录（manifest.json + 安装包）
+	WebauthnRPID    string        // WebAuthn RP ID（可注册域名，如 vpn.example.com / localhost）
+	WebauthnOrigins string        // WebAuthn 允许来源，逗号分隔（如 https://vpn.example.com）
 }
 
 // Load 从环境变量装载配置。
@@ -37,6 +39,11 @@ func Load() Config {
 		DBPath:          env("BAIDI_DB", "baidi.db"),
 		JWTSecret:       env("BAIDI_JWT_SECRET", DefaultJWTSecret),
 		DownloadsDir:    env("BAIDI_DOWNLOADS", "downloads"), // 客户端安装包目录（manifest.json + 安装包）
+		// WebAuthn（passkey 二次认证）：RP ID 必须是可注册域名或 localhost——
+		// 浏览器规范不允许裸 IP 作 RP ID，故 IP 演示站（101.43.125.131）无法启用 WebAuthn。
+		// 两者任一为空即视为未启用，登录回落 legacy 演示验证码路径（见 api.webauthnEnabled）。
+		WebauthnRPID:    env("BAIDI_WEBAUTHN_RPID", ""),
+		WebauthnOrigins: env("BAIDI_WEBAUTHN_ORIGIN", ""),
 	}
 }
 

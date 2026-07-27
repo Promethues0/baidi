@@ -38,6 +38,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/portal', redirect: '/portal/apps' },
   { path: '/portal/apps', component: () => import('@/views/PortalApps.vue') },
   { path: '/portal/requests', component: () => import('@/views/PortalRequests.vue') },
+  { path: '/portal/security', component: () => import('@/views/PortalSecurity.vue') },
   { path: '/portal/downloads', component: () => import('@/views/PortalDownloads.vue') },
   // 态势大屏（全屏 NOC，脱离控制台 chrome；非 public，受登录守卫保护）
   { path: '/screen', component: () => import('@/views/BigScreen.vue') },
@@ -56,11 +57,16 @@ const routes: RouteRecordRaw[] = [
 
 const router = createRouter({ history: createWebHistory(), routes });
 
-// 管理台登录守卫：非 /login、非 /portal/* 的路由需已登录，否则跳登录页
+// 免登录路径白名单：只有两个登录页与公开的下载中心真正免认证。
+// ★不能把 /portal/* 整段视为 public——门户里的「我的申请」「我的安全」（passkey 管理）
+// 都是需要身份的页面，整段豁免会让它们裸奔。
+const PUBLIC_PATHS = new Set(['/login', '/portal/login', '/portal/downloads']);
+
+// 登录守卫：非白名单路由需已登录；门户页未登录回门户登录页，管理台回管理台登录页。
 router.beforeEach((to) => {
-  const isPublic = to.path === '/login' || to.path.startsWith('/portal');
-  if (!isPublic && !getToken()) return '/login';
-  return true;
+  if (PUBLIC_PATHS.has(to.path)) return true;
+  if (getToken()) return true;
+  return to.path.startsWith('/portal') ? '/portal/login' : '/login';
 });
 
 export default router;

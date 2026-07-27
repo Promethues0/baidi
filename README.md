@@ -107,7 +107,8 @@ cd control && go run ./cmd/baidi-control
 cd console && npm install && npm run dev     # → http://localhost:5193
 ```
 
-- **登录**：管理台 `admin / baidi@123`；终端门户 `/portal/login` 任意用户名 + 口令 `baidi@123`（如 `li.fang`），`ext.*` / 含「外包」账号（如 `ext.zhou`）触发自适应 MFA，验证码 `123456`。
+- **登录**：管理台 `admin / baidi@123`；终端门户 `/portal/login` 任意用户名 + 口令 `baidi@123`（如 `li.fang`）。
+- **二次认证（WebAuthn / passkey）**：配置 `BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 后启用，门户与管理台均覆盖——已注册 passkey 的账号登录需 Touch ID / Windows Hello / 安全密钥断言，`/portal/security` 管理凭据。注意 **RP ID 必须是可注册域名或 `localhost`，浏览器不允许裸 IP**，故上述 IP 演示站无法启用 passkey，回落演示验证码 `123456`。
 - 未起后端时各页降级为内置演示数据，UI 完整可点。
 
 ### 数据面网关

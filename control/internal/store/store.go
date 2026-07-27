@@ -38,6 +38,10 @@ type Store interface {
 	JitGrants(ctx context.Context) ([]JitGrant, error)
 	ActiveGrants(ctx context.Context) ([]JitGrant, error)
 	ActiveGrantsFor(ctx context.Context, user string) ([]JitGrant, error)
+	// WebAuthn passkey 凭据（真实数据域，Memory 返回空）
+	WebauthnCredentialsFor(ctx context.Context, account string) ([]WebauthnCredential, error)
+	WebauthnCredentialByID(ctx context.Context, credentialID string) (WebauthnCredential, bool, error)
+	WebauthnCredentialCount(ctx context.Context, account string) (int, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

@@ -21,7 +21,18 @@
 
       <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
 
-      <a-button type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submit">登 录</a-button>
+      <!-- passkey 二次认证（口令已通过，等待认证器） -->
+      <div v-if="step === 'webauthn'" class="bd-login__pk">
+        <icon-fingerprint />
+        <span>{{ pkMsg || '请用 Touch ID / Windows Hello / 安全密钥完成二次认证' }}</span>
+      </div>
+
+      <a-button
+        v-if="step === 'webauthn'"
+        type="primary" size="large" long :loading="loading" class="bd-login__btn"
+        @click="submitWebauthn"
+      >使用 passkey 验证</a-button>
+      <a-button v-else type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submit">登 录</a-button>
 
       <div class="bd-login__hint">演示账号 <code>admin</code> · 口令 <code>baidi@123</code></div>
       <div class="bd-login__foot">终端用户请使用 <a @click="$router.push('/portal/login')">应用门户登录</a></div>
@@ -33,21 +44,35 @@
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { api, setToken, type PortalLoginResp } from '@/lib/api';
+import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
 const username = ref('admin');
 const password = ref('');
 const loading = ref(false);
 const err = ref('');
+const step = ref<'login' | 'webauthn'>('login');
+const ticket = ref('');
+const pkMsg = ref('');
 
 async function submit() {
   if (!username.value || !password.value) { err.value = '请输入账号与口令'; return; }
   loading.value = true; err.value = '';
   try {
-    const r = await api<PortalLoginResp & { role?: string }>('/auth/login', {
+    const r = await api<PortalLoginResp>('/auth/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: username.value, password: password.value })
     });
+    // 管理台同样过 passkey 二次因子（已注册 passkey 的 admin 强制断言）
+    if (r.needWebauthn && r.ticket) {
+      if (!webauthnSupported()) { err.value = '当前浏览器不支持 passkey'; return; }
+      ticket.value = r.ticket;
+      pkMsg.value = r.reason ?? '';
+      step.value = 'webauthn';
+      void submitWebauthn();
+      return;
+    }
+    if (r.needEnroll) { err.value = r.reason || '该账号须先注册 passkey'; return; }
     if (r.ok && r.token) {
       setToken(r.token);
       router.push('/');
@@ -56,6 +81,39 @@ async function submit() {
     }
   } catch {
     err.value = '无法连接控制中心（baidi-control）';
+  } finally {
+    loading.value = false;
+  }
+}
+
+/** passkey 断言两回合，成功后换管理台会话令牌。 */
+async function submitWebauthn() {
+  if (!ticket.value) { step.value = 'login'; return; }
+  loading.value = true; err.value = '';
+  try {
+    const opts = await api<{ publicKey: Record<string, never> }>('/webauthn/login/begin', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: ticket.value })
+    });
+    const assertion = await getAssertion(opts as never);
+    const r = await api<PortalLoginResp>('/webauthn/login/finish', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...assertion, ticket: ticket.value })
+    });
+    if (r.ok && r.token) {
+      setToken(r.token);
+      router.push('/');
+      return;
+    }
+    pkMsg.value = r.reason || 'passkey 验证失败，请重试';
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    if (msg.startsWith('401')) {
+      err.value = '认证超时，请重新登录';
+      step.value = 'login'; ticket.value = '';
+    } else {
+      pkMsg.value = webauthnErrMsg(e);
+    }
   } finally {
     loading.value = false;
   }
@@ -80,6 +138,12 @@ async function submit() {
 .bd-login__sub { font-size: 12px; color: var(--bd-t3); margin-top: 5px; }
 .bd-login__inp { margin-bottom: 14px; }
 .bd-login__err { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-danger); margin: -4px 0 12px; }
+.bd-login__pk {
+  display: flex; align-items: center; gap: 9px; font-size: 12.5px; line-height: 1.6;
+  color: var(--bd-t2); background: var(--bd-fill-1); border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-s); padding: 11px 13px; margin: 2px 0 14px;
+}
+.bd-login__pk :deep(.arco-icon) { font-size: 18px; color: var(--bd-primary); flex: none; }
 .bd-login__btn { margin-top: 4px; height: 42px; font-size: 15px; letter-spacing: 4px; }
 .bd-login__hint { text-align: center; font-size: 12px; color: var(--bd-t3); margin-top: 16px; }
 .bd-login__hint code, .bd-login__foot a { color: var(--bd-primary); }

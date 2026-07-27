@@ -99,7 +99,41 @@
           </a-button>
         </template>
 
-        <!-- 步骤二：二次认证 -->
+        <!-- 步骤二：passkey 二次认证（WebAuthn 断言） -->
+        <template v-else-if="step === 'webauthn'">
+          <h2 class="bd-card__h">二次认证</h2>
+          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 完成 passkey 验证</p>
+
+          <div class="bd-tip bd-tip--warn">
+            <icon-safe />
+            <span>{{ mfaReason || '请用已注册的 passkey 完成二次认证。' }}</span>
+          </div>
+
+          <div class="bd-pk">
+            <span class="bd-pk__ic"><icon-fingerprint /></span>
+            <div class="bd-pk__t">
+              <b>Touch ID / Windows Hello / 安全密钥</b>
+              <i>公钥密码学验证，抗钓鱼——凭据永不离开你的设备</i>
+            </div>
+          </div>
+
+          <a-button
+            type="primary"
+            long
+            size="large"
+            :loading="loading"
+            class="bd-submit"
+            @click="submitWebauthn"
+          >
+            使用 passkey 验证
+          </a-button>
+          <a-button type="text" long class="bd-back" @click="backToLogin">
+            <template #icon><icon-left /></template>
+            返回重新登录
+          </a-button>
+        </template>
+
+        <!-- 步骤二（legacy）：未配置 WebAuthn 时的演示验证码 -->
         <template v-else>
           <h2 class="bd-card__h">二次认证</h2>
           <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 完成短信验证</p>
@@ -141,8 +175,9 @@
         </template>
 
         <p class="bd-demo">
-          演示提示：口令 <code class="bd-mono">baidi@123</code>；外包 / 未授信账号（如
-          <code class="bd-mono">ext.zhou</code>）将触发短信验证码 <code class="bd-mono">123456</code>。
+          演示提示：口令 <code class="bd-mono">baidi@123</code>。已注册 passkey 的账号登录需
+          <b>Touch ID / Windows Hello / 安全密钥</b> 二次认证；登录后可在
+          <b>「我的安全」</b> 管理 passkey。
         </p>
 
         <p class="bd-getcli">
@@ -162,13 +197,15 @@ import { reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, setToken, type PortalLoginResp } from '@/lib/api';
+import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
 
-const step = ref<'login' | 'mfa'>('login');
+const step = ref<'login' | 'webauthn' | 'mfa'>('login');
 const loading = ref(false);
 const errMsg = ref('');
 const mfaReason = ref('');
+const ticket = ref(''); // 「口令已验」一次性票据，断言两回合凭它绑定账号
 
 const form = reactive({ username: '', password: '', mfaCode: '' });
 
@@ -208,6 +245,23 @@ async function submitLogin() {
   loading.value = false;
   if (!resp) return;
 
+  // passkey 二次认证（口令已通过，服务端下发一次性票据）
+  if (resp.needWebauthn && resp.ticket) {
+    if (!webauthnSupported()) {
+      errMsg.value = '当前浏览器不支持 passkey，请更换浏览器或联系管理员。';
+      return;
+    }
+    ticket.value = resp.ticket;
+    mfaReason.value = resp.reason ?? '';
+    step.value = 'webauthn';
+    void submitWebauthn(); // 直接唤起认证器，省去多一次点击
+    return;
+  }
+  // 风险账号尚未注册 passkey：不放行，提示先录入
+  if (resp.needEnroll) {
+    errMsg.value = resp.reason || '该账号须先注册 passkey 才能接入。';
+    return;
+  }
   if (resp.needMfa) {
     mfaReason.value = resp.reason ?? '';
     form.mfaCode = '';
@@ -219,6 +273,45 @@ async function submitLogin() {
     return;
   }
   errMsg.value = resp.reason || '用户名或口令错误，请重试。';
+}
+
+/** passkey 断言两回合：begin 取 challenge → navigator.credentials.get → finish 换会话令牌。 */
+async function submitWebauthn() {
+  if (!ticket.value) {
+    backToLogin();
+    return;
+  }
+  errMsg.value = '';
+  loading.value = true;
+  try {
+    const opts = await api<{ publicKey: Record<string, never> }>('/webauthn/login/begin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: ticket.value })
+    });
+    const assertion = await getAssertion(opts as never);
+    const resp = await api<PortalLoginResp>('/webauthn/login/finish', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ...assertion, ticket: ticket.value })
+    });
+    if (resp.ok && resp.token) {
+      onSuccess(resp);
+      return;
+    }
+    mfaReason.value = resp.reason || 'passkey 验证失败，请重试。';
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    // 票据过期（3min）→ 退回口令步骤重来
+    if (msg.startsWith('401')) {
+      errMsg.value = '认证超时，请重新登录。';
+      backToLogin();
+    } else {
+      mfaReason.value = webauthnErrMsg(e);
+    }
+  } finally {
+    loading.value = false;
+  }
 }
 
 async function submitMfa() {
@@ -247,6 +340,7 @@ function backToLogin() {
   errMsg.value = '';
   mfaReason.value = '';
   form.mfaCode = '';
+  ticket.value = '';
 }
 </script>
 
@@ -370,6 +464,22 @@ function backToLogin() {
 .bd-tip :deep(.arco-icon) { font-size: 15px; flex: none; margin-top: 1px; }
 .bd-tip--err { background: var(--bd-tag-red-bg); color: var(--bd-danger); }
 .bd-tip--warn { background: var(--bd-tag-gold-bg); color: var(--bd-warning); }
+
+/* passkey 提示卡 */
+.bd-pk {
+  display: flex; align-items: center; gap: 13px;
+  padding: 14px 16px; margin-bottom: 18px;
+  border: 1px solid var(--bd-border); border-radius: var(--bd-radius-s);
+  background: var(--bd-fill-1);
+}
+.bd-pk__ic {
+  width: 40px; height: 40px; border-radius: 10px; flex: none;
+  background: var(--bd-tag-blue-bg); color: var(--bd-primary);
+  display: flex; align-items: center; justify-content: center; font-size: 21px;
+}
+.bd-pk__t { display: flex; flex-direction: column; line-height: 1.45; min-width: 0; }
+.bd-pk__t b { font-size: 13.5px; font-weight: 600; color: var(--bd-t1); }
+.bd-pk__t i { font-style: normal; font-size: 12px; color: var(--bd-t3); margin-top: 3px; }
 
 .bd-submit { margin-top: 6px; font-weight: 600; letter-spacing: 2px; }
 .bd-back { margin-top: 10px; color: var(--bd-t3); }

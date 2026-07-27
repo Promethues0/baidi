@@ -23,7 +23,7 @@
 
         <div v-if="err" class="ck-err"><icon-close-circle-fill /> {{ err }}</div>
         <button class="dk-btn ck-login__btn" :disabled="loading" @click="doLogin(needMfa)">{{ loading ? '验证中…' : needMfa ? '验证并登录' : '登 录' }}</button>
-        <div class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · 外包账号 <code>ext.zhou</code> 触发验证码 <code>123456</code></div>
+        <div class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · passkey 二次认证请用浏览器门户</div>
       </div>
     </div>
 

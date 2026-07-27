@@ -14,6 +14,7 @@ import (
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
+	"baidi.dev/control/internal/webauthnx"
 )
 
 // Version 控制中心版本号。
@@ -35,8 +36,9 @@ type Server struct {
 	writer        store.Writer
 	secret        []byte
 	env           string
-	downloadsDir  string // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
-	postureStrict bool   // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
+	downloadsDir  string        // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
+	rp            *webauthnx.RP // WebAuthn 依赖方；nil = 未配置 RP ID/Origin，登录回落 legacy 演示路径
+	postureStrict bool          // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
 	mu            sync.Mutex
 	gateways      map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess        map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -107,8 +109,9 @@ type GwSession struct {
 }
 
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
-func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDir string) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, downloadsDir: downloadsDir,
+// rp 为已装配的 WebAuthn 依赖方，nil 表示未配置（登录回落 legacy 演示验证码路径）。
+func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDir string, rp *webauthnx.RP) *Server {
+	return &Server{store: st, writer: wr, secret: secret, env: env, downloadsDir: downloadsDir, rp: rp,
 		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
@@ -117,6 +120,10 @@ func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDi
 func (s *Server) IsOpen(_, path string) bool {
 	switch path {
 	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads":
+		return true
+	// WebAuthn 登录断言两回合：此时尚无会话令牌，身份由「口令已验」的一次性 mfaTicket 承载
+	// （handler 内 verifyMfaTicket 强校验，非免鉴权——只是不走 Bearer 中间件）。
+	case "/api/v1/webauthn/login/begin", "/api/v1/webauthn/login/finish":
 		return true
 	}
 	// /downloads/{file} 路径可变，前缀豁免；白名单校验在 handler 内（manifest available 条目）。
@@ -209,6 +216,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/access-requests/{id}/decide", s.handleDecideAccessRequest)
 	mux.HandleFunc("GET /api/v1/jit/grants", s.handleJitGrants)
 	mux.HandleFunc("POST /api/v1/jit/grants/{id}/revoke", s.handleRevokeGrant)
+	// WebAuthn / passkey 二次认证：注册仪式与凭据管理（需登录）+ 登录断言（凭口令已验票据）
+	mux.HandleFunc("POST /api/v1/webauthn/register/begin", s.handleWebauthnRegisterBegin)
+	mux.HandleFunc("POST /api/v1/webauthn/register/finish", s.handleWebauthnRegisterFinish)
+	mux.HandleFunc("POST /api/v1/webauthn/login/begin", s.handleWebauthnLoginBegin)
+	mux.HandleFunc("POST /api/v1/webauthn/login/finish", s.handleWebauthnLoginFinish)
+	mux.HandleFunc("GET /api/v1/webauthn/credentials", s.handleWebauthnCredentials)
+	mux.HandleFunc("DELETE /api/v1/webauthn/credentials/{id}", s.handleWebauthnDeleteCredential)
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 
@@ -261,7 +275,10 @@ func (s *Server) Routes() http.Handler {
 	return mux
 }
 
-// handlePortalLogin 终端用户登录（演示口令 baidi@123；未授信/外包账号触发自适应二次认证，验证码 123456）。
+// handlePortalLogin 终端用户登录（演示口令 baidi@123）。
+// 二次认证：口令通过后，若该账号已注册 passkey（或属自适应触发的风险账号），
+// 返回 needWebauthn + 一次性票据，客户端据此走 /webauthn/login/begin|finish 完成抗钓鱼断言。
+// 未配置 WebAuthn RP（BAIDI_WEBAUTHN_RPID/ORIGIN 缺失，如裸 IP 演示站）则回落 legacy 演示验证码。
 func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	var b struct {
 		Username string `json:"username"`
@@ -289,14 +306,9 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[cred.Status] + "，请联系管理员"})
 		return
 	}
-	risky := strings.HasPrefix(cred.Account, "ext") || strings.Contains(cred.Account, "外包")
-	if risky && b.MfaCode == "" {
-		s.auditAs(r, cred.Account, "security", "终端用户登录触发自适应二次认证", "mfa")
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "检测到未授信终端/异地登录，需短信二次认证"})
-		return
-	}
-	if risky && b.MfaCode != "123456" {
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：123456）"})
+	// legacy 回落路径需要读 mfaCode，经 context 传给 secondFactor（避免重复解码请求体）。
+	if resp, done := s.secondFactor(r.WithContext(withLegacyMfaCode(r.Context(), b.MfaCode)), cred); done {
+		httpx.JSON(w, http.StatusOK, resp)
 		return
 	}
 	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
@@ -320,6 +332,12 @@ type PortalTile struct {
 // handlePortalApps 返回当前用户可见的应用门户（复用 SQLite 中的已发布应用；高敏类需申请）。
 // 高敏磁贴默认 Accessible=false（需申请）；若当前用户对该资源持有效 JIT 授予，则翻回可访问——JIT 闭环的门户侧收口。
 func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
+	// 门户是人机面：只认 admin/user 会话，拒 gateway 身份与 WebAuthn 中间票据(role=mfa)——
+	// 票据只用于换取一次断言，绝不能当会话令牌消费业务数据。
+	c, ok := s.requireUser(w, r)
+	if !ok {
+		return
+	}
 	b, err := s.store.Apps(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load portal apps")
@@ -327,11 +345,9 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	}
 	// 调用方的有效授予集合（resource_id）：把「需申请」磁贴翻回可访问。best-effort，读失败按未授予处理。
 	granted := map[string]bool{}
-	if c, ok := auth.FromContext(r.Context()); ok {
-		if gs, err := s.store.ActiveGrantsFor(r.Context(), normUser(c.Name)); err == nil {
-			for _, g := range gs {
-				granted[g.ResourceID] = true
-			}
+	if gs, err := s.store.ActiveGrantsFor(r.Context(), normUser(c.Name)); err == nil {
+		for _, g := range gs {
+			granted[g.ResourceID] = true
 		}
 	}
 	tiles := []PortalTile{}
@@ -460,10 +476,10 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 }
 
 // handleChangePassword 当前登录用户自助改密（校验旧口令）。
+// requireUser：拒 gateway 身份与 WebAuthn 中间票据(role=mfa)——半程认证态不得改口令。
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
-	c, ok := auth.FromContext(r.Context())
+	c, ok := s.requireUser(w, r)
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "未认证")
 		return
 	}
 	var body struct {
@@ -528,6 +544,11 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[cred.Status]})
 		return
 	}
+	// 管理台是权限最高面，同门户一样过二次因子（已注册 passkey 即强制断言）。
+	if resp, done := s.secondFactor(r, cred); done {
+		httpx.JSON(w, http.StatusOK, resp)
+		return
+	}
 	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
 	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
 	tok := auth.Sign(s.secret, auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
@@ -544,9 +565,10 @@ func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 // 客户端用它敲门、网关按 jti 一次性放行，杜绝令牌被解出后主动重放（90s 内也仅一次）。
 // 强制下线封禁期内拒发——掐断客户端 reknock 保活的令牌来源。
 func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
-	c, ok := auth.FromContext(r.Context())
+	// requireUser 是第 0 道闸：敲门令牌直通数据面，绝不能签给 WebAuthn 中间票据(role=mfa)
+	// 这类半程认证态——二次因子没走完就拿到敲门令牌，等于绕过 2FA 直连业务。
+	c, ok := s.requireUser(w, r)
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "未认证")
 		return
 	}
 	if ri, banned := s.revokedActive(c.Name); banned {

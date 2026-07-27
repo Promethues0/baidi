@@ -5,6 +5,9 @@
       <button class="bd-pquit" @click="router.push('/portal/requests')">
         <icon-history /><span>我的申请</span>
       </button>
+      <button class="bd-pquit" @click="router.push('/portal/security')">
+        <icon-safe /><span>我的安全</span>
+      </button>
       <button class="bd-pquit" @click="router.push('/portal/downloads')">
         <icon-download /><span>下载客户端</span>
       </button>

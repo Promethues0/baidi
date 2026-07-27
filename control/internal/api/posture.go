@@ -6,7 +6,6 @@ import (
 	"strings"
 	"time"
 
-	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/risk"
 	"baidi.dev/control/internal/store"
@@ -25,13 +24,9 @@ var validReportPlatform = map[string]bool{"Windows": true, "macOS": true, "Linux
 // handlePostureReport 终端 posture 上报：风险引擎按安全基线评估 → 落库最新报告 → 回传可解释判定。
 // 判定权在控制面；判定转入/转出 block 落 security 审计（自动收缩/恢复留痕）。
 func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
-	c, ok := auth.FromContext(r.Context())
+	// requireUser：拒网关身份与 WebAuthn 中间票据(role=mfa)——只有完整会话才能上报终端环境。
+	c, ok := s.requireUser(w, r)
 	if !ok {
-		httpx.Error(w, http.StatusUnauthorized, "未认证")
-		return
-	}
-	if c.Role == "gateway" {
-		httpx.Error(w, http.StatusForbidden, "网关身份不能上报终端环境")
 		return
 	}
 	var b struct {

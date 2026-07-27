@@ -17,6 +17,7 @@ import (
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
+	"baidi.dev/control/internal/webauthnx"
 )
 
 func main() {
@@ -35,7 +36,20 @@ func main() {
 	}
 	defer st.Close()
 	secret := []byte(cfg.JWTSecret)
-	srv := api.New(st, st, secret, cfg.Env, cfg.DownloadsDir)
+	// WebAuthn RP：RP ID 必须是可注册域名或 localhost（浏览器不允许裸 IP），
+	// 未配置即禁用 passkey，登录回落 legacy 演示验证码路径。
+	rp, err := webauthnx.New(cfg.WebauthnRPID, cfg.WebauthnOrigins, "白帝零信任")
+	if err != nil {
+		slog.Error("WebAuthn 配置无效", "rpid", cfg.WebauthnRPID, "origins", cfg.WebauthnOrigins, "err", err)
+		os.Exit(1)
+	}
+	if rp == nil {
+		slog.Warn("WebAuthn 未启用（BAIDI_WEBAUTHN_RPID/ORIGIN 未配置）：二次认证回落演示验证码路径；" +
+			"生产请配置可注册域名——浏览器规范不允许裸 IP 作 RP ID")
+	} else {
+		slog.Info("WebAuthn 已启用", "rpid", cfg.WebauthnRPID, "origins", cfg.WebauthnOrigins)
+	}
+	srv := api.New(st, st, secret, cfg.Env, cfg.DownloadsDir, rp)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

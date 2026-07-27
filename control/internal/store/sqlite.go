@@ -44,6 +44,13 @@ type Writer interface {
 	CreateAccessRequest(ctx context.Context, req AccessRequest) (AccessRequest, error)
 	DecideAccessRequest(ctx context.Context, id, decision, reason, decidedBy string, ttlOverride int) (AccessRequest, JitGrant, error)
 	RevokeGrant(ctx context.Context, id, reason string) (JitGrant, error)
+	// WebAuthn：凭据落库/删除、签名计数器更新、challenge 生成与单次消费
+	SaveWebauthnCredential(ctx context.Context, c WebauthnCredential) (WebauthnCredential, error)
+	DeleteWebauthnCredential(ctx context.Context, account, id string) error
+	UpdateSignCount(ctx context.Context, credentialID string, newCount uint32) error
+	CreateWebauthnChallenge(ctx context.Context, ch WebauthnChallenge) (WebauthnChallenge, error)
+	ConsumeWebauthnChallenge(ctx context.Context, challenge, typ string) (WebauthnChallenge, error)
+	PurgeExpiredChallenges(ctx context.Context) (int64, error)
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -217,7 +224,18 @@ CREATE TABLE IF NOT EXISTS jit_grants (
   id TEXT PRIMARY KEY, usr TEXT, resource_id TEXT, resource_name TEXT, request_id TEXT,
   reason TEXT, granted_by TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT,
   revoked_at INTEGER, revoke_reason TEXT
-);`)
+);
+CREATE TABLE IF NOT EXISTS webauthn_credentials (
+  id TEXT PRIMARY KEY, user_id TEXT, account TEXT, credential_id TEXT UNIQUE,
+  public_key TEXT, sign_count INTEGER DEFAULT 0, transports TEXT, aaguid TEXT,
+  name TEXT, created_at TEXT, last_used_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_webauthn_creds_account ON webauthn_credentials(account);
+CREATE TABLE IF NOT EXISTS webauthn_challenges (
+  id TEXT PRIMARY KEY, account TEXT, challenge TEXT, type TEXT, session_data TEXT,
+  expires_at INTEGER, consumed INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);`)
 	if err != nil {
 		return err
 	}

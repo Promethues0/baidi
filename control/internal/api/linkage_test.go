@@ -21,6 +21,9 @@ import (
 
 var testSecret = []byte("test-secret")
 
+// testKeys：Ed25519 签发 + 迁移期接受 HS256（与生产默认姿态一致）
+var testKeys = auth.NewTestKeys(testSecret, true)
+
 func newTestServer(t *testing.T) http.Handler {
 	t.Helper()
 	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "test.db"))
@@ -28,8 +31,8 @@ func newTestServer(t *testing.T) http.Handler {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", t.TempDir(), nil)
-	return auth.Middleware(testSecret, s.IsOpen)(s.Routes())
+	s := New(st, st, testKeys, "test", t.TempDir(), nil)
+	return auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 }
 
 func doJSON(t *testing.T, h http.Handler, method, path, token string, body any) (int, map[string]any) {
@@ -65,15 +68,15 @@ func portalLogin(t *testing.T, h http.Handler, user, mfa string) map[string]any 
 }
 
 func userToken(name string) string {
-	return auth.Sign(testSecret, auth.Claims{Sub: name, Role: "user", Name: name}, tokenTTL)
+	return testKeys.Sign(auth.Claims{Sub: name, Role: "user", Name: name}, tokenTTL)
 }
 
 func adminToken() string {
-	return auth.Sign(testSecret, auth.Claims{Sub: "admin", Role: "admin", Name: "安全管理员"}, tokenTTL)
+	return testKeys.Sign(auth.Claims{Sub: "admin", Role: "admin", Name: "安全管理员"}, tokenTTL)
 }
 
 func gatewayToken() string {
-	return auth.Sign(testSecret, auth.Claims{Sub: "gw-test", Role: "gateway", Name: "gw-test"}, tokenTTL)
+	return testKeys.Sign(auth.Claims{Sub: "gw-test", Role: "gateway", Name: "gw-test"}, tokenTTL)
 }
 
 // revokedUsers 拉一次网关策略，返回 revoked 名单里的账号集合。

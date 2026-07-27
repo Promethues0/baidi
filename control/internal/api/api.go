@@ -34,7 +34,7 @@ const (
 type Server struct {
 	store         store.Store
 	writer        store.Writer
-	secret        []byte
+	keys          *auth.Keys // Ed25519 签发/双验（迁移期兼容 HS256 存量令牌）
 	env           string
 	downloadsDir  string        // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
 	rp            *webauthnx.RP // WebAuthn 依赖方；nil = 未配置 RP ID/Origin，登录回落 legacy 演示路径
@@ -110,8 +110,8 @@ type GwSession struct {
 
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
 // rp 为已装配的 WebAuthn 依赖方，nil 表示未配置（登录回落 legacy 演示验证码路径）。
-func New(st store.Store, wr store.Writer, secret []byte, env string, downloadsDir string, rp *webauthnx.RP) *Server {
-	return &Server{store: st, writer: wr, secret: secret, env: env, downloadsDir: downloadsDir, rp: rp,
+func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloadsDir string, rp *webauthnx.RP) *Server {
+	return &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
 		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
@@ -314,7 +314,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
 	// 令牌 Name=账号（数据面网关按 claims.Name 做放行/封禁匹配，必须是规范账号，不能放显示名）；
 	// 显示名单独经响应体 displayName 回给前端。
-	tok := auth.Sign(s.secret, auth.Claims{Sub: cred.Account, Role: cred.Role, Name: cred.Account}, tokenTTL)
+	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: cred.Role, Name: cred.Account}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name})
 }
 
@@ -551,7 +551,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
 	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
-	tok := auth.Sign(s.secret, auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
+	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name, "role": "admin"})
 }
 
@@ -611,7 +611,7 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	// Use=knock 是给数据面的用途自证：网关 strict 模式只接受本处签发的令牌，
 	// 会话令牌/MFA 票据（Use 为空）一律拒绝敲门——堵死"持 8h 会话令牌直连数据面、
 	// 绕过封禁/账号状态/终端合规三道闸"的旁路。改 knockTTL 须同步网关 -knock-max-ttl 上界。
-	tok := auth.Sign(s.secret, auth.Claims{
+	tok := s.keys.Sign(auth.Claims{
 		Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI(), Use: auth.UseKnock,
 	}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})

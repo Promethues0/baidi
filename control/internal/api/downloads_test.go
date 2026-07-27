@@ -22,8 +22,8 @@ func newDownloadsServer(t *testing.T) (http.Handler, string) {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", dir, nil)
-	return auth.Middleware(testSecret, s.IsOpen)(s.Routes()), dir
+	s := New(st, st, testKeys, "test", dir, nil)
+	return auth.Middleware(testKeys, s.IsOpen)(s.Routes()), dir
 }
 
 func getManifest(t *testing.T, h http.Handler) (int, map[string]any) {

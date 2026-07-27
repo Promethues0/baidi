@@ -119,12 +119,12 @@ func withLegacyMfaCode(ctx context.Context, code string) context.Context {
 // signMfaTicket 签发"口令已验"的一次性短票据：role=mfa 使其无法当会话令牌用
 // （requireAdmin/requireUser 都不认 mfa 角色），只能用来换取一次 WebAuthn 断言。
 func (s *Server) signMfaTicket(account string) string {
-	return auth.Sign(s.secret, auth.Claims{Sub: account, Role: "mfa", Name: account, Jti: auth.RandJTI()}, mfaTicketTTL)
+	return s.keys.Sign(auth.Claims{Sub: account, Role: "mfa", Name: account, Jti: auth.RandJTI()}, mfaTicketTTL)
 }
 
 // verifyMfaTicket 校验票据并取回账号；非 mfa 角色一律拒（防会话令牌当票据用）。
 func (s *Server) verifyMfaTicket(tok string) (string, bool) {
-	c, err := auth.Verify(s.secret, tok)
+	c, err := s.keys.Verify(tok)
 	if err != nil || c.Role != "mfa" || c.Sub == "" {
 		return "", false
 	}
@@ -345,7 +345,7 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.auditAs(r, account, "auth", "passkey 二次认证通过，登录成功", "ok")
-	tok := auth.Sign(s.secret, auth.Claims{Sub: wu.cred.Account, Role: wu.cred.Role, Name: wu.cred.Account, Jti: auth.RandJTI()}, tokenTTL)
+	tok := s.keys.Sign(auth.Claims{Sub: wu.cred.Account, Role: wu.cred.Role, Name: wu.cred.Account, Jti: auth.RandJTI()}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"ok": true, "token": tok, "displayName": wu.cred.Name, "role": wu.cred.Role,
 	})

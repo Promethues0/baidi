@@ -18,6 +18,7 @@ import (
 	"strings"
 	"time"
 
+	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/cplane"
 	"baidi.dev/gateway/internal/darkfw"
 	"baidi.dev/gateway/internal/gmcert"
@@ -44,6 +45,10 @@ func main() {
 			"关闭则兼容长效会话令牌直接敲门——那会绕过封禁/账号状态/终端合规三道闸，仅限过渡")
 	knockMaxTTL := flag.Duration("knock-max-ttl", 5*time.Minute,
 		"敲门令牌寿命上界（纵深防御；须 ≥ control 的 knockTTL）")
+	jwtPub := flag.String("jwt-pubkey", env("BAIDI_GW_JWT_PUBKEY", ""),
+		"control 的 Ed25519 公钥 PEM 路径（部署期分发的 <私钥>.pub）：只验不签，网关不再持签发能力")
+	acceptHS256 := flag.Bool("accept-hs256", envBool("BAIDI_GW_ACCEPT_HS256", true),
+		"迁移期是否接受旧的 HS256 共享密钥令牌；收口后置 false，网关即完全依赖公钥验证")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -56,8 +61,17 @@ func main() {
 	if !*strictKnock {
 		slog.Warn("⚠ 严格敲门已关闭：长效会话令牌可直接敲门，绕过强制下线/账号禁用/终端合规三道闸，仅限过渡期")
 	}
+	verifier, err := auth.NewVerifier(*jwtPub, []byte(*secret), *acceptHS256)
+	if err != nil {
+		log.Fatalf("载入令牌验证材料失败: %v", err)
+	}
+	if !verifier.HasPublicKey() {
+		slog.Warn("⚠ 未配置 control 公钥（-jwt-pubkey）：仍在用共享密钥校验令牌，" +
+			"网关机被攻陷即可自签任意角色令牌；请分发 control 的 <私钥>.pub 并收口 HS256")
+	}
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
-		"ttl", ttl.String(), "strictKnock", *strictKnock)
+		"ttl", ttl.String(), "strictKnock", *strictKnock,
+		"jwtPubkey", verifier.HasPublicKey(), "acceptHS256", verifier.AcceptsLegacy())
 
 	al := spa.NewAllowlist()
 
@@ -168,7 +182,7 @@ func main() {
 	}
 
 	go func() {
-		if err := spa.Serve(*spaAddr, []byte(*secret), *ttl, al, *strictKnock, *knockMaxTTL); err != nil {
+		if err := spa.Serve(*spaAddr, verifier, *ttl, al, *strictKnock, *knockMaxTTL); err != nil {
 			log.Fatalf("SPA 监听失败: %v", err)
 		}
 	}()

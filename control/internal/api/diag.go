@@ -33,8 +33,8 @@ type DiagCheck struct {
 	Status   string     `json:"status"` // pass | warn | fail
 	Summary  string     `json:"summary"`
 	Metric   string     `json:"metric"`
-	Hint     string     `json:"hint"`             // 处置建议（warn/fail 时）
-	Items    []DiagItem `json:"items,omitempty"`  // 可展开明细（如每台网关）
+	Hint     string     `json:"hint"`            // 处置建议（warn/fail 时）
+	Items    []DiagItem `json:"items,omitempty"` // 可展开明细（如每台网关）
 }
 
 // DiagBundle 一次运维体检的完整结果（控制面真实探测，非种子）。
@@ -352,19 +352,25 @@ func (s *Server) checkPosture(ctx context.Context) DiagCheck {
 // checkSecurity 检查 JWT 密钥强度与传输加密拓扑（诚实反映控制面回环 HTTP + nginx 前置 TLS）。
 func (s *Server) checkSecurity() DiagCheck {
 	c := DiagCheck{Key: "secret", Category: "security", Name: "密钥与传输安全"}
-	defaultSecret := string(s.secret) == config.DefaultJWTSecret
+	legacyOn := s.keys.AcceptsLegacy()
+	defaultSecret := legacyOn && s.keys.LegacyIs(config.DefaultJWTSecret)
+	c.Items = []DiagItem{
+		{Label: "令牌签名", Value: "Ed25519 (EdDSA) · kid " + s.keys.Kid(), Status: "pass"},
+	}
 	switch {
 	case defaultSecret && s.env == "prod":
-		c.Status, c.Metric = "fail", "默认密钥 · 生产"
-		c.Summary = "生产环境仍使用默认 JWT 密钥，令牌可被伪造"
-		c.Hint = "立即经 BAIDI_JWT_SECRET 注入高强度随机密钥并重启"
-	case defaultSecret:
-		c.Status, c.Metric = "warn", "默认密钥 · 开发"
-		c.Summary = "使用开发默认 JWT 密钥（控制面回环 HTTP，前置 nginx 终止 TLS）"
-		c.Hint = "上线前经 BAIDI_JWT_SECRET 注入随机密钥"
+		c.Status, c.Metric = "fail", "默认共享密钥 · 生产"
+		c.Summary = "生产仍接受默认 HS256 共享密钥签发的令牌，任何持该密钥者可伪造 admin"
+		c.Hint = "注入强随机 BAIDI_JWT_SECRET，并尽快置 BAIDI_ACCEPT_HS256=0 关闭迁移窗口"
+	case legacyOn:
+		c.Status, c.Metric = "warn", "迁移窗口开启"
+		c.Summary = "令牌已切 Ed25519 非对称签名，但仍接受存量 HS256 令牌（升级兼容窗口）"
+		c.Hint = "存量 8h 会话令牌全部自然过期后，置 BAIDI_ACCEPT_HS256=0 收口"
+		c.Items = append(c.Items, DiagItem{Label: "HS256 兼容", Value: "仍接受（迁移期）", Status: "warn"})
 	default:
-		c.Status, c.Metric = "pass", "自定义密钥"
-		c.Summary = "JWT 密钥已自定义；控制面经前置 nginx 终止 TLS，数据面国密证书由网关自治"
+		c.Status, c.Metric = "pass", "非对称签名 · 已收口"
+		c.Summary = "令牌由 control 私钥签发，数据面只持公钥、不具备签发能力；HS256 兼容已关闭"
+		c.Items = append(c.Items, DiagItem{Label: "HS256 兼容", Value: "已关闭", Status: "pass"})
 	}
 	return c
 }

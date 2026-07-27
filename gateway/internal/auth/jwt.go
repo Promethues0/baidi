@@ -87,7 +87,12 @@ func Verify(secret []byte, token string) (Claims, error) {
 	if !hmac.Equal([]byte(b64.EncodeToString(h.Sum(nil))), []byte(parts[2])) {
 		return Claims{}, errors.New("bad signature")
 	}
-	raw, err := b64.DecodeString(parts[1])
+	return decodeClaims(parts[1])
+}
+
+// decodeClaims 解析 payload 并校验有效期（EdDSA / HS256 两条验签路径共用）。
+func decodeClaims(seg string) (Claims, error) {
+	raw, err := b64.DecodeString(seg)
 	if err != nil {
 		return Claims{}, errors.New("bad payload")
 	}

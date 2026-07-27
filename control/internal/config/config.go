@@ -4,6 +4,7 @@ package config
 import (
 	"os"
 	"strconv"
+	"strings"
 	"time"
 )
 
@@ -27,6 +28,8 @@ type Config struct {
 	DownloadsDir    string        // 客户端安装包目录（manifest.json + 安装包）
 	WebauthnRPID    string        // WebAuthn RP ID（可注册域名，如 vpn.example.com / localhost）
 	WebauthnOrigins string        // WebAuthn 允许来源，逗号分隔（如 https://vpn.example.com）
+	JWTKeyPath      string        // Ed25519 签名私钥 PEM 路径（缺失则首启生成；公钥写同名 .pub 供分发）
+	AcceptHS256     bool          // 迁移期是否接受存量 HS256 令牌（默认 true，收口后置 0）
 }
 
 // Load 从环境变量装载配置。
@@ -44,7 +47,23 @@ func Load() Config {
 		// 两者任一为空即视为未启用，登录回落 legacy 演示验证码路径（见 api.webauthnEnabled）。
 		WebauthnRPID:    env("BAIDI_WEBAUTHN_RPID", ""),
 		WebauthnOrigins: env("BAIDI_WEBAUTHN_ORIGIN", ""),
+		// 令牌签名私钥：control 独有，绝不下发给网关（网关只拿 .pub）。
+		JWTKeyPath: env("BAIDI_JWT_KEY", "jwt-ed25519.pem"),
+		// 迁移期默认接受存量 HS256 令牌：升级瞬间在线会话（8h TTL）与网关自签的
+		// role=gateway 令牌都还是 HS256，一刀切会让管理台掉线 + 数据面断联。
+		AcceptHS256: envBool("BAIDI_ACCEPT_HS256", true),
 	}
+}
+
+// envBool 读布尔环境变量（1/true/yes/on 为真，0/false/no/off 为假，其余取默认）。
+func envBool(k string, def bool) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(k))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	}
+	return def
 }
 
 func env(k, def string) string {

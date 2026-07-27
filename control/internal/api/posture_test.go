@@ -149,9 +149,9 @@ func TestPostureStrictMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", t.TempDir(), nil)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil)
 	s.postureStrict = true
-	h := auth.Middleware(testSecret, s.IsOpen)(s.Routes())
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 	tok := userToken("li.fang")
 
 	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusForbidden {
@@ -207,9 +207,9 @@ func TestPostureStrictUsesFreshestNotWorst(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testSecret, "test", t.TempDir(), nil)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil)
 	s.postureStrict = true
-	h := auth.Middleware(testSecret, s.IsOpen)(s.Routes())
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 
 	ctx := context.Background()
 	old := time.Now().Add(-20 * time.Minute).Unix()

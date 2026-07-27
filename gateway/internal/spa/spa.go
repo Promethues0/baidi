@@ -207,12 +207,13 @@ func checkKnock(c auth.Claims, protected bool, maxTTL time.Duration) error {
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
 // strict=true 时只接受 control /knock-token 签发的短时效一次性敲门令牌（见 checkKnock）；
 // false 为过渡兼容姿态，仅告警不拒绝——生产务必开启。
-func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist, strict bool, knockMaxTTL time.Duration) error {
+func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, strict bool, knockMaxTTL time.Duration) error {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return err
 	}
-	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String(), "strict", strict, "knockMaxTTL", knockMaxTTL.String())
+	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String(), "strict", strict,
+		"knockMaxTTL", knockMaxTTL.String(), "pubkey", v.HasPublicKey(), "acceptHS256", v.AcceptsLegacy())
 	cache := knock.NewCache()
 	const skew = 30 * time.Second // 允许时钟偏移 / 重放窗口
 	buf := make([]byte, 8192)
@@ -227,7 +228,7 @@ func Serve(addr string, secret []byte, ttl time.Duration, al *Allowlist, strict 
 			slog.Warn("SPA 敲门拒绝（重放/信封无效）", "src", ip, "err", err.Error())
 			continue
 		}
-		claims, err := auth.Verify(secret, token)
+		claims, err := v.Verify(token)
 		if err != nil {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
 			continue

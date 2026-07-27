@@ -33,6 +33,38 @@ type Claims struct {
 
 var b64 = base64.RawURLEncoding
 
+// header JWT 头。kid 供多密钥/轮换时定位公钥（阶段 1 起使用）。
+type header struct {
+	Alg string `json:"alg"`
+	Typ string `json:"typ"`
+	Kid string `json:"kid,omitempty"`
+}
+
+// parseHeader 解析并校验 JWT 头：alg 必须在白名单内、typ 必须是 JWT。
+//
+// ★这是引入公钥验证分支的前置：若不锁定 alg，攻击者可把 alg 改成 HS256 并拿
+// 公钥（公开信息）当 HMAC 密钥伪造签名——经典的 alg-confusion。当前单算法下
+// 不构成漏洞，但必须先于任何 EdDSA 分支落地。
+func parseHeader(seg string, allow ...string) (header, error) {
+	raw, err := b64.DecodeString(seg)
+	if err != nil {
+		return header{}, errors.New("bad header")
+	}
+	var h header
+	if err := json.Unmarshal(raw, &h); err != nil {
+		return header{}, errors.New("bad header")
+	}
+	if h.Typ != "" && h.Typ != "JWT" {
+		return header{}, errors.New("unexpected typ")
+	}
+	for _, a := range allow {
+		if h.Alg == a {
+			return h, nil
+		}
+	}
+	return header{}, errors.New("unexpected alg: " + h.Alg)
+}
+
 // RandJTI 生成随机令牌 id（短时效敲门令牌单次有效的去重键）。
 func RandJTI() string {
 	b := make([]byte, 16)
@@ -56,6 +88,10 @@ func Verify(secret []byte, token string) (Claims, error) {
 	parts := strings.Split(token, ".")
 	if len(parts) != 3 {
 		return Claims{}, errors.New("malformed token")
+	}
+	// 先锁 alg，再验签：杜绝 alg-confusion（见 parseHeader）。
+	if _, err := parseHeader(parts[0], "HS256"); err != nil {
+		return Claims{}, err
 	}
 	body := parts[0] + "." + parts[1]
 	if !hmac.Equal([]byte(mac(secret, body)), []byte(parts[2])) {

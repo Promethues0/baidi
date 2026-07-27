@@ -32,6 +32,7 @@ export const NAV: NavGroup[] = [
       { title: '用户与角色', path: '/business/users', icon: 'IconUserGroup', done: true },
       { title: '认证源接入', path: '/business/auth', icon: 'IconLock', done: true },
       { title: '终端管理', path: '/business/devices', icon: 'IconMobile', done: true },
+      { title: 'JIT 即时访问', path: '/business/jit', icon: 'IconThunderbolt', done: true },
       { title: '对象库', path: '/business/objects', icon: 'IconBookmark', done: true }
     ]
   },

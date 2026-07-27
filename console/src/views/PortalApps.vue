@@ -2,6 +2,9 @@
   <div class="bd-portal">
     <!-- 顶部细 bar -->
     <PortalBar title="白帝 · 应用门户">
+      <button class="bd-pquit" @click="router.push('/portal/requests')">
+        <icon-history /><span>我的申请</span>
+      </button>
       <button class="bd-pquit" @click="router.push('/portal/downloads')">
         <icon-download /><span>下载客户端</span>
       </button>
@@ -75,6 +78,25 @@
         </a-spin>
       </div>
     </main>
+
+    <!-- JIT 访问申请 -->
+    <a-modal v-model:visible="reqOpen" :title="`申请访问「${reqApp?.name ?? ''}」`" :width="480"
+      :ok-loading="submitting" @ok="submitRequest" ok-text="提交申请" cancel-text="取消">
+      <div class="bd-reqtip">
+        <icon-safe class="bd-reqtip__ic" />
+        <div>该应用为<b>高敏资源</b>，需管理员审批。批准后你将获得<b>限时访问授予</b>，到期自动回收。</div>
+      </div>
+      <div class="bd-reqfield">
+        <label>期望时长（分钟）</label>
+        <a-input-number v-model="reqTtl" :min="15" :max="480" :step="15" style="width: 160px" />
+        <span class="bd-reqfield__hint">15–480 分钟</span>
+      </div>
+      <div class="bd-reqfield">
+        <label>申请理由</label>
+        <a-textarea v-model="reqReason" placeholder="例如：季度财务对账，需临时访问财务核算系统"
+          :max-length="200" allow-clear :auto-size="{ minRows: 3, maxRows: 5 }" />
+      </div>
+    </a-modal>
   </div>
 </template>
 
@@ -91,6 +113,13 @@ const loading = ref(false);
 const keyword = ref('');
 const apps = ref<PortalTile[]>([]);
 const displayName = ref('');
+
+/* JIT 访问申请弹窗 */
+const reqOpen = ref(false);
+const reqApp = ref<PortalTile | null>(null);
+const reqReason = ref('');
+const reqTtl = ref(60);
+const submitting = ref(false);
 
 const modeMeta: Record<PortalTile['mode'], { label: string; icon: string }> = {
   tunnel: { label: '隧道代理', icon: 'icon-swap' },
@@ -121,7 +150,31 @@ function openApp(app: PortalTile) {
 }
 
 function requestAccess(app: PortalTile) {
-  Message.info(`「${app.name}」权限申请已提交，待审批`);
+  reqApp.value = app;
+  reqReason.value = '';
+  reqTtl.value = 60;
+  reqOpen.value = true;
+}
+
+async function submitRequest() {
+  const app = reqApp.value;
+  if (!app) return;
+  if (!reqReason.value.trim()) { Message.warning('请填写申请理由'); return; }
+  submitting.value = true;
+  try {
+    await api('/portal/access-requests', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: app.id, reason: reqReason.value.trim(), ttlMinutes: reqTtl.value })
+    });
+    reqOpen.value = false;
+    Message.success(`「${app.name}」访问申请已提交，等待管理员审批`);
+  } catch (e) {
+    // 无后端 / 重复申请等：不白屏，提示即可（HTTP 409 = 已有待审批或有效授予）
+    const msg = String((e as Error)?.message ?? '');
+    Message.error(msg.startsWith('409') ? '你已有待审批的申请或有效授予，请勿重复提交' : '申请提交失败，请稍后再试');
+  } finally {
+    submitting.value = false;
+  }
 }
 
 async function load() {
@@ -239,4 +292,12 @@ onMounted(() => {
 .bd-empty__icon { font-size: 56px; color: var(--bd-t4); }
 .bd-empty__t { margin-top: 16px; font-size: 16px; font-weight: 600; color: var(--bd-t2); }
 .bd-empty__s { margin-top: 6px; font-size: 13px; color: var(--bd-t3); }
+
+/* 申请弹窗 */
+.bd-reqtip { display: flex; gap: 10px; font-size: 13px; line-height: 1.7; color: var(--bd-t2); margin-bottom: 16px; }
+.bd-reqtip__ic { color: var(--bd-primary); font-size: 18px; flex: none; margin-top: 2px; }
+.bd-reqtip b { color: var(--bd-t1); font-weight: 600; }
+.bd-reqfield { margin-bottom: 14px; }
+.bd-reqfield label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 8px; }
+.bd-reqfield__hint { font-size: 12px; color: var(--bd-t3); margin-left: 10px; }
 </style>

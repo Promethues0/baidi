@@ -32,6 +32,12 @@ type Store interface {
 	ObjectExists(ctx context.Context, kind, id string) (bool, error)
 	AuthPolicies(ctx context.Context) ([]AuthPolicy, error)
 	Credential(ctx context.Context, account string) (Credential, bool, error)
+	// JIT 即时访问：申请单 + 时限授予（真实数据域，Memory 返回空）
+	AccessRequests(ctx context.Context) ([]AccessRequest, error)
+	AccessRequestsFor(ctx context.Context, user string) ([]AccessRequest, error)
+	JitGrants(ctx context.Context) ([]JitGrant, error)
+	ActiveGrants(ctx context.Context) ([]JitGrant, error)
+	ActiveGrantsFor(ctx context.Context, user string) ([]JitGrant, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

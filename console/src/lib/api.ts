@@ -204,8 +204,25 @@ export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 
 /* ── 终端用户门户 ── */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
-export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
+export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean; resourceId: string }
 export interface PortalAppsResp { apps: PortalTile[] }
+
+/* ── JIT 即时访问申请 / 时限授予（store.AccessRequest / store.JitGrant）── */
+export interface AccessRequest {
+  id: string; user: string; resourceId: string; resourceName: string;
+  reason: string; ttlMinutes: number;
+  status: 'pending' | 'approved' | 'rejected';
+  timeline: ApprovalEvent[];
+  submittedAt: string; decidedAt: string; decideReason: string; decidedBy: string; grantId: string;
+}
+export interface JitGrant {
+  id: string; user: string; resourceId: string; resourceName: string; requestId: string;
+  reason: string; grantedBy: string; grantedAt: number; expiresAt: number;
+  status: 'active' | 'revoked' | 'expired'; revokedAt: number; revokeReason: string;
+}
+export interface AccessRequestsResp { requests: AccessRequest[] }
+export interface MyRequestsResp { requests: AccessRequest[]; grants: JitGrant[] }
+export interface JitGrantsResp { grants: JitGrant[] }
 
 /** 客户端下载中心（公开端点 GET /portal/downloads；文件走 /downloads/<file>） */
 export interface ClientDownload {

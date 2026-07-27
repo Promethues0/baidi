@@ -14,6 +14,7 @@ const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/business/apps': () => import('@/views/Apps.vue'),
   '/business/users': () => import('@/views/Users.vue'),
   '/business/devices': () => import('@/views/Devices.vue'),
+  '/business/jit': () => import('@/views/Jit.vue'),
   '/business/auth': () => import('@/views/Auth.vue'),
   '/security/audit': () => import('@/views/Audit.vue'),
   '/security/gateway': () => import('@/views/Gateway.vue'),
@@ -36,6 +37,7 @@ const routes: RouteRecordRaw[] = [
   { path: '/portal/login', component: () => import('@/views/PortalLogin.vue') },
   { path: '/portal', redirect: '/portal/apps' },
   { path: '/portal/apps', component: () => import('@/views/PortalApps.vue') },
+  { path: '/portal/requests', component: () => import('@/views/PortalRequests.vue') },
   { path: '/portal/downloads', component: () => import('@/views/PortalDownloads.vue') },
   // 态势大屏（全屏 NOC，脱离控制台 chrome；非 public，受登录守卫保护）
   { path: '/screen', component: () => import('@/views/BigScreen.vue') },

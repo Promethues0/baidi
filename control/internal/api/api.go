@@ -202,6 +202,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/posture", s.handlePostureReport)
 	mux.HandleFunc("GET /api/v1/posture", s.handlePostureList)
 	mux.HandleFunc("DELETE /api/v1/posture/{user}/{device}", s.handleDeletePostureReport)
+	// JIT 即时访问：门户自助申请 + 我的申请（登录用户）；管理台待办/审批/授予清单/撤销（admin）
+	mux.HandleFunc("POST /api/v1/portal/access-requests", s.handlePortalCreateAccessRequest)
+	mux.HandleFunc("GET /api/v1/portal/access-requests", s.handlePortalMyRequests)
+	mux.HandleFunc("GET /api/v1/access-requests", s.handleAccessRequests)
+	mux.HandleFunc("POST /api/v1/access-requests/{id}/decide", s.handleDecideAccessRequest)
+	mux.HandleFunc("GET /api/v1/jit/grants", s.handleJitGrants)
+	mux.HandleFunc("POST /api/v1/jit/grants/{id}/revoke", s.handleRevokeGrant)
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 
@@ -307,14 +314,25 @@ type PortalTile struct {
 	Addr        string `json:"addr"`
 	Sensitivity string `json:"sensitivity"` // normal | high
 	Accessible  bool   `json:"accessible"`  // false = 需申请
+	ResourceID  string `json:"resourceId"`  // 关联受控资源（JIT 申请用；空=不接入自助申请）
 }
 
 // handlePortalApps 返回当前用户可见的应用门户（复用 SQLite 中的已发布应用；高敏类需申请）。
+// 高敏磁贴默认 Accessible=false（需申请）；若当前用户对该资源持有效 JIT 授予，则翻回可访问——JIT 闭环的门户侧收口。
 func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	b, err := s.store.Apps(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load portal apps")
 		return
+	}
+	// 调用方的有效授予集合（resource_id）：把「需申请」磁贴翻回可访问。best-effort，读失败按未授予处理。
+	granted := map[string]bool{}
+	if c, ok := auth.FromContext(r.Context()); ok {
+		if gs, err := s.store.ActiveGrantsFor(r.Context(), normUser(c.Name)); err == nil {
+			for _, g := range gs {
+				granted[g.ResourceID] = true
+			}
+		}
 	}
 	tiles := []PortalTile{}
 	for _, a := range b.Apps {
@@ -324,8 +342,11 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		sens, acc := "normal", true
 		if a.Category == "finance" {
 			sens, acc = "high", false // 高敏应用默认需走自助申请审批
+			if a.ResourceID != "" && granted[a.ResourceID] {
+				acc = true // 持有效 JIT 授予 → 临时可访问
+			}
 		}
-		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr, Sensitivity: sens, Accessible: acc})
+		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr, Sensitivity: sens, Accessible: acc, ResourceID: a.ResourceID})
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
 }
@@ -672,6 +693,25 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 			if k := normUser(acc); !seen[k] {
 				seen[k] = true
 				revoked = append(revoked, revokedDTO{User: acc, Until: until})
+			}
+		}
+	}
+
+	// JIT 即时访问：把有效授予（active 且未到期）临时并入对应资源的 AllowUsers——网关零改动即经
+	// proxy.Authorize 命中放行。★必须在 seen 排除集（revoked+禁用/锁定+posture-block）完全构建之后：
+	// grant 只加正向 allow，被上游否决的账号在此先剔除（撤销恒胜于授予）。只改内存 DTO（rs 每次现构造），
+	// 绝不 SaveResource 写回；到期后 ActiveGrants 不再 emit，网关下轮 reg.Replace 即失效（惰性回收）。
+	if grants, err := s.store.ActiveGrants(r.Context()); err == nil {
+		idx := make(map[string]int, len(rs))
+		for i := range rs {
+			idx[rs[i].ID] = i
+		}
+		for _, g := range grants {
+			if now >= g.ExpiresAt || seen[normUser(g.User)] {
+				continue // 双保险到期过滤 + 撤销/禁用/posture-block 恒胜
+			}
+			if i, ok := idx[g.ResourceID]; ok {
+				rs[i].AllowUsers = append(rs[i].AllowUsers, g.User)
 			}
 		}
 	}

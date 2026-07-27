@@ -14,7 +14,8 @@ type AppCategory struct {
 	Count int    `json:"count"`
 }
 
-// App 受控应用资源。
+// App 受控应用资源。ResourceID 关联 resources.id——门户高敏应用自助申请(JIT)据此把磁贴解析成
+// 真实受控资源；空=该应用不接入 JIT 自助申请。apps 与 resources 是两套 id 空间，靠此列显式桥接。
 type App struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
@@ -23,14 +24,15 @@ type App struct {
 	Category    string `json:"category"` // 分类 key
 	Node        string `json:"node"`     // 所属网关区域
 	AuthedUsers int    `json:"authedUsers"`
-	Status      string `json:"status"` // running | stopped
+	Status      string `json:"status"`     // running | stopped
+	ResourceID  string `json:"resourceId"` // 关联 resources.id（JIT 申请解析用；空=不接入自助申请）
 }
 
 func (m *Memory) Apps(_ context.Context) (AppBundle, error) {
 	apps := []App{
-		{ID: "a1", Name: "OA 协同办公", Addr: "10.20.1.10:8080", Mode: "web", Category: "office", Node: "华东出口", AuthedUsers: 860, Status: "running"},
-		{ID: "a2", Name: "财务核算系统", Addr: "10.20.3.21:443", Mode: "web", Category: "finance", Node: "华东出口", AuthedUsers: 64, Status: "running"},
-		{ID: "a3", Name: "研发 Git 仓库", Addr: "10.30.5.8:22", Mode: "tunnel", Category: "dev", Node: "华东出口", AuthedUsers: 210, Status: "running"},
+		{ID: "a1", Name: "OA 协同办公", Addr: "10.20.1.10:8080", Mode: "web", Category: "office", Node: "华东出口", AuthedUsers: 860, Status: "running", ResourceID: "oa"},
+		{ID: "a2", Name: "财务核算系统", Addr: "10.20.3.21:443", Mode: "web", Category: "finance", Node: "华东出口", AuthedUsers: 64, Status: "running", ResourceID: "finance"},
+		{ID: "a3", Name: "研发 Git 仓库", Addr: "10.30.5.8:22", Mode: "tunnel", Category: "dev", Node: "华东出口", AuthedUsers: 210, Status: "running", ResourceID: "git"},
 		{ID: "a4", Name: "数据库运维 (SSH)", Addr: "10.30.9.4:22", Mode: "tunnel", Category: "dev", Node: "华南出口", AuthedUsers: 18, Status: "running"},
 		{ID: "a5", Name: "客服工单系统", Addr: "10.40.2.7:8000", Mode: "web", Category: "office", Node: "华南出口", AuthedUsers: 64, Status: "stopped"},
 		{ID: "a6", Name: "知网文献 (全网资源)", Addr: "*.cnki.net", Mode: "global", Category: "global", Node: "华东出口", AuthedUsers: 1284, Status: "running"},

@@ -40,6 +40,10 @@ type Writer interface {
 	DeleteBaseline(ctx context.Context, id string) error
 	SavePostureReport(ctx context.Context, r PostureReport) error
 	DeletePostureReport(ctx context.Context, user, device string) (bool, error)
+	// JIT 即时访问：申请落库 + 审批（同事务建授予）+ 撤销授予
+	CreateAccessRequest(ctx context.Context, req AccessRequest) (AccessRequest, error)
+	DecideAccessRequest(ctx context.Context, id, decision, reason, decidedBy string, ttlOverride int) (AccessRequest, JitGrant, error)
+	RevokeGrant(ctx context.Context, id, reason string) (JitGrant, error)
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -157,7 +161,7 @@ func (s *SQLiteStore) migrate() error {
 	_, err := s.db.Exec(`
 CREATE TABLE IF NOT EXISTS apps (
   id TEXT PRIMARY KEY, name TEXT, addr TEXT, mode TEXT, category TEXT, node TEXT,
-  authed_users INTEGER, status TEXT, created_at TEXT
+  authed_users INTEGER, status TEXT, created_at TEXT, resource_id TEXT
 );
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY, usr TEXT, device TEXT, fingerprint TEXT, submitted_at TEXT,
@@ -203,6 +207,16 @@ CREATE TABLE IF NOT EXISTS posture_reports (
   user TEXT, device TEXT, platform TEXT, os TEXT, client_version TEXT,
   checks_json TEXT, verdict TEXT, score INTEGER, level TEXT, reasons_json TEXT, ts INTEGER,
   PRIMARY KEY(user, device)
+);
+CREATE TABLE IF NOT EXISTS access_requests (
+  id TEXT PRIMARY KEY, usr TEXT, resource_id TEXT, resource_name TEXT, reason TEXT,
+  ttl_minutes INTEGER, status TEXT, timeline TEXT, submitted_at TEXT,
+  decided_at TEXT, decide_reason TEXT, decided_by TEXT, grant_id TEXT
+);
+CREATE TABLE IF NOT EXISTS jit_grants (
+  id TEXT PRIMARY KEY, usr TEXT, resource_id TEXT, resource_name TEXT, request_id TEXT,
+  reason TEXT, granted_by TEXT, granted_at INTEGER, expires_at INTEGER, status TEXT,
+  revoked_at INTEGER, revoke_reason TEXT
 );`)
 	if err != nil {
 		return err
@@ -212,6 +226,7 @@ CREATE TABLE IF NOT EXISTS posture_reports (
 		{"resources", "addr_ref"}, {"resources", "svc_ref"},
 		{"ipsec_sites", "local_ref"}, {"ipsec_sites", "remote_ref"},
 		{"users", "pass_hash"}, {"users", "role"},
+		{"apps", "resource_id"}, // JIT：磁贴 → 受控资源的权威映射列（旧库补列）
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col); e != nil {
 			return e
@@ -239,8 +254,8 @@ func (s *SQLiteStore) seed() error {
 	if n == 0 {
 		b, _ := s.Memory.Apps(ctx)
 		for _, a := range b.Apps {
-			if _, err := s.db.Exec(`INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-				a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr()); err != nil {
+			if _, err := s.db.Exec(`INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+				a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr(), a.ResourceID); err != nil {
 				return err
 			}
 		}
@@ -517,7 +532,7 @@ var catOrder = []string{"office", "finance", "dev", "global"}
 
 // Apps 覆盖：从库读取应用 + 动态聚合分类计数。
 func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,authed_users,status FROM apps ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,authed_users,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
 	if err != nil {
 		return AppBundle{}, err
 	}
@@ -526,7 +541,7 @@ func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var a App
-		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Node, &a.AuthedUsers, &a.Status); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Node, &a.AuthedUsers, &a.Status, &a.ResourceID); err != nil {
 			return AppBundle{}, err
 		}
 		apps = append(apps, a)
@@ -548,8 +563,8 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 	if a.Node == "" {
 		a.Node = "华东出口"
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at) VALUES(?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr()); err != nil {
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+		a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr(), a.ResourceID); err != nil {
 		return App{}, err
 	}
 	return a, nil

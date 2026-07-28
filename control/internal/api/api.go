@@ -13,6 +13,7 @@ import (
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
 )
@@ -32,18 +33,22 @@ const (
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
-	store         store.Store
-	writer        store.Writer
-	keys          *auth.Keys // Ed25519 签发/双验（迁移期兼容 HS256 存量令牌）
-	env           string
-	downloadsDir  string        // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
-	rp            *webauthnx.RP // WebAuthn 依赖方；nil = 未配置 RP ID/Origin，登录回落 legacy 演示路径
-	postureStrict bool          // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
-	mu            sync.Mutex
-	gateways      map[string]GatewayInfo // 已注册（在线）网关，按 id
-	gwSess        map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
-	kicked        map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
-	revoked       map[string]revokeInfo  // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	store        store.Store
+	writer       store.Writer
+	keys         *auth.Keys // Ed25519 签发/双验（迁移期兼容 HS256 存量令牌）
+	env          string
+	downloadsDir string        // 客户端安装包目录（manifest.json + 安装包），BAIDI_DOWNLOADS
+	rp           *webauthnx.RP // WebAuthn 依赖方；nil = 未配置 RP ID/Origin，登录回落 legacy 演示路径
+	ca           *pki.CA       // 内部 CA：签发网关 mTLS 客户端证书；nil = 未启用
+	// gwPlaintextCompat 迁移期是否允许明文 :8090 上用 JWT role=gateway 调网关接口。
+	// 收口后置 false，网关接口就只剩 mTLS 一条路。
+	gwPlaintextCompat bool
+	postureStrict     bool // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
+	mu                sync.Mutex
+	gateways          map[string]GatewayInfo // 已注册（在线）网关，按 id
+	gwSess            map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	kicked            map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	revoked           map[string]revokeInfo  // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
@@ -110,8 +115,9 @@ type GwSession struct {
 
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
 // rp 为已装配的 WebAuthn 依赖方，nil 表示未配置（登录回落 legacy 演示验证码路径）。
-func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloadsDir string, rp *webauthnx.RP) *Server {
+func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloadsDir string, rp *webauthnx.RP, ca *pki.CA, gwPlaintextCompat bool) *Server {
 	return &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
+		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
 		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
 }
@@ -143,10 +149,21 @@ func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return true
 }
 
-// requireGateway 校验上下文角色为 gateway 或 admin（数据面拉策略/注册用）。
+// requireGateway 校验调用方是数据面网关。
+//
+// 优先认 mTLS 客户端证书 CN（阶段 2 的目标形态：机器身份在传输层完成、与用户身份分家）；
+// 迁移期回退到 JWT role=gateway。★注意 admin 兜底已移除：留着它，任何 admin 令牌都能调
+// 网关接口，「机器身份走 mTLS」就只是多一条路而没关掉旧路。
 func (s *Server) requireGateway(w http.ResponseWriter, r *http.Request) bool {
+	if cn := GatewayCN(r.Context()); cn != "" {
+		return true // 已过 mTLS 握手 + 证书白名单校验
+	}
+	if !s.gwPlaintextCompat {
+		httpx.Error(w, http.StatusForbidden, "网关接口须经 mTLS 客户端证书访问")
+		return false
+	}
 	c, ok := auth.FromContext(r.Context())
-	if !ok || (c.Role != "gateway" && c.Role != "admin") {
+	if !ok || c.Role != "gateway" {
 		httpx.Error(w, http.StatusForbidden, "需要网关身份")
 		return false
 	}
@@ -259,12 +276,20 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)          // 自助改密
 
 	// ── 网关数据面：注册 + 拉策略（需 gateway/admin 身份）；资源 CRUD（admin）──
-	mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister) // 网关注册/心跳
-	mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)      // 网关拉资源策略
-	mux.HandleFunc("GET /api/v1/gateways", s.handleGateways)                  // 在线网关清单（管理）
-	mux.HandleFunc("GET /api/v1/resources", s.handleResources)                // 资源清单（管理）
-	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)            // 新增/改资源
-	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource)   // 删资源
+	// ★网关数据面接口只挂 mTLS 监听（见 MTLSHandler）。明文侧仅在迁移期挂载，
+	// 收口后 /api/v1/gateways/{register,policy} 在 :8090 上根本不存在。
+	if s.gwPlaintextCompat {
+		mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister)
+		mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)
+	}
+	// 网关客户端证书：签发 / 清单 / 吊销（admin）
+	mux.HandleFunc("POST /api/v1/pki/gateway-certs", s.handleIssueGatewayCert)
+	mux.HandleFunc("GET /api/v1/pki/gateway-certs", s.handleGatewayCerts)
+	mux.HandleFunc("POST /api/v1/pki/gateway-certs/{fingerprint}/revoke", s.handleRevokeGatewayCert)
+	mux.HandleFunc("GET /api/v1/gateways", s.handleGateways)                // 在线网关清单（管理）
+	mux.HandleFunc("GET /api/v1/resources", s.handleResources)              // 资源清单（管理）
+	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)          // 新增/改资源
+	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource) // 删资源
 
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)

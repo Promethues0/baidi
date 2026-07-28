@@ -57,8 +57,8 @@ type UserStateItem struct {
 	User      string   `json:"user"`
 	Account   string   `json:"account"`
 	Org       string   `json:"org"`
-	State     string   `json:"state"`   // risk-high | risk-low | locked | disabled | idle
-	Risk      string   `json:"risk"`    // none | low | high
+	State     string   `json:"state"` // risk-high | risk-low | locked | disabled | idle
+	Risk      string   `json:"risk"`  // none | low | high
 	Online    bool     `json:"online"`
 	Reasons   []string `json:"reasons"` // 命中的风险 / 异常原因
 	LastEvent string   `json:"lastEvent"`

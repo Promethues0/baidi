@@ -42,6 +42,9 @@ type Store interface {
 	WebauthnCredentialsFor(ctx context.Context, account string) ([]WebauthnCredential, error)
 	WebauthnCredentialByID(ctx context.Context, credentialID string) (WebauthnCredential, bool, error)
 	WebauthnCredentialCount(ctx context.Context, account string) (int, error)
+	// 网关客户端证书白名单（mTLS 机器身份）
+	GatewayCerts(ctx context.Context) ([]GatewayCert, error)
+	GatewayCertTrusted(ctx context.Context, fingerprint string) (GatewayCert, bool, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

@@ -51,6 +51,9 @@ type Writer interface {
 	CreateWebauthnChallenge(ctx context.Context, ch WebauthnChallenge) (WebauthnChallenge, error)
 	ConsumeWebauthnChallenge(ctx context.Context, challenge, typ string) (WebauthnChallenge, error)
 	PurgeExpiredChallenges(ctx context.Context) (int64, error)
+	// 网关客户端证书：签发登记 + 吊销
+	SaveGatewayCert(ctx context.Context, c GatewayCert) error
+	RevokeGatewayCert(ctx context.Context, fingerprint, reason string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -100,6 +103,7 @@ const seedPassword = "baidi@123"
 //   - 权威 role 列空的用户按展示角色推断补齐；
 //   - pass_hash 空的用户回填 demo 口令哈希（否则迁移后无人能登录）；
 //   - admin 账号不存在则补建（role=admin）。
+//
 // 全新库 seed() 已设好，这里对其为幂等空操作。
 func (s *SQLiteStore) ensureCredentials() error {
 	ctx := context.Background()
@@ -235,7 +239,11 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
   id TEXT PRIMARY KEY, account TEXT, challenge TEXT, type TEXT, session_data TEXT,
   expires_at INTEGER, consumed INTEGER DEFAULT 0
 );
-CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);`)
+CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);
+CREATE TABLE IF NOT EXISTS gateway_certs (
+  fingerprint TEXT PRIMARY KEY, gateway_id TEXT, issued_at TEXT, not_after TEXT,
+  revoked INTEGER DEFAULT 0, revoked_at TEXT, revoke_reason TEXT
+);`)
 	if err != nil {
 		return err
 	}

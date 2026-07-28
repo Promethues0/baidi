@@ -45,7 +45,9 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - 鉴权：JWT Role ∈ admin|user|gateway；写操作 handler 内 requireAdmin()，数据面拉策略 requireGateway()。
 - 配置全走 `BAIDI_*` 环境变量（BAIDI_ADDR/BAIDI_DB/BAIDI_JWT_SECRET/BAIDI_GW_SPA…）。
 - **终端 posture / 风险引擎**：`POST /api/v1/posture` 上报（登录用户，platform 枚举 Windows|macOS|Linux，每账号 ≤20 台设备）→ `internal/risk.Evaluate` 按安全中心基线（`baseline_policies` 表，安全中心页可编辑）评估 → 最新判定 block 则 knock-token 403 + 经 `gateways/policy` revoked 捎带撤窗断隧道；判定权全在控制面，网关零改动。缺报默认放行（observe），`BAIDI_POSTURE_ENFORCE=strict` 缺报/过期（10min）也拒。基线检查 key 与桌面采集器对齐：disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version。
-- **control 与 gateway 必须共用同一 BAIDI_JWT_SECRET**，不一致则 SPA 敲门校验全挂。
+- **身份密钥（CA 迁移进行中）**：control 用 **Ed25519 私钥**（`BAIDI_JWT_KEY`，首启自动生成 0600，公钥写同名 `.pub`）签发全部令牌；网关只持公钥验证（`-jwt-pubkey` / `BAIDI_GW_JWT_PUBKEY`），在密码学上不再具备签发能力。迁移期两侧默认仍接受存量 HS256（`BAIDI_ACCEPT_HS256` / `BAIDI_GW_ACCEPT_HS256`，存量 8h 会话过期后置 0 收口）。**公钥用部署期文件分发，刻意不做 JWKS 端点**——在线端点若自身即信任根会构成循环论证。
+- **网关机器身份 = mTLS 客户端证书**：control 内部 CA（标准 X.509/P-256，`BAIDI_PKI_DIR`）签发，`POST /api/v1/pki/gateway-certs` 取证、`…/{fingerprint}/revoke` 吊销（指纹白名单是即刻吊销的执行点）。网关配 `-mtls-cert/-mtls-key/-mtls-ca` 后经 `BAIDI_MTLS_ADDR` 独立端口调控制面。`/api/v1/gateways/*` **只挂 mTLS 监听**，明文口仅迁移期挂载（`BAIDI_GW_PLAINTEXT_COMPAT=0` 收口后该路由在 :8090 上根本不存在）。SM2 国密 CA 继续只管 TLCP 隧道，两套 PKI 互不污染。
+- **control 与 gateway 迁移期仍共用 BAIDI_JWT_SECRET**（验存量 HS256 令牌 + 网关自签兼容），不一致则存量令牌校验挂；收口后该密钥不再承担跨进程职责。
 - **严格敲门（strict knock，默认开）**：网关只接受 control `/knock-token` 签发的短时效一次性令牌（`use=knock` + jti + ≤`-knock-max-ttl`，见 `spa.checkKnock`）。长效会话令牌**不能**再直接敲门——那会绕过强制下线/账号禁用/终端合规三道闸。因此**所有敲门客户端必须能访问 control**（`baidi-knock`/`baidi-tun`/`tlcp-probe` 的 `-control` 已必填，knock-agent 有默认值）。逃生舱 `BAIDI_GW_KNOCK_STRICT=0` 仅限过渡。副作用：control 不可达超过网关 `-ttl`(30s) 时窗口自然关闭（fail-closed，零信任下是正确姿态，不再回退长效令牌硬撑）。
 - 演示口令：管理台 admin/baidi@123；门户任意用户+baidi@123。
 - **二次认证 = WebAuthn/passkey**（`BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 驱动，门户与管理台都覆盖）：已注册 passkey 的账号登录强制断言；风险账号（ext.*/含「外包」）未注册则拒绝登录并引导录入。**RP ID 必须是可注册域名或 localhost——浏览器规范不允许裸 IP**，故 IP 演示站（101.43.125.131）无法启用，未配置时回落 legacy 演示验证码 123456（仅此路径可达）。passkey 管理页 /portal/security。

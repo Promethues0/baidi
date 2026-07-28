@@ -16,6 +16,7 @@ import (
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
 )
@@ -60,7 +61,18 @@ func main() {
 	} else {
 		slog.Info("WebAuthn 已启用", "rpid", cfg.WebauthnRPID, "origins", cfg.WebauthnOrigins)
 	}
-	srv := api.New(st, st, keys, cfg.Env, cfg.DownloadsDir, rp)
+	// 内部 CA：签发网关 mTLS 客户端证书（机器身份与用户身份在密码学上分家）
+	ca, cerr := pki.LoadOrCreate(cfg.PKIDir)
+	if cerr != nil {
+		slog.Error("内部 CA 初始化失败", "dir", cfg.PKIDir, "err", cerr)
+		os.Exit(1)
+	}
+	slog.Info("内部 CA 就绪", "dir", cfg.PKIDir)
+	srv := api.New(st, st, keys, cfg.Env, cfg.DownloadsDir, rp, ca, cfg.GwPlaintextCompat)
+	if cfg.GwPlaintextCompat {
+		slog.Warn("⚠ 网关接口明文兼容开启：/api/v1/gateways/* 仍可用 JWT role=gateway 调用；" +
+			"全部网关切到 mTLS 客户端证书后请置 BAIDI_GW_PLAINTEXT_COMPAT=0")
+	}
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,
@@ -76,6 +88,27 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		MaxHeaderBytes:    1 << 20,
+	}
+
+	// 网关接口的 mTLS 监听（独立端口，只挂 /api/v1/gateways/*）：
+	// 身份在传输层完成，且与人机接口分到两个端口——admin 令牌再也调不到网关接口。
+	if cfg.MTLSAddr != "" {
+		srvCert, serr := pki.ServerCertFor(ca, cfg.MTLSAddr)
+		if serr != nil {
+			slog.Error("mTLS 服务端证书签发失败", "err", serr)
+			os.Exit(1)
+		}
+		mtlsSrv := &http.Server{
+			Addr: cfg.MTLSAddr, Handler: srv.MTLSHandler(),
+			TLSConfig: srv.MTLSConfig(ca, srvCert), ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			slog.Info("网关 mTLS 监听（仅 /api/v1/gateways/*）", "addr", cfg.MTLSAddr)
+			if err := mtlsSrv.ListenAndServeTLS("", ""); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				slog.Error("mTLS 监听失败", "err", err)
+				os.Exit(1)
+			}
+		}()
 	}
 
 	// 启动

@@ -40,6 +40,9 @@ func main() {
 	control := flag.String("control", env("BAIDI_GW_CONTROL", ""), "baidi-control 地址；设了则向控制面注册并周期拉取资源策略（动态，优先于静态 -resources）")
 	gwid := flag.String("gwid", env("BAIDI_GW_ID", "gw-1"), "本网关 id（控制面注册标识）")
 	poll := flag.Duration("poll", 15*time.Second, "控制面策略轮询/心跳间隔")
+	mtlsCert := flag.String("mtls-cert", env("BAIDI_GW_MTLS_CERT", ""), "控制面签发的网关客户端证书 PEM（mTLS 机器身份）")
+	mtlsKey := flag.String("mtls-key", env("BAIDI_GW_MTLS_KEY", ""), "网关客户端私钥 PEM")
+	mtlsCA := flag.String("mtls-ca", env("BAIDI_GW_MTLS_CA", ""), "控制面内部 CA 公证书 PEM（校验 mTLS 服务端）")
 	strictKnock := flag.Bool("strict-knock", envBool("BAIDI_GW_KNOCK_STRICT", true),
 		"严格敲门：只接受 control /knock-token 签发的短时效一次性令牌（use=knock）；"+
 			"关闭则兼容长效会话令牌直接敲门——那会绕过封禁/账号状态/终端合规三道闸，仅限过渡")
@@ -126,7 +129,20 @@ func main() {
 				}
 			}
 		}
-		cp := cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
+		// 机器身份：优先 mTLS 客户端证书（网关不再持签发能力）；未配置则回退自签令牌（迁移期）
+		var cp *cplane.Client
+		if *mtlsCert != "" && *mtlsKey != "" && *mtlsCA != "" {
+			c, cerr := cplane.NewMTLS(*control, *gwid, *proxyAddr, *spaAddr, *mtlsCert, *mtlsKey, *mtlsCA)
+			if cerr != nil {
+				log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
+			}
+			cp = c
+			slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
+		} else {
+			cp = cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
+			slog.Warn("⚠ 控制面身份仍为共享密钥自签令牌：网关持有可签任意角色（含 admin）的密钥；" +
+				"请用 POST /api/v1/pki/gateway-certs 签发客户端证书并配置 -mtls-cert/-mtls-key/-mtls-ca")
+		}
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}

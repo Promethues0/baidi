@@ -1,12 +1,20 @@
 // Package cplane 是网关侧的控制面客户端：向 baidi-control 注册自身，并拉取资源授权策略。
-// 网关用共享密钥自签 gateway 身份令牌认证（无需额外凭据下发）。
+//
+// 机器身份优先走 mTLS 客户端证书（CA 身份迁移 阶段 2）：证书由控制面内部 CA 签发，
+// 身份在传输层完成。此前是用共享密钥自签 role=gateway 令牌——而那把密钥同时能签
+// role=admin，等于把控制面的签发能力放在被保护方手里。
+// 未配置证书时回退自签令牌（迁移期兼容，收口后应彻底移除）。
 package cplane
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,10 +28,11 @@ type Client struct {
 	gwID       string
 	proxy, spa string
 	secret     []byte
+	mtls       bool // 已装载客户端证书：身份走 TLS，不再自签令牌
 	httpc      *http.Client
 }
 
-// New 构造控制面客户端。
+// New 构造控制面客户端（共享密钥自签令牌，迁移期兼容形态）。
 func New(control, gwID, proxy, spa string, secret []byte) *Client {
 	return &Client{
 		control: strings.TrimRight(control, "/"),
@@ -34,6 +43,38 @@ func New(control, gwID, proxy, spa string, secret []byte) *Client {
 		httpc:   &http.Client{Timeout: 8 * time.Second},
 	}
 }
+
+// NewMTLS 构造走 mTLS 客户端证书的控制面客户端。
+// certFile/keyFile 是控制面签发给本网关的证书与私钥，caFile 是内部 CA 公证书。
+func NewMTLS(control, gwID, proxy, spa, certFile, keyFile, caFile string) (*Client, error) {
+	cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+	if err != nil {
+		return nil, fmt.Errorf("载入网关客户端证书失败: %w", err)
+	}
+	caPEM, err := os.ReadFile(caFile)
+	if err != nil {
+		return nil, fmt.Errorf("载入 CA 证书失败: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caPEM) {
+		return nil, errors.New("CA 证书解析失败: " + caFile)
+	}
+	return &Client{
+		control: strings.TrimRight(control, "/"),
+		gwID:    gwID, proxy: proxy, spa: spa, mtls: true,
+		httpc: &http.Client{
+			Timeout: 8 * time.Second,
+			Transport: &http.Transport{TLSClientConfig: &tls.Config{
+				MinVersion:   tls.VersionTLS12,
+				Certificates: []tls.Certificate{cert},
+				RootCAs:      pool,
+			}},
+		},
+	}, nil
+}
+
+// UsesMTLS 报告是否以客户端证书作为机器身份（供启动日志暴露真实姿态）。
+func (c *Client) UsesMTLS() bool { return c.mtls }
 
 // token 自签短时效 gateway 身份令牌（共享密钥；控制面据角色放行网关接口）。
 func (c *Client) token() string {
@@ -51,7 +92,10 @@ func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+c.token())
+	// mTLS 下身份由客户端证书承载，不再附带自签令牌——网关不应具备签发能力。
+	if !c.mtls {
+		req.Header.Set("Authorization", "Bearer "+c.token())
+	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

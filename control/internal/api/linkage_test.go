@@ -31,7 +31,7 @@ func newTestServer(t *testing.T) http.Handler {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testKeys, "test", t.TempDir(), nil)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, true)
 	return auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 }
 

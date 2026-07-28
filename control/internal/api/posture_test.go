@@ -149,7 +149,7 @@ func TestPostureStrictMode(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testKeys, "test", t.TempDir(), nil)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, true)
 	s.postureStrict = true
 	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 	tok := userToken("li.fang")
@@ -207,7 +207,7 @@ func TestPostureStrictUsesFreshestNotWorst(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testKeys, "test", t.TempDir(), nil)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, true)
 	s.postureStrict = true
 	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
 

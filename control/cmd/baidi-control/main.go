@@ -39,14 +39,17 @@ func main() {
 	secret := []byte(cfg.JWTSecret)
 	// 令牌签名切非对称：control 私钥签、数据面只持公钥。迁移期仍接受存量 HS256 令牌
 	// （BAIDI_ACCEPT_HS256=0 收口）。公钥写在 <私钥路径>.pub，由 deploy 分发给网关。
-	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, secret, cfg.AcceptHS256)
+	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, secret, cfg.AcceptHS256)
 	if err != nil {
 		slog.Error("载入/生成 JWT 签名密钥失败", "path", cfg.JWTKeyPath, "err", err)
 		os.Exit(1)
 	}
-	slog.Info("令牌签名：Ed25519", "kid", keys.Kid(), "pubkey", cfg.JWTKeyPath+".pub", "acceptHS256", cfg.AcceptHS256)
+	slog.Info("令牌签名：Ed25519 按用途分密钥",
+		"sessKid", keys.SessKid(), "knockKid", keys.KnockKid(),
+		"分发给网关的公钥", cfg.JWTKnockKeyPath+".pub", "acceptHS256", cfg.AcceptHS256)
 	if cfg.AcceptHS256 {
-		slog.Warn("⚠ 迁移窗口开启：仍接受存量 HS256 共享密钥令牌；存量会话过期后请置 BAIDI_ACCEPT_HS256=0")
+		slog.Warn("⚠ 逃生舱开启（BAIDI_ACCEPT_HS256=1）：仍接受存量 HS256 共享密钥令牌，" +
+			"任何持该密钥者可伪造任意角色；存量 8h 会话过期后请立即关回")
 	}
 	// WebAuthn RP：RP ID 必须是可注册域名或 localhost（浏览器不允许裸 IP），
 	// 未配置即禁用 passkey，登录回落 legacy 演示验证码路径。
@@ -70,8 +73,8 @@ func main() {
 	slog.Info("内部 CA 就绪", "dir", cfg.PKIDir)
 	srv := api.New(st, st, keys, cfg.Env, cfg.DownloadsDir, rp, ca, cfg.GwPlaintextCompat)
 	if cfg.GwPlaintextCompat {
-		slog.Warn("⚠ 网关接口明文兼容开启：/api/v1/gateways/* 仍可用 JWT role=gateway 调用；" +
-			"全部网关切到 mTLS 客户端证书后请置 BAIDI_GW_PLAINTEXT_COMPAT=0")
+		slog.Warn("⚠ 逃生舱开启（BAIDI_GW_PLAINTEXT_COMPAT=1）：/api/v1/gateways/* 仍挂在明文口，" +
+			"可用 JWT role=gateway 调用；全部网关切到 mTLS 后请立即关回")
 	}
 
 	handler := httpx.Chain(srv.Routes(),

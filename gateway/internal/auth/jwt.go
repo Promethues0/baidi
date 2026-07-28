@@ -58,18 +58,9 @@ func parseHeader(seg string, allow ...string) (header, error) {
 	return header{}, errors.New("unexpected alg: " + h.Alg)
 }
 
-// Sign 用共享密钥签发 HS256 JWT（网关据此自签 gateway 身份令牌去调控制面）。
-func Sign(secret []byte, c Claims, ttl time.Duration) string {
-	now := time.Now()
-	c.Iat = now.Unix()
-	c.Exp = now.Add(ttl).Unix()
-	header := b64.EncodeToString([]byte(`{"alg":"HS256","typ":"JWT"}`))
-	payload, _ := json.Marshal(c)
-	body := header + "." + b64.EncodeToString(payload)
-	h := hmac.New(sha256.New, secret)
-	h.Write([]byte(body))
-	return body + "." + b64.EncodeToString(h.Sum(nil))
-}
+// ★本包刻意不提供 Sign：数据面只验证、不签发（CA 身份迁移 阶段 4）。
+// 网关的机器身份走 mTLS 客户端证书（internal/cplane），用户令牌由 control 私钥签发、
+// 网关持公钥验证（verifier.go）。留一个 Sign 在这里，就等于把签发能力留在被保护方。
 
 // Verify 校验签名与有效期。
 func Verify(secret []byte, token string) (Claims, error) {

@@ -49,9 +49,10 @@ func main() {
 	knockMaxTTL := flag.Duration("knock-max-ttl", 5*time.Minute,
 		"敲门令牌寿命上界（纵深防御；须 ≥ control 的 knockTTL）")
 	jwtPub := flag.String("jwt-pubkey", env("BAIDI_GW_JWT_PUBKEY", ""),
-		"control 的 Ed25519 公钥 PEM 路径（部署期分发的 <私钥>.pub）：只验不签，网关不再持签发能力")
-	acceptHS256 := flag.Bool("accept-hs256", envBool("BAIDI_GW_ACCEPT_HS256", true),
-		"迁移期是否接受旧的 HS256 共享密钥令牌；收口后置 false，网关即完全依赖公钥验证")
+		"control 的**敲门**公钥 PEM 路径（部署期分发的 <knock 私钥>.pub），逗号分隔可装多把供轮换。"+
+			"只装 knock 公钥即可——会话令牌用另一把密钥签，其 kid 在本地查不到，从密码学上就敲不开门")
+	acceptHS256 := flag.Bool("accept-hs256", envBool("BAIDI_GW_ACCEPT_HS256", false),
+		"是否接受旧的 HS256 共享密钥令牌（阶段4 起默认 false）；=true 为过渡逃生舱，会让持共享密钥者可伪造令牌")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -69,12 +70,12 @@ func main() {
 		log.Fatalf("载入令牌验证材料失败: %v", err)
 	}
 	if !verifier.HasPublicKey() {
-		slog.Warn("⚠ 未配置 control 公钥（-jwt-pubkey）：仍在用共享密钥校验令牌，" +
-			"网关机被攻陷即可自签任意角色令牌；请分发 control 的 <私钥>.pub 并收口 HS256")
+		slog.Warn("⚠ 未配置 control 公钥（-jwt-pubkey）：无法校验 EdDSA 令牌，" +
+			"只能吃 HS256 存量令牌；请分发 control 的 <knock 私钥>.pub")
 	}
 	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
 		"ttl", ttl.String(), "strictKnock", *strictKnock,
-		"jwtPubkey", verifier.HasPublicKey(), "acceptHS256", verifier.AcceptsLegacy())
+		"公钥数", verifier.PublicKeyCount(), "acceptHS256", verifier.AcceptsLegacy())
 
 	al := spa.NewAllowlist()
 
@@ -129,20 +130,17 @@ func main() {
 				}
 			}
 		}
-		// 机器身份：优先 mTLS 客户端证书（网关不再持签发能力）；未配置则回退自签令牌（迁移期）
-		var cp *cplane.Client
-		if *mtlsCert != "" && *mtlsKey != "" && *mtlsCA != "" {
-			c, cerr := cplane.NewMTLS(*control, *gwid, *proxyAddr, *spaAddr, *mtlsCert, *mtlsKey, *mtlsCA)
-			if cerr != nil {
-				log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
-			}
-			cp = c
-			slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
-		} else {
-			cp = cplane.New(*control, *gwid, *proxyAddr, *spaAddr, []byte(*secret))
-			slog.Warn("⚠ 控制面身份仍为共享密钥自签令牌：网关持有可签任意角色（含 admin）的密钥；" +
-				"请用 POST /api/v1/pki/gateway-certs 签发客户端证书并配置 -mtls-cert/-mtls-key/-mtls-ca")
+		// 机器身份只有 mTLS 客户端证书一条路：网关在代码层已无签发能力（阶段 4 删了 auth.Sign），
+		// 没有证书就无从证明自己是网关——早失败好过起来后静默调不通。
+		if *mtlsCert == "" || *mtlsKey == "" || *mtlsCA == "" {
+			log.Fatal("拒绝启动：配了 -control 就必须同时配 -mtls-cert/-mtls-key/-mtls-ca。" +
+				"用 admin 调 POST /api/v1/pki/gateway-certs 取证（响应含 certPem/keyPem/caPem）")
 		}
+		cp, cerr := cplane.NewMTLS(*control, *gwid, *proxyAddr, *spaAddr, *mtlsCert, *mtlsKey, *mtlsCA)
+		if cerr != nil {
+			log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
+		}
+		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}

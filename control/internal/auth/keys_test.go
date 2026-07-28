@@ -17,8 +17,8 @@ func TestKeysSignVerify(t *testing.T) {
 	if err != nil {
 		t.Fatalf("header 应为 EdDSA: %v", err)
 	}
-	if h.Kid != k.Kid() {
-		t.Fatalf("header 应带 kid=%s, 得 %s", k.Kid(), h.Kid)
+	if h.Kid != k.SessKid() {
+		t.Fatalf("会话令牌应用 sess kid=%s, 得 %s", k.SessKid(), h.Kid)
 	}
 	c, err := k.Verify(tok)
 	if err != nil || c.Sub != "li.fang" || c.Role != "user" {
@@ -77,8 +77,9 @@ func TestKeysLegacyHS256Window(t *testing.T) {
 func TestLoadOrCreateKeysPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "jwt.pem")
+	kpath := filepath.Join(dir, "sub", "jwt-knock.pem")
 
-	k1, err := LoadOrCreateKeys(path, nil, false)
+	k1, err := LoadOrCreateKeys(path, kpath, nil, false)
 	if err != nil {
 		t.Fatalf("首启应生成密钥: %v", err)
 	}
@@ -94,12 +95,16 @@ func TestLoadOrCreateKeysPersistence(t *testing.T) {
 		t.Fatalf("公钥应旁路落盘供分发: %v", err)
 	}
 
-	k2, err := LoadOrCreateKeys(path, nil, false)
+	k2, err := LoadOrCreateKeys(path, kpath, nil, false)
 	if err != nil {
 		t.Fatalf("二次载入应成功: %v", err)
 	}
-	if k1.Kid() != k2.Kid() {
-		t.Fatalf("重启后 kid 应稳定: %s vs %s", k1.Kid(), k2.Kid())
+	if k1.SessKid() != k2.SessKid() || k1.KnockKid() != k2.KnockKid() {
+		t.Fatalf("重启后两把 kid 都应稳定: %s/%s vs %s/%s",
+			k1.SessKid(), k1.KnockKid(), k2.SessKid(), k2.KnockKid())
+	}
+	if k1.SessKid() == k1.KnockKid() {
+		t.Fatal("会话密钥与敲门密钥必须是两把不同的密钥")
 	}
 	// k1 签的令牌 k2 能验（同一把密钥）
 	if _, err := k2.Verify(k1.Sign(Claims{Sub: "u", Role: "user", Name: "u"}, time.Hour)); err != nil {

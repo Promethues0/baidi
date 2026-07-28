@@ -355,7 +355,9 @@ func (s *Server) checkSecurity() DiagCheck {
 	legacyOn := s.keys.AcceptsLegacy()
 	defaultSecret := legacyOn && s.keys.LegacyIs(config.DefaultJWTSecret)
 	c.Items = []DiagItem{
-		{Label: "令牌签名", Value: "Ed25519 (EdDSA) · kid " + s.keys.Kid(), Status: "pass"},
+		{Label: "令牌签名", Value: "Ed25519 (EdDSA) · 按用途分密钥", Status: "pass"},
+		{Label: "会话密钥 kid", Value: s.keys.SessKid(), Status: "pass"},
+		{Label: "敲门密钥 kid", Value: s.keys.KnockKid() + "（仅此公钥分发给数据面）", Status: "pass"},
 	}
 	switch {
 	case defaultSecret && s.env == "prod":

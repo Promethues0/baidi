@@ -1,0 +1,4 @@
+# 身份密钥材料：control 私钥与内部 CA，任何情况下不入库（同 certs/ 的约定）
+jwt-ed25519*.pem
+jwt-ed25519*.pem.pub
+pki/

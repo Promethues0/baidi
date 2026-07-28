@@ -27,7 +27,9 @@
 | `baidi-tun` | **客户端数据面（macOS，需 root）**：utun 接管系统流量 → gVisor 网络栈终止 TCP → 逐流敲门 + 隧道 |
 
 ```bash
-baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -secret <与control一致> -ttl 30s
+baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -ttl 30s \
+              -jwt-pubkey <control 的 jwt-ed25519-knock.pem.pub>
+# 网关只持 control 的敲门公钥验证令牌，自身不具备签发能力；会话令牌在此从密码学上验不过
 baidi-knock   -spa 127.0.0.1:18201 -token <会话 JWT> -control http://127.0.0.1:8090
 # -control 必填：网关默认 strict，只认 control 签发的 use=knock 短时效一次性令牌
 ```

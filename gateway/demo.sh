@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 白帝数据面真链路演示：暗 → SPA 敲门(携带 baidi-control 签发的 JWT) → SSL 隧道代理到后端业务。
-# 前置：baidi-control 在 :8090 运行（用默认 JWT 密钥；网关 -secret 须与之一致）。
+# 前置：baidi-control 在 :8090 运行（网关只需它的敲门公钥 jwt-ed25519-knock.pem.pub，不再共享密钥）。
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GW=/tmp/baidi-gateway; KNOCK=/tmp/baidi-knock
@@ -14,7 +14,10 @@ pkill -f 'http.server 19999' 2>/dev/null; pkill -f "$GW" 2>/dev/null; sleep 0.3
 ( cd /tmp && nohup python3 -m http.server 19999 --bind 127.0.0.1 >/tmp/baidi-backend.log 2>&1 & )
 
 echo "==> 启动网关（暗；proxy=$PROXY spa=$SPA → $BACKEND）"
-nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -ttl 30s >/tmp/baidi-gateway.log 2>&1 &
+# 网关只持 control 的**敲门**公钥验证令牌（会话令牌用另一把密钥签，在此从密码学上验不过）
+PUB="${BAIDI_GW_JWT_PUBKEY:-$HERE/../control/jwt-ed25519-knock.pem.pub}"
+[ -f "$PUB" ] || { echo "   ✗ 找不到 control 的敲门公钥：$PUB"; echo "     （先启动一次 baidi-control 让它生成，或用 BAIDI_GW_JWT_PUBKEY 指定）"; exit 1; }
+nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -ttl 30s -jwt-pubkey "$PUB" >/tmp/baidi-gateway.log 2>&1 &
 sleep 1
 
 echo ""; echo "① 敲门前：curl 隧道端口（期望失败=对未授权者隐身）"

@@ -1,9 +1,11 @@
 // Package cplane 是网关侧的控制面客户端：向 baidi-control 注册自身，并拉取资源授权策略。
 //
-// 机器身份优先走 mTLS 客户端证书（CA 身份迁移 阶段 2）：证书由控制面内部 CA 签发，
+// 机器身份走 mTLS 客户端证书（CA 身份迁移 阶段 2/4）：证书由控制面内部 CA 签发，
 // 身份在传输层完成。此前是用共享密钥自签 role=gateway 令牌——而那把密钥同时能签
 // role=admin，等于把控制面的签发能力放在被保护方手里。
-// 未配置证书时回退自签令牌（迁移期兼容，收口后应彻底移除）。
+//
+// ★阶段 4 已删除自签回退：gateway/internal/auth 不再有 Sign 函数，
+// 数据面在**代码层**不具备签发能力。要调控制面就必须持证书，没有第二条路。
 package cplane
 
 import (
@@ -18,7 +20,6 @@ import (
 	"strings"
 	"time"
 
-	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/resource"
 )
 
@@ -27,21 +28,8 @@ type Client struct {
 	control    string
 	gwID       string
 	proxy, spa string
-	secret     []byte
-	mtls       bool // 已装载客户端证书：身份走 TLS，不再自签令牌
+	mtls       bool // 已装载客户端证书：身份走 TLS
 	httpc      *http.Client
-}
-
-// New 构造控制面客户端（共享密钥自签令牌，迁移期兼容形态）。
-func New(control, gwID, proxy, spa string, secret []byte) *Client {
-	return &Client{
-		control: strings.TrimRight(control, "/"),
-		gwID:    gwID,
-		proxy:   proxy,
-		spa:     spa,
-		secret:  secret,
-		httpc:   &http.Client{Timeout: 8 * time.Second},
-	}
 }
 
 // NewMTLS 构造走 mTLS 客户端证书的控制面客户端。
@@ -76,11 +64,6 @@ func NewMTLS(control, gwID, proxy, spa, certFile, keyFile, caFile string) (*Clie
 // UsesMTLS 报告是否以客户端证书作为机器身份（供启动日志暴露真实姿态）。
 func (c *Client) UsesMTLS() bool { return c.mtls }
 
-// token 自签短时效 gateway 身份令牌（共享密钥；控制面据角色放行网关接口）。
-func (c *Client) token() string {
-	return auth.Sign(c.secret, auth.Claims{Sub: "gateway:" + c.gwID, Role: "gateway", Name: c.gwID}, 5*time.Minute)
-}
-
 func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	var rd *bytes.Reader
 	if body != nil {
@@ -92,10 +75,7 @@ func (c *Client) do(method, path string, body []byte) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	// mTLS 下身份由客户端证书承载，不再附带自签令牌——网关不应具备签发能力。
-	if !c.mtls {
-		req.Header.Set("Authorization", "Bearer "+c.token())
-	}
+	// 身份由客户端证书承载：不附带任何 Bearer 令牌——网关不具备签发能力。
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

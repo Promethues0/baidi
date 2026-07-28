@@ -32,11 +32,17 @@ if [ -d "$HERE/downloads" ]; then
   mv "$BD_PREFIX/downloads.new" "$BD_PREFIX/downloads"
 fi
 
-# JWT 密钥（仅首次生成，保密 0600）
+# 身份密钥材料目录（control 私钥与内部 CA；网关拿不到这里的任何东西）
+mkdir -p "$BD_PREFIX/etc/keys" "$BD_PREFIX/etc/pki"
+chmod 0700 "$BD_PREFIX/etc/keys" "$BD_PREFIX/etc/pki"
+
+# control 专属 env（0600）。注意：令牌已全部由 Ed25519 私钥签发，
+# BAIDI_JWT_SECRET 只在 BAIDI_ACCEPT_HS256=1 的过渡逃生舱下才有意义，
+# 这里仍生成一个随机值以备回滚，但默认不参与任何鉴权。
 if [ ! -f "$BD_PREFIX/etc/baidi.env" ]; then
   echo "BAIDI_JWT_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/')" > "$BD_PREFIX/etc/baidi.env"
   chmod 0600 "$BD_PREFIX/etc/baidi.env"
-  echo "==> 已生成随机 JWT 密钥 → $BD_PREFIX/etc/baidi.env"
+  echo "==> 已生成 control 专属 env（HS256 逃生舱备用密钥）→ $BD_PREFIX/etc/baidi.env"
 fi
 
 # 自签 TLS（仅首次；生产请换正式证书）。SAN 区分 IP/域名；私钥严格 0600（umask 兜底）。
@@ -58,9 +64,14 @@ fi
 chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX"
 
 # 渲染 systemd 单元（先装单元，nginx 校验通过后再启动控制面，避免无入口空跑）
+MTLS_PORT="${MTLS_PORT:-8092}"   # 网关接口的 mTLS 独立监听（回环）
+# 以运行用户身份执行（runuser 属 util-linux，比 sudo 更可靠地存在于精简镜像）
+as_bd() { if command -v runuser >/dev/null 2>&1; then runuser -u "$BD_USER" -- "$@"; else sudo -u "$BD_USER" "$@"; fi; }
+GW_ID="${GW_ID:-gw-1}"           # 本机网关 id（= mTLS 客户端证书 CN）
 render() { sed -e "s#@BD_PREFIX@#$BD_PREFIX#g" -e "s#@BD_USER@#$BD_USER#g" \
                -e "s#@CONTROL_PORT@#$CONTROL_PORT#g" -e "s#@PUBLIC_ORIGIN@#$PUBLIC_ORIGIN#g" \
-               -e "s#@BD_HTTPS_PORT@#$BD_HTTPS_PORT#g" -e "s#@PUBLIC_HOST@#$PUBLIC_HOST#g" "$1"; }
+               -e "s#@BD_HTTPS_PORT@#$BD_HTTPS_PORT#g" -e "s#@PUBLIC_HOST@#$PUBLIC_HOST#g" \
+               -e "s#@MTLS_PORT@#$MTLS_PORT#g" -e "s#@GW_ID@#$GW_ID#g" "$1"; }
 render "$HERE/systemd/baidi-control.service" > /etc/systemd/system/baidi-control.service
 systemctl daemon-reload
 
@@ -132,13 +143,39 @@ if [ "${WITH_GATEWAY:-0}" = "1" ]; then
   install -m 0755 "$HERE/bin/baidi-gateway" "$BD_PREFIX/bin/baidi-gateway"
   install -m 0755 "$HERE/bin/baidi-gmca" "$BD_PREFIX/bin/baidi-gmca"
   "$BD_PREFIX/bin/baidi-gmca" -dir "$BD_PREFIX/etc/gmcerts" >/dev/null
-  chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX/etc/gmcerts" "$BD_PREFIX/bin"
+
+  # 网关身份材料：mTLS 客户端证书 + CA 公证书 + 敲门公钥。
+  # 由 control 离线签发（同一套 PKI 与库，指纹登记进白名单以便随时吊销）。
+  # ★网关只拿到 knock 公钥与自己的客户端证书——**没有任何签发能力**：
+  #   会话签名私钥留在 etc/keys（0700），网关连它的公钥都拿不到。
+  echo "==> 签发网关身份材料（mTLS 客户端证书 + 敲门公钥）"
+  as_bd env \
+    BAIDI_DB="$BD_PREFIX/data/baidi.db" \
+    BAIDI_JWT_KEY="$BD_PREFIX/etc/keys/jwt-ed25519.pem" \
+    BAIDI_JWT_KNOCK_KEY="$BD_PREFIX/etc/keys/jwt-ed25519-knock.pem" \
+    BAIDI_PKI_DIR="$BD_PREFIX/etc/pki" \
+    "$BD_PREFIX/bin/baidi-control" -issue-gateway-cert "$GW_ID" -out "$BD_PREFIX/etc/gwcerts" \
+    || { echo "  ✗ 网关身份材料签发失败"; exit 1; }
+
+  # 网关专属 env：只含公钥与自己的证书路径，与 control 的 baidi.env 彻底分开
+  cat > "$BD_PREFIX/etc/baidi-gateway.env" <<GWENV
+# 白帝网关专属配置——只有验证材料，没有任何签发能力。
+# 令牌验证：只装 control 的**敲门**公钥；会话令牌用另一把密钥签，其 kid 在此查不到。
+BAIDI_GW_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/knock.pub
+# 机器身份：mTLS 客户端证书（CN=$GW_ID），控制面据此认人并可即刻吊销
+BAIDI_GW_MTLS_CERT=$BD_PREFIX/etc/gwcerts/gw.crt.pem
+BAIDI_GW_MTLS_KEY=$BD_PREFIX/etc/gwcerts/gw.key.pem
+BAIDI_GW_MTLS_CA=$BD_PREFIX/etc/gwcerts/ca.crt.pem
+GWENV
+  chmod 0640 "$BD_PREFIX/etc/baidi-gateway.env"
+  chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX/etc/gmcerts" "$BD_PREFIX/etc/gwcerts" \
+    "$BD_PREFIX/etc/baidi-gateway.env" "$BD_PREFIX/bin"
   render "$HERE/systemd/baidi-gateway.service" > /etc/systemd/system/baidi-gateway.service
   systemctl daemon-reload
   systemctl enable --now baidi-gateway
   systemctl restart baidi-gateway
   sleep 1
-  systemctl is-active --quiet baidi-gateway && echo "  ✓ baidi-gateway 已起：SPA :18201/udp + 国密 TLCP 代理 :18443/tcp（与 control 同密钥，后端=control:${CONTROL_PORT}）" \
+  systemctl is-active --quiet baidi-gateway && echo "  ✓ baidi-gateway 已起：SPA :18201/udp + 国密 TLCP 代理 :18443/tcp（mTLS 身份 CN=$GW_ID，经 :${MTLS_PORT} 拉策略，后端=control:${CONTROL_PORT}）" \
     || { echo "  ✗ baidi-gateway 启动失败，看日志："; journalctl -u baidi-gateway --no-pager -n 12; }
 fi
 

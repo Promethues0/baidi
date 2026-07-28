@@ -24,10 +24,17 @@ import (
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 
+	// 部署期离线签发网关身份材料（-issue-gateway-cert）：处理完即退出，不起服务。
+	if runBootstrap() {
+		return
+	}
+
 	cfg := config.Load()
-	// 生产环境拒绝用默认/空 JWT 密钥启动：密钥可猜则任何人都能伪造 admin 令牌。
-	if config.InsecureProdSecret(cfg.Env, cfg.JWTSecret) {
-		slog.Error("拒绝启动：BAIDI_ENV=prod 但 BAIDI_JWT_SECRET 未设置或仍为默认值，请注入强随机密钥")
+	// 生产拒绝用默认/空 HS256 密钥启动——但仅当迁移逃生舱开着时该密钥才有意义。
+	// 收口后（BAIDI_ACCEPT_HS256=false，默认）令牌全由 Ed25519 私钥签发，
+	// BAIDI_JWT_SECRET 不再参与任何鉴权，自然也不必强求它非默认。
+	if cfg.AcceptHS256 && config.InsecureProdSecret(cfg.Env, cfg.JWTSecret) {
+		slog.Error("拒绝启动：BAIDI_ACCEPT_HS256=1 且 BAIDI_ENV=prod，但 BAIDI_JWT_SECRET 未设置或仍为默认值")
 		os.Exit(1)
 	}
 	st, err := store.OpenSQLite(cfg.DBPath)

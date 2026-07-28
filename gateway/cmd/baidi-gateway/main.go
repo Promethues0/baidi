@@ -31,7 +31,7 @@ func main() {
 	spaAddr := flag.String("spa", env("BAIDI_GW_SPA", ":18201"), "SPA 敲门 UDP 监听地址")
 	proxyAddr := flag.String("proxy", env("BAIDI_GW_PROXY", ":18443"), "TLS 隧道代理监听地址")
 	backend := flag.String("backend", env("BAIDI_GW_BACKEND", "127.0.0.1:9999"), "后端业务 host:port")
-	secret := flag.String("secret", env("BAIDI_JWT_SECRET", "baidi-dev-secret-change-me"), "JWT 密钥（须与 baidi-control 一致）")
+	secret := flag.String("secret", env("BAIDI_JWT_SECRET", ""), "旧 HS256 共享密钥（仅 -accept-hs256=true 的过渡逃生舱用；收口后留空即可）")
 	ttl := flag.Duration("ttl", 30*time.Second, "SPA 放行窗口")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
 	certDir := flag.String("certdir", env("BAIDI_GW_CERTDIR", "certs"), "国密证书目录（持久化 CA 签发的双证书；首启自动生成）")
@@ -56,11 +56,13 @@ func main() {
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
-	if *secret == "" {
-		log.Fatal("拒绝启动：BAIDI_JWT_SECRET 为空（数据面授权依赖它校验 SPA 敲门身份）")
+	// 收口后网关不再持有任何共享密钥：令牌验证只靠 control 的敲门公钥。
+	// 仅当显式打开 HS256 逃生舱时才需要 -secret。
+	if *acceptHS256 && *secret == "" {
+		log.Fatal("拒绝启动：-accept-hs256=true 需同时提供 -secret（旧共享密钥）")
 	}
-	if *secret == "baidi-dev-secret-change-me" {
-		slog.Warn("⚠ 正在使用开发默认 JWT 密钥，生产务必经 BAIDI_JWT_SECRET 配置独立密钥（须与 baidi-control 一致）")
+	if *secret != "" && !*acceptHS256 {
+		slog.Warn("已忽略 -secret：HS256 兼容已关闭，网关只用 control 公钥验证令牌")
 	}
 	if !*strictKnock {
 		slog.Warn("⚠ 严格敲门已关闭：长效会话令牌可直接敲门，绕过强制下线/账号禁用/终端合规三道闸，仅限过渡期")

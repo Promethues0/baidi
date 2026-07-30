@@ -1,0 +1,462 @@
+# 白帝 · 架构与技术方案解析
+
+> 面向代码审查：每节都给出可点击的源码位置。读完这篇应当能回答「一个包从终端出发，经过哪些判定，最终怎么到达业务」，以及「哪一段是真链路，哪一段是演示数据」。
+>
+> 配套自检（各一条命令、自带起栈、无需 root/Docker）：
+> - `cd gateway && ./e2e.sh` —— 南北向：登录 → 剖面 → 敲门 → 钉扎 → 多资源路由 → 越权拒绝
+> - `cd gateway && ./ipsec-e2e.sh` —— 东西向：真 IKEv2 协商 → 真 ESP 加密 → 跨隧道业务流量 → 反例
+
+---
+
+## 一、一句话架构
+
+**控制面判定，数据面执行，两者之间只有单向的信任流。**
+
+控制面（`control/`）持有全部判定权：谁是谁、能访问什么、此刻是否合规。数据面（`gateway/`）不做任何策略推导，只执行控制面下发的结论。终端（`clients/`）连策略都不推导，连"哪些地址该进隧道"都由控制面告诉它。
+
+这条原则决定了后面所有的设计取舍——凡是让数据面或终端获得判定权/签发能力的方案，都被刻意排除了。
+
+---
+
+## 二、进程全景
+
+| 进程 | 位置 | 职责 | 端口 |
+|---|---|---|---|
+| `baidi-control` | [control/cmd/baidi-control](../control/cmd/baidi-control/main.go) | 控制面：身份、策略、审计、令牌签发、接入剖面下发 | 8090（管理）/ 8092（网关 mTLS） |
+| `baidi-gateway` | [gateway/cmd/baidi-gateway](../gateway/cmd/baidi-gateway/main.go) | 数据面：SPA 门控 + 隧道代理 + 资源路由 | 18201/udp（敲门）、18443/tcp（隧道） |
+| `baidi-tun` | [gateway/cmd/baidi-tun](../gateway/cmd/baidi-tun/main.go) | 终端数据面：utun 接管流量 → 逐流入隧道（需 root） | — |
+| `baidi-knock` | [gateway/cmd/baidi-knock](../gateway/cmd/baidi-knock/main.go) | 轻量敲门器（桌面端 sidecar） | — |
+| `baidi-knock-agent` | [gateway/cmd/baidi-knock-agent](../gateway/cmd/baidi-knock-agent/main.go) | 浏览器 dev 联调用的敲门代理 | 8091 |
+| `baidi-gmca` | [gateway/cmd/baidi-gmca](../gateway/cmd/baidi-gmca/main.go) | 国密 SM2 双证书签发（只服务 TLCP 隧道） | — |
+| `baidi-tlcp-probe` | [gateway/cmd/baidi-tlcp-probe](../gateway/cmd/baidi-tlcp-probe/main.go) | 国密隧道探针（curl 不支持 TLCP） | — |
+| `baidi-e2e` | [gateway/cmd/baidi-e2e](../gateway/cmd/baidi-e2e/main.go) | **全链路自检**：8 步真实断言 | — |
+| `baidi-ipsec` | [gateway/cmd/baidi-ipsec](../gateway/cmd/baidi-ipsec/) | **站点组网**：自研 IKEv2 + ESP（需 CAP_NET_ADMIN） | 500/udp（IKE）、4500/udp（NAT-T + ESP 封装） |
+| `baidi-ipsec-e2e` | [gateway/cmd/baidi-ipsec-e2e](../gateway/cmd/baidi-ipsec-e2e/) | IPSec 全链路自检（无 root） | — |
+| console | [console/](../console/) | 管理台 SPA + 门户 + 大屏 + 诊断 | 5193（dev） |
+| desktop | [clients/desktop/](../clients/desktop/) | Tauri 2 + Vue3 桌面客户端 | 5294（dev） |
+
+---
+
+## 三、核心链路：一次接入的完整时序
+
+这是理解整个系统的主干。**注意 ②③ 两步是本轮补上的关键环节** —— 在此之前客户端不知道该接管哪些网段，隧道建起来了也没有流量进去。
+
+```mermaid
+sequenceDiagram
+    participant U as 终端用户
+    participant C as 桌面客户端
+    participant T as baidi-tun (root)
+    participant CT as baidi-control
+    participant G as baidi-gateway
+    participant B as 业务后端
+
+    U->>C: ① 门户登录（口令 + WebAuthn 断言）
+    C->>CT: POST /api/v1/portal/login
+    CT-->>C: 会话令牌（Ed25519，8h）
+
+    C->>CT: ② GET /api/v1/client/profile
+    Note over CT: 组装接入剖面：网关落点 + 路由表<br/>+ 资源映射 + 隧道证书指纹
+    CT-->>C: ClientProfile
+
+    C->>T: ③ tunnel_start（osascript 提权）<br/>-route 剖面网段 -resmap 剖面映射 -pin 指纹
+    T->>T: 创建 utun + 按剖面配多条路由
+
+    loop 每 15s 保活
+        T->>CT: ④ POST /api/v1/knock-token（会话令牌）
+        Note over CT: 三道闸：强制下线 / 账号状态 / 终端合规
+        CT-->>T: 敲门令牌（use=knock, jti, 90s）
+        T->>G: ⑤ SPA UDP 敲门包 {t, ts, nonce}
+        Note over G: 验签(knock 公钥) + jti 去重 + nonce 防重放
+        G->>G: 放行该源 IP 一个 TTL 窗口（30s）
+    end
+
+    U->>C: ⑥ 点开「OA 协同办公」
+    C->>U: 打开 http://10.99.0.14:8080（VIP）
+    Note over T: utun 捕获该流 → gVisor netstack 终止 TCP
+    T->>T: ⑦ 查 resmap：10.99.0.14:8080 → "oa"
+    T->>G: ⑧ TLS 拨号 + 指纹钉扎校验
+    T->>G: CONNECT oa\n
+    Note over G: 查注册表得后端 + resource.Authorize 鉴权
+    G->>B: ⑨ 拨 127.0.0.1:19001
+    B-->>U: 业务响应（全程经隧道）
+```
+
+### 为什么第 ②③ 步是关键
+
+修复前，客户端的接管网段是**设置页里手填的** `10.99.0.0/24`，而业务真实地址是 `10.20.1.10:8080`。两者毫无关系，于是：
+
+- 隧道成功建立、UI 显示"已接入"、日志一切正常；
+- 但用户点开应用，流量走系统默认路由直连内网，**根本不进隧道**；
+- 而 `-resmap` 从来没有被任何人填过，即使流量进了隧道也只会落到网关的单一默认后端。
+
+这就是"最基础的客户端连接没跑通"的真实成因——不是某处报错，而是**整条映射链缺了控制面这一环**。修复方式是让控制面下发接入剖面（[clientprofile.go](../control/internal/api/clientprofile.go)），因为只有它同时知道：网关在哪、业务在哪、当前用户有权访问哪些资源。
+
+---
+
+## 四、信任模型：三套互不污染的密钥体系
+
+这是全系统最需要小心的部分。三套 PKI 各管一段，**刻意不复用**：
+
+```mermaid
+graph TB
+    subgraph CT["baidi-control（唯一信任根）"]
+        K1["Ed25519 会话密钥<br/>BAIDI_JWT_KEY"]
+        K2["Ed25519 敲门密钥<br/>BAIDI_JWT_KNOCK_KEY"]
+        CA1["内部 CA (P-256)<br/>BAIDI_PKI_DIR"]
+    end
+    subgraph GW["baidi-gateway（被保护方）"]
+        P2["knock 公钥 .pub<br/>（只有这一把）"]
+        MC["mTLS 客户端证书"]
+        SC["隧道自签证书"]
+    end
+    subgraph CL["终端客户端"]
+        TK["会话令牌"]
+        PIN["证书指纹（钉扎）"]
+    end
+    subgraph GM["国密 CA（独立）"]
+        SM["SM2 双证书"]
+    end
+
+    K1 -->|签| TK
+    K2 -->|签敲门令牌| P2
+    CA1 -->|签| MC
+    SC -->|指纹经 control 转发| PIN
+    SM -->|只管 TLCP 隧道| SC
+
+    style CT fill:#e8f0ff,stroke:#165DFF
+    style GW fill:#fff4e6,stroke:#ff9a2e
+```
+
+### 关键不变量
+
+| 不变量 | 实现位置 | 为什么 |
+|---|---|---|
+| **网关只装 knock 公钥** | [main.go `-jwt-pubkey`](../gateway/cmd/baidi-gateway/main.go) | 会话令牌用另一把密钥签，其 kid 在网关侧查不到 → **从密码学上就敲不开门**。`spa.checkKnock` 的 `use` 语义闸退化为纵深，而非唯一防线 |
+| **数据面没有 Sign 函数** | [gateway/internal/auth](../gateway/internal/auth/) | 阶段 4 主动删除。要加签发就是给被保护方发钥匙——不加 |
+| **公钥走部署期文件分发，不做 JWKS 端点** | 部署脚本 | 在线端点若自身即信任根，会构成循环论证 |
+| **配了 `-control` 就必须配 mTLS 证书** | [main.go](../gateway/cmd/baidi-gateway/main.go) | 机器身份只有一条路，没有回退 |
+| **证书指纹白名单是即刻吊销的执行点** | [mtls.go `VerifyPeerCertificate`](../control/internal/api/mtls.go) | mTLS 只证明证书由我们签过，不代表此刻仍被信任 |
+| **国密 CA 只管 TLCP 隧道** | [gmcert](../gateway/internal/gmcert/gmcert.go) | 与身份体系完全隔离，两套 PKI 互不污染 |
+
+### 隧道证书钉扎（本轮新增）
+
+网关的隧道证书是**启动期自签**的，没有公共 CA 可校验。修复前客户端写死 `InsecureSkipVerify: true` —— 隧道加密但**不认证**，任何抢到 TCP 连接的中间人都能冒充网关，把明文业务流量原样读走。
+
+修复思路不是"去搞一个公共证书"，而是**把信任根落到控制面**：
+
+1. 网关启动时算出自己隧道证书的 SHA-256 指纹，随 mTLS 注册心跳上报（[main.go `certFingerprint`](../gateway/cmd/baidi-gateway/main.go)）；
+2. 控制面存下并经接入剖面转发给客户端（[clientprofile.go `ProfileGateway.TunnelPin`](../control/internal/api/clientprofile.go)）；
+3. 客户端在 `VerifyPeerCertificate` 里比对指纹（[dataplane.go `tlsClientConfig`](../gateway/internal/dataplane/dataplane.go)）。
+
+> 代码里仍然有 `InsecureSkipVerify: true`，但含义完全不同：它关掉的是**链**校验（自签证书必然过不了），安全性改由指纹钉扎承担。钉扎比链校验**更严**——只认那一张证书，连同一个 CA 签的其他证书都不认。回归覆盖见 [pin_test.go](../gateway/internal/dataplane/pin_test.go)。
+
+---
+
+## 五、五道门：一个访问请求会被拦几次
+
+理解白帝的核心在于：**同一个访问会被独立地拦截五次，任何一次拒绝都终止访问**。
+
+| # | 门 | 位置 | 拦什么 |
+|---|---|---|---|
+| 1 | **敲门令牌签发闸** | [api.go `handleKnockToken`](../control/internal/api/api.go) | 强制下线名单 / 账号禁用锁定 / 终端合规（posture）三项任一不过就不发令牌 |
+| 2 | **SPA 单包授权** | [spa.go `checkKnock`](../gateway/internal/spa/spa.go) | 令牌签名、`use=knock`、jti 去重、TTL 上界、nonce 防重放；未通过 → 网关对该 IP 保持隐身 |
+| 3 | **放行窗口** | [spa.go `Allowlist`](../gateway/internal/spa/spa.go) | 源 IP 不在 30s 放行窗口内 → 隧道端口直接断连 |
+| 4 | **隧道证书钉扎** | [dataplane.go](../gateway/internal/dataplane/dataplane.go) | 对端不是那台网关 → 握手失败（防中间人） |
+| 5 | **资源鉴权** | [registry.go `Authorize`](../gateway/internal/resource/registry.go) | 资源 id 的 AllowRoles/AllowUsers 不命中 → 断连 |
+
+关键：**接入剖面不是授权凭据**。它只是"路由提示"，告诉客户端哪些地址该进隧道。即使剖面被完整泄露，攻击者也拿不到任何访问权 —— 第 5 道门在网关侧独立重新鉴权（自检第 ⑧ 步专门验证这一点）。
+
+### fail-closed 的代价与补偿
+
+严格敲门（默认开）意味着**所有敲门客户端必须能访问控制面**。副作用是：控制面不可达超过网关 TTL（30s）时，窗口自然关闭、访问中断。
+
+这是刻意的选择——零信任下失去策略源就该收窗，而不是拿长效令牌硬撑。补偿手段是 reknock 频度（15s）显著小于 TTL（30s），单次抖动不至于关窗（[dataplane.go `knock`](../gateway/internal/dataplane/dataplane.go)）。
+
+---
+
+## 六、代码地图
+
+### 控制面 `control/`
+
+```
+cmd/baidi-control/       启动、密钥自举、双监听（明文 8090 + mTLS 8092）
+internal/api/
+  api.go                 主路由表 + 门户/管理端点（1000+ 行，从这里开始读）
+  clientprofile.go       ★接入剖面：网关落点 + 路由表 + 资源映射 + 证书指纹
+  mtls.go                网关 mTLS 服务端配置 + 证书指纹白名单校验
+  jit.go                 JIT 申请 → 审批 → 时限授予
+  webauthn.go            passkey 注册/断言两回合
+  posture.go             终端环境上报
+  diag.go                自诊断
+internal/auth/           Ed25519 双密钥、JWT 自实现、中间件
+internal/pki/            内部 CA（签网关 mTLS 客户端证书）
+internal/risk/           按安全基线评估 posture → allow/observe/block
+internal/store/          领域文件 + 同名 _sqlite.go 成对；Memory 是种子/降级
+internal/webauthnx/      WebAuthn 依赖方实现
+```
+
+### 数据面 `gateway/`
+
+```
+internal/spa/            ★SPA 单包授权：放行表、封禁、敲门校验
+internal/proxy/          受 SPA 门控的隧道代理；CONNECT 前导多资源路由
+internal/resource/       资源注册表（防 SSRF：后端地址只来自注册表）
+internal/dataplane/      ★客户端数据面引擎（桌面/移动共享）
+                         TUN → gVisor netstack → 逐流隧道 + 证书钉扎
+internal/knock/          敲门包封装、nonce 缓存、向控制面换令牌
+internal/cplane/         网关侧控制面客户端（mTLS）
+internal/darkfw/         内核态隐身（pf / nft）
+internal/auth/           令牌验证（★刻意没有 Sign）
+internal/gmcert/         国密 SM2 双证书
+internal/ipsec/          ★站点组网：自研 IKEv2 + ESP（约 2 万行含测试）
+                         依赖是一条单向链，任何一环都不许反向 import：
+                         ipsec（契约） ← ike ← esp ← site ← cmd/baidi-ipsec
+  types.go               契约层：SiteConfig / SiteState / Protector / Datapath / Transport
+  config.go              装载期拒绝规则的**唯一集中地**（不支持的配置一律显式拒绝，绝不静默降级）
+  transport_udp.go       500/4500 双监听 + non-ESP marker + IKE/ESP/keepalive 三分流
+  transport_mem.go       进程内假 UDP 网 —— 让「真协商」能被无 root 的 go test 验证
+  datapath_{tun,pair,netstack}.go  生产 TUN / 内存对拨 / gVisor netstack 三种数据面
+  ike/                   IKEv2：wire 报文层、payload_* 载荷、crypto+dh 算法、keys 派生、
+                         auth PSK 认证、suite 套件映射、initiator/responder/engine 状态机、
+                         rekey / nat / cookie / retransmit
+  esp/                   ESP：packet 线格式、sa SPI 与生存期、replay 反重放窗口、spd 选路
+  site/                  编排：site 生命周期、backend 声明式对账、pump 双向泵、status 状态聚合
+mobile/baidimobile/      gomobile 绑定（iOS/Android）
+```
+
+### 客户端 `clients/desktop/`
+
+```
+src-tauri/src/main.rs    Tauri 壳：osascript 提权拉起 root baidi-tun、
+                         终端环境采集、托盘常驻、open_app_url 白名单
+src/lib/api.ts           HTTP 封装 + 接入剖面类型
+src/lib/store.ts         会话 / 配置 / ★接入剖面（profile）
+src/lib/tunnel.ts        ★resolveTunOpts：剖面优先、config 兜底
+src/lib/knock.ts         敲门抽象（Tauri sidecar / dev 代理两条路径）
+src/views/Connect.vue    接入状态机（从 baidi-tun 真实日志解析状态）
+src/views/Apps.vue       ★应用中心：真实打开 VIP 地址
+```
+
+---
+
+## 六·五、站点组网：自研 IKEv2 + ESP
+
+远程接入（南北向：用户 → 业务）与站点组网（东西向：站点 ↔ 站点）是**两条完全独立的链路**，只共享 mTLS 客户端证书与控制面地址。理解这一点很重要——它解释了为什么 IPSec 是独立进程而不是并进网关。
+
+### 为什么是独立进程
+
+| 理由 | 说明 |
+|---|---|
+| **权限边界（决定性）** | `baidi-gateway` 是**非 root、`NoNewPrivileges=true`** 的进程——这不是偶然：SPA 敲门 + 隧道代理只需两个高位端口。IPSec 需要 `CAP_NET_BIND_SERVICE`（绑 500）+ `CAP_NET_ADMIN`（建 TUN、配路由）。并进去等于给**直接暴露在公网、逐包解析未认证 UDP 敲门包**的进程授予建网络接口的能力，账算不过来 |
+| **失效域隔离** | 网关挂 = 远程接入中断；IPSec 挂 = 站点组网中断。合进一个进程意味着 IKE 解析器的一个 panic 会顺带打掉所有远程接入 |
+| **部署可选性** | `WITH_IPSEC=0` 默认关。很多部署只要远程接入不要站点组网，不该被迫背上一个需要特权的组件 |
+
+### 一条隧道的建立时序
+
+```mermaid
+sequenceDiagram
+    participant CT as baidi-control
+    participant A as baidi-ipsec (站点A)
+    participant B as baidi-ipsec (站点B)
+
+    loop 每 15s
+        A->>CT: GET /api/v1/gateways/ipsec（mTLS，CN=ipsec-*）
+        Note over CT: 最小披露：只下发本网关负责的站点
+        CT-->>A: 站点配置 + pskVersion
+        alt 本地 PSK 版本落后
+            A->>CT: GET …/ipsec/{id}/psk
+            Note over CT: 落库时 AES-256-GCM 加密，AAD 绑 site_id
+            CT-->>A: PSK 原文（只经 mTLS 口）
+        end
+    end
+
+    A->>B: ① IKE_SA_INIT（明文）SA, KE, Ni, N(NAT检测)
+    B->>A: ① IKE_SA_INIT 响应 SA, KE, Nr, N(NAT检测)
+    Note over A,B: 各自算 g^ir → SKEYSEED → prf+ 展开七段密钥
+
+    A->>B: ② IKE_AUTH（加密）SK{IDi, AUTH, SA, TSi, TSr}
+    Note over B: 校验 AUTH = prf(prf(PSK,"Key Pad for IKEv2"), SignedOctets)
+    B->>A: ② IKE_AUTH 响应 SK{IDr, AUTH, SA, TSi, TSr}
+    Note over A,B: KEYMAT = prf+(SK_d, Ni‖Nr) → 装载 Child SA
+
+    loop 业务流量
+        A->>B: ③ ESP over UDP:4500（SPI + 序号 + AEAD 密文）
+        Note over B: 查 SA → 验 ICV → 解密 → 反重放窗口 → 内层 TS 校验
+    end
+
+    A->>CT: ④ POST /api/v1/gateways/ipsec/status
+    Note over CT: 实测状态：SPI / 协商结果 / 字节数 / 失败原因
+```
+
+### 三个关键设计决定
+
+**① ESP 只走 UDP 4500 封装，不做裸 ESP。** 裸 ESP（IP 协议号 50）需要 raw socket + root，本机无法验证——做了就等于再造一个不可验证的声明。UDP 封装还顺带让 IKE 与 ESP 共用一条 socket（NAT 映射按五元组建立，ESP 另开端口在 NAT 后必然收不到）。
+
+**② 期望态与观测态彻底分家。** `ipsec_sites.enabled` 是管理意图（toggle 只改这个），`ipsec_sa_state` 是网关实测回报。旧实现里 `status` 一列同时承担两者，于是「点了启用」和「真的连上了」在界面上长得一模一样——真做 IKE 后必然出现「点了启用但协商失败」，混在一起就是又一个静默失效。
+
+**③ 算法参数化从第一行做起。** IKEv2 的报文编解码、状态机、SPI 管理、rekey、NAT-T、ESP 封装占了 90% 的工作量，而这些**全部与具体算法无关**。把算法藏在 `EncrAlg`/`PRF`/`IntegAlg`/`DHGroup` 接口后面，增加国密套件的成本就退化为「注册表加一行 + 几十行 gmsm 胶水」。反过来先硬编码 AES 再回头抽象，代价是重写整条链路。
+
+> 国密套件能以极低成本存在，但**能实现不等于能声称合规**——它走 IANA 私有码点，只白帝↔白帝互通，与 GM/T 0022 无关。边界见第七节。
+
+---
+
+## 七、真实性清单（诚实版）
+
+这是本文档最该被认真读的一节。
+
+### ✅ 真链路（可用 `./e2e.sh` 复现验证）
+
+| 能力 | 证据 |
+|---|---|
+| SPA 单包授权 + 服务隐身 | 自检 ③：敲门前直连必被拒 |
+| 短时效一次性敲门令牌（三道闸） | 自检 ④；[api.go `handleKnockToken`](../control/internal/api/api.go) |
+| 敲门重放防护（ts + nonce + jti） | [knock.go](../gateway/internal/knock/knock.go)、[spa_test.go](../gateway/internal/spa/spa_test.go) |
+| TLS / 国密 TLCP 隧道 | 自检 ⑤；国密路径用 `baidi-tlcp-probe` 验证 |
+| **隧道证书钉扎（防中间人）** | 自检 ⑤⑥；[pin_test.go](../gateway/internal/dataplane/pin_test.go) |
+| **多资源路由到不同后端** | 自检 ⑦：两个资源落到两个可区分的后端 |
+| **资源级鉴权（越权拒绝）** | 自检 ⑧ |
+| utun 真流量接管 + gVisor netstack | [dataplane.go](../gateway/internal/dataplane/dataplane.go)（需 root，自检不覆盖建卡） |
+| 网关 mTLS 机器身份 + 即刻吊销 | [mtls.go](../control/internal/api/mtls.go)、[gwidentity_test.go](../control/internal/api/gwidentity_test.go) |
+| 强制下线（撤窗 + 断隧道 + 封禁敲门） | [linkage_test.go](../control/internal/api/linkage_test.go) |
+| 终端合规（posture）→ 拒发令牌 | [posture_test.go](../control/internal/api/posture_test.go)、[risk_test.go](../control/internal/risk/risk_test.go) |
+| JIT 申请 → 审批 → 时限授予 → 网关放行 | [jit_sqlite_test.go](../control/internal/store/jit_sqlite_test.go)、`TestBuildProfile_ActiveGrantUnlocksRouting` |
+| WebAuthn / passkey 二次认证 | [ceremony_test.go](../control/internal/webauthnx/ceremony_test.go)（需可注册域名，裸 IP 不可用） |
+| 真实在线用户 / 网关活性 | 网关 mTLS 注册上报，[monitor_objects.go](../control/internal/api/monitor_objects.go) |
+| 审计落库 | [audit_sqlite.go](../control/internal/store/audit_sqlite.go) |
+
+### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
+
+| 页面 | store 方法 | 说明 |
+|---|---|---|
+| 网关与隐身 · 区域拓扑 | `Memory.Gateway` | "华东/华南出口"是硬编码拓扑；**真实网关清单**在 `GET /api/v1/gateways`（mTLS 注册来源） |
+| 认证源接入 | `Memory.AuthSrc` | LDAP/OAuth 接入未实现，只有配置界面 |
+| 系统管理 · 集群信息 | `Memory.System` | 管理员分组/集群节点是演示值 |
+| 策略管理 · 组织树 | `Memory.PolicyBundle` | 组织树是种子；但**策略覆盖**（`SavePolicyOverride`）真落库 |
+| 大屏 `/screen` | 前端 `MOCK_*` 常量 | 纯展示 |
+
+### ✅ IPSec 站点组网（真，但边界很硬）
+
+纯 Go 自实现 **IKEv2（RFC 7296 子集）+ ESP（RFC 4303）**，用户态数据面，独立进程 `baidi-ipsec`（`gateway/internal/ipsec/`，约 2 万行含测试）。真实完成 IKE_SA_INIT / IKE_AUTH（PSK）/ CREATE_CHILD_SA（含 PFS）/ INFORMATIONAL（DPD、Delete），真实做 DH 密钥交换、prf+ 派生、AES-GCM 与 AES-CBC+HMAC 的 ESP 加解密、64 位滑窗反重放。站点状态、SPI、协商结果、流量字节数**全部来自 IKE 状态机与 ESP 计数器的实测值**，经 mTLS 回报控制面。
+
+**能声称**：两台白帝网关之间能建立真实 IPSec 隧道并承载真实业务流量。协商与加解密可在**无 root、无 Docker** 的本机由 `gateway/ipsec-e2e.sh` 端到端验证。关键证据（都是「只有真协商才可能成立」的性质）：
+
+- 两端**独立导出**的 KEYMAT 逐字节相等，且这些密钥字节**从未出现在任何一条抓到的报文里**；
+- SPI **交叉相等**（`InSPI(A) == OutSPI(B)`）—— 单端伪造不出来；
+- IKE_AUTH 报文的明文里**看不到身份**（被 SK 加密），而 IKE_SA_INIT **能被明文解析出 SA/KE/Nonce** —— 正面证明这是 RFC 7296 的报文，不是自造协议；
+- ESP 载荷与 `crypto/cipher` **独立**按 RFC 4106 算出的结果逐字节相同（KAT，排除「自己 Seal 自己 Open 所以通过」）；
+- 反例断言同样常驻：PSK 不一致 → `AUTHENTICATION_FAILED`、套件不相交 → `NO_PROPOSAL_CHOSEN`、TS 不匹配 → `TS_UNACCEPTABLE`、密文翻转任一 bit → 丢弃、重放 → 丢弃并计数、越权目的地址 → 不进隧道。
+
+**不能声称**：
+
+- **未与 strongSwan / libreswan 做过实机互通验证**。设计按 RFC 7296/4303 逐字段对齐并刻意避开私有行为，但**「按标准写」与「实测互通」是两回事**。`interop_test.go` 默认 skip，不作为互通依据。已知风险点：AEAD 提案我们显式发 `INTEG=NONE(0)`，strongSwan 是省略该变换（收侧已双向宽容，发侧未验证）。
+- **ESP 只走 UDP 4500 封装（RFC 3948），不实现裸 ESP（IP 协议号 50）**。裸 ESP 需要 raw socket + root，本机无法验证 —— 不做，而不是做了不验证。与 strongSwan 对接需对端 `forceencap=yes`。
+- **两端的 UDP 封装端口必须一致（生产恒为 4500）**，否则须在站点上显式配 `peerNatPort`。IKEv2 **没有**通告对端封装端口的机制，RFC 3948 直接把它定死为 4500，实现只能按对称假设推算。配错的症状极具迷惑性：**IKE 协商全绿、隧道显示 up、协商结果正常，但字节数恒为 0 且没有任何报错**。
+- **认证方式只有 PSK**。证书认证（RFC 7427 数字签名 AUTH、CERT/CERTREQ）本轮不实现；控制台的 `cert`/`sm2cert` 在装载期被**显式拒绝并回报原因**，不会静默降级成 PSK。
+- **国密套件（`suite=gm`：SM4-GCM/SM4-CBC、HMAC-SM3、sm2p256v1）走 IANA 私有使用段码点（1024+），只承诺白帝↔白帝互通，与 GM/T 0022 无关**。GM/T 0022 是 IKEv1 血统 + 数字信封的另一套协议栈，与 RFC 7296 结构性不兼容；且 IANA 从未为 SM 系列分配 IKEv2 码点。**因此绝不可对外称「国密 IPSec」或宣称 GM/T 合规。** 纯软件实现也不具备商用密码产品认证的资格（GM/T 0028 要求密码运算在硬件密码模块内完成）。
+- **不实现**：EAP、IKEv1、MOBIKE、IKE 分片、配置载荷 CP/虚拟 IP 下发、ESN、传输模式、AH、IPComp、TFC padding、多 TS 对与 narrowing、窗口 >1、后量子混合（`pqHybrid` 字段保留但无效，装载期告警）。
+- **不做 PMTUD**：内层包超过隧道 MTU 直接丢弃并计数（可见），不静默截断。
+- **自实现的密码学协议，未经安全审计**。与项目整体定位一致（README 已声明研究/演示用途）。
+
+### ✅ 分离式 DNS（split-DNS，真，但系统解析器那一段未实机验证）
+
+企业业务几乎都靠域名访问。此前客户端**只按 IP 路由**，域名形式的后端被静默跳过（流量直连内网、无任何提示）。现在：控制面剖面下发 `dns` 段（解析器 VIP + 分流域 + `FQDN→VIP` 记录表），客户端在 netstack 里跑一个隧道内解析器，并把这些域交给它解析。
+
+**能声称**：DNS 报文的编解码与作答逻辑是真的，有单元测试 + fuzz + 一条端到端用例（手工拼校验和的 IPv4/UDP 包灌进真协议栈，断言回包源地址/端口/事务 ID/RDATA）。UDP 与 TCP 两条查询路径都实现并有回归覆盖。
+
+几个刻意的取舍：
+
+- **不做递归转发**：未知域名一律 `REFUSED`。转发会把内网查询泄露给外部解析器，也会让我们变成开放解析器；而系统已按域分流，不属于我们的域名根本不会来问。
+- **AAAA 命中名字返回 `NOERROR + 0 应答`（NODATA）而非 `NXDOMAIN`**。NXDOMAIN 意为「这个名字不存在」，客户端收到后连 A 都不再查——症状是「明明配了 A 记录却解析失败」，且**只在开了 IPv6 的机器上出现**。
+- **按域分流，不全局接管**：全局接管会让所有 DNS 走隧道，隧道一断整机解析全挂。
+- **UDP 只服务 DNS**：隧道协议只承载 TCP 语义，其余 UDP 目的地不接管。不接管的包**交回协议栈回 ICMP 端口不可达**而非黑洞丢弃——黑洞会让 QUIC(UDP/443) 卡满重试超时才降级 TCP，表现为「接入后网页奇慢」，比直接失败难查。
+
+**不能声称**：**系统解析器配置那一段未实机验证**（macOS `/etc/resolver`、Linux `resolvectl`/`resolv.conf`、Windows NRPT）——它需要 root 且会真改系统配置，本机与 CI 都不跑。三个平台实现的文件头都标了「未实机验证，请按未验证代码对待」。清理覆盖了 defer / 信号 / 数据面异常退出三条路径，但 SIGKILL 拦不住的残留只能靠下次启动扫描回收。
+
+**运维约束**：业务后端应使用**专用内网域**。分流域是从域名后端推导的父域（`oa.corp.internal` → `corp.internal`），若有人配了 `shop.example.com`，`example.com` 会成为分流域，其兄弟名字在隧道期间会因「不转发」而解析不了。公共后缀（`com`/`co.uk` 这类）已被显式挡住，但可公开注册的二级域挡不住。
+
+### ✅ 认证源接入 LDAP/AD + OIDC（真，但未与真实目录/IdP 实机互通）
+
+此前「认证源接入」页是**一整页内存种子**：6 条硬编码认证源，连「总部 AD 域 1160 用户」这个数字都是凭空写的，「接入认证源 / 同步」按钮背后没有任何东西；登录只查本地 SQLite + bcrypt。
+
+现在：认证源配置真落库、凭据加密存储（AES-256-GCM，AAD 绑认证源 id，**只写不读**）、「测试连接」真的去连、登录链路真的按「本地 → 外部源」问下去。
+
+**能声称**：协议实现是真的，且**验证方式不是 mock 接口**——
+- LDAP/AD 用 `gldap` 起**进程内 LDAP 服务端**做真实 BER 协议往返（含 LDAPS 与 StartTLS 握手），覆盖率 93.6%；
+- OIDC 用 `httptest` 起 mock IdP（发现文档 + JWKS + 令牌端点，真 RSA-2048/P-256 私钥签 ID Token），30 个用例。
+
+守住的**认证绕过**（每条都有对应测试）：LDAP 注入（RFC 4515 转义，带"未转义会被骗到"的漏洞对照组）、**空口令 bind**（LDAP 经典绕过：有 DN + 空口令会被许多目录当成匿名 bind 并返回成功）、空 DN 条目、命中多条即拒、StartTLS 失败不得降级明文、OIDC 的 `alg=none` 与 HS256（且算法由**我们的白名单**决定而非令牌自称）、iss/aud/azp/exp/nonce 全验、伪造 kid 不会打成 JWKS 拉取风暴。
+
+账号映射的两条硬约束（`login_authsrc.go` 与 `authsrc_sqlite.go` 里都写了症状）：
+- **绑定以 `Subject`（OIDC 的 `sub` / LDAP 的 `entryDN`）为键，不是用户名**。按用户名绑的话，谁能在 AD 里新建一个叫 `admin` 的账号谁就是本地管理员，而审计日志里是一次完全正常的「admin 登录成功」。撞名时给外部账号加来源后缀，绝不复用本地账号；外部账号 `role` 恒为 `user`。
+- **外部账号的 `pass_hash` 恒为空**。不置空的话，认证源被停用/删除后那个账号会退回成「用某个本地口令也能登录」，而那个口令是谁设的没人说得清。
+
+**认证源故障 ≠ 密码错误**：目录不可用时回「认证服务暂时不可用」而非「用户名或密码错误」，也不计入账号锁定——不区分的症状是「AD 挂了，所有人看到的都是密码错误」，运维被误导去查用户而不是查目录。
+
+**不能声称**：
+- **未与真实 Active Directory / OpenLDAP / Keycloak / Azure AD 实机互通验证过**。所有往返都是对自写的进程内服务端/mock IdP。协议编解码是真的，但 AD 的具体行为（`data 533` 诊断串格式、referral 回法）与真实 IdP 的实现差异（form 编码、字符串型 `exp`、单值 `groups`）是**按文档模拟**的，不是抓包抄的。这条边界和 IPSec 那条一样硬。
+- **LDAP 不支持 referral 追踪**（AD 多域林会表现为「某些域的人登不上」）、**不支持 SASL/GSSAPI/Kerberos**（只做 simple bind）、**嵌套组不展开**（按组授权时嵌套组成员会被判成不在组里）。
+- **`Subject = entryDN` 有代价**：用户改名或跨 OU 移动时 DN 会变，绑定需要重建。AD 的 `objectGUID` 才是真正不变的标识，但它是 AD 专有。
+- **OIDC 没有登出通道**（RP-initiated / back-channel logout 都没做）：**IdP 上禁用了账号，白帝这边 8h 会话照用**。这是目前最需要补的一个洞。
+- **RADIUS / 短信网关 / 商密证书三种类型没有实现**，`Kind.Supported()` 会在保存时明确拒绝，控制台上置灰——不再是「能选但静默不生效」。
+
+### ⚠️ 声明式但未实现的能力
+
+- **console 各页的 `MOCK_*` 常量**：这些是**后端不可达时的降级演示数据**（设计如此，见 CLAUDE.md）。后端在跑时走真实 API。判断方法：页面右上角的「已连控制中心 / 未连」标签。
+
+### 📌 已知配置缺口（会被剖面显式告警，不再静默）
+
+- 应用 `a4 数据库运维 (SSH)` 未关联受控资源 → 无法经隧道访问。剖面会返回 `warnings`，客户端显著提示。这类缺口此前是静默的：管理台里应用好端端的，客户端就是连不上，且没有任何线索。
+
+---
+
+## 八、本轮做了什么（收口清单）
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 1 | **客户端不知道该接管哪些网段**，隧道通了但流量不进去 | 控制面新增 `GET /api/v1/client/profile` 下发路由表（[clientprofile.go](../control/internal/api/clientprofile.go)） |
+| 2 | `-resmap` 从未被填过，所有流量落到单一默认后端 | 剖面下发资源映射，Tauri 落盘后传 `-resmap`（[main.rs](../clients/desktop/src-tauri/src/main.rs)） |
+| 3 | `baidi-tun` 只支持单网段 | `-route` 支持逗号分隔多段，三平台 `ifup` 同步（[ifup_*.go](../gateway/cmd/baidi-tun/)） |
+| 4 | 隧道 `InsecureSkipVerify` 写死，加密但不认证 | 网关上报证书指纹 → 控制面转发 → 客户端钉扎（[dataplane.go](../gateway/internal/dataplane/dataplane.go)） |
+| 5 | `Apps.vue:openApp()` 只弹 toast，什么都不做 | 真实打开 VIP 地址（web）/ 复制接入地址（SSH 等） |
+| 6 | `knock.ts` 硬编码 `127.0.0.1:18201`，设置项被忽略 | 改为剖面优先、配置兜底 |
+| 7 | **`apps.resource_id` 补列迁移只加列不回填** | 既有库的应用↔资源桥接永久为空，静默拖垮 JIT 与客户端路由 → 加回填（[sqlite.go `backfillAppResourceID`](../control/internal/store/sqlite.go)） |
+| 8 | 网关地址靠用户手填 | 剖面从 mTLS 注册信息取真实落点，离线时明确告警 |
+| 9 | 无法验证"到底通没通" | 新增 [baidi-e2e](../gateway/cmd/baidi-e2e/main.go) + [e2e.sh](../gateway/e2e.sh)：8 步真实断言 |
+
+### IPSec 站点组网：从"只有配置面"到真实实现
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 10 | **`toggle` 全部实现就是两条 SQL**（把 `status` 改成 `'up'`），没有任何进程被通知、没有任何网络动作 | 自研 IKEv2 + ESP（[internal/ipsec/](../gateway/internal/ipsec/)），独立进程 [baidi-ipsec](../gateway/cmd/baidi-ipsec/) |
+| 11 | **审计谎报**：toggle 写「建立 IPSec 隧道 X · ok」——断言了一个从未发生的事实 | 改为记录「下发启用意图」，真正的 up/down 由网关实测回报另记一条 |
+| 12 | `rx_bytes` 全库**没有任何 UPDATE 语句**，种子里 184MB 的常量永久不变（UI 上最有欺骗性的一格） | 新表 `ipsec_sa_state`，字节数只来自 ESP 计数器；旧四列废弃 |
+| 13 | `status` 一列同时表达「管理员想让它开」和「它真的开着」 | 拆成 `enabled`（意图）+ `state`（实测五态）。不拆的话「点了启用但协商失败」在界面上和「已连上」长得一样 |
+| 14 | **`GET /api/v1/ipsec` 漏了 `requireAdmin`** —— 任何登录用户（含门户普通员工）都能读走全部对端公网地址 + 内网网段拓扑 | 补上。这是往模型里加 PSK 之前的硬前置 |
+| 15 | 模型里没有 PSK 字段，UI 却允许选 `auth=psk` | 独立加密表 `ipsec_secrets`（AES-256-GCM，**AAD 绑 site_id**，否则剪贴密文行即可完成密钥转移），只写不读 |
+| 16 | 种子站点配的是 `sm2cert`/`group24`/`PqHybrid`，本轮全不支持 → 落地即永久标红 | 改成真能连的配置。**留一条永远红的站点比改种子更不诚实** |
+| 17 | 一张网关证书可读全部策略 | mTLS **CN 前缀分权**：`ipsec-*` 只能调 ipsec 端点，读不到资源授权策略 |
+| 18 | IKE 是网关上第一个「非暗」的对外端口，逐包解析未认证输入，但引擎无 panic 兜底 | 收包与定时器两条路径加顶层 `recover`：把「一个畸形包打掉整个进程」降级成「丢一个包 + 一条响亮日志」（[panicguard_test.go](../gateway/internal/ipsec/ike/panicguard_test.go) 守着不被重构掉） |
+| 19 | **控制面没下发 `ikeVersion`**，网关侧那道「非 IKEv2 一律拒绝」的闸永远不会响 | 补进下发 DTO。管理员选了 IKEv1 现在会被当面拒绝，而不是被当成 IKEv2 静默处理 |
+| 20 | **无 NAT 时 ESP 被发往对端 IKE 端口**（`applyNAT` 只在检测到 NAT 时才切封装口），而 500 口按设计只跑 IKE → 静默丢弃 | ESP 落点与 IKE 落点分开算（[nat.go `espEndpoints`](../gateway/internal/ipsec/ike/nat.go)）。**这个缺陷只在「两端都有公网 IP、中间无 NAT」的数据中心互联场景出现，有 NAT 的测试环境永远复现不了**，而症状正是隧道 up、零流量、无报错 |
+| 21 | 两端封装端口不一致时无从表达，同样静默失效 | 新增 `peerNatPort` 站点配置，端到端贯通（store→DTO→网关）。旧库补列后为 NULL，读侧 `COALESCE` 到 0 即「按对称假设」，与既有部署行为一致，故**不需要回填** |
+| 22 | netstack 数据面只有**同网段**往返测试，而 IPSec 场景恒为跨网段 | 补 [跨网段往返测试](../gateway/internal/ipsec/datapath_netstack_crossnet_test.go)：少了它，数据面的跨网段缺陷会一路潜伏到 e2e 才炸，那时怀疑对象是十几个环节 |
+
+### 分离式 DNS：让域名形式的业务也真正走隧道
+
+| # | 问题 | 修复 |
+|---|---|---|
+| 23 | **客户端数据面完全没有 UDP**，DNS 无法穿隧道 | netstack 注册 UDP 协议与转发器，**只**服务隧道内 DNS；其余 UDP 交回协议栈回 ICMP 端口不可达（[dataplane.go](../gateway/internal/dataplane/dataplane.go)） |
+| 24 | **域名形式的后端被静默跳过**（`clientprofile.go` 原注释：「域名后端交给系统 DNS + 默认出口」）——配了却不走隧道，无任何提示 | 域名后端同样分配 VIP、进 resmap、并登记进 `DNS.Records`；父域推导为分流域（[clientprofile.go](../control/internal/api/clientprofile.go)） |
+| 25 | 解析器 VIP 会与资源 VIP **撞号**：资源从 `.11` 连续递增，第 43 个正好落在 `.53` | `vipHostFor` 把 53 从分配区间挖掉，且**无条件**挖除——否则新增一个域名应用会让几十个资源 VIP 集体后移，用户书签/SSH 配置全部失效 |
+| 26 | **TCP/53 会掉进隧道转发路径**：解析器 VIP 随 routes 被接管，发往它 53 端口的 TCP 连接会去 CONNECT 一个不存在的资源 id | TCP 转发器对解析器 VIP 短路并真正实现 DNS-over-TCP（RFC 1035 §4.2.2 长度前缀）。症状本来是「`dig +tcp` 挂住而 UDP 正常」，只有特定查询方式才暴露 |
+
+---
+
+## 九、下一步建议（按价值排序）
+
+1. **DNS 劫持**：目前只按 IP 路由，域名形式的业务（`oa.corp.internal`）需要在 netstack 里接管 DNS 并返回 VIP。这是从"能用"到"好用"的最大一步。
+2. **IPSec 与 strongSwan 实机互通验证**：协议按 RFC 写完了，但没跟第三方实现对过字节。搭一台 strongSwan（`authby=secret` + `forceencap=yes`）跑通 `interop_test.go`，才能把「未验证互通」这条从边界里划掉。第一个该查的地方是 AEAD 提案的 `INTEG=NONE` 发送形式。
+3. **IPSec 证书认证**：目前只有 PSK。内部 CA（`control/internal/pki`）已能签客户端证书，接 RFC 7427 数字签名 AUTH 即可复用同一套白名单/吊销机制，把 PSK 降级为兼容路径。
+4. **认证源接入**：LDAP/OIDC 是企业落地的硬门槛，目前完全是界面。
+5. **剖面缓存与增量**：现在每次接入全量拉取；资源多了之后应加 ETag + 变更推送。
+6. **网关多活**：剖面目前只选心跳最新鲜的一台，没有故障转移与就近选择。

@@ -33,6 +33,12 @@ echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
 
+# 站点组网网关（东西向，自研 IKEv2/ESP）。无条件编译、由 install-remote.sh 的 WITH_IPSEC 决定装不装：
+# 交付包里多一个 3MB 二进制的成本，远小于「现场想开组网却发现产物里没有」的成本。
+echo "==> 交叉编译站点组网网关 baidi-ipsec（linux/amd64）"
+( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-ipsec" ./cmd/baidi-ipsec )
+
 echo "==> 携带部署脚本/模板"
 cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" "$OUT/"
 

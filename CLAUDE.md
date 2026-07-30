@@ -13,6 +13,9 @@
 cd console && npm run dev            # :5193（或 preview_start baidi-console），/api→127.0.0.1:8090
 cd control && go run ./cmd/baidi-control   # :8090，SQLite 首启自动建表+播种
 cd gateway && ./demo.sh              # 数据面最小闭环：暗→敲门→隧道→后端→TTL重暗（前置 control 已跑）
+cd gateway && ./e2e.sh               # 全链路自检（自带起栈）：登录→剖面→敲门→钉扎→多资源路由→越权拒绝
+cd gateway && ./ipsec-e2e.sh         # IPSec 全链路自检（无 root）：真 IKEv2 协商→真 ESP 加密→跨隧道业务流量→反例
+cd gateway && go run ./cmd/baidi-ipsec -h  # 站点组网守护进程（IKEv2+ESP，需 CAP_NET_ADMIN）
 cd gateway && go run ./cmd/baidi-gateway -gm   # 国密 TLCP 隧道网关
 cd clients/desktop && npm run dev    # :5294
 cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build   # 打包前必先 build sidecar
@@ -27,6 +30,7 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 | baidi-control 管理 API | 8090（BAIDI_ADDR） |
 | console dev / desktop dev / mobile dev | 5193 / 5294 / 5295 |
 | baidi-gateway SPA 敲门 / TLS·TLCP 隧道 | 18201/udp / 18443/tcp |
+| baidi-ipsec IKE / NAT-T（ESP 走 UDP 封装） | 500/udp / 4500/udp（可 `-ike-port` 改） |
 | baidi-knock-agent（dev 敲门代理，/knock 反代目标） | 8091 |
 | 部署 nginx HTTPS | 443 独占机；与烛龙共存默认 **9443** |
 
@@ -35,7 +39,8 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - `console/` — 单 SPA：管理台（监控中心/业务管理/安全防护/系统，15 真实页余 ComingSoon）+ 门户 /portal/* + 大屏 /screen + 诊断 /diag；路由生成式：nav.ts 定义 IA → router.ts BUILT 映射
 - `console/src/lib/api.ts` — 唯一 HTTP 封装：BASE=/api/v1，token 存 localStorage(baidi_token)
 - `control/` — Go 控制面（**stdlib mux + Go 1.22 方法路由，无 gin**；modernc SQLite 免 CGO；自实现 JWT）；store 层 = 领域文件 + 同名 _sqlite.go 成对
-- `gateway/` — Go 数据面：6 个二进制（baidi-gateway / baidi-knock sidecar / baidi-knock-agent / baidi-tun utun 数据面(需root) / baidi-gmca SM2 签发 / baidi-tlcp-probe）；firewall/ 内核态隐身脚本（pf/nft）
+- `docs/ARCHITECTURE.md` — **架构与技术方案解析**（含接入时序图、信任模型、五道门、代码地图、真伪清单）。改动数据面/信任链前先读它
+- `gateway/` — Go 数据面：9 个二进制（baidi-gateway / baidi-knock sidecar / baidi-knock-agent / baidi-tun utun 数据面(需root) / baidi-gmca SM2 签发 / baidi-tlcp-probe / baidi-e2e 全链路自检 / **baidi-ipsec 站点组网守护进程** / baidi-ipsec-e2e）；`internal/ipsec/` 自研 IKEv2+ESP（ike/ 控制面 · esp/ 数据面 · site/ 编排，依赖单向：ipsec←ike←esp←site）；firewall/ 内核态隐身脚本（pf/nft）
 - `gateway/mobile/baidimobile/` — gomobile 绑定（iOS .xcframework / 安卓 .aar）
 - `clients/desktop/` — Tauri 2 + Vue3，4 视图，osascript 提权拉起 root baidi-tun，托盘常驻
 - `docs/` — SCOPE.md（对烛龙 PRD 逐章取舍）、design/00-ia-and-interaction.md（P1-P10 交互范式）
@@ -50,6 +55,11 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - **`gateway/internal/auth` 刻意没有 Sign 函数**：数据面在代码层不具备签发能力（阶段 4 删除）。要加签发就是在给被保护方发钥匙，别加。
 - **收口默认值与逃生舱**：`BAIDI_ACCEPT_HS256`、`BAIDI_GW_ACCEPT_HS256`、`BAIDI_GW_PLAINTEXT_COMPAT` **均已默认 false**。三者置 1 是过渡逃生舱（升级瞬间尚有未过期的 8h 会话时临时用），存量过期后必须关回。`BAIDI_JWT_SECRET` 收口后已不承担跨进程职责，仅逃生舱路径用得到。
 - **严格敲门（strict knock，默认开）**：网关只接受 control `/knock-token` 签发的短时效一次性令牌（`use=knock` + jti + ≤`-knock-max-ttl`，见 `spa.checkKnock`）。长效会话令牌**不能**再直接敲门——那会绕过强制下线/账号禁用/终端合规三道闸。因此**所有敲门客户端必须能访问 control**（`baidi-knock`/`baidi-tun`/`tlcp-probe` 的 `-control` 已必填，knock-agent 有默认值）。逃生舱 `BAIDI_GW_KNOCK_STRICT=0` 仅限过渡。副作用：control 不可达超过网关 `-ttl`(30s) 时窗口自然关闭（fail-closed，零信任下是正确姿态，不再回退长效令牌硬撑）。
+- **客户端接入剖面（终端能连通的前提）**：`GET /api/v1/client/profile`（登录用户）一次下发**网关落点 + 该接管哪些网段 + "host:port→资源id"映射 + 隧道证书指纹**。终端**不推导策略、也不自己猜网段**——只有控制面同时知道网关在哪、业务在哪、当前用户有权访问什么。剖面里同时登记 VIP 与业务真实地址（两种访问姿态收敛到同一 `CONNECT <id>`），VIP 按资源 id 字典序**确定性分配**（不稳定会让用户书签/SSH 配置失效）。**剖面不是授权凭据**，只是路由提示：权威授权闸始终在网关侧 `resource.Authorize`，泄露剖面拿不到任何访问权。可访问性判定必须与 `handleGatewayPolicy` 同构（静态 ACL ∪ 有效 JIT 授予），否则会出现「审批批了却连不上」。
+- **隧道服务端认证 = 证书指纹钉扎**：网关隧道证书是启动期自签的，没有公共 CA 可依赖。网关算出自己证书的 SHA-256 指纹随 mTLS 注册心跳上报 → control 经剖面转发 → 客户端 `VerifyPeerCertificate` 比对（`dataplane.tlsClientConfig`）。代码里的 `InsecureSkipVerify: true` 关掉的是**链**校验，安全性由钉扎承担——钉扎比链校验**更严**，只认那一张证书。指纹口径两侧必须一致：都对**叶子证书 DER 原文**取 SHA-256。国密 TLCP 走 CA 校验，两条路径信任材料不同，不可混用。
+- **分离式 DNS（split-DNS）**：剖面 `dns` 段下发解析器 VIP + 分流域 + `FQDN→VIP`；客户端在 netstack 里跑隧道内解析器（`dataplane/dns.go`），并按域配系统解析器（macOS `/etc/resolver` / Linux `resolvectl` / Windows NRPT）。**不做递归转发**（未知域名 REFUSED，避免泄露内网查询 + 变成开放解析器）；**AAAA 命中名字回 NOERROR+0 而非 NXDOMAIN**（回 NXDOMAIN 会让客户端连 A 都不再查，且只在双栈机器上出现）；**UDP 只服务 DNS**，其余 UDP 回 ICMP 端口不可达而非黑洞（黑洞会让 QUIC 卡到超时才降级）。解析器 VIP 用网段基址 +53 并从资源分配区间**挖除**。系统解析器配置那一段**未实机验证**，退出清理覆盖 defer/信号/异常退出三路。
+- **`baidi-tun -route` 支持逗号分隔多网段**：业务地址散落在多个内网段，只接管单一网段就会出现「隧道建起来了、点开应用却直连不走隧道」——这是本项目历史上最迷惑人的失败形态（无报错、UI 显示已接入）。网段清单由剖面下发，不该由用户手填。
+- **认证源接入（LDAP/AD + OIDC 已真实现）**：配置落库 `auth_sources`，凭据走 `auth_source_secrets` 独立表加密（AAD 绑源 id，**只写不读**）。登录链路「先本地、后外部」——反过来等于把本地 admin 的认证权外包出去。**账号绑定以 `Subject`（OIDC `sub` / LDAP `entryDN`）为键而非用户名**：按用户名绑的话，AD 里新建一个 admin 就能冒充本地管理员且审计看起来完全正常；撞名加来源后缀、外部账号 `role` 恒 user、`pass_hash` 恒空（否则停用认证源后账号退回成"某个本地口令也能登录"）。**认证源故障不能回「密码错误」**也不计入锁定。LDAP 客户端用 go-ldap（**刻意不自研**：与 IKEv2 相反，LDAP 的价值就是连别人的 AD，自研只增互通风险）；OIDC 用标准库。RADIUS/短信/证书三类未实现，保存时明确拒绝。**均未与真实 AD/IdP 实机互通验证**，边界见 docs/ARCHITECTURE.md 第七节。
 - 演示口令：管理台 admin/baidi@123；门户任意用户+baidi@123。
 - **二次认证 = WebAuthn/passkey**（`BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 驱动，门户与管理台都覆盖）：已注册 passkey 的账号登录强制断言；风险账号（ext.*/含「外包」）未注册则拒绝登录并引导录入。**RP ID 必须是可注册域名或 localhost——浏览器规范不允许裸 IP**，故 IP 演示站（101.43.125.131）无法启用，未配置时回落 legacy 演示验证码 123456（仅此路径可达）。passkey 管理页 /portal/security。
 - 未起后端时 console 各页降级为内置演示数据，UI 完整可点。
@@ -63,3 +73,7 @@ cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 - Go 版本不一致：control 要 go 1.25，gateway 要 go 1.26.3；交叉编译全程 CGO_ENABLED=0。
 - curl 不支持国密 TLCP，验证 -gm 隧道用 gateway/cmd/baidi-tlcp-probe。
 - 重置数据：删 control/baidi.db 重启即重灌种子。
+- **补列迁移必须配回填**：`addColumnIfMissing` 只加列不填值，既有库的新列永久为 NULL。`apps.resource_id` 就这么静默断过——应用↔资源桥接为空 → JIT 解析不出资源、客户端剖面排不出路由，两处都**无报错**。加业务语义列时同步写回填（见 `backfillAppResourceID`）。
+- **IPSec 已真实实现，但边界很硬**：纯 Go IKEv2+ESP（`gateway/internal/ipsec/`，独立进程 `baidi-ipsec`）。**只支持 PSK 认证、ESP 只走 UDP-4500 封装、未与 strongSwan 实机互通验证过**；`suite=gm` 用 IANA 私有码点，只白帝↔白帝，**不是国密 IPSec，别这么说**。toggle 改的是 `enabled`（管理意图），`state` 由网关实测回报——`ipsec_sites` 的 `status/rx_bytes/tx_bytes/last_up` 四列已废弃，读运行态一律走 `ipsec_sa_state`。站点 `gatewayId` **必须以 `ipsec-` 开头**（它就是组网网关 mTLS 证书的 CN，控制面按 CN 精确过滤下发；前缀不对时网关拉到空列表而非错误，站点安静地永远 down）。其余真伪边界见 docs/ARCHITECTURE.md 第七节。
+- **IKE_AUTH 之外的交换必须先过已认证闸**（`ike.onRequest`）：SK_e/SK_a 只由 DH + nonce + SPI 派生，PSK 只进 AUTH 载荷——任何能完成一次 IKE_SA_INIT 的对端都持有可用的 SK 密钥。少了这道闸，不知道 PSK 的对端跳过 IKE_AUTH 直发 CREATE_CHILD_SA 就能装进一条真通的 ESP 隧道，而 `States()` 因 `primary()` 要求 SAEstablished 仍不显示 up（数据面已通、控制台无痕）。判据必须用 `State.authenticated()` 而非 `Keys != nil`——**密钥就绪不等于身份已验**。
+- **展示值必须来自「数据面真正在用的那份」**：桌面客户端接入信息取 `tunnel.ts` 的 `startedOpts` 快照而非当前剖面。全局剖面随时会被刷新（切「应用」页即重拉），而 baidi-tun 的参数在拉起那一刻定死——现算当前剖面会把**未钉扎的运行中隧道显示成已钉扎**。同理 `profile.error` 与剖面 `warnings` 必须在「接入」页渲染：剖面拉不到会退回本机默认配置（单网段、无 resmap、无 pin）却仍显示「已接入」。

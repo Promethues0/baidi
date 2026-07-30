@@ -28,6 +28,18 @@ fi
 # 清空 nginx 站点（已备份），由白帝 install 重建
 rm -f /etc/nginx/sites-enabled/* /etc/nginx/conf.d/* 2>/dev/null || true
 
+# 停白帝自己的数据面服务（这台机若装过白帝）。install-remote.sh 随后会重装并拉起，
+# 所以这里只 stop 不 disable，也不碰 baidi-control（它持库，停它没有收益）。
+# ★baidi-ipsec 必须在这一步停掉：它常驻持有 UDP 500/4500——
+#   ① 不停的话，本轮若换了端口，旧进程仍绑着旧端口，装完看起来正常、实际两套端口并存；
+#   ② 本轮若换了 mTLS 证书，旧进程会拿着已吊销的证书反复被控制面拒，日志刷屏难定位。
+for svc in baidi-ipsec baidi-gateway; do
+  if systemctl is-active --quiet "$svc" 2>/dev/null; then
+    echo "==> 停 $svc（白帝数据面，install 会重装拉起）"
+    systemctl stop "$svc" 2>/dev/null || true
+  fi
+done
+
 # 停 + 禁用 旧业务 systemd 单元（保留系统/ssh）；名单可按盘点结果增删
 for svc in $(systemctl list-units --type=service --state=running --plain --no-legend 2>/dev/null \
     | awk '{print $1}' | grep -ivE 'systemd|dbus|cron|ssh|networkd|resolved|polkit|rsyslog|getty|accounts|udisks|snapd|unattended|multipath|chrony|cloud-init|irqbalance|packagekit|nginx|docker|baidi'); do
@@ -39,6 +51,20 @@ for p in 80 443; do
   pids="$(ss -lntpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ')"
   if [ -n "${pids// /}" ]; then
     echo "==> 端口 $p 仍被占用，结束进程：$pids"
+    # shellcheck disable=SC2086
+    kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true
+  fi
+done
+
+# 释放 UDP 500/4500（IPSec）：strongSwan 若不是 systemd 单元、或单元名没被上面的
+# 匹配抓到（ipsec.service / strongswan-starter.service 都常见），停服务这一步会漏掉它。
+# ★漏掉的后果不是「装不上」，而是更难查的那种：baidi-ipsec 起得来、端口预检也过了
+#   （预检发生在 wipe 之后），但先绑上的那个进程收走全部 IKE 报文——控制台上站点
+#   永远 down、一条协商记录都没有，看起来像对端没配。
+for p in 500 4500; do
+  pids="$(ss -lunpH "sport = :$p" 2>/dev/null | grep -oE 'pid=[0-9]+' | cut -d= -f2 | sort -u | tr '\n' ' ')"
+  if [ -n "${pids// /}" ]; then
+    echo "==> UDP $p 仍被占用（多半是 strongSwan），结束进程：$pids"
     # shellcheck disable=SC2086
     kill $pids 2>/dev/null || true; sleep 1; kill -9 $pids 2>/dev/null || true
   fi

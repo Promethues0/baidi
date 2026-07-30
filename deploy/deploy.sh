@@ -10,6 +10,10 @@ source "$HERE/config.env"
 : "${SERVER_SSH:?需在 config.env 设置 SERVER_SSH，如 root@101.43.125.131}"
 : "${BD_PREFIX:=/opt/baidi}"; : "${BD_USER:=baidi}"; : "${CONTROL_PORT:=8090}"; : "${PUBLIC_ORIGIN:=*}"
 : "${BD_HTTPS_PORT:=9443}"; : "${PUBLIC_HOST:=}"; : "${SSH_KEY:=}"; : "${WIPE:=0}"; : "${WITH_GATEWAY:=0}"
+# 站点组网（默认关）。这几项必须显式转发给远端：install-remote.sh 是经 ssh 起的新 shell，
+# config.env 里的值不会自动过去——漏转的症状是「config.env 里写了 WITH_IPSEC=1，
+# 部署成功，机器上却根本没有 baidi-ipsec」，且全程无报错。
+: "${WITH_IPSEC:=0}"; : "${IPSEC_GW_ID:=}"; : "${IKE_PORT:=}"; : "${NATT_PORT:=}"
 
 # 若指定私钥则用之（如 ubuntu 用户需 -i ~/.ssh/xxx）
 SSH=(ssh); RSYNC_E=(ssh)
@@ -28,6 +32,6 @@ if [ "$WIPE" = "1" ]; then
 fi
 
 echo "==> 远程安装（sudo；独立端口 $BD_HTTPS_PORT）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

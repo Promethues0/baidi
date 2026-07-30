@@ -14,3 +14,14 @@ certs/
 
 # gomobile 绑定产物（.xcframework/.aar，各上百 MB 的编译产物），本地按需重建，不入库
 clients/mobile/native/out/
+
+# gateway 根目录手动 go build 的二进制残留（e2e 脚本产物在 /tmp；源码在 gateway/cmd/*）
+# 注：baidi-tun(.exe) 是历史 tracked 二进制，不受 ignore 影响，见 CLAUDE.md「坑」
+gateway/baidi-ipsec-e2e
+gateway/baidi-ipsec
+gateway/baidi-e2e
+gateway/baidi-gateway
+gateway/baidi-knock
+gateway/baidi-knock-agent
+gateway/baidi-gmca
+gateway/baidi-tlcp-probe

@@ -50,6 +50,87 @@ VALUES(?,?,'203.0.113.1','10.20.0.0/16','10.40.0.0/16','IKEv2','psk','standard',
 	return path
 }
 
+// 种子站点的 gateway_id / local_id / remote_id 与 enabled 同批补列，必须一并回填。
+//
+// ★这条是线上实测发现的：演示机既有库升级后三条种子站点的 gatewayId 全为空，
+// 而控制面按 gateway_id == 证书 CN 精确过滤下发——网关拉到的是**空列表而不是
+// 错误**，站点安静地永远 down。只回填 enabled 会漏掉这一半。
+func TestBackfillIpsecIdentityOnLegacyDB(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "old.db")
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatalf("open raw sqlite: %v", err)
+	}
+	if _, err := db.Exec(`CREATE TABLE ipsec_sites (
+  id TEXT PRIMARY KEY, name TEXT, peer TEXT, local_subnet TEXT, remote_subnet TEXT,
+  ike_version TEXT, auth TEXT, suite TEXT, phase1 TEXT, phase2 TEXT, pfs INTEGER, pq_hybrid INTEGER,
+  status TEXT, rx_bytes INTEGER, tx_bytes INTEGER, last_up TEXT, local_ref TEXT, remote_ref TEXT, updated_at TEXT
+)`); err != nil {
+		t.Fatalf("create old table: %v", err)
+	}
+	// 老库里的种子行（老 schema 没有 gateway_id/local_id/remote_id 这三列）
+	for _, id := range []string{"site-sh", "site-gz", "site-cd"} {
+		if _, err := db.Exec(`INSERT INTO ipsec_sites(id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up,local_ref,remote_ref,updated_at)
+VALUES(?,'分支','203.0.113.1','10.20.0.0/16','10.40.0.0/16','IKEv2','psk','standard','{}','{}',1,0,'down',0,0,'','','','2026-06-28 10:00:00')`, id); err != nil {
+			t.Fatalf("insert seed row %s: %v", id, err)
+		}
+	}
+	// 管理员自建的老站点：gateway_id 无从推断，必须留空而不是猜一个填进去
+	if _, err := db.Exec(`INSERT INTO ipsec_sites(id,name,peer,local_subnet,remote_subnet,ike_version,auth,suite,phase1,phase2,pfs,pq_hybrid,status,rx_bytes,tx_bytes,last_up,local_ref,remote_ref,updated_at)
+VALUES('site-custom','自建','203.0.113.9','10.20.0.0/16','10.70.0.0/16','IKEv2','psk','standard','{}','{}',1,0,'down',0,0,'','','','2026-06-28 10:00:00')`); err != nil {
+		t.Fatalf("insert custom row: %v", err)
+	}
+	db.Close()
+
+	st, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("migrate legacy db: %v", err)
+	}
+	defer st.Close()
+	sites, err := st.Ipsec(context.Background())
+	if err != nil {
+		t.Fatalf("read sites: %v", err)
+	}
+	got := map[string]IpsecSite{}
+	for _, s := range sites {
+		got[s.ID] = s
+	}
+	for _, w := range []struct{ id, gw, local, remote string }{
+		{"site-sh", "ipsec-1", "hq.baidi", "sh.baidi"},
+		{"site-gz", "ipsec-1", "hq.baidi", "gz.baidi"},
+		{"site-cd", "ipsec-1", "hq.baidi", "cd.baidi"},
+	} {
+		s := got[w.id]
+		if s.GatewayID != w.gw || s.LocalID != w.local || s.RemoteID != w.remote {
+			t.Fatalf("种子站点 %s 回填错误：gw=%q local=%q remote=%q，期望 %q/%q/%q（gatewayId 为空时网关拉到空列表且零报错）",
+				w.id, s.GatewayID, s.LocalID, s.RemoteID, w.gw, w.local, w.remote)
+		}
+	}
+	if got["site-custom"].GatewayID != "" {
+		t.Fatalf("自建站点的 gatewayId 被猜了一个值 %q——无从推断时必须留空，靠 configWarning 提示管理员补",
+			got["site-custom"].GatewayID)
+	}
+
+	// 幂等：管理员改过之后再迁移一次，不得被冲掉
+	cur := got["site-sh"]
+	cur.GatewayID = "ipsec-beijing"
+	if _, err := st.SaveIpsecSite(context.Background(), cur); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+	st.Close()
+	st2, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer st2.Close()
+	sites2, _ := st2.Ipsec(context.Background())
+	for _, s := range sites2 {
+		if s.ID == "site-sh" && s.GatewayID != "ipsec-beijing" {
+			t.Fatalf("重复迁移把管理员改过的 gatewayId 冲回成 %q：回填只能填空值", s.GatewayID)
+		}
+	}
+}
+
 // ★核心回归：旧库跑完迁移后 enabled 必须被回填，且映射忠实于旧 status。
 // 不回填时网关拉到的是空列表，控制台、网关日志、审计三处全程零报错。
 func TestBackfillIpsecEnabledOnLegacyDB(t *testing.T) {

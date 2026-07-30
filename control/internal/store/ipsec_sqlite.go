@@ -326,7 +326,37 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 // 映射用旧的 status 列：旧实现里 status='up' 的唯一来源就是管理员点过「启用」，
 // 所以它恰好就是当时的管理意图，是最忠实的还原。其余（down/connecting/空）一律 0。
 func (s *SQLiteStore) backfillIpsecEnabled() error {
-	_, err := s.db.Exec(
-		`UPDATE ipsec_sites SET enabled = CASE WHEN status='up' THEN 1 ELSE 0 END WHERE enabled IS NULL`)
-	return err
+	if _, err := s.db.Exec(
+		`UPDATE ipsec_sites SET enabled = CASE WHEN status='up' THEN 1 ELSE 0 END WHERE enabled IS NULL`); err != nil {
+		return err
+	}
+	return s.backfillIpsecIdentity()
+}
+
+// backfillIpsecIdentity 回填种子站点的 gateway_id / local_id / remote_id。
+//
+// ★这三列与 enabled 同批补进来，只回填 enabled 是漏的：既有库升级上来后
+// gateway_id 永久为 NULL，而控制面按 gateway_id == 证书 CN 精确过滤下发——
+// 网关拉到的是**空列表而不是错误**，站点安静地永远 down。
+// （local_id/remote_id 为空至少是 fail loud 的：网关装载期拒绝并回报 LastError。）
+//
+// ★只回填**种子站点**：它们的"正确值"是已知的（就是 Memory.Ipsec 里那份）。
+// 管理员自建的老站点无从推断 gateway_id，猜一个填进去比留空更糟——留空时
+// ipsecConfigWarning 会明确报「未指派承载网关」，管理员在控制台上就能补。
+func (s *SQLiteStore) backfillIpsecIdentity() error {
+	for _, seed := range []struct{ id, gw, local, remote string }{
+		{"site-sh", "ipsec-1", "hq.baidi", "sh.baidi"},
+		{"site-gz", "ipsec-1", "hq.baidi", "gz.baidi"},
+		{"site-cd", "ipsec-1", "hq.baidi", "cd.baidi"},
+	} {
+		// 逐列 COALESCE：只填空值，绝不覆盖管理员已经改过的字段。
+		if _, err := s.db.Exec(`UPDATE ipsec_sites SET
+  gateway_id = COALESCE(NULLIF(gateway_id,''), ?),
+  local_id   = COALESCE(NULLIF(local_id,''),   ?),
+  remote_id  = COALESCE(NULLIF(remote_id,''),  ?)
+WHERE id = ?`, seed.gw, seed.local, seed.remote, seed.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }

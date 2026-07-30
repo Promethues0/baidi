@@ -17,40 +17,64 @@
       <span class="bd-tab" :class="{ on: tab === 'rule' }" @click="tab = 'rule'">自适应认证规则</span>
     </div>
 
-    <!-- ============ 认证源 ============ -->
+    <!-- ============ 认证源（真落库、真探测、真参与登录）============ -->
     <div v-show="tab === 'source'">
       <div class="bd-srctoolbar">
         <div class="bd-srctoolbar__sub">
-          已接入 <b>{{ sources.length }}</b> 个身份源 · 纳管 <b>{{ totalUsers.toLocaleString() }}</b> 名访问者
+          已接入 <b>{{ recs.length }}</b> 个身份源
+          <!-- ★刻意不显示"纳管用户数"：那个数拿不到（LDAP 要全量遍历目录才能数），
+               原实现里的 1160 是编的。显示一个 0 会让人以为是真统计出来的。 -->
+          <span class="bd-srchint">登录按「本地目录 → 外部源（按优先级）」依次询问</span>
         </div>
-        <button class="bd-btn" @click="addSource"><icon-plus />接入认证源</button>
+        <button class="bd-btn" @click="openSrcCreate"><icon-plus />接入认证源</button>
       </div>
 
       <div class="bd-srcgrid">
-        <div v-for="s in sources" :key="s.key" class="bd-card bd-srccard">
+        <div v-for="s in recs" :key="s.id" class="bd-card bd-srccard">
           <div class="bd-srccard__top">
-            <span class="bd-srcicon" :style="srcIconStyle(s.type)">
-              <component :is="srcIcon(s.type)" />
+            <span class="bd-srcicon" :style="kindIconStyle(s.kind)">
+              <component :is="kindIcon(s.kind)" />
             </span>
             <div class="bd-srccard__id">
               <div class="bd-srccard__name">
                 {{ s.name }}
-                <span v-if="s.primary" class="bd-primarytag"><icon-star-fill />主认证</span>
+                <span v-if="s.kind === 'local'" class="bd-primarytag"><icon-star-fill />内置</span>
               </div>
-              <span class="bd-tg" :style="tagStyle(typeColor(s.type))">{{ typeLabel(s.type) }}</span>
+              <span class="bd-tg" :style="tagStyle(kindColor(s.kind))">{{ kindLabel(s.kind) }}</span>
             </div>
             <span class="bd-st bd-srccard__st">
-              <span class="d" :style="{ background: statusColor(s.status) }" />{{ statusLabel(s.status) }}
+              <span class="d" :style="{ background: s.enabled ? '#00B42A' : '#86909C' }" />
+              {{ s.enabled ? '已启用' : '已停用' }}
             </span>
           </div>
+
+          <!-- 探测结果：这个按钮此前是纯装饰，现在真的去连目录 / 拉发现文档 -->
+          <div v-if="probeOf(s.id)" class="bd-probe" :class="probeOf(s.id)!.ok ? 'ok' : 'bad'">
+            <component :is="probeOf(s.id)!.ok ? 'icon-check-circle-fill' : 'icon-close-circle-fill'" />
+            <span>{{ probeOf(s.id)!.detail }}</span>
+            <span v-if="probeOf(s.id)!.elapsedMs !== undefined" class="bd-probe__ms">
+              {{ probeOf(s.id)!.elapsedMs }}ms
+            </span>
+          </div>
+
           <div class="bd-srccard__foot">
-            <div class="bd-srccard__kv"><span>纳管用户</span><b>{{ s.users.toLocaleString() }}</b></div>
+            <div class="bd-srccard__kv">
+              <span>凭据</span>
+              <b v-if="s.kind === 'local'">—</b>
+              <b v-else-if="s.hasSecret" class="bd-mono">已配置 · {{ s.secretFingerprint || '••••' }}</b>
+              <b v-else class="bd-warn">未配置</b>
+            </div>
             <div class="bd-srccard__acts">
-              <span class="bd-link bd-link--grey">详情</span>
-              <span class="bd-link">同步</span>
+              <span v-if="s.kind !== 'local'" class="bd-link" @click="probe(s)">
+                {{ probing === s.id ? '测试中…' : '测试连接' }}
+              </span>
+              <span v-if="s.kind !== 'local'" class="bd-link" @click="openSrcEdit(s)">编辑</span>
+              <span v-if="s.kind !== 'local'" class="bd-link bd-link--danger" @click="removeSource(s)">删除</span>
+              <span v-else class="bd-link bd-link--grey">内置不可改</span>
             </div>
           </div>
         </div>
+        <div v-if="!recs.length" class="bd-srcempty">尚未接入任何认证源</div>
       </div>
     </div>
 
@@ -322,6 +346,110 @@
         </div>
       </div>
     </div>
+
+    <!-- ============ 认证源编辑抽屉 ============ -->
+    <a-drawer v-model:visible="srcDrawer" :width="560" :title="srcForm.id ? '编辑认证源' : '接入认证源'" unmount-on-close>
+      <div class="bd-srcform">
+        <div class="bd-srcform__row">
+          <label>名称</label>
+          <a-input v-model="srcForm.name" placeholder="如：总部 AD 域" allow-clear />
+        </div>
+
+        <div class="bd-srcform__row">
+          <label>类型</label>
+          <a-select v-model="srcForm.kind" :disabled="!!srcForm.id">
+            <a-option v-for="k in KIND_OPTS" :key="k.v" :value="k.v" :disabled="!supported.includes(k.v)">
+              {{ k.label }}<template v-if="!supported.includes(k.v)">（本版本未实现）</template>
+            </a-option>
+          </a-select>
+          <!-- ★未实现的类型在这里就置灰。此前它们看起来可选，但后端从来没有实现过——
+               「界面上能选、后端静默不生效」是这个项目反复吃亏的形态。 -->
+          <div class="bd-srcform__hint">RADIUS / 短信网关 / 商密证书三类本版本未实现，已置灰</div>
+        </div>
+
+        <div class="bd-srcform__row bd-srcform__row--inline">
+          <a-switch v-model="srcForm.enabled" /><span>启用（参与登录）</span>
+          <span class="bd-srcform__pri">优先级
+            <a-input-number v-model="srcForm.priority" :min="0" :max="99" size="small" style="width:76px" />
+          </span>
+        </div>
+
+        <!-- ── LDAP / AD ── -->
+        <template v-if="srcForm.kind === 'ldap' || srcForm.kind === 'ad'">
+          <div class="bd-srcform__sec">目录连接</div>
+          <div class="bd-srcform__row"><label>主机</label>
+            <a-input v-model="ldap.host" placeholder="dc01.corp.example" allow-clear /></div>
+          <div class="bd-srcform__row"><label>端口</label>
+            <a-input-number v-model="ldap.port" :min="0" :max="65535" placeholder="0 = 按传输方式取默认" style="width:100%" /></div>
+          <div class="bd-srcform__row"><label>传输</label>
+            <a-select v-model="ldap.tlsMode">
+              <a-option value="ldaps">LDAPS（推荐）</a-option>
+              <a-option value="starttls">StartTLS</a-option>
+              <a-option value="plaintext">明文（不推荐）</a-option>
+            </a-select>
+            <!-- ★明文 LDAP 会把用户口令明文送上网。这不是"不够优雅"，是直接泄露凭据。 -->
+            <div v-if="ldap.tlsMode === 'plaintext'" class="bd-srcform__warn">
+              明文 LDAP 会把用户口令以明文送上网络，仅限隔离网段联调
+            </div>
+          </div>
+          <div class="bd-srcform__row"><label>CA 证书</label>
+            <a-textarea v-model="ldap.caCert" :auto-size="{ minRows: 2, maxRows: 4 }"
+              placeholder="PEM；留空用系统根证书池。填了就只信这一把（比系统池+私有CA更严）" /></div>
+          <div class="bd-srcform__row bd-srcform__row--inline">
+            <a-switch v-model="ldap.insecureSkipVerify" size="small" /><span>跳过证书校验</span>
+          </div>
+          <div v-if="ldap.insecureSkipVerify" class="bd-srcform__warn">
+            跳过校验后 TLS 只加密不认证，中间人可无声接管并拿到用户明文口令——比明文更坏，
+            因为它看起来是有 TLS 的
+          </div>
+
+          <div class="bd-srcform__sec">服务账号与搜索</div>
+          <div class="bd-srcform__row"><label>Bind DN</label>
+            <a-input v-model="ldap.bindDn" placeholder="CN=svc-baidi,OU=Svc,DC=corp,DC=example" allow-clear /></div>
+          <div class="bd-srcform__row"><label>Base DN</label>
+            <a-input v-model="ldap.baseDn" placeholder="OU=Users,DC=corp,DC=example" allow-clear /></div>
+          <div class="bd-srcform__row"><label>用户过滤器</label>
+            <a-input v-model="ldap.userFilter" placeholder="留空用类型默认；须含 {{username}} 占位符" allow-clear /></div>
+          <div class="bd-srcform__row"><label>登录名属性</label>
+            <a-input v-model="ldap.usernameAttr"
+              :placeholder="srcForm.kind === 'ad' ? '默认 sAMAccountName' : '默认 uid'" allow-clear /></div>
+        </template>
+
+        <!-- ── OIDC ── -->
+        <template v-else-if="srcForm.kind === 'oidc'">
+          <div class="bd-srcform__sec">OpenID Connect</div>
+          <div class="bd-srcform__row"><label>Issuer</label>
+            <a-input v-model="oidc.issuer" placeholder="https://idp.example.com/realms/corp" allow-clear /></div>
+          <div class="bd-srcform__row"><label>Client ID</label>
+            <a-input v-model="oidc.clientId" allow-clear /></div>
+          <div class="bd-srcform__row"><label>回调地址</label>
+            <a-input v-model="oidc.redirectUri" placeholder="https://vpn.example.com/api/v1/authsrc/oidc/callback" allow-clear /></div>
+          <div class="bd-srcform__hint">
+            仅接受 RS256/ES256 这类非对称签名；alg=none 与 HS256 会被拒绝（算法混淆攻击面）
+          </div>
+        </template>
+
+        <!-- ── 凭据（只写不读）── -->
+        <template v-if="srcForm.kind !== 'local'">
+          <div class="bd-srcform__sec">凭据</div>
+          <div class="bd-srcform__row">
+            <label>{{ srcForm.kind === 'oidc' ? 'Client Secret' : 'Bind 口令' }}</label>
+            <a-input-password v-model="srcSecret" allow-clear
+              :placeholder="srcForm.hasSecret ? '已配置（指纹 ' + (srcForm.secretFingerprint || '••••') + '）；留空则不改' : '未配置'" />
+            <!-- ★只写不读：没有任何端点能把它读回去。回显原文没有操作价值（配错了重设即可），
+                 只有泄露面。空口令在 LDAP 上会退化成匿名 bind 并"看起来成功"，后端会拒。 -->
+            <div class="bd-srcform__hint">加密落库，永不回显。留空表示保持原有凭据不变</div>
+          </div>
+        </template>
+      </div>
+
+      <template #footer>
+        <a-space>
+          <a-button @click="srcDrawer = false">取消</a-button>
+          <a-button type="primary" :loading="srcSaving" @click="saveSource">保存</a-button>
+        </a-space>
+      </template>
+    </a-drawer>
   </div>
 </template>
 
@@ -330,7 +458,9 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
-  type AuthPolicy, type AuthPolicyResp, type PrimaryMethod, type SecondaryMethod
+  type AuthPolicy, type AuthPolicyResp, type PrimaryMethod, type SecondaryMethod,
+  type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
+  type LdapConfig, type OidcConfig
 } from '@/lib/api';
 
 type SrcType = AuthSource['type'];
@@ -382,6 +512,166 @@ const MOCK_RULES: AdaptiveRule[] = [
 
 const sources = ref<AuthSource[]>(MOCK_SOURCES);
 const rules = ref<AdaptiveRule[]>(MOCK_RULES);
+
+/* ══════════ 认证源：真落库的那一套 ══════════
+ *
+ * 上面的 MOCK_SOURCES 只保留给「自适应规则」两个 tab 的降级演示用。
+ * 认证源 tab 已经完全走真实端点——它此前是一整页内存种子，
+ * 连「AD 域 1160 用户」这个数字都是凭空写的，「同步」按钮背后什么都没有。
+ */
+const recs = ref<AuthSourceRec[]>([]);
+const supported = ref<string[]>(['local', 'ldap', 'ad', 'oidc']);
+const probes = ref<Record<string, ProbeResp>>({});
+const probing = ref('');
+
+const KIND_OPTS: { v: string; label: string }[] = [
+  { v: 'ldap', label: '通用 LDAP' },
+  { v: 'ad', label: 'Active Directory' },
+  { v: 'oidc', label: 'OpenID Connect' },
+  // 这三类后端未实现，靠 supported 置灰而不是从列表里删掉——
+  // 删掉会让人以为"白帝不支持这些"，置灰+注明才说清是"本版本没做"。
+  { v: 'radius', label: 'RADIUS' },
+  { v: 'sms', label: '短信网关' },
+  { v: 'cert', label: '商密证书（SM2）' }
+];
+
+const KIND_LABEL: Record<string, string> = {
+  local: '本地目录', ldap: '通用 LDAP', ad: 'Active Directory', oidc: 'OpenID Connect',
+  radius: 'RADIUS', sms: '短信网关', cert: '商密证书'
+};
+const KIND_COLOR: Record<string, string> = {
+  local: '#165DFF', ldap: '#722ED1', ad: '#165DFF', oidc: '#00B42A'
+};
+const KIND_ICON: Record<string, string> = {
+  local: 'icon-user', ldap: 'icon-mind-mapping', ad: 'icon-storage', oidc: 'icon-link'
+};
+function kindLabel(k: string) { return KIND_LABEL[k] ?? k; }
+function kindColor(k: string) { return KIND_COLOR[k] ?? '#86909C'; }
+function kindIcon(k: string) { return KIND_ICON[k] ?? 'icon-question-circle'; }
+function kindIconStyle(k: string) {
+  const c = kindColor(k);
+  return { color: c, background: c + '1A' };
+}
+function probeOf(id: string): ProbeResp | undefined { return probes.value[id]; }
+
+/* ── 抽屉表单 ── */
+const srcDrawer = ref(false);
+const srcSaving = ref(false);
+const srcSecret = ref('');
+const srcForm = reactive<{
+  id: string; name: string; kind: string; enabled: boolean; priority: number;
+  hasSecret: boolean; secretFingerprint?: string;
+}>({ id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false });
+const ldap = reactive<LdapConfig>({ host: '', port: 0, tlsMode: 'ldaps', baseDn: '' });
+const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '' });
+
+function resetSrcForm() {
+  Object.assign(srcForm, { id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false, secretFingerprint: undefined });
+  Object.assign(ldap, { host: '', port: 0, tlsMode: 'ldaps', caCert: '', insecureSkipVerify: false, bindDn: '', baseDn: '', userFilter: '', usernameAttr: '' });
+  Object.assign(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined });
+  srcSecret.value = '';
+}
+
+function openSrcCreate() { resetSrcForm(); srcDrawer.value = true; }
+
+function openSrcEdit(r: AuthSourceRec) {
+  resetSrcForm();
+  Object.assign(srcForm, {
+    id: r.id, name: r.name, kind: r.kind, enabled: r.enabled, priority: r.priority,
+    hasSecret: r.hasSecret, secretFingerprint: r.secretFingerprint
+  });
+  // config 是后端存的 JSON 字符串。解析失败不能把表单搞成空白——
+  // 那会让"保存"变成一次静默的配置清空。
+  try {
+    const cfg = JSON.parse(r.config || '{}');
+    if (r.kind === 'oidc') Object.assign(oidc, cfg);
+    else Object.assign(ldap, cfg);
+  } catch {
+    Message.warning('该认证源的配置不是合法 JSON，已按空白载入——保存会覆盖原配置');
+  }
+  srcDrawer.value = true;
+}
+
+async function loadSources() {
+  try {
+    const r = await api<AuthSourcesResp>('/authsrc/sources');
+    recs.value = r.sources ?? [];
+    if (r.supportedKinds?.length) supported.value = r.supportedKinds;
+  } catch {
+    // 认证源是真数据，拿不到就明确留空并提示，**不降级到假数据**——
+    // 这一页的历史问题恰恰就是"看起来有数据其实是编的"。
+    recs.value = [];
+  }
+}
+
+async function saveSource() {
+  if (!srcForm.name.trim()) { Message.warning('请填写名称'); return; }
+  if (!supported.value.includes(srcForm.kind)) {
+    Message.error(`${kindLabel(srcForm.kind)} 本版本未实现，无法保存`);
+    return;
+  }
+  srcSaving.value = true;
+  try {
+    const config = srcForm.kind === 'oidc' ? { ...oidc } : { ...ldap };
+    const resp = await api<SaveSourceResp>('/authsrc/sources', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: srcForm.id, name: srcForm.name, kind: srcForm.kind,
+        enabled: srcForm.enabled, priority: srcForm.priority, config
+      })
+    });
+    // 凭据单独一个端点（只写不读）；留空表示不改，不能拿空串去覆盖。
+    if (srcSecret.value.trim()) {
+      const sr = await api<{ ok: boolean; fingerprint: string }>(
+        `/authsrc/sources/${encodeURIComponent(resp.source.id)}/secret`,
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ secret: srcSecret.value }) });
+      Message.success(`凭据已更新（指纹 ${sr.fingerprint}）`);
+    }
+    // 后端「保存即校验」：配置写错了当场就说，而不是等到有人登录不上才发现。
+    if (resp.warning) Message.warning(resp.warning);
+    else Message.success('认证源已保存');
+    srcDrawer.value = false;
+    await loadSources();
+  } catch (e) {
+    Message.error(`保存失败：${String((e as Error)?.message ?? e)}`);
+  } finally {
+    srcSaving.value = false;
+  }
+}
+
+/** 真实连通性探测。此前这个按钮是纯装饰。 */
+async function probe(r: AuthSourceRec) {
+  probing.value = r.id;
+  try {
+    probes.value = {
+      ...probes.value,
+      [r.id]: await api<ProbeResp>(`/authsrc/sources/${encodeURIComponent(r.id)}/probe`, { method: 'POST' })
+    };
+  } catch (e) {
+    probes.value = { ...probes.value, [r.id]: { ok: false, detail: String((e as Error)?.message ?? e) } };
+  } finally {
+    probing.value = '';
+  }
+}
+
+function removeSource(r: AuthSourceRec) {
+  Modal.warning({
+    title: `删除认证源「${r.name}」`,
+    // ★必须说清连带后果：删源会一起清掉身份绑定，那些外部用户下次登录会被重新建号。
+    content: '删除会连同该源的凭据与外部身份绑定一起清除。绑定过的外部用户下次登录将被重新建号（原有本地账号会留成孤儿）。',
+    okText: '确认删除', cancelText: '取消', hideCancel: false,
+    onOk: async () => {
+      try {
+        await api(`/authsrc/sources/${encodeURIComponent(r.id)}`, { method: 'DELETE' });
+        Message.success('已删除');
+        await loadSources();
+      } catch (e) {
+        Message.error(`删除失败：${String((e as Error)?.message ?? e)}`);
+      }
+    }
+  });
+}
 
 const totalUsers = computed(() => sources.value.reduce((s, x) => s + x.users, 0));
 
@@ -635,10 +925,37 @@ onMounted(async () => {
     live.value = true;
   } catch { live.value = false; }
   await loadPolicies();
+  // 认证源是真数据，与上面那个降级 bundle 分开加载：
+  // 后者拿不到时会回落到 MOCK（供规则两个 tab 演示），前者拿不到就留空。
+  await loadSources();
 });
 </script>
 
 <style scoped>
+/* 认证源（真数据那一套）*/
+.bd-srchint { color: var(--bd-t3); margin-left: 10px; font-size: 12px; }
+.bd-srcempty { grid-column: 1 / -1; text-align: center; color: var(--bd-t3); font-size: 13px; padding: 40px 0; }
+.bd-warn { color: var(--bd-warning); }
+.bd-mono { font-family: ui-monospace, SFMono-Regular, monospace; font-size: 12px; }
+.bd-link--danger { color: var(--bd-danger); }
+.bd-probe { display: flex; align-items: center; gap: 6px; font-size: 12px; padding: 7px 10px;
+  border-radius: 6px; margin: 10px 0 2px; line-height: 1.5; }
+.bd-probe.ok { color: var(--bd-success); background: var(--bd-tag-green-bg, #E8FFEA); }
+.bd-probe.bad { color: var(--bd-danger); background: var(--bd-tag-red-bg, #FFECE8); }
+.bd-probe__ms { margin-left: auto; opacity: .7; }
+
+/* 认证源抽屉表单 */
+.bd-srcform { display: flex; flex-direction: column; gap: 14px; }
+.bd-srcform__row { display: flex; flex-direction: column; gap: 6px; }
+.bd-srcform__row label { font-size: 12.5px; color: var(--bd-t2); }
+.bd-srcform__row--inline { flex-direction: row; align-items: center; gap: 8px; font-size: 13px; }
+.bd-srcform__pri { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; color: var(--bd-t2); font-size: 12.5px; }
+.bd-srcform__sec { font-size: 12px; font-weight: 600; color: var(--bd-t3); letter-spacing: .5px;
+  border-top: 1px solid var(--bd-border); padding-top: 12px; margin-top: 2px; }
+.bd-srcform__hint { font-size: 11.5px; color: var(--bd-t3); line-height: 1.6; }
+.bd-srcform__warn { font-size: 11.5px; color: var(--bd-warning); line-height: 1.6;
+  background: var(--bd-tag-gold-bg, #FFF7E8); padding: 7px 9px; border-radius: 6px; }
+
 /* tabs */
 .bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
 .bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }

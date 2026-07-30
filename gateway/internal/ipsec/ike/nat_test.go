@@ -435,3 +435,84 @@ func TestNATTraversalCompletesHandshakeAndSwitchesTo4500(t *testing.T) {
 		}
 	}
 }
+
+// 双向 NAT + 非标准封装口：两端各自在 NAT 后，且对端的封装口不是 4500。
+//
+// ★两个分支各自在 NAT 后、靠端口转发互通是常见的企业组网形态。它一次性压住
+// 本轮线上暴露的两个缺陷：
+//
+//	① applyNAT 不区分发起方/响应方 → 发起方保留对端的 IKE 口，IKE_AUTH 发进
+//	   一个对方已不再监听的端口；
+//	② applyNAT 之后 onSAInitResponse 里那句 `sa.Peer = d.Remote` 连**端口**一起
+//	   覆盖 → 把刚切好的封装口冲回成 IKE_SA_INIT 响应的源端口。
+//
+// 两者症状完全一样且都不报错：协商停在 IKE_AUTH，而日志里「对端落点」还显示着
+// 正确的值（那条日志打在覆盖之前），照着日志排查会一直看错方向。
+func TestBidirectionalNATWithNonStandardEncapPorts(t *testing.T) {
+	var (
+		aIKE = netip.MustParseAddrPort("10.0.0.1:500")
+		aNAT = netip.MustParseAddrPort("10.0.0.1:4500")
+		// B 用非标准封装口（如与既有 IPSec 共存时被迫改的端口）。
+		bIKE = netip.MustParseAddrPort("10.0.0.2:15500")
+		bNAT = netip.MustParseAddrPort("10.0.0.2:15501")
+		// 两端各自的公网映射。
+		pubAIKE = netip.MustParseAddrPort("198.51.100.7:1500")
+		pubANAT = netip.MustParseAddrPort("198.51.100.7:14500")
+		pubBIKE = netip.MustParseAddrPort("198.51.100.8:25500")
+		pubBNAT = netip.MustParseAddrPort("198.51.100.8:25501")
+	)
+
+	clk := newRKClock()
+	cfgA := hsSiteA("baidi-ipsec-psk")
+	cfgB := hsSiteB("baidi-ipsec-psk")
+	// 每一端只知道对方的**公网**落点。
+	cfgA.Peer, cfgB.Peer = pubBIKE, pubAIKE
+	// 对端封装口只能靠显式配置表达——IKEv2 没有通告它的机制（RFC 3948 定死 4500）。
+	cfgA.PeerNATPort, cfgB.PeerNATPort = pubBNAT.Port(), pubANAT.Port()
+
+	f := hsSetupWith(t, cfgA, cfgB, clk.now,
+		func(n *ipsec.MemNet) (ipsec.Transport, ipsec.Transport, netip.AddrPort, netip.AddrPort, netip.AddrPort, netip.AddrPort) {
+			mk := func(ap netip.AddrPort) *ipsec.MemTransport {
+				tr, err := n.Bind(ap)
+				if err != nil {
+					t.Fatalf("绑定 %s 失败: %v", ap, err)
+				}
+				return tr
+			}
+			ta := newNATMulti(mk(aIKE), mk(aNAT))
+			tb := newNATMulti(mk(bIKE), mk(bNAT))
+			// 两台 NAT 设备：出方向改源、回程改目的，两端对称。
+			out := map[netip.AddrPort]netip.AddrPort{
+				aIKE: pubAIKE, aNAT: pubANAT, bIKE: pubBIKE, bNAT: pubBNAT,
+			}
+			back := map[netip.AddrPort]netip.AddrPort{
+				pubAIKE: aIKE, pubANAT: aNAT, pubBIKE: bIKE, pubBNAT: bNAT,
+			}
+			n.SetFilter(func(d ipsec.Datagram) (ipsec.Datagram, bool) {
+				if v, ok := out[d.Local]; ok {
+					d.Local = v
+				}
+				if v, ok := back[d.Remote]; ok {
+					d.Remote = v
+				}
+				return d, true
+			})
+			return ta, tb, aIKE, bIKE, aNAT, bNAT
+		})
+
+	hsWait(t, "双向 NAT + 非标准封装口下握手完成", func() bool { return hsUp(f.a, "site-1") && hsUp(f.b, "site-1") })
+
+	saA, saB := hsPrimarySA(f.a, "site-1"), hsPrimarySA(f.b, "site-1")
+	if !saA.PeerNATed || !saA.LocalNATed || !saB.PeerNATed || !saB.LocalNATed {
+		t.Fatalf("双向 NAT 下两端都应判定双侧在 NAT 后，实际 A(peer=%v local=%v) B(peer=%v local=%v)",
+			saA.PeerNATed, saA.LocalNATed, saB.PeerNATed, saB.LocalNATed)
+	}
+	if saA.Local != aNAT || saB.Local != bNAT {
+		t.Fatalf("两端都应从 IKE_AUTH 起切到各自的封装口，实际 A=%s B=%s", saA.Local, saB.Local)
+	}
+	// ★发起方必须发往对端的**封装口**映射，而不是它的 IKE 口映射。
+	if saA.Peer != pubBNAT {
+		t.Fatalf("发起方 A 应发往对端封装口映射 %s，实际 %s（发到 IKE 口的话对端不剥 marker，静默丢弃）",
+			pubBNAT, saA.Peer)
+	}
+}

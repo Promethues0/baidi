@@ -238,13 +238,17 @@ func (e *Engine) onSAInitResponse(sa *IKESA, ex *exchange, m *Message, d ipsec.D
 				"本端落点", sa.Local, "对端落点", sa.Peer)
 		}
 	}
-	// 对端地址一律以**实测值**为准（NAT 后配置里的地址根本收不到包）。
-	if !sa.PeerNATed {
-		// 非 NAT 场景也要跟随实测源地址：对端可能有多个出口。
-		sa.Peer = netip.AddrPortFrom(d.Remote.Addr(), sa.Peer.Port())
-	} else {
-		sa.Peer = d.Remote
-	}
+	// 对端**地址**一律以实测值为准（NAT 后配置里的地址根本收不到包；非 NAT 时对端
+	// 也可能有多个出口）。
+	//
+	// ★但只跟随地址、不跟随端口——端口归 applyNAT 管，它刚按「发起方 / 响应方」
+	// 分别算好了该发往哪个口。这里若连端口一起覆盖成 d.Remote.Port()，就等于把
+	// 刚切到的封装口冲回成 IKE_SA_INIT 响应的源端口（对端的 **IKE 口**）：
+	// 本端从封装口发出（带 non-ESP marker），对端在 IKE 口收（不剥 marker）→
+	// 解析失败后静默丢弃，协商停在 IKE_AUTH 且两端都不报错。
+	// 更隐蔽的是上面那条日志打在覆盖**之前**，显示的落点是对的，与实际发出的不符——
+	// 照着日志排查会一直看错方向。
+	sa.Peer = netip.AddrPortFrom(d.Remote.Addr(), sa.Peer.Port())
 
 	keys, err := DeriveIKEKeys(sa.Suite, shared, sa.ni, sa.nr, sa.SPIi, sa.SPIr)
 	if err != nil {

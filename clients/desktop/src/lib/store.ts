@@ -1,6 +1,38 @@
 import { reactive } from 'vue';
+import type { ClientProfile } from './api';
 
 const ls = localStorage;
+
+/**
+ * 控制面下发的接入剖面（网关落点 / 路由表 / 资源映射）。登录后拉取，接入时照它执行。
+ *
+ * ★这是「客户端真正连得通」的权威依据。config 里那些 gateway/route/ip 字段现在只是
+ * 剖面不可用时的回退与人工覆盖入口——正常路径下一律以剖面为准，因为只有控制面同时
+ * 知道网关在哪、业务在哪、以及当前用户有权访问哪些资源。
+ */
+export const profile = reactive<{ data: ClientProfile | null; loadedAt: string; error: string }>({
+  data: null,
+  loadedAt: '',
+  error: ''
+});
+
+export function setProfile(p: ClientProfile): void {
+  profile.data = p;
+  profile.loadedAt = new Date().toLocaleTimeString('zh-CN');
+  profile.error = '';
+}
+
+/**
+ * 记下剖面拉取失败的原因，供「接入」页显著呈现。
+ *
+ * ★保留 profile.data 不清：上一份剖面虽然可能过期，但它比「本机默认单网段」
+ * 接近事实得多，清掉等于主动退化成最差配置。代价是页面上可能同时出现
+ * 「拉取失败」与基于旧剖面的告警——这正是要让用户看到的状态，故 loadedAt
+ * 一并呈现，让「这份数据是什么时候的」有据可查。
+ */
+export function setProfileError(msg: string): void {
+  profile.error = msg;
+}
 
 /** 客户端会话与接入状态（终端 Agent 全局状态）。 */
 export const session = reactive({
@@ -55,6 +87,11 @@ export function logout(): void {
   session.token = '';
   session.user = '';
   session.connected = false;
+  // 剖面是按登录身份下发的（含该用户有权访问的资源），换人必须重拉——
+  // 留着旧剖面会让下一个登录者看到上一个人的资源清单。
+  profile.data = null;
+  profile.loadedAt = '';
+  profile.error = '';
   ls.removeItem('baidi_client_token');
   ls.removeItem('baidi_client_user');
 }

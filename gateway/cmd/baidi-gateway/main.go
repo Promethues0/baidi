@@ -5,9 +5,11 @@ package main
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"crypto/tls"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"encoding/hex"
 	"encoding/pem"
 	"flag"
 	"log"
@@ -17,6 +19,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"gitee.com/Trisia/gotlcp/tlcp"
 
 	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/cplane"
@@ -89,6 +93,30 @@ func main() {
 		slog.Info("资源注册表已加载", "file", *resources, "count", reg.Count())
 	}
 
+	// ── 隧道服务端凭据提前就绪 ──
+	// 证书必须在**控制面注册之前**准备好，因为它的指纹要随注册心跳一起上报：网关的隧道证书
+	// 是启动期自签的（国密路径是本地 CA 签的），没有公共 CA 可供客户端校验，客户端此前只能
+	// InsecureSkipVerify——隧道加密但不认证，中间人可无声接管。改由控制面（真正的信任根）
+	// 把指纹转发给客户端做证书钉扎。此前证书在 main 末尾才生成，注册时根本无从上报。
+	var tlsCert tls.Certificate
+	var tlcpCerts []tlcp.Certificate
+	var tunnelFP string
+	if *gm {
+		tlcpCerts, err = gmcert.EnsureGateway(*certDir)
+		if err != nil {
+			log.Fatalf("生成/加载国密双证书失败: %v", err)
+		}
+		// TLCP 双证书中握手出示给客户端校验身份的是**签名证书**（EnsureGateway 返回的 [0]），
+		// 加密证书只参与密钥交换——钉扎必须钉签名证书，否则客户端永远比对不上。
+		if len(tlcpCerts) > 0 && len(tlcpCerts[0].Certificate) > 0 {
+			tunnelFP = certFingerprint(tlcpCerts[0].Certificate[0])
+		}
+	} else {
+		tlsCert = mustSelfSigned()
+		tunnelFP = certFingerprint(tlsCert.Certificate[0])
+	}
+	slog.Info("隧道服务端证书就绪（指纹随注册下发给客户端做钉扎）", "gm", *gm, "fp", tunnelFP)
+
 	// 控制面对接：注册自身 + 周期拉取资源授权策略（动态替代静态 resources.json）
 	if *control != "" {
 		started := time.Now()
@@ -143,6 +171,7 @@ func main() {
 			log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
 		}
 		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
+		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
@@ -203,21 +232,26 @@ func main() {
 		}
 	}()
 
+	// 证书已在上文备妥（指纹须先于注册上报），这里只负责监听。
 	if *gm {
-		certs, err := gmcert.EnsureGateway(*certDir)
-		if err != nil {
-			log.Fatalf("生成/加载国密双证书失败: %v", err)
-		}
 		slog.Info("隧道加密：国密 TLCP（持久化 CA 签发的 SM2 双证书）", "certdir", *certDir)
-		if err := proxy.ServeTLCP(*proxyAddr, certs, reg, al); err != nil {
+		if err := proxy.ServeTLCP(*proxyAddr, tlcpCerts, reg, al); err != nil {
 			log.Fatalf("TLCP 代理监听失败: %v", err)
 		}
 		return
 	}
 	slog.Info("隧道加密：通用 TLS（自签）")
-	if err := proxy.Serve(*proxyAddr, mustSelfSigned(), reg, al); err != nil {
+	if err := proxy.Serve(*proxyAddr, tlsCert, reg, al); err != nil {
 		log.Fatalf("代理监听失败: %v", err)
 	}
+}
+
+// certFingerprint 计算证书 DER 的 SHA-256 指纹（小写 hex）。
+// 与客户端 dataplane 的钉扎比对口径必须完全一致：都对**叶子证书的 DER 原文**取 SHA-256，
+// 不含 PEM 头尾、不做 base64——换任一环节都会算出不同值而永远比对失败。
+func certFingerprint(der []byte) string {
+	sum := sha256.Sum256(der)
+	return hex.EncodeToString(sum[:])
 }
 
 func env(k, def string) string {

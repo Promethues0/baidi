@@ -29,8 +29,14 @@ type Client struct {
 	gwID       string
 	proxy, spa string
 	mtls       bool // 已装载客户端证书：身份走 TLS
-	httpc      *http.Client
+	// tunnelFP 本网关隧道 TLS/TLCP 证书的 SHA-256 指纹（hex）。随注册心跳上报，
+	// 由控制面转发给客户端做证书钉扎——网关证书自签，客户端没有别的途径确认对端身份。
+	tunnelFP string
+	httpc    *http.Client
 }
+
+// SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
+func (c *Client) SetTunnelFP(fp string) { c.tunnelFP = fp }
 
 // NewMTLS 构造走 mTLS 客户端证书的控制面客户端。
 // certFile/keyFile 是控制面签发给本网关的证书与私钥，caFile 是内部 CA 公证书。
@@ -96,6 +102,7 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	body, _ := json.Marshal(map[string]any{
 		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
 		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
+		"tunnelFp": c.tunnelFP, // 供控制面转发给客户端做隧道证书钉扎
 	})
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {

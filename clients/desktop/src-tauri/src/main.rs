@@ -13,6 +13,13 @@ use tauri::{Emitter, Manager};
 const LOG: &str = "/tmp/baidi-tun.log";
 const PID: &str = "/tmp/baidi-tun.pid";
 const LAUNCH: &str = "/tmp/baidi-tun-launch.sh";
+/// 资源映射表落盘路径。控制面接入剖面里的 resmap（"host:port" → 资源 id）经此文件交给
+/// root 权限的 baidi-tun（-resmap）。不含凭据，只是路由提示；仍按 0600 写，避免同机
+/// 其他用户顺手读走内网拓扑。root 进程读 0600 的他人文件不受限。
+const RESMAP: &str = "/tmp/baidi-resmap.json";
+/// 隧道内 DNS 记录表落盘路径（FQDN → VIP）。与 RESMAP 同一套写法：不含凭据，
+/// 但仍按 0600 写，避免同机其他用户顺手读走内网域名清单（那是一份现成的内网资产地图）。
+const DNSREC: &str = "/tmp/baidi-dns-records.json";
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -21,10 +28,33 @@ struct TunOpts {
     gateway: String,    // 网关主机，如 127.0.0.1
     spa_port: String,   // SPA 敲门端口，默认 18201
     proxy_port: String, // 隧道代理端口，默认 18443
-    route: String,      // 引流进隧道的受保护网段，如 10.99.0.0/24
-    ip: String,         // utun 虚拟 IP，如 10.99.0.2
-    gm: bool,           // 国密 TLCP 隧道（自签网关证书 → 附带 -insecure 跳过校验）
-    token: String,      // 会话 JWT
+    // route 引流进隧道的受保护网段，逗号分隔可多段。前端把控制面剖面的 routes 数组
+    // join(',') 后传入——只接管单一手填网段正是「隧道通了但点开应用不走隧道」的根因。
+    route: String,
+    ip: String, // utun 虚拟 IP，如 10.99.0.2
+    gm: bool,   // 国密 TLCP 隧道（自签网关证书 → 附带 -insecure 跳过校验）
+    token: String, // 会话 JWT
+    // resmap 控制面剖面下发的 "host:port" → 资源 id 映射（JSON 字符串）。
+    // 空串表示没有可路由资源，此时不写文件、不传 -resmap，隧道回退网关默认后端。
+    #[serde(default)]
+    resmap: String,
+    // pin 网关隧道证书 SHA-256 指纹（hex）。非空则 baidi-tun 对通用 TLS 隧道做证书钉扎，
+    // 把「加密但不认证」补成「加密 + 认证」。
+    #[serde(default)]
+    pin: String,
+    // ── 分离式 DNS（剖面 dns 段）──
+    // 没有这三个字段时，域名后端（oa.corp.internal:8080）完全不被接管，流量直连内网
+    // 且没有任何提示——「配了却不生效」里最难归因的一种。三者都为空 = 老行为。
+    //
+    // dns_listen 隧道内解析器的 VIP。空=不启用（后两个字段随之无意义）。
+    #[serde(default)]
+    dns_listen: String,
+    // dns_domains 交给隧道内解析器的搜索域，逗号分隔。只按域分流，不接管系统全局 DNS。
+    #[serde(default)]
+    dns_domains: String,
+    // dns_records FQDN→VIP 记录表（JSON 字符串），落盘后经 -dns-records 交给 root 数据面。
+    #[serde(default)]
+    dns_records: String,
 }
 
 /// 定位随 app 打包的 baidi-tun。确定性顺序：同名 → 当前架构三元组名 → 排序后首个 baidi-tun*。
@@ -83,6 +113,44 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     if opts.gm {
         args.push("-gm".into());
         args.push("-insecure".into());
+    } else if !opts.pin.trim().is_empty() {
+        // 通用 TLS 隧道：用控制面下发的指纹钉扎网关证书。国密路径走 TLCP 的 CA 校验，
+        // 两条路径的信任材料不同，不能混用，故只在非 -gm 时传 -pin。
+        args.push("-pin".into());
+        args.push(opts.pin.trim().into());
+    }
+    // 资源映射表：写盘后经 -resmap 交给 root 数据面。控制面是这张表的唯一来源——
+    // 客户端不自己推导「哪个地址属于哪个资源」，避免终端与网关对资源归属产生分歧。
+    if !opts.resmap.trim().is_empty() {
+        fs::write(RESMAP, opts.resmap.trim()).map_err(|e| format!("写资源映射表失败：{e}"))?;
+        let _ = fs::set_permissions(RESMAP, fs::Permissions::from_mode(0o600));
+        args.push("-resmap".into());
+        args.push(RESMAP.into());
+    } else {
+        // 上一轮遗留的映射表必须清掉：否则换用户/换策略后仍会按旧表路由，
+        // 表现为「明明改了权限，客户端还能连到老资源」。
+        let _ = fs::remove_file(RESMAP);
+    }
+    // 分离式 DNS：记录表落盘后经 -dns-records 交给 root 数据面，与 resmap 同一套写法。
+    // 只有 -dns-listen 非空才接线；否则连记录表都不写，并把上一轮的残留删掉——
+    // 留着会让下一次接入按旧地址作答（「域名改指向了，客户端还连老机器」）。
+    if !opts.dns_listen.trim().is_empty() {
+        args.push("-dns-listen".into());
+        args.push(opts.dns_listen.trim().into());
+        if !opts.dns_domains.trim().is_empty() {
+            args.push("-dns-domains".into());
+            args.push(opts.dns_domains.trim().into());
+        }
+        if !opts.dns_records.trim().is_empty() {
+            fs::write(DNSREC, opts.dns_records.trim()).map_err(|e| format!("写 DNS 记录表失败：{e}"))?;
+            let _ = fs::set_permissions(DNSREC, fs::Permissions::from_mode(0o600));
+            args.push("-dns-records".into());
+            args.push(DNSREC.into());
+        } else {
+            let _ = fs::remove_file(DNSREC);
+        }
+    } else {
+        let _ = fs::remove_file(DNSREC);
     }
     let argline = args.iter().map(|a| sq(a)).collect::<Vec<_>>().join(" ");
     let script = format!(
@@ -148,9 +216,16 @@ fn tunnel_status() -> TunStatus {
 }
 
 /// 断开：以管理员权限 kill 掉 root 数据面进程（utun/路由随进程退出回收），清理临时文件。
+///
+/// ★这里必须是 `kill`（SIGTERM）而不是 `kill -9`：baidi-tun 收到 SIGTERM 才会去收回
+/// 它写进系统的解析器配置（/etc/resolver/<域名>）。被 -9 打掉的话配置会留在系统里，
+/// 把该域名指向一个已经不存在的 VIP——症状是「断开客户端后这个域名永久解析失败」，
+/// 用户根本不会联想到是客户端留下的。（真被 -9 打掉时，靠 baidi-tun 下次启动时扫描回收。）
 #[tauri::command]
 fn tunnel_stop() -> Result<(), String> {
     let _ = fs::remove_file(LAUNCH);
+    let _ = fs::remove_file(RESMAP); // 断开即清映射表，不给下一轮留下陈旧路由
+    let _ = fs::remove_file(DNSREC); // 同理：陈旧的 DNS 记录表会让下轮解析到已下线的地址
     let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
     if pid.is_empty() {
         return Ok(());
@@ -178,6 +253,25 @@ fn tunnel_stop() -> Result<(), String> {
 #[tauri::command]
 fn force_quit(app: tauri::AppHandle) {
     app.exit(0);
+}
+
+/// 用系统默认浏览器打开应用地址（应用页「打开」按钮的真实动作）。
+///
+/// 刻意走自定义命令，而不是给前端放开 `shell:allow-open`：这样「能打开什么」的判定
+/// 留在 Rust 侧。URL 虽然来自控制面剖面，但 webview 始终是攻击面，不该具备打开任意
+/// URI 的能力——file://、smb:// 以及各类自定义协议处理器都是本地提权的经典跳板。
+#[tauri::command]
+fn open_app_url(app: tauri::AppHandle, url: String) -> Result<(), String> {
+    use tauri_plugin_shell::ShellExt;
+    let u = url.trim();
+    if !(u.starts_with("http://") || u.starts_with("https://")) {
+        return Err(format!("仅允许打开 http/https 地址：{u}"));
+    }
+    // shell().open 在 tauri-plugin-shell 2.x 标记为 deprecated（官方推荐 tauri-plugin-opener），
+    // 但功能完好。此处不迁移：换插件要同时动 Cargo 依赖、npm 依赖与 capabilities 权限声明，
+    // 收益仅是消除一条告警。待有其他理由动 Tauri 依赖时一并迁移。
+    #[allow(deprecated)]
+    app.shell().open(u, None).map_err(|e| e.to_string())
 }
 
 // ── 终端环境采集（posture）──
@@ -297,7 +391,14 @@ fn main() {
 
     tauri::Builder::default()
         .plugin(tauri_plugin_shell::init())
-        .invoke_handler(tauri::generate_handler![tunnel_start, tunnel_status, tunnel_stop, force_quit, collect_posture])
+        .invoke_handler(tauri::generate_handler![
+            tunnel_start,
+            tunnel_status,
+            tunnel_stop,
+            force_quit,
+            collect_posture,
+            open_app_url
+        ])
         .setup(|app| {
             // 托盘菜单：状态（禁用只读）/ 显示主窗口 / 退出
             let status = MenuItem::with_id(app, "status", "○ 未接入", false, None::<&str>)?;

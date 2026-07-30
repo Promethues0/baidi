@@ -86,6 +86,21 @@
 
         <div class="dk-card ck-conn" :class="{ off: stage !== 'connected' }">
           <div class="ck-card__h">接入信息<span v-if="stage === 'connected'" class="ck-live">● 隧道活动</span></div>
+          <!--
+            剖面拿不到 = 接入退回本机默认配置（单网段、无资源映射、无证书钉扎），
+            隧道会照常建起来、UI 也会走到「已接入」，但真实业务网段一条都没接管。
+            这正是本轮要消灭的「隧道通了却什么都访问不到」，只是换成了无声版本，
+            所以必须在接入信息里显著呈现，而不是只写进 store 没人读。
+          -->
+          <div v-if="profile.error" class="ck-pwarn ck-pwarn--err">
+            <icon-exclamation-circle-fill />
+            <span>接入剖面拉取失败：{{ profile.error }}。当前用本机默认配置接入，业务网段可能未被接管——请检查控制中心连通性后重新接入。</span>
+          </div>
+          <!-- 控制面下发的降级告警（如网关未上报证书指纹、应用未关联受控资源） -->
+          <div v-for="w in profileWarnings" :key="w" class="ck-pwarn">
+            <icon-exclamation-circle-fill />
+            <span>{{ w }}</span>
+          </div>
           <template v-if="stage === 'connected'">
             <div class="ck-kv"><span>安全代理网关</span><b class="dk-mono">{{ tun.gateway }}</b></div>
             <div class="ck-kv"><span>加密隧道</span><b class="ok">已建立 · {{ tun.cipher }}</b></div>
@@ -107,8 +122,8 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type PortalLoginResp } from '@/lib/api';
-import { session, login, authed, validateConfig } from '@/lib/store';
+import { api, fetchProfile, type PortalLoginResp } from '@/lib/api';
+import { session, login, authed, validateConfig, profile, setProfile, setProfileError } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, type TunView } from '@/lib/tunnel';
 import { postureState } from '@/lib/posture';
@@ -129,7 +144,10 @@ async function doLogin(withMfa: boolean) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: form.username, password: form.password, mfaCode: withMfa ? form.mfaCode : '' })
     });
-    if (r.ok && r.token) { login(r.token, r.displayName || form.username); }
+    if (r.ok && r.token) {
+      login(r.token, r.displayName || form.username);
+      await loadProfile(); // 登录即取接入剖面：接入所需的网关落点/路由表/资源映射全在其中
+    }
     else if (r.needMfa) { needMfa.value = true; mfaReason.value = r.reason || ''; err.value = ''; }
     else { err.value = r.reason || '登录失败'; }
   } catch { err.value = '无法连接控制中心（检查「设置」里的控制中心地址）'; } finally { loading.value = false; }
@@ -143,6 +161,10 @@ const err2 = ref('');
 const showLog = ref(false);
 const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', lines: [] });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
+// 控制面在剖面里下发的降级告警：网关未上报隧道证书指纹（隧道加密但不认证）、
+// 应用未关联受控资源（点开必然不走隧道）等。这些都是「配置齐全、就是不生效」
+// 的静默失效，控制面已经识别出来了，客户端不呈现等于白识别。
+const profileWarnings = computed(() => profile.data?.warnings ?? []);
 
 let pollTimer = 0;
 let pollGen = 0;         // 轮询代次：断开/重连后自增，令过期的在途轮询失效
@@ -158,11 +180,31 @@ function stepFromTun(v: TunView): number {
   return 1;
 }
 
+/**
+ * 拉取接入剖面（网关落点 + 路由表 + 资源映射）。
+ * 拉不到不阻断接入——用设置页配置兜底试一把，但把原因记下来供「接入」页显示，
+ * 因为此时的接入很可能是「隧道起来了却没有正确路由」的半成功状态，必须让用户看见。
+ */
+async function loadProfile(): Promise<void> {
+  try {
+    setProfile(await fetchProfile());
+  } catch (e) {
+    setProfileError(String((e as Error)?.message ?? e));
+  }
+}
+
 async function connect() {
   err2.value = ''; connectTimedOut.value = false; denied.value = false; deniedReason.value = '';
   if (!isTauri) { await connectDev(); return; }   // 浏览器联调：真敲门探测，不接管流量
+  // 剖面可能过期（管理员改了资源/网关重启换了证书指纹），接入前刷新一次，
+  // 拿到的路由表与钉扎指纹才与当前策略一致。
+  await loadProfile();
   const bad = validateConfig();
   if (bad) { err2.value = bad; return; }          // 接入前配置校验（端口/网段/URL）
+  if (profile.data && !profile.data.gateway.online) {
+    err2.value = '控制面显示没有网关在线：请先确认 baidi-gateway 已启动并注册到控制中心';
+    return; // fail-fast：网关离线时接入必然失败，早报错好过让用户等一轮超时
+  }
   stage.value = 'connecting'; step.value = 0;
   try {
     await tunnelStart();                            // 触发管理员授权 + 后台拉起 baidi-tun（root）
@@ -295,6 +337,12 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-denied__r { font-size: 12px; color: var(--bd-t1); margin-top: 4px; line-height: 1.5; }
 .ck-denied__h { font-size: 11px; color: var(--bd-t3); margin-top: 6px; line-height: 1.6; }
 .ck-devnote { font-size: 11px; color: var(--bd-t3); margin-top: 14px; max-width: 260px; text-align: center; line-height: 1.6; }
+
+/* 剖面告警：橙=控制面下发的降级提示，红=剖面根本没拿到（接入已退回本机默认配置） */
+.ck-pwarn { display: flex; gap: 6px; align-items: flex-start; font-size: 11px; line-height: 1.55;
+  color: var(--bd-warning, #FF7D00); padding: 8px 10px; margin-bottom: 8px; border-radius: 8px;
+  background: rgba(255, 125, 0, .08); border: 1px solid rgba(255, 125, 0, .24); }
+.ck-pwarn--err { color: var(--bd-danger); background: rgba(245, 63, 63, .08); border-color: rgba(245, 63, 63, .28); }
 
 .ck-side { width: 320px; flex: none; display: flex; flex-direction: column; gap: 16px; }
 .ck-card__h { font-size: 14px; font-weight: 600; padding: 14px 16px; border-bottom: 1px solid var(--bd-fill-2); display: flex; align-items: center; justify-content: space-between; }

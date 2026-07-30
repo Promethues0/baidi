@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -47,8 +48,12 @@ type Server struct {
 	mu                sync.Mutex
 	gateways          map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess            map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
-	kicked            map[string]string      // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
-	revoked           map[string]revokeInfo  // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	// gwTunnelFP 各网关隧道 TLS 证书的 SHA-256 指纹，按网关 id。网关证书是启动期自签的，
+	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
+	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
+	gwTunnelFP map[string]string
+	kicked     map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	revoked    map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
@@ -119,7 +124,8 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	return &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
 		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
 		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
-		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{}, revoked: map[string]revokeInfo{}}
+		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
+		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单/安装包分发）。供 auth 中间件使用。
@@ -218,6 +224,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/system", s.handleSystem)
 	// 认证源接入：认证源 + 自适应规则
 	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
+	// 认证源接入（真落库、真探测、真参与登录）：
+	mux.HandleFunc("GET /api/v1/authsrc/sources", s.handleAuthSources)
+	mux.HandleFunc("POST /api/v1/authsrc/sources", s.handleSaveAuthSource)
+	mux.HandleFunc("DELETE /api/v1/authsrc/sources/{id}", s.handleDeleteAuthSource)
+	mux.HandleFunc("PUT /api/v1/authsrc/sources/{id}/secret", s.handleSetAuthSourceSecret)
+	mux.HandleFunc("POST /api/v1/authsrc/sources/{id}/probe", s.handleProbeAuthSource)
 	// 安全中心：安全基线 + SPA
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
 	mux.HandleFunc("POST /api/v1/security/baselines", s.handleSaveBaseline)          // 保存基线（admin）
@@ -248,11 +260,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/online/{id}/kick", s.handleKickSession) // 强制下线（admin）
 	mux.HandleFunc("GET /api/v1/userstate", s.handleUserState)
 
-	// IPSec VPN 组网：站点清单 + CRUD + 启停
+	// IPSec VPN 组网：站点清单（配置 + 网关实测运行态）+ CRUD + 启停意图 + PSK 只写不读
+	// ★数据面侧的三个 ipsec 端点只挂 mTLS 监听（见 MTLSHandler），明文口没有它们——
+	// PSK 原文在 :8090 上不存在任何形态的出口。
 	mux.HandleFunc("GET /api/v1/ipsec", s.handleIpsec)
 	mux.HandleFunc("POST /api/v1/ipsec", s.handleSaveIpsec)               // 新增/改站点（admin）
 	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)      // 删站点（admin）
-	mux.HandleFunc("POST /api/v1/ipsec/{id}/toggle", s.handleToggleIpsec) // 启停隧道（admin）
+	mux.HandleFunc("POST /api/v1/ipsec/{id}/toggle", s.handleToggleIpsec) // 翻转启用意图（admin，不再直接写 status）
+	mux.HandleFunc("PUT /api/v1/ipsec/{id}/psk", s.handleSetIpsecPSK)     // 设置 PSK（admin，只写不读）
 
 	// 对象库：地址 / 服务 / 时间对象 + 被引用反查（复用闭环）
 	mux.HandleFunc("GET /api/v1/objects", s.handleObjects)
@@ -294,6 +309,9 @@ func (s *Server) Routes() http.Handler {
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
 	mux.HandleFunc("GET /api/v1/portal/apps", s.handlePortalApps)
+	// 终端客户端接入剖面：网关落点 + 路由表 + 资源映射，一次下发，客户端照做即可接入。
+	// 这是「点开应用真的走隧道」的前提——此前客户端只能手填一个与业务地址无关的网段。
+	mux.HandleFunc("GET /api/v1/client/profile", s.handleClientProfile)
 	mux.HandleFunc("GET /api/v1/portal/downloads", s.handleDownloadsManifest) // 客户端下载清单（免认证）
 	mux.HandleFunc("GET /downloads/{file}", s.handleDownloadFile)             // 客户端安装包分发（公开；白名单校验在 handler 内）
 
@@ -321,11 +339,31 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found || !auth.VerifyPassword(cred.PassHash, b.Password) {
-		s.auditAs(r, b.Username, "auth", "终端用户登录失败（账号或口令错误）", "fail")
-		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
-		return
+		// 本地目录没认出他 → 依次问外部认证源（LDAP/AD）。
+		//
+		// ★顺序是「先本地、后外部」而不是反过来：本地目录里有 admin 这种
+		// 高权账号，把它交给外部目录先答，等于把本地管理员的认证权外包出去。
+		extCred, srcName, hit, aerr := s.authenticateExternal(r.Context(), b.Username, b.Password)
+		switch {
+		case aerr != nil:
+			// ★认证源故障绝不能回「用户名或密码错误」：那会让运维去查用户而不是查目录，
+			// 也不该计入账号锁定计数（用户什么都没做错）。
+			s.auditAs(r, b.Username, "auth", "终端用户登录失败（认证源不可用）", "fail")
+			slog.Error("外部认证源不可用", "账号", b.Username, "err", aerr.Error())
+			httpx.JSON(w, http.StatusOK, map[string]any{
+				"ok": false, "reason": "认证服务暂时不可用，请稍后重试或联系管理员"})
+			return
+		case !hit:
+			s.auditAs(r, b.Username, "auth", "终端用户登录失败（账号或口令错误）", "fail")
+			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
+			return
+		}
+		cred = extCred
+		s.auditAs(r, cred.Account, "auth", "经外部认证源「"+srcName+"」认证通过", "ok")
 	}
 	// 账号状态门：禁用/锁定的目录账号口令对了也不放行（也不进 MFA 流程）
+	// ★外部源认证成功的账号同样要过这道闸：本地把某个外部用户禁用了，
+	// 就必须挡住，否则「在白帝上禁用」对外部账号形同虚设。
 	if accountBlocked(cred.Status) {
 		s.auditAs(r, cred.Account, "auth", "终端用户登录被拒（账号已"+statusZh[cred.Status]+"）", "deny")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "账号已被" + statusZh[cred.Status] + "，请联系管理员"})
@@ -671,6 +709,9 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		Tunnels  int         `json:"tunnels"`
 		Uptime   int64       `json:"uptime"`
 		Sessions []GwSession `json:"sessions"`
+		// TunnelFP 网关隧道 TLS 证书的 SHA-256 指纹（hex）。网关自签证书每次重启都变，
+		// 随心跳上报即可；控制面转发给客户端做证书钉扎（见 handleClientProfile）。
+		TunnelFP string `json:"tunnelFp"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&b)
 	c, _ := auth.FromContext(r.Context())
@@ -684,6 +725,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime,
 	}
 	s.gwSess[id] = b.Sessions
+	s.gwTunnelFP[id] = b.TunnelFP
 	s.mu.Unlock()
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

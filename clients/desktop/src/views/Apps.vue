@@ -19,11 +19,13 @@
           <span v-if="!a.accessible" class="ap__sens"><icon-lock />需申请</span>
         </div>
         <div class="ap__name">{{ a.name }}</div>
-        <div class="ap__addr dk-mono">{{ a.addr }}</div>
+        <!-- 显示接入地址（VIP），不是内网真实地址：终端只需知道「往哪连」，
+             内网拓扑属于最小知悉之外的信息。鼠标悬停可看真实后端，便于排障。 -->
+        <div class="ap__addr dk-mono" :title="a.backend ? `真实后端 ${a.backend}` : ''">{{ a.url || a.backend }}</div>
         <button v-if="a.accessible" class="dk-btn ap__btn" @click="openApp(a)"><icon-link />访问</button>
         <button v-else class="dk-btn dk-btn--ghost ap__btn" @click="apply(a)">申请权限</button>
       </div>
-      <div v-if="!apps.length" class="ap__empty">暂无可访问应用</div>
+      <div v-if="!apps.length" class="ap__empty">{{ loadErr || '暂无可访问应用' }}</div>
     </div>
   </div>
 </template>
@@ -31,30 +33,76 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type PortalAppsResp, type PortalTile } from '@/lib/api';
-import { authed, session } from '@/lib/store';
+import { fetchProfile, type ProfileApp } from '@/lib/api';
+import { authed, session, setProfile, setProfileError } from '@/lib/store';
+import { openAppUrl, tauriRuntime } from '@/lib/tunnel';
 
 const authedNow = computed(() => authed());
-const apps = ref<PortalTile[]>([]);
+const apps = ref<ProfileApp[]>([]);
 const live = ref<boolean | null>(null);
+const loadErr = ref('');
 
-const META: Record<PortalTile['mode'], { icon: string; color: string; bg: string }> = {
+const META: Record<ProfileApp['mode'], { icon: string; color: string; bg: string }> = {
   tunnel: { icon: 'icon-code', color: '#722ED1', bg: '#F5E8FF' },
   web: { icon: 'icon-common', color: '#165DFF', bg: '#F2F7FF' },
   global: { icon: 'icon-public', color: '#00B42A', bg: '#E8FFEA' }
 };
-function meta(m: PortalTile['mode']) { return META[m]; }
+function meta(m: ProfileApp['mode']) { return META[m]; }
 
-function openApp(a: PortalTile) {
-  if (!session.connected) { Message.warning('请先在「接入」页接入企业内网'); return; }
-  Message.success(`正在通过安全隧道打开「${a.name}」…`);
+/**
+ * 真正打开应用。此前这里只弹一句「正在通过安全隧道打开…」的 toast，什么都没做——
+ * 界面看着完整，实际是纯装饰。现在：
+ *  - web 模式：调 Rust 侧 open_app_url 用系统浏览器打开 VIP 地址，流量经 utun → 隧道 → 网关 → 后端；
+ *  - tunnel 模式（SSH / 数据库等）：没有通用的「打开」语义，改为把接入地址放进剪贴板，
+ *    让用户粘进自己的终端/客户端。这比假装打开诚实，也确实可用。
+ */
+async function openApp(a: ProfileApp) {
+  // global 模式（全网资源）不经隧道，直连即可，故不要求已接入。
+  if (a.mode !== 'global' && !session.connected) {
+    Message.warning('请先在「接入」页接入企业内网——未接入时该地址不会被隧道接管');
+    return;
+  }
+  if (a.mode === 'web' || /^https?:\/\//.test(a.url)) {
+    try {
+      if (tauriRuntime()) await openAppUrl(a.url);
+      else window.open(a.url, '_blank', 'noopener');
+      Message.success(`已打开「${a.name}」（${a.url}）`);
+    } catch (e) {
+      Message.error(`打开失败：${String(e)}`);
+    }
+    return;
+  }
+  try {
+    await navigator.clipboard.writeText(a.url);
+    Message.success(`「${a.name}」接入地址已复制：${a.url}`);
+  } catch {
+    Message.info(`「${a.name}」接入地址：${a.url}`);
+  }
 }
-function apply(a: PortalTile) { Message.info(`已提交「${a.name}」权限申请，待审批`); }
 
+function apply(a: ProfileApp) {
+  Message.info(`请到门户「我的申请」提交「${a.name}」的访问申请（高敏资源需审批后临时授予）`);
+}
+
+/**
+ * 应用清单直接取自接入剖面，而不是 /portal/apps。
+ * 原因：剖面里的每个应用都带着 VIP / 资源 id / 可点 URL，是「能真的连上」的那份数据；
+ * portal/apps 只有展示用的内网地址，点了也到不了。同一份数据支撑展示与路由，
+ * 也杜绝了「列表里有、隧道里没路由」的错配。
+ */
 onMounted(async () => {
   if (!authedNow.value) return;
-  try { apps.value = (await api<PortalAppsResp>('/portal/apps')).apps; live.value = true; }
-  catch { live.value = false; }
+  try {
+    const p = await fetchProfile();
+    setProfile(p);
+    apps.value = p.apps;
+    live.value = true;
+    if (p.warnings?.length) Message.warning(p.warnings[0]);
+  } catch (e) {
+    live.value = false;
+    loadErr.value = '控制中心不可达，无法获取可访问应用';
+    setProfileError(String(e));
+  }
 });
 </script>
 

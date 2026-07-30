@@ -4,9 +4,20 @@
  *  - 浏览器 dev：经本地 baidi-knock-agent（/knock 代理）发起真实敲门 + 隧道可达性验证。
  * 两条路径都执行"真链路"敲门，区别只是谁来发 UDP 包。
  */
-import { config } from './store';
+import { config, profile } from './store';
 
-const GW_SPA = '127.0.0.1:18201'; // 演示网关 SPA 地址；生产由控制面按策略下发
+/**
+ * 敲门目标地址：控制面剖面下发的网关落点优先，设置页配置兜底。
+ *
+ * 此前这里写死 `127.0.0.1:18201`，于是任何非本机部署的网关都敲不开门——
+ * 界面上配的网关地址根本没被用上，属于「设置项看着生效、实际被忽略」的假功能。
+ */
+function spaTarget(): string {
+  const gw = profile.data?.gateway;
+  const host = gw?.host || config.gateway.trim();
+  const port = gw?.spaPort || config.spaPort.trim();
+  return `${host}:${port}`;
+}
 
 export interface KnockResult { ok: boolean; detail?: string }
 
@@ -27,7 +38,7 @@ export async function knock(token: string): Promise<KnockResult> {
     const shellMod = '@tauri-apps/plugin-shell';
     const shell = (await import(/* @vite-ignore */ shellMod)) as { Command: { sidecar: (b: string, a: string[]) => { execute: () => Promise<{ code: number | null; stdout: string; stderr: string }> } } };
     const out = await shell.Command.sidecar('binaries/baidi-knock',
-      ['-spa', GW_SPA, '-token', token, '-control', control]).execute();
+      ['-spa', spaTarget(), '-token', token, '-control', control]).execute();
     return { ok: out.code === 0, detail: (out.stdout || out.stderr || '').trim() };
   }
 

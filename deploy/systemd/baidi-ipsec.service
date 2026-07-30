@@ -1,0 +1,73 @@
+[Unit]
+# 白帝站点组网网关（可选，WITH_IPSEC=1 才装）：自研 IKEv2 + ESP，用户态数据面，站点↔站点。
+#
+# 与 baidi-gateway 是两个进程、两张证书、两个失效域，**刻意不合并**：
+#   · baidi-gateway 走南北向（用户 → 业务），非特权，直接暴露在公网上收未认证的 UDP 敲门包；
+#   · baidi-ipsec  走东西向（站点 ↔ 站点），需要 CAP_NET_BIND_SERVICE + CAP_NET_ADMIN。
+# 合并的代价是把「建网络接口、改路由」的能力交给那个专门吃畸形包的进程；反过来，
+# IKE 解析器 panic 一次会顺带打掉全部远程接入——Restart= 能把进程拉起来，
+# 挽不回被牵连的那一半业务。
+#
+# ★启用前须在云安全组放行 500/udp **和** 4500/udp（NAT-T）。
+#   只放 500 的症状最难查：IKE_SA_INIT 一来一回之后再无动静——只要有一端在 NAT 后，
+#   IKE_AUTH 起就切到 4500，全程被安全组吞掉，控制台上站点停在「协商中」再无下文。
+# ★该机若已跑 strongSwan，两者会抢 500/4500（baidi-gateway.service 的注释里已提示过
+#   这台机可能有 strongSwan-gm）。install-remote.sh 装机期有占用预检，检出即中止；
+#   确需共存就改 IKE_PORT/NATT_PORT 到高位端口，并同步改对端配置与安全组。
+Description=白帝站点组网网关 baidi-ipsec（IKEv2/ESP）
+After=network.target
+
+[Service]
+Type=simple
+User=@BD_USER@
+WorkingDirectory=@BD_PREFIX@
+# 组网专属配置：只有 mTLS 身份材料的路径，**没有任何密钥原文**。
+# PSK 不在这里、也不在任何配置文件里——进程运行时经 mTLS 单取
+# （GET /api/v1/gateways/ipsec/{id}/psk），只存在于内存。
+# （无 - 前缀：缺该文件即启动失败，绝不静默降级；与 baidi-gateway.env 同款姿态）
+EnvironmentFile=@BD_PREFIX@/etc/baidi-ipsec.env
+# 身份材料路径同时以显式 flag 传入（flag 优先，env 文件里是同一组值）：
+# 重复是有意的——单元文件里一眼能看到本机组网身份用的是哪张证书，不必去翻 env。
+#
+# ★-gwid 同时就是 mTLS 客户端证书的 CN，**必须以 ipsec- 开头**：控制面按这个前缀分权
+#   （ipsec-* 只能调 /api/v1/gateways/ipsec*，读不到全量资源授权策略；接入网关证书
+#   反过来也取不到 PSK）。写成 gw-1-ipsec 这种形态会被 403，报文里会写清楚。
+# ★它还必须与控制台上站点的「所属网关」**逐字符相同**：控制面按 gateway_id == CN
+#   精确过滤下发站点清单。不一致时网关拉到的是**空列表而不是错误**——站点安静地
+#   永远 down、日志里一条协商记录都没有，看起来像「对端没配」。这是本项目
+#   apps.resource_id 那类静默断链的翻版，排查起来最费时间。
+ExecStart=@BD_PREFIX@/bin/baidi-ipsec \
+  -gwid @IPSEC_GW_ID@ \
+  -control https://127.0.0.1:@MTLS_PORT@ \
+  -mtls-cert @BD_PREFIX@/etc/ipseccerts/gw.crt.pem \
+  -mtls-key @BD_PREFIX@/etc/ipseccerts/gw.key.pem \
+  -mtls-ca @BD_PREFIX@/etc/ipseccerts/ca.crt.pem \
+  -ike-port @IKE_PORT@ -natt-port @NATT_PORT@
+Restart=on-failure
+RestartSec=3
+
+# ────────────── 与 baidi-gateway.service 刻意相反的三行，别「统一加固」 ──────────────
+# baidi-gateway 是纯非特权进程（NoNewPrivileges=true）：它只绑 18201/18443 两个高位端口，
+# 不需要任何 capability。baidi-ipsec 不同：IKE 要绑 UDP 500（<1024，需 CAP_NET_BIND_SERVICE），
+# 建 TUN 设备并配路由要 CAP_NET_ADMIN。所以这里给 ambient 能力，且把 bounding set
+# 收到同样两项——**只给这两项**，多一项都不给。
+#
+# ★NoNewPrivileges 取 false 是刻意与 baidi-gateway 相反的一行，不要照着网关单元改回 true：
+#   本进程本来就持有 CAP_NET_ADMIN，no_new_privs 的实际收益接近零；而它会禁止 execve
+#   过程中获得任何新权限——一旦 ifup/配路由那条路径落到外部命令上（部分发行版的
+#   /sbin/ip 带 cap_net_admin+ep 文件能力），那条命令就会静默失去权限。
+#   症状：隧道协商成功、控制台显示已建立，但路由没配上，流量根本不进隧道，**全程无报错**。
+#   这正是 CLAUDE.md 里记的那种最迷惑的失败形态，用一行加固去换不值得。
+# ★同理**不要加 PrivateDevices=true / DeviceAllow=**：那会挡掉 /dev/net/tun，
+#   症状同样是静默的——进程起来了，但一张网卡也建不出来。
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE CAP_NET_ADMIN
+NoNewPrivileges=false
+# ──────────────────────────────────────────────────────────────────────────────
+
+ProtectSystem=full
+PrivateTmp=true
+ReadWritePaths=@BD_PREFIX@/etc
+
+[Install]
+WantedBy=multi-user.target

@@ -144,75 +144,11 @@ func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, b)
 }
 
-// ── IPSec VPN 组网 ──
-
-func (s *Server) handleIpsec(w http.ResponseWriter, r *http.Request) {
-	sites, err := s.store.Ipsec(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load ipsec sites")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"sites": sites})
-}
-
-func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	var it store.IpsecSite
-	if err := json.NewDecoder(r.Body).Decode(&it); err != nil || it.Name == "" || it.Peer == "" {
-		httpx.Error(w, http.StatusBadRequest, "name/peer 必填")
-		return
-	}
-	// 网段引用必须指向真实存在的地址对象，挡住悬空引用。
-	for _, ref := range []string{it.LocalRef, it.RemoteRef} {
-		if ref == "" {
-			continue
-		}
-		if ok, err := s.objectExists(r.Context(), "addr", ref); err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "failed to validate addr ref")
-			return
-		} else if !ok {
-			httpx.Error(w, http.StatusBadRequest, "引用的地址对象不存在")
-			return
-		}
-	}
-	saved, err := s.writer.SaveIpsecSite(r.Context(), it)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to save ipsec site")
-		return
-	}
-	s.audit(r, "admin", "保存 IPSec 站点「"+saved.Name+"」", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "site": saved})
-}
-
-func (s *Server) handleDeleteIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	id := r.PathValue("id")
-	if err := s.writer.DeleteIpsecSite(r.Context(), id); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to delete ipsec site")
-		return
-	}
-	s.audit(r, "admin", "删除 IPSec 站点 "+id, "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
-}
-
-func (s *Server) handleToggleIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
-		return
-	}
-	id := r.PathValue("id")
-	status, err := s.writer.ToggleIpsecSite(r.Context(), id)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to toggle ipsec site")
-		return
-	}
-	act := map[string]string{"up": "建立", "down": "断开"}[status]
-	s.audit(r, "admin", act+" IPSec 隧道 "+id, "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": status})
-}
+// ★IPSec VPN 组网的 handlers 已整体搬到 ipsec.go（admin 侧）与 ipsec_gateway.go
+// （mTLS 侧）。搬走的原因不只是文件变长：原先 handleToggleIpsec 写的审计是
+// 「建立 IPSec 隧道 site-sh · ok」，而它实际只把一个字符串列改成了 'up'——
+// 审计断言了一个从未发生的事实。新实现里 toggle 只记「下发启用意图」，
+// 真正的 up/down 由网关回报后另记一条。
 
 // ── 对象库 ──
 

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	"baidi.dev/control/internal/httpx"
@@ -34,12 +35,62 @@ func GatewayCN(ctx context.Context) string {
 	return cn
 }
 
-// MTLSHandler 返回只服务网关接口的 handler（注册/拉策略），身份取自客户端证书。
+// ipsecCNPrefix 站点组网网关（baidi-ipsec）的证书 CN 前缀约定。
+const ipsecCNPrefix = "ipsec-"
+
+// MTLSHandler 返回只服务网关接口的 handler，身份取自客户端证书。
+//
+// ★两类数据面进程共用同一套 CA 与同一个 mTLS 端口，但**能调的接口不同**：
+//
+//	CN 非 ipsec-* （接入网关 baidi-gateway）→ register / policy
+//	CN =  ipsec-* （组网网关 baidi-ipsec）  → 只有 /api/v1/gateways/ipsec*
+//
+// 分权的目标只有一个方向：一张只负责站点组网的证书**不该能读走全量资源授权策略**
+// （policy 里是「谁能访问哪个后端」的完整清单，等于一张授权地图）。反过来，
+// 接入网关调不到 ipsec 端点，是为了让 PSK 的出口尽可能窄。
+//
+// ★为什么组网侧用白名单（必须 ipsec-）、接入侧用黑名单（只要不是 ipsec-）：
+// 接入网关的 CN 就是部署时填的 GW_ID（deploy/config.env.example 里默认 gw-1，
+// 但它是**用户可改的**，现网可能是 beijing-idc-1 之类）。把接入侧也收成
+// `gw-` 白名单，会在升级的那一瞬间把所有 CN 不以 gw- 开头的现网网关全部踢下线，
+// 而安全收益为零——真正要挡的是「组网证书读授权策略」这一个方向，
+// 黑名单已经完整覆盖它。组网侧的 CN 是本轮新引入的，可以从一开始就要求前缀。
 func (s *Server) MTLSHandler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister)
-	mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)
+	mux.HandleFunc("POST /api/v1/gateways/register", accessCNet(s.handleGatewayRegister))
+	mux.HandleFunc("GET /api/v1/gateways/policy", accessCNet(s.handleGatewayPolicy))
+	// 站点组网：只有 ipsec-* 证书能调
+	mux.HandleFunc("GET /api/v1/gateways/ipsec", ipsecCNOnly(s.handleGatewayIpsecSites))
+	mux.HandleFunc("GET /api/v1/gateways/ipsec/{id}/psk", ipsecCNOnly(s.handleGatewayIpsecPSK))
+	mux.HandleFunc("POST /api/v1/gateways/ipsec/status", ipsecCNOnly(s.handleGatewayIpsecStatus))
 	return withCertCN(mux)
+}
+
+// ipsecCNOnly 只放行 CN 以 ipsec- 开头的客户端证书。
+func ipsecCNOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cn := GatewayCN(r.Context())
+		if !strings.HasPrefix(cn, ipsecCNPrefix) {
+			// 错误信息带上实际 CN 与期望前缀：部署时把 IPSEC_GW_ID 写成了 gw-1-ipsec
+			// 而不是 ipsec-gw-1，是这条闸最常见的误报来源，报文里说清楚能省一小时。
+			httpx.Error(w, http.StatusForbidden,
+				"该接口只接受站点组网网关（证书 CN 需以 "+ipsecCNPrefix+" 开头，本次为 "+orElse(cn, "空")+"）")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// accessCNet 拒绝 CN 以 ipsec- 开头的客户端证书调用接入网关接口。
+func accessCNet(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if cn := GatewayCN(r.Context()); strings.HasPrefix(cn, ipsecCNPrefix) {
+			httpx.Error(w, http.StatusForbidden,
+				"站点组网网关证书（CN "+cn+"）不能调用接入网关接口：一张只负责 IPSec 的证书不应能读全量资源授权策略")
+			return
+		}
+		next(w, r)
+	}
 }
 
 // withCertCN 把已完成 mTLS 握手的客户端证书 CN 放进上下文，供 requireGateway 使用。

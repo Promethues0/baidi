@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 
@@ -25,9 +26,9 @@ type Writer interface {
 	SetUserPassword(ctx context.Context, id, hash string) error
 	SaveResource(ctx context.Context, r Resource) error
 	DeleteResource(ctx context.Context, id string) error
-	SaveIpsecSite(ctx context.Context, s IpsecSite) (IpsecSite, error)
-	DeleteIpsecSite(ctx context.Context, id string) error
-	ToggleIpsecSite(ctx context.Context, id string) (string, error)
+	// ★IPSec 的读写不在 Writer 里，收敛到 IpsecStore（见 ipsec_state.go）：
+	// 那组方法里有「读 PSK 密文」这种只该被两个 handler 调用的能力，
+	// 挂在人人可得的 Writer 上等于把密钥访问面摊给全体 handler。
 	SaveAddrObject(ctx context.Context, o AddrObject) (AddrObject, error)
 	SaveServiceObject(ctx context.Context, o ServiceObject) (ServiceObject, error)
 	SaveTimeObject(ctx context.Context, o TimeObject) (TimeObject, error)
@@ -189,10 +190,34 @@ CREATE TABLE IF NOT EXISTS users (
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
 );
+-- ipsec_sites 只放**配置**（管理员权威）。status/rx_bytes/tx_bytes/last_up 四列已冻结：
+-- 它们是运行态与配置混表时代的遗物，代码不再读写，运行态一律去 ipsec_sa_state。
+-- 留着不删是为了让旧库直接可用（DROP COLUMN 在老 SQLite 上不可用，且没有收益）。
 CREATE TABLE IF NOT EXISTS ipsec_sites (
-  id TEXT PRIMARY KEY, name TEXT, peer TEXT, local_subnet TEXT, remote_subnet TEXT,
+  id TEXT PRIMARY KEY, name TEXT, gateway_id TEXT, enabled INTEGER,
+  peer TEXT, local_subnet TEXT, remote_subnet TEXT, local_id TEXT, remote_id TEXT,
   ike_version TEXT, auth TEXT, suite TEXT, phase1 TEXT, phase2 TEXT, pfs INTEGER, pq_hybrid INTEGER,
+  psk_version INTEGER,
+  peer_nat_port INTEGER,
   status TEXT, rx_bytes INTEGER, tx_bytes INTEGER, last_up TEXT, local_ref TEXT, remote_ref TEXT, updated_at TEXT
+);
+-- ipsec_secrets 独立成表放 PSK 密文（AES-256-GCM，AAD 绑 site_id）。
+-- 物理分表让「某天有人写了 SELECT * 拼站点清单」不可能顺手把密钥带出去——
+-- GET /api/v1/ipsec 历史上就漏过一次 requireAdmin，同结构体时那次等于整表泄密钥。
+CREATE TABLE IF NOT EXISTS ipsec_secrets (
+  site_id TEXT PRIMARY KEY, alg TEXT, nonce BLOB, cipher BLOB,
+  fingerprint TEXT, version INTEGER, updated_at TEXT
+);
+-- ipsec_sa_state 是网关权威的实测运行态，15s 全量覆写；管理员写不进这张表。
+-- 主键含 gateway_id：两台网关抢同一条站点时两行并存，界面上看得见，
+-- 而不是第二台悄悄覆盖第一台、只剩一条抖动的状态。
+CREATE TABLE IF NOT EXISTS ipsec_sa_state (
+  site_id TEXT, gateway_id TEXT, state TEXT,
+  ike_spi_i TEXT, ike_spi_r TEXT, child_spi_in INTEGER, child_spi_out INTEGER,
+  rx_bytes INTEGER, tx_bytes INTEGER, packets_in INTEGER, packets_out INTEGER,
+  negotiated TEXT, established_at INTEGER, rekey_at INTEGER, expires_at INTEGER,
+  last_error TEXT, last_error_at INTEGER, reported_at INTEGER,
+  PRIMARY KEY(site_id, gateway_id)
 );
 CREATE TABLE IF NOT EXISTS addr_objects (
   id TEXT PRIMARY KEY, name TEXT, kind TEXT, value TEXT, descr TEXT, updated_at TEXT
@@ -240,6 +265,24 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
   expires_at INTEGER, consumed INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);
+-- ── 认证源接入 ──
+-- 配置与凭据**物理分表**：让「某天有人写了 SELECT *」或忘加 requireAdmin 时，
+-- 泄露需要显式写代码，而不是默认发生（与 ipsec_secrets 同一条推理）。
+CREATE TABLE IF NOT EXISTS auth_sources (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, enabled INTEGER, priority INTEGER,
+  config TEXT, created_at TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS auth_source_secrets (
+  source_id TEXT PRIMARY KEY, nonce BLOB, cipher BLOB, fingerprint TEXT, updated_at TEXT
+);
+-- 外部身份 → 本地用户绑定。主键是 (源, subject) 而**不是** username：
+-- 按用户名绑定的话，外部目录里新建一个与本地管理员同名的账号即可冒充，
+-- 而审计日志里看起来是一次完全正常的登录。
+CREATE TABLE IF NOT EXISTS auth_source_bindings (
+  source_id TEXT, subject TEXT, user_id TEXT, username TEXT, created_at TEXT,
+  PRIMARY KEY(source_id, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_authbind_user ON auth_source_bindings(user_id);
 CREATE TABLE IF NOT EXISTS gateway_certs (
   fingerprint TEXT PRIMARY KEY, gateway_id TEXT, issued_at TEXT, not_after TEXT,
   revoked INTEGER DEFAULT 0, revoked_at TEXT, revoke_reason TEXT
@@ -248,22 +291,105 @@ CREATE TABLE IF NOT EXISTS gateway_certs (
 		return err
 	}
 	// 对象库引用列：旧库表已存在时 CREATE TABLE IF NOT EXISTS 不会补列，逐列幂等 ALTER（忽略已存在）。
-	for _, c := range []struct{ table, col string }{
-		{"resources", "addr_ref"}, {"resources", "svc_ref"},
-		{"ipsec_sites", "local_ref"}, {"ipsec_sites", "remote_ref"},
-		{"users", "pass_hash"}, {"users", "role"},
-		{"apps", "resource_id"}, // JIT：磁贴 → 受控资源的权威映射列（旧库补列）
+	for _, c := range []struct{ table, col, typ string }{
+		{"resources", "addr_ref", "TEXT"}, {"resources", "svc_ref", "TEXT"},
+		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
+		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
+		{"apps", "resource_id", "TEXT"}, // JIT：磁贴 → 受控资源的权威映射列（旧库补列）
+		// IPSec 组网：配置面补列。enabled 用 INTEGER 而不是复用 TEXT——
+		// 它要参与 `WHERE enabled=1`，存 '1'/'0' 字符串时 SQLite 的类型亲和会
+		// 悄悄比出「一条都不匹配」，症状同样是网关拉到空站点列表且零报错。
+		{"ipsec_sites", "gateway_id", "TEXT"},
+		{"ipsec_sites", "enabled", "INTEGER"},
+		{"ipsec_sites", "local_id", "TEXT"},
+		{"ipsec_sites", "remote_id", "TEXT"},
+		{"ipsec_sites", "psk_version", "INTEGER"},
+		// 对端 UDP 封装口。旧库补列后为 NULL，读侧 COALESCE 到 0 即「按对称假设」——
+		// 与既有部署（两端都是 4500）的行为完全一致，故这一列不需要回填。
+		{"ipsec_sites", "peer_nat_port", "INTEGER"},
+		// 凭据指纹。★存指纹而不是在列表里解密：指纹的用途是让管理员核对"两端配的是
+		// 不是同一把"，它本身只是个截断哈希、不敏感；而为了显示它去解密明文，
+		// 等于在一条人人可读的列表路径上引入解密调用，与"只写不读"的姿态自相矛盾。
+		// 旧库补列后为 NULL，界面上显示 •••• ——不影响功能，重设一次凭据即补齐。
+		{"auth_source_secrets", "fingerprint", "TEXT"},
 	} {
-		if e := s.addColumnIfMissing(c.table, c.col); e != nil {
+		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
+		}
+	}
+	if err := s.backfillAppResourceID(); err != nil {
+		return err
+	}
+	// ★两条回填并列挂在这里不是排版偏好：补列迁移只加列不填值，是本项目
+	// 已经踩过一次的坑（apps.resource_id）。凡是新增**业务语义列**，
+	// 回填必须与 ALTER 同一处出现，否则下一个加列的人不会想到还有这一步。
+	if err := s.backfillIpsecEnabled(); err != nil {
+		return err
+	}
+	if err := s.ensureAccountUnique(); err != nil {
+		return err
+	}
+	return s.seedLocalAuthSource()
+}
+
+// ensureAccountUnique 给 users.account 建规范化唯一索引。
+//
+// ★account 不只是显示名，它是**令牌主体**（JWT Sub）与 JIT 授予 / 强制下线 /
+// posture 判定的键。两行同 account 意味着两个真实身份在授权层面合并成一个：
+// 后来者直接继承前者的全部授权，而审计日志看起来完全正常。
+// BindExternalUser 里的循环消歧是第一道闸，这条索引是并发下的最终防线
+// （两个事务同时查重都判"不撞"时，靠它让后到的那次失败而不是静默共号）。
+//
+// 索引建在 lower(trim(account)) 上，与所有查账号的 SQL 口径一致——
+// 建在裸列上会让 "Alice" 与 "alice" 被认成两个账号，而登录时它们是同一个。
+// 既有库若已存在重复（本轮之前的实现有可能留下），CREATE UNIQUE INDEX 会失败：
+// 此时只记警告不阻断启动——控制面起不来的代价远大于这条索引晚一步建立，
+// 而重复账号需要人来判断该保留哪个，不能由迁移代劳。
+func (s *SQLiteStore) ensureAccountUnique() error {
+	_, err := s.db.Exec(
+		`CREATE UNIQUE INDEX IF NOT EXISTS idx_users_account_norm ON users(lower(trim(account)))`)
+	if err != nil {
+		slog.Warn("users.account 唯一索引建立失败，库中可能已有重复账号（两个身份共用一个令牌主体，请人工核对后清理）",
+			"err", err.Error())
+	}
+	return nil
+}
+
+// backfillAppResourceID 回填 apps.resource_id。
+//
+// ★补列迁移只加列、不回填，于是任何在该列出现**之前**建好的库，其种子应用的
+// resource_id 永久为 NULL。而这一列是「应用磁贴 → 受控资源」的唯一桥接：为空时
+//   - JIT 自助申请解析不出目标资源；
+//   - 客户端接入剖面排不出路由，应用点开不走隧道。
+//
+// 两处都是静默失效（没有报错，只是"什么都没发生"），排障时极难指向这里。
+//
+// 只回填仍为空的行，且只按内置种子的 id 对应关系补——管理员后来手工改过的值一律不动。
+func (s *SQLiteStore) backfillAppResourceID() error {
+	seed, err := s.Memory.Apps(context.Background())
+	if err != nil {
+		return err
+	}
+	for _, a := range seed.Apps {
+		if a.ResourceID == "" {
+			continue
+		}
+		if _, err := s.db.Exec(
+			`UPDATE apps SET resource_id=? WHERE id=? AND COALESCE(resource_id,'')=''`,
+			a.ResourceID, a.ID); err != nil {
+			return err
 		}
 	}
 	return nil
 }
 
-// addColumnIfMissing 幂等地为表补一列 TEXT；列已存在（duplicate column name）视为成功。
-func (s *SQLiteStore) addColumnIfMissing(table, col string) error {
-	_, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` TEXT`)
+// addColumnIfMissing 幂等地为表补一列；列已存在（duplicate column name）视为成功。
+//
+// ★不带 DEFAULT 是有意的：新列在既有行上就是 NULL，而 NULL 正是「这一行还没被
+// 回填过」的标记，回填语句据此写 `WHERE <col> IS NULL`（幂等、且不会覆盖管理员
+// 后来手工改过的值）。给了 DEFAULT 就再也分不清「默认值」与「已回填成默认值」。
+func (s *SQLiteStore) addColumnIfMissing(table, col, typ string) error {
+	_, err := s.db.Exec(`ALTER TABLE ` + table + ` ADD COLUMN ` + col + ` ` + typ)
 	if err != nil && !strings.Contains(err.Error(), "duplicate column name") {
 		return err
 	}

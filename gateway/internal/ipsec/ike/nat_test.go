@@ -1,0 +1,401 @@
+package ike
+
+import (
+	"bytes"
+	"net/netip"
+	"sync"
+	"testing"
+	"time"
+
+	"baidi.dev/gateway/internal/ipsec"
+)
+
+// NAT-T 的测试。
+//
+// ★这一组用例覆盖的错误有一个共同特征：**只在 NAT 路径上炸，非 NAT 环境永远发现不了**。
+// 因为非 NAT 时两个检测哈希天然相等，判定逻辑写反、哈希算法选错、marker 混进签名字节，
+// 统统不会有任何表现。所以必须专门造一个 NAT 环境来跑。
+
+// ── 检测哈希本身 ──
+
+func TestNATDetectHashShapeAndSensitivity(t *testing.T) {
+	spii := [8]byte{1, 2, 3, 4, 5, 6, 7, 8}
+	spir := [8]byte{9, 10, 11, 12, 13, 14, 15, 16}
+	base := netip.MustParseAddrPort("203.0.113.5:500")
+
+	h := natDetectHash(spii, spir, base)
+	// ★固定 20 字节 = SHA-1，与协商出的 PRF 无关。
+	// 用 SHA-256 会算出 32 字节，对端按 20 字节比对必然不等 → 双方都判定
+	// "对端在 NAT 后" → 双双切 4500 → 居然还能通，于是这个错误会一直潜伏到
+	// 与第三方设备互通时才爆发。
+	if len(h) != 20 {
+		t.Fatalf("NAT 检测哈希应为 20 字节（SHA-1，与协商的 PRF 无关），实际 %d", len(h))
+	}
+	if !bytes.Equal(h, natDetectHash(spii, spir, base)) {
+		t.Fatal("同样的输入必须算出同样的哈希")
+	}
+
+	// 四个输入分量各自都必须参与计算——漏掉任何一个，NAT 检测都会在某些
+	// 场景下给出错误结论（例如只改端口的 NAPT 就检测不出来）。
+	spii2 := spii
+	spii2[0]++
+	spir2 := spir
+	spir2[7]++
+	for name, other := range map[string][]byte{
+		"SPIi": natDetectHash(spii2, spir, base),
+		"SPIr": natDetectHash(spii, spir2, base),
+		"IP":   natDetectHash(spii, spir, netip.MustParseAddrPort("203.0.113.6:500")),
+		"端口":   natDetectHash(spii, spir, netip.MustParseAddrPort("203.0.113.5:4500")),
+	} {
+		if bytes.Equal(h, other) {
+			t.Fatalf("%s 没有参与 NAT 检测哈希的计算", name)
+		}
+	}
+
+	// IPv4-mapped IPv6 必须与纯 IPv4 算出同一个值：netip 里 ::ffff:a.b.c.d 的
+	// As16() 是 16 字节，不 Unmap 就会与对端按 4 字节算出的哈希对不上。
+	mapped := netip.AddrPortFrom(netip.AddrFrom16(base.Addr().As16()), base.Port())
+	if !bytes.Equal(h, natDetectHash(spii, spir, mapped)) {
+		t.Fatal("IPv4-mapped IPv6 地址应先 Unmap 再参与哈希")
+	}
+}
+
+// ── 交叉比对逻辑 ──
+
+func TestDetectNATIsCrossCompared(t *testing.T) {
+	spii := [8]byte{0xaa}
+	claimedSrc := netip.MustParseAddrPort("10.0.0.1:500") // 发送方自认为的源
+	claimedDst := netip.MustParseAddrPort("10.0.0.2:500") // 发送方自认为的目的
+	natedSrc := netip.MustParseAddrPort("198.51.100.7:33333")
+
+	build := func(ps []Payload) *Message {
+		raw, err := Encode(Header{SPIi: spii, Version: Version, ExchangeType: ExchangeIKESAInit}, ps)
+		if err != nil {
+			t.Fatalf("编码失败: %v", err)
+		}
+		m, err := Decode(raw)
+		if err != nil {
+			t.Fatalf("解码失败: %v", err)
+		}
+		return m
+	}
+	m := build(natNotifies(spii, [8]byte{}, claimedSrc, claimedDst))
+
+	// ① 完全没有 NAT：实测地址与声明一致。
+	peer, local, present := detectNAT(m, claimedSrc, claimedDst)
+	if !present || peer || local {
+		t.Fatalf("无 NAT 时不应判定任何一侧在 NAT 后（peer=%v local=%v present=%v）", peer, local, present)
+	}
+
+	// ② 对端在 NAT 后：我看到的源地址与它声明的不一样。
+	peer, local, _ = detectNAT(m, natedSrc, claimedDst)
+	if !peer || local {
+		t.Fatalf("对端源地址被改写时应判定**对端**在 NAT 后（peer=%v local=%v）——"+
+			"这里写反的话，非 NAT 环境下一切正常，只有真到 NAT 场景才炸", peer, local)
+	}
+
+	// ③ 本端在 NAT 后：对端声明的目的地址不是我实际收包的地址。
+	peer, local, _ = detectNAT(m, claimedSrc, netip.MustParseAddrPort("192.168.1.9:500"))
+	if peer || !local {
+		t.Fatalf("目的地址对不上时应判定**本端**在 NAT 后（peer=%v local=%v）", peer, local)
+	}
+
+	// ④ ★对端根本没发 NAT 通知：必须两条都是 false，且 present=false。
+	// 把"没发"当成"不匹配"，会让所有不支持 NAT-T 的对端被误判成 NAT 后并被切到
+	// 4500 端口——而它根本没监听 4500，隧道就此消失。
+	m2 := build([]Payload{&NoncePayload{Nonce: make([]byte, 32)}})
+	peer, local, present = detectNAT(m2, natedSrc, claimedDst)
+	if present || peer || local {
+		t.Fatalf("对端没发 NAT 通知时必须一律判 false（peer=%v local=%v present=%v）", peer, local, present)
+	}
+}
+
+// ── 端口切换：applyNAT ──
+
+func TestApplyNATSwitchesPortsOnlyWhenNeeded(t *testing.T) {
+	natLocal := netip.MustParseAddrPort("10.0.0.1:4500")
+
+	// 无 NAT：一切不动，继续走 500。
+	sa := newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
+	sa.applyNAT(false, false, natLocal)
+	if sa.Local.Port() != 500 || sa.Peer.Port() != 500 {
+		t.Fatalf("无 NAT 时不该切换端口，实际 local=%s peer=%s", sa.Local, sa.Peer)
+	}
+
+	// 本端在 NAT 后、对端不在：两侧都切 4500。
+	sa = newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
+	sa.applyNAT(false, true, natLocal)
+	if sa.Local != natLocal || sa.Peer.Port() != 4500 {
+		t.Fatalf("检测到 NAT 后两侧都应切到 4500，实际 local=%s peer=%s", sa.Local, sa.Peer)
+	}
+
+	// ★对端在 NAT 后：**不能**把它的端口改成 4500。
+	// 要发往的是 NAT 映射出来的那个端口（= 我们实测到的源端口），
+	// 硬改成 4500 的话包会送到 NAT 设备上一个根本不存在的映射，全部黑洞。
+	sa = newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("198.51.100.7:33333")
+	sa.applyNAT(true, false, natLocal)
+	if sa.Peer.Port() != 33333 {
+		t.Fatalf("对端在 NAT 后时应保留实测到的映射端口，实际 %s", sa.Peer)
+	}
+	if sa.Local != natLocal {
+		t.Fatalf("本端仍应切到 4500，实际 %s", sa.Local)
+	}
+
+	// 没配 4500 落点时宁可不切：切到一个不存在的端口会让隧道彻底消失。
+	sa = newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
+	sa.applyNAT(true, true, netip.AddrPort{})
+	if sa.Local.Port() != 500 {
+		t.Fatalf("未配置 4500 落点时不该切换，实际 %s", sa.Local)
+	}
+	if !sa.PeerNATed || !sa.LocalNATed {
+		t.Fatal("即便不切端口，NAT 判定也要记录下来（回报与 keepalive 都靠它）")
+	}
+}
+
+// ── 端到端：一台网关在 NAT 后，完整握手必须成功 ──
+
+// natMulti 把多个 MemTransport（500 / 4500）合成一个 ipsec.Transport。
+//
+// 生产实现（WP-E 的 transport_udp.go）同样是"一个 Transport 背后两个 socket"，
+// 且 non-ESP marker 的加减完全由它独占——★上层永远看不到 marker，
+// 这正是 RealMessage1/2 天然不含 marker 的原因（auth.go 第 2 条约束）。
+type natMulti struct {
+	subs map[netip.AddrPort]*ipsec.MemTransport
+	any  *ipsec.MemTransport
+	in   chan ipsec.Datagram
+	done chan struct{}
+	once sync.Once
+}
+
+func newNATMulti(ts ...*ipsec.MemTransport) *natMulti {
+	m := &natMulti{
+		subs: make(map[netip.AddrPort]*ipsec.MemTransport, len(ts)),
+		in:   make(chan ipsec.Datagram, 64),
+		done: make(chan struct{}),
+	}
+	for _, t := range ts {
+		m.subs[t.Local()] = t
+		if m.any == nil {
+			m.any = t
+		}
+		go func(t *ipsec.MemTransport) {
+			for {
+				d, err := t.Recv()
+				if err != nil {
+					return
+				}
+				select {
+				case m.in <- d:
+				case <-m.done:
+					return
+				}
+			}
+		}(t)
+	}
+	return m
+}
+
+func (m *natMulti) Send(d ipsec.Datagram) error {
+	t := m.subs[d.Local]
+	if t == nil {
+		t = m.any
+	}
+	return t.Send(d)
+}
+
+func (m *natMulti) Recv() (ipsec.Datagram, error) {
+	select {
+	case d := <-m.in:
+		return d, nil
+	case <-m.done:
+		return ipsec.Datagram{}, ipsec.ErrClosed
+	}
+}
+
+func (m *natMulti) Close() error {
+	m.once.Do(func() {
+		close(m.done)
+		for _, t := range m.subs {
+			_ = t.Close()
+		}
+	})
+	return nil
+}
+
+// natRecord 抓包（含 Kind，keepalive 断言要用）。
+type natRecord struct {
+	mu   sync.Mutex
+	pkts []ipsec.Datagram
+}
+
+func (r *natRecord) add(d ipsec.Datagram) {
+	r.mu.Lock()
+	r.pkts = append(r.pkts, ipsec.Datagram{
+		Kind: d.Kind, Local: d.Local, Remote: d.Remote,
+		Payload: append([]byte(nil), d.Payload...),
+	})
+	r.mu.Unlock()
+}
+
+func (r *natRecord) snapshot() []ipsec.Datagram {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]ipsec.Datagram(nil), r.pkts...)
+}
+
+func TestNATTraversalCompletesHandshakeAndSwitchesTo4500(t *testing.T) {
+	var (
+		aIKE = netip.MustParseAddrPort("10.0.0.1:500")
+		aNAT = netip.MustParseAddrPort("10.0.0.1:4500")
+		bIKE = netip.MustParseAddrPort("10.0.0.2:500")
+		bNAT = netip.MustParseAddrPort("10.0.0.2:4500")
+		// A 在 NAT 后，公网映射：500→1500，4500→14500。
+		pubIKE = netip.MustParseAddrPort("198.51.100.7:1500")
+		pubNAT = netip.MustParseAddrPort("198.51.100.7:14500")
+	)
+
+	rec := &natRecord{}
+	clk := newRKClock()
+
+	cfgA := hsSiteA("baidi-ipsec-psk")
+	cfgB := hsSiteB("baidi-ipsec-psk")
+	// ★B 只知道 A 的**公网**地址——这正是 NAT 场景的定义。
+	// findSiteByPeer 只比 IP 不比端口，否则 NAT 随机分配的源端口必然匹配不上，
+	// 症状是"NAT 后的对端永远连不进来"，而日志里连一条记录都没有（静默丢包）。
+	cfgB.Peer = netip.MustParseAddrPort("198.51.100.7:500")
+
+	f := hsSetupWith(t, cfgA, cfgB, clk.now,
+		func(n *ipsec.MemNet) (ipsec.Transport, ipsec.Transport, netip.AddrPort, netip.AddrPort, netip.AddrPort, netip.AddrPort) {
+			mk := func(ap netip.AddrPort) *ipsec.MemTransport {
+				tr, err := n.Bind(ap)
+				if err != nil {
+					t.Fatalf("绑定 %s 失败: %v", ap, err)
+				}
+				return tr
+			}
+			ta := newNATMulti(mk(aIKE), mk(aNAT))
+			tb := newNATMulti(mk(bIKE), mk(bNAT))
+
+			// NAT 设备：改写 A 出去的源地址，以及回程包的目的地址。
+			n.SetFilter(func(d ipsec.Datagram) (ipsec.Datagram, bool) {
+				switch d.Local {
+				case aIKE:
+					d.Local = pubIKE
+				case aNAT:
+					d.Local = pubNAT
+				}
+				switch d.Remote {
+				case pubIKE:
+					d.Remote = aIKE
+				case pubNAT:
+					d.Remote = aNAT
+				}
+				rec.add(d)
+				return d, true
+			})
+			return ta, tb, aIKE, bIKE, aNAT, bNAT
+		})
+
+	hsWait(t, "NAT 环境下两端都建立成功", func() bool { return hsUp(f.a, "site-1") && hsUp(f.b, "site-1") })
+
+	saA, saB := hsPrimarySA(f.a, "site-1"), hsPrimarySA(f.b, "site-1")
+
+	// ── 判定方向必须正确（写反的话非 NAT 环境一切正常）──
+	if !saA.LocalNATed || saA.PeerNATed {
+		t.Fatalf("A 侧应判定「本端在 NAT 后、对端不在」，实际 local=%v peer=%v", saA.LocalNATed, saA.PeerNATed)
+	}
+	if saB.LocalNATed || !saB.PeerNATed {
+		t.Fatalf("B 侧应判定「对端在 NAT 后、本端不在」，实际 local=%v peer=%v", saB.LocalNATed, saB.PeerNATed)
+	}
+
+	// ── IKE_AUTH 起切 4500 ──
+	if saA.Local != aNAT {
+		t.Fatalf("A 侧应从 IKE_AUTH 起改用 4500，实际本端落点 %s", saA.Local)
+	}
+	if saB.Local != bNAT {
+		t.Fatalf("B 侧应从 IKE_AUTH 起改用 4500，实际本端落点 %s", saB.Local)
+	}
+	// B 发往 A 的地址必须是**实测到的 NAT 映射**，不是配置里的 198.51.100.7:500。
+	if saB.Peer != pubNAT {
+		t.Fatalf("B 应把对端地址更新为实测到的 NAT 映射 %s，实际 %s", pubNAT, saB.Peer)
+	}
+
+	// ── ★IKE_SA_INIT 那一轮必须还在 500 上 ──
+	// 提前切的后果：响应从 4500 发出并被 Transport 加上 4 字节 non-ESP marker，
+	// 而对端还在 500 上按裸 IKE 报文解析——第一个字节就是 0，解析失败且静默丢包。
+	pkts := rec.snapshot()
+	if len(pkts) < 4 {
+		t.Fatalf("抓到 %d 条报文，握手至少 4 条", len(pkts))
+	}
+	for i := 0; i < 2; i++ {
+		if pkts[i].Local.Port() == 4500 || pkts[i].Remote.Port() == 4500 {
+			t.Fatalf("第 %d 条（IKE_SA_INIT）走了 4500：%s→%s；切换必须从 IKE_AUTH 开始",
+				i+1, pkts[i].Local, pkts[i].Remote)
+		}
+	}
+	for i := 2; i < 4; i++ {
+		if pkts[i].Local.Port() != 4500 && pkts[i].Local.Port() != 14500 {
+			t.Fatalf("第 %d 条（IKE_AUTH）没有走 4500：%s→%s", i+1, pkts[i].Local, pkts[i].Remote)
+		}
+	}
+
+	// ── ★AUTH 成功本身就证明了签名字节串不含 non-ESP marker ──
+	// marker 由 Transport 独占，从未进入 Engine；这里再正面验证一次
+	// RealMessage1 确实是从 SPIi 第一字节开始的裸 IKE 报文。
+	if !bytes.HasPrefix(saA.initMsgRaw, saA.SPIi[:]) {
+		t.Fatal("RealMessage1 没有从 SPIi 第一字节开始——多半是 4 字节 non-ESP marker 混进了签名字节串")
+	}
+	if bytes.HasPrefix(saA.initMsgRaw, []byte{0, 0, 0, 0}) {
+		t.Fatal("RealMessage1 以 4 个零字节开头，那正是 non-ESP marker 的形态")
+	}
+	if hdr, err := ParseHeader(saA.initMsgRaw); err != nil || hdr.ExchangeType != ExchangeIKESAInit {
+		t.Fatalf("RealMessage1 应能直接按 IKE 头解析：%v / %v", err, hdr.ExchangeType)
+	}
+	if !bytes.Equal(saA.initMsgRaw, saB.initMsgRaw) || !bytes.Equal(saA.respMsgRaw, saB.respMsgRaw) {
+		t.Fatal("两端缓存的 RealMessage1/2 必须逐字节相同，否则 AUTH 只能靠运气对上")
+	}
+
+	// 密钥仍然要两端一致（NAT 不该影响任何密码学计算）。
+	if !bytes.Equal(saA.Keys.SKei, saB.Keys.SKei) || !bytes.Equal(saA.Keys.SKd, saB.Keys.SKd) {
+		t.Fatal("NAT 环境下两端 IKE 密钥不一致")
+	}
+
+	// ── NAT keepalive ──
+	before := len(rec.snapshot())
+	clk.advance(natKeepaliveInterval + time.Second)
+	f.a.runTimers()
+	var ka *ipsec.Datagram
+	for i, d := range rec.snapshot() {
+		if i >= before && d.Kind == ipsec.KindKeepalive {
+			ka = &rec.snapshot()[i]
+			break
+		}
+	}
+	if ka == nil {
+		// ★不发 keepalive 的症状极具迷惑性：隧道建好后能跑，空闲一两分钟后单向不通
+		//（NAT 映射老化，对端发来的包没有回程条目），本端一发包又立刻恢复——
+		// 看起来像"网络时好时坏"。
+		t.Fatal("本端在 NAT 后时必须定期发 NAT keepalive")
+	}
+	if len(ka.Payload) != 1 || ka.Payload[0] != 0xFF {
+		t.Fatalf("NAT keepalive 必须是单字节 0xFF，实际 %x", ka.Payload)
+	}
+
+	// B 不在 NAT 后，不该发 keepalive（白白烧对端的 CPU 与流量）。
+	beforeB := len(rec.snapshot())
+	clk.advance(natKeepaliveInterval + time.Second)
+	f.b.runTimers()
+	for i, d := range rec.snapshot() {
+		if i >= beforeB && d.Kind == ipsec.KindKeepalive && d.Local.Addr() == bIKE.Addr() {
+			t.Fatal("不在 NAT 后的一端不应发 keepalive")
+		}
+	}
+}

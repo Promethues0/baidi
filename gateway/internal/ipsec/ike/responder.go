@@ -177,7 +177,7 @@ func (e *Engine) onSAInitRequest(m *Message, d ipsec.Datagram) {
 	// 从 4500 发出、并被 Transport 加上 4 字节 non-ESP marker，而对端还在 500 上
 	// 按裸 IKE 报文解析——收到的第一个字节就是 0，解析直接失败，且**静默丢包**。
 	if present {
-		sa.applyNAT(peerNATed, localNATed, e.opt.LocalNAT)
+		sa.applyNAT(peerNATed, localNATed, e.opt.LocalNAT, s.cfg.PeerNATPort)
 	}
 	e.opt.Log.Info("ike: 已响应 IKE_SA_INIT（half-open）",
 		"site", s.cfg.ID, "from", d.Remote, "spiI", spiHex(sa.SPIi), "spiR", spiHex(sa.SPIr),

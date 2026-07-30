@@ -119,7 +119,7 @@ func TestApplyNATSwitchesPortsOnlyWhenNeeded(t *testing.T) {
 	sa := newIKESA("s", true, time.Now())
 	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
 	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
-	sa.applyNAT(false, false, natLocal)
+	sa.applyNAT(false, false, natLocal, 0)
 	if sa.Local.Port() != 500 || sa.Peer.Port() != 500 {
 		t.Fatalf("无 NAT 时不该切换端口，实际 local=%s peer=%s", sa.Local, sa.Peer)
 	}
@@ -128,30 +128,66 @@ func TestApplyNATSwitchesPortsOnlyWhenNeeded(t *testing.T) {
 	sa = newIKESA("s", true, time.Now())
 	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
 	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
-	sa.applyNAT(false, true, natLocal)
+	sa.applyNAT(false, true, natLocal, 0)
 	if sa.Local != natLocal || sa.Peer.Port() != 4500 {
 		t.Fatalf("检测到 NAT 后两侧都应切到 4500，实际 local=%s peer=%s", sa.Local, sa.Peer)
 	}
 
-	// ★对端在 NAT 后：**不能**把它的端口改成 4500。
-	// 要发往的是 NAT 映射出来的那个端口（= 我们实测到的源端口），
-	// 硬改成 4500 的话包会送到 NAT 设备上一个根本不存在的映射，全部黑洞。
-	sa = newIKESA("s", true, time.Now())
+	// ★发起方：对端在 NAT 后也必须切到**对端的封装口**，不能保留实测到的源端口。
+	//
+	// 那个源端口（33333）是 NAT 为对端的 **IKE 口(500)** 建立的映射——IKE_SA_INIT
+	// 就是从 500 发出的。而对端从 IKE_AUTH 起改用封装口收发，保留 33333 等于把
+	// IKE_AUTH 发进一个对端已经不再监听的映射。更糟的是本端此时已从 4500 发出
+	// （Transport 会加 non-ESP marker），而 500 那侧按设计不剥 marker——
+	// 收端解析失败后静默丢弃，协商停在 IKE_AUTH 且两端都不报错。
+	sa = newIKESA("s", true, time.Now()) // true = 本端是发起方
 	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
 	sa.Peer = netip.MustParseAddrPort("198.51.100.7:33333")
-	sa.applyNAT(true, false, natLocal)
-	if sa.Peer.Port() != 33333 {
-		t.Fatalf("对端在 NAT 后时应保留实测到的映射端口，实际 %s", sa.Peer)
+	sa.applyNAT(true, false, natLocal, 0)
+	if sa.Peer.Port() != 4500 {
+		t.Fatalf("发起方应切到对端封装口 4500（对称假设），实际 %s", sa.Peer)
 	}
 	if sa.Local != natLocal {
 		t.Fatalf("本端仍应切到 4500，实际 %s", sa.Local)
+	}
+
+	// 发起方 + 对端封装口非标准：必须用配置的 PeerNATPort，而不是对称假设。
+	sa = newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("198.51.100.7:33333")
+	sa.applyNAT(true, false, natLocal, 15501)
+	if sa.Peer.Port() != 15501 {
+		t.Fatalf("配了 PeerNATPort 时应切到它，实际 %s", sa.Peer)
+	}
+
+	// ★响应方：保留实测到的映射端口。
+	// 响应方观测到的源端口就是对端 NAT 映射出来的那个，硬改成 4500 会送到
+	// NAT 设备上一个根本不存在的映射，全部黑洞。对端随后从自己的封装口发来
+	// IKE_AUTH 时，onAuthRequest 会用实测地址覆盖（responder.go 的 sa.Peer = d.Remote）。
+	sa = newIKESA("s", false, time.Now()) // false = 本端是响应方
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("198.51.100.7:33333")
+	sa.applyNAT(true, false, natLocal, 0)
+	if sa.Peer.Port() != 33333 {
+		t.Fatalf("响应方应保留实测到的映射端口，实际 %s", sa.Peer)
+	}
+
+	// 双向 NAT（两个分支各自在 NAT 后、靠端口转发互通，是常见的企业组网形态）：
+	// 发起方仍须切到对端封装口。不区分角色时两端都保留对方的 IKE 口，
+	// 于是双方的 IKE_AUTH 都发给了对方不再监听的端口——隧道永远建不起来。
+	sa = newIKESA("s", true, time.Now())
+	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
+	sa.Peer = netip.MustParseAddrPort("198.51.100.7:33333")
+	sa.applyNAT(true, true, natLocal, 0)
+	if sa.Peer.Port() != 4500 || sa.Local != natLocal {
+		t.Fatalf("双向 NAT 下发起方两侧都应切到封装口，实际 local=%s peer=%s", sa.Local, sa.Peer)
 	}
 
 	// 没配 4500 落点时宁可不切：切到一个不存在的端口会让隧道彻底消失。
 	sa = newIKESA("s", true, time.Now())
 	sa.Local = netip.MustParseAddrPort("10.0.0.1:500")
 	sa.Peer = netip.MustParseAddrPort("10.0.0.2:500")
-	sa.applyNAT(true, true, netip.AddrPort{})
+	sa.applyNAT(true, true, netip.AddrPort{}, 0)
 	if sa.Local.Port() != 500 {
 		t.Fatalf("未配置 4500 落点时不该切换，实际 %s", sa.Local)
 	}

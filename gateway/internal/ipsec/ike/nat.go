@@ -110,7 +110,7 @@ func equalBytes(a, b []byte) bool {
 //
 // natLocal 是本端 4500 的落点。为空（未配 4500）时不切换：与其切到一个不存在的
 // 端口让隧道彻底消失，不如维持 500 并把 NAT 情况记录下来。
-func (s *IKESA) applyNAT(peerNATed, localNATed bool, natLocal netip.AddrPort) {
+func (s *IKESA) applyNAT(peerNATed, localNATed bool, natLocal netip.AddrPort, peerEncapPort uint16) {
 	s.PeerNATed = peerNATed
 	s.LocalNATed = localNATed
 	if !peerNATed && !localNATed {
@@ -120,10 +120,34 @@ func (s *IKESA) applyNAT(peerNATed, localNATed bool, natLocal netip.AddrPort) {
 		return
 	}
 	s.Local = natLocal
-	// ★对端的 4500 端口不能想当然地写成 4500：对端在 NAT 后时，我们要发往的是
-	// **NAT 映射出来的那个端口**，而它恰好就是我们观测到的源端口（对端用同一条
-	// socket 收发 IKE 与 ESP，见 types.go 中 Transport 的说明）。
-	// 只有在对端**不在** NAT 后时，才按标准切到它的 4500。
+
+	// ★源换了，目的也必须换——否则报文从本端的 4500 口发出（Transport 会加 4 字节
+	// non-ESP marker），却落到对端的 **500 口**，而那个口按设计不剥 marker，
+	// 收端解析失败后静默丢弃：协商停在 IKE_AUTH，两侧日志都只显示「已发出」，
+	// 没有任何一端报错。
+	//
+	// 但"该换成哪个端口"取决于本端是发起方还是响应方，两者**不能共用一套逻辑**：
+	//
+	//   响应方：观测到的源端口就是对端 NAT 映射出来的端口，保持它。对端随后从自己的
+	//           封装口发来 IKE_AUTH 时，onAuthRequest 会用实测地址覆盖（responder.go
+	//           里那句 `sa.Peer = d.Remote`），映射端口在那一刻才真正确定。
+	//
+	//   发起方：观测到的源端口对应的是响应方的 **IKE 口**（IKE_SA_INIT 从 500 发出）。
+	//           响应方切到封装口后端口会变，保持旧值必然发到一个不再监听的端口。
+	//           所以要主动切到对端的封装口：优先用配置的 PeerNATPort，没配则按对称
+	//           假设取本端封装口的端口号（生产上两端都是 4500）。
+	//
+	// 不区分角色的后果是**双向 NAT 场景完全不通**（两个分支各自在 NAT 后、靠端口
+	// 转发互通是企业组网的常见形态）：双方都保持观测到的对端 IKE 口，于是双方的
+	// IKE_AUTH 都发给了对方不再监听的端口。
+	if s.LocalIsInit {
+		port := peerEncapPort
+		if port == 0 {
+			port = natLocal.Port()
+		}
+		s.Peer = netip.AddrPortFrom(s.Peer.Addr(), port)
+		return
+	}
 	if !peerNATed {
 		s.Peer = netip.AddrPortFrom(s.Peer.Addr(), natLocal.Port())
 	}

@@ -231,7 +231,7 @@ func (e *Engine) onSAInitResponse(sa *IKESA, ex *exchange, m *Message, d ipsec.D
 	// NAT 检测必须在切端口**之前**用收包时的实际地址做。
 	peerNATed, localNATed, present := detectNAT(m, d.Remote, d.Local)
 	if present {
-		sa.applyNAT(peerNATed, localNATed, e.opt.LocalNAT)
+		sa.applyNAT(peerNATed, localNATed, e.opt.LocalNAT, s.cfg.PeerNATPort)
 		if peerNATed || localNATed {
 			e.opt.Log.Info("ike: 检测到 NAT，IKE_AUTH 起改走 UDP 4500",
 				"site", s.cfg.ID, "对端在NAT后", peerNATed, "本端在NAT后", localNATed,

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -40,6 +41,15 @@ func TestBaselineCRUD(t *testing.T) {
 	bad := map[string]any{"name": "x", "type": "onboarding", "disposal": "nuke", "status": "enabled"}
 	if code, _ := doJSON(t, h, "POST", "/api/v1/security/baselines", adm, bad); code != http.StatusBadRequest {
 		t.Fatalf("非法 disposal 应 400, got %d", code)
+	}
+	// 顶层 platforms 枚举外取值 400——精确匹配下 "macos"/"All" 的基线对任何上报永不生效（静默失效）
+	for _, p := range []string{"macos", "All", "iOS"} {
+		bp := map[string]any{"name": "x", "type": "onboarding", "disposal": "block", "status": "enabled",
+			"platforms": []string{p},
+			"checks":    []map[string]string{{"key": "disk_encrypted", "label": "磁盘已加密", "platform": "All", "severity": "high"}}}
+		if code, _ := doJSON(t, h, "POST", "/api/v1/security/baselines", adm, bp); code != http.StatusBadRequest {
+			t.Fatalf("platforms=%q 应 400, got %d", p, code)
+		}
 	}
 	// 非 admin 403
 	if code, _ := doJSON(t, h, "POST", "/api/v1/security/baselines", userToken("li.fang"), body); code != http.StatusForbidden {
@@ -177,7 +187,7 @@ func TestPostureRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
-// 设备基数上限：单账号超过 maxPostureDevices 台新设备被拒（防无界撑大 posture_reports）。
+// 设备基数上限：单账号超过 store.MaxPostureDevices 台新设备被拒（防无界撑大 posture_reports）。
 func TestPostureDeviceCap(t *testing.T) {
 	h := newTestServer(t)
 	tok := userToken("li.fang")
@@ -186,7 +196,7 @@ func TestPostureDeviceCap(t *testing.T) {
 		code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body)
 		return code
 	}
-	for i := 0; i < maxPostureDevices; i++ {
+	for i := 0; i < store.MaxPostureDevices; i++ {
 		if code := post(fmt.Sprintf("DEV-%d", i)); code != http.StatusOK {
 			t.Fatalf("第 %d 台应 200, got %d", i, code)
 		}
@@ -197,6 +207,56 @@ func TestPostureDeviceCap(t *testing.T) {
 	// 已存设备再上报（upsert，不增行）仍放行
 	if code := post("DEV-0"); code != http.StatusOK {
 		t.Fatalf("已存设备 upsert 应 200, got %d", code)
+	}
+}
+
+// 设备上限并发突发：count=19 时 20 个新设备同时上报，只应放行 1 个。
+// 上限判定与写入必须在同一条 SQL 里原子完成——handler 层 check-then-act 会让多个请求同时通过检查。
+func TestPostureDeviceCapConcurrentBurst(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	post := func(dev string) int {
+		body := map[string]any{"device": dev, "platform": "macOS", "checks": []map[string]any{{"key": "disk_encrypted", "label": "磁盘已加密", "ok": true}}}
+		code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body)
+		return code
+	}
+	for i := 0; i < store.MaxPostureDevices-1; i++ {
+		if code := post(fmt.Sprintf("SEED-%d", i)); code != http.StatusOK {
+			t.Fatalf("seed %d: %d", i, code)
+		}
+	}
+	const burst = 20
+	var wg sync.WaitGroup
+	codes := make([]int, burst)
+	for i := 0; i < burst; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			codes[i] = post(fmt.Sprintf("RACE-%d", i))
+		}(i)
+	}
+	wg.Wait()
+	ok := 0
+	for _, c := range codes {
+		if c == http.StatusOK {
+			ok++
+		}
+	}
+	if ok != 1 {
+		t.Fatalf("并发 %d 个新设备只应放行 1 个（剩余额度），实际放行 %d", burst, ok)
+	}
+}
+
+// device 是删除接口的 URL 路径段："."/".." 会被 mux 路径清洗成 301、斜杠拆散路径段，
+// 落库即成永远删不掉的记录——上报入口必须拒绝。
+func TestPostureRejectsPathHostileDevice(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	for _, dev := range []string{".", "..", "a/b", `a\b`, "../etc"} {
+		body := map[string]any{"device": dev, "platform": "macOS", "checks": []map[string]any{{"key": "disk_encrypted", "label": "磁盘已加密", "ok": true}}}
+		if code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body); code != http.StatusBadRequest {
+			t.Fatalf("device=%q 应 400, got %d", dev, code)
+		}
 	}
 }
 

@@ -1,6 +1,16 @@
 package store
 
-import "context"
+import (
+	"context"
+	"errors"
+)
+
+// MaxPostureDevices 单账号最多留存的终端设备报告数（防用随机 device 无界撑大 posture_reports）。
+const MaxPostureDevices = 20
+
+// ErrPostureDeviceCap 新设备写入超出单账号上限。上限判定与写入在同一条 SQL 里原子完成
+// （见 SQLiteStore.SavePostureReport），而非 handler 层 check-then-act——后者在并发突发下会越过上限。
+var ErrPostureDeviceCap = errors.New("单账号终端设备数超限")
 
 // PostureCheckResult 终端上报的一条检查结果（客户端机械布尔化 + 原始值，策略判定在控制面）。
 type PostureCheckResult struct {
@@ -43,5 +53,3 @@ func (m *Memory) PostureBlockedUsers(_ context.Context) ([]string, error) { retu
 func (m *Memory) PostureFreshest(_ context.Context, _ string) (PostureReport, bool, error) {
 	return PostureReport{}, false, nil
 }
-
-func (m *Memory) PostureDeviceCount(_ context.Context, _ string) (int, error) { return 0, nil }

@@ -2,6 +2,8 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -13,9 +15,6 @@ import (
 
 // postureFreshTTL posture 报告新鲜窗口（strict 模式缺报/过期即拒；block 判定不看新鲜度，见 spec DP-04）。
 const postureFreshTTL = 10 * time.Minute
-
-// maxPostureDevices 单账号最多留存的终端设备报告数（防用随机 device 无界撑大 posture_reports）。
-const maxPostureDevices = 20
 
 // validReportPlatform 上报可接受的平台（对齐基线检查的平台枚举，但不含 "All"）。
 // 服务端对基线 platform 有严格枚举，对上报 platform 同样校验，杜绝"未知平台跳过全部基线→allow 顶掉 block"。
@@ -49,6 +48,12 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "device 过长或检查项超限（≤32）")
 		return
 	}
+	// 管理侧删除接口经 URL 路径定位设备（DELETE /posture/{user}/{device}）：
+	// "."/".." 会被 mux 路径清洗成 301、斜杠会拆散路径段，落库后即成永远删不掉的记录，入口拒绝。
+	if b.Device == "." || b.Device == ".." || strings.ContainsAny(b.Device, "/\\") {
+		httpx.Error(w, http.StatusBadRequest, "device 不可为 . / .. 或含斜杠")
+		return
+	}
 	// 规则源：安全中心基线。读失败 fail-closed（不评估就不落库，避免坏数据顶掉有效判定）。
 	baselines, err := s.store.Baselines(r.Context())
 	if err != nil {
@@ -58,13 +63,6 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 	v := risk.Evaluate(b.Platform, b.Checks, baselines)
 
 	user := normUser(c.Name)
-	// 设备基数上限：新 device 才计数（已存在的 upsert 不增行）；防随机 device 无界撑大 posture_reports。
-	if _, exists, err := s.store.PostureReportFor(r.Context(), user, b.Device); err == nil && !exists {
-		if n, err := s.store.PostureDeviceCount(r.Context(), user); err == nil && n >= maxPostureDevices {
-			httpx.Error(w, http.StatusForbidden, "终端设备数超限（最多 20 台），请联系管理员清理")
-			return
-		}
-	}
 	// 转换审计口径须与执行闸门一致——都用用户级「跨设备最差」判定，而非单设备前值
 	// （否则设备 B 恢复合规会误记「已解除」，但闸门按最差仍在拦该用户）。
 	prevWorst, hadPrev, _ := s.store.PostureVerdict(r.Context(), user)
@@ -73,7 +71,13 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		Checks: b.Checks, Verdict: v.Disposal, Score: v.Score, Level: v.Level, Reasons: v.Reasons,
 		TS: time.Now().Unix(),
 	}
+	// 设备基数上限在 store 写入语句内原子判定（handler 层 check-then-act 在并发突发下会越过上限）。
 	if err := s.writer.SavePostureReport(r.Context(), rep); err != nil {
+		if errors.Is(err, store.ErrPostureDeviceCap) {
+			httpx.Error(w, http.StatusForbidden,
+				fmt.Sprintf("终端设备数超限（最多 %d 台），请联系管理员清理", store.MaxPostureDevices))
+			return
+		}
 		httpx.Error(w, http.StatusInternalServerError, "failed to save posture report")
 		return
 	}

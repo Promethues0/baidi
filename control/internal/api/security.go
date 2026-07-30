@@ -30,6 +30,14 @@ func (s *Server) handleSaveBaseline(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "type/disposal/status 取值非法")
 		return
 	}
+	// 顶层 platforms 与上报 platform 精确匹配（risk.platformApplies）：存进 "macos"/"All" 这类
+	// 枚举外取值的基线对任何上报都永不生效——静默失效比报错危险，入口拒绝。留空 = 适用全平台。
+	for _, p := range b.Platforms {
+		if !validReportPlatform[p] {
+			httpx.Error(w, http.StatusBadRequest, "platforms 取值须为 Windows|macOS|Linux（留空=全平台）")
+			return
+		}
+	}
 	if len(b.Checks) > 64 {
 		httpx.Error(w, http.StatusBadRequest, "检测项过多（≤64）")
 		return

@@ -123,6 +123,63 @@ export interface RuleCond { field: 'weakPwd' | 'geoAnomaly' | 'offHours' | 'risk
 export interface AdaptiveRule { id: string; name: string; enabled: boolean; logic: 'AND' | 'OR'; conditions: RuleCond[]; action: 'allow' | 'mfa' | 'stepup' | 'block'; priority: number }
 export interface AuthSrcBundle { sources: AuthSource[]; rules: AdaptiveRule[] }
 
+/* ── 认证源接入 · 真实落库的那一套（GET /api/v1/authsrc/sources）──
+ *
+ * ★与上面的 AuthSource 是**两回事**：那个是历史内存种子的形状（带编造的 users 数），
+ * 这个是真落库的配置。用户数这类拿不到的字段刻意不在这里——
+ * 显示一个 0 会让人以为是真的统计出来的。
+ */
+export type AuthSrcKind = 'local' | 'ldap' | 'ad' | 'oidc';
+
+export interface AuthSourceRec {
+  id: string;
+  name: string;
+  kind: AuthSrcKind | string;
+  enabled: boolean;
+  priority: number;
+  /** 该类型的非敏感配置 JSON 字符串（敏感项在独立加密表，不在这里）。 */
+  config: string;
+  /** 凭据是否已配置。原文永不回显——只写不读。 */
+  hasSecret: boolean;
+  /** 凭据指纹前 8 位，供两端核对"是不是同一把"。 */
+  secretFingerprint?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuthSourcesResp {
+  sources: AuthSourceRec[];
+  /** 后端真实实现了的类型。控制台据此把未实现的选项置灰，而不是让它们看起来可选。 */
+  supportedKinds: string[];
+}
+
+/** LDAP/AD 的配置形状（与 control 的 ldapConfigDTO 对齐）。 */
+export interface LdapConfig {
+  host: string;
+  port?: number;
+  tlsMode: 'ldaps' | 'starttls' | 'plaintext';
+  caCert?: string;
+  insecureSkipVerify?: boolean;
+  bindDn?: string;
+  baseDn: string;
+  userFilter?: string;
+  usernameAttr?: string;
+  displayNameAttr?: string;
+  emailAttr?: string;
+  groupAttr?: string;
+}
+
+/** OIDC 的配置形状（与 control 的 oidcConfigDTO 对齐）。 */
+export interface OidcConfig {
+  issuer: string;
+  clientId: string;
+  redirectUri: string;
+  scopes?: string[];
+}
+
+export interface ProbeResp { ok: boolean; detail: string; elapsedMs?: number }
+export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: string }
+
 /* ── 认证策略 · PC/移动端分栏（store.AuthPolicy，FR-AUTH-12）── */
 export type PrimaryMethod = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
 export type SecondaryMethod = 'sms' | 'totp' | 'radius' | 'cert' | 'http';
@@ -181,16 +238,93 @@ export interface UserStateItem {
 }
 export interface UserStateBundle { buckets: UserStateBucket[]; items: UserStateItem[] }
 
-/* ── IPSec VPN 组网（store.IpsecSite）── */
+/* ── IPSec VPN 组网（配置 store.IpsecSite ＋ 运行态 ipsec_sa_state）──
+ *
+ * ★这两半必须分开看，混在一个结构里就是旧实现出事的根源：
+ *   · 配置 / 管理意图 —— 管理员写，控制面权威（peer、subnet、phase1/phase2、auth、suite、enabled…）
+ *   · 实测运行态     —— 网关经 mTLS 心跳回报，网关权威（全在 sa 子对象里）
+ * 旧版把 status/rxBytes 与配置列平级摆在同一张表，于是「toggle 一下把 status 改成 up」
+ * 成了合法写法：界面上那条「已建立 · 已传 184 MB」其实是播种时灌进库的常量，永不变化。
+ * 现在配置侧不再暴露任何可读的运行态字段——想显示状态就只能去读 sa，读不到就老实说未回报。
+ */
 export interface IpsecPhase { enc: string; hash: string; dh: string }
+
+/** IPSec 隧道实测五态，与 gateway/internal/ipsec.State 一一对应。
+ *
+ * ★为什么是五态而不是三态：down 表示「管理员没启用」，failed 表示「启用了但协商失败」。
+ * 两者挤进同一个值，界面上就分不出「本来就没开」和「开了连不上」——后者必须刺眼，
+ * 前者不该报警。rekeying 也不能并进 connecting：重协商期间旧 SA 仍在承载流量，不是故障。 */
+export type IpsecState = 'down' | 'connecting' | 'up' | 'rekeying' | 'failed';
+
+/** 一条站点隧道的实测运行态（gateway/internal/ipsec.SiteState 的 JSON 形态）。
+ *  每个字段都来自 IKE 状态机或 ESP 计数器，没有任何一项是配置回显。 */
+export interface IpsecSA {
+  siteId: string;
+  /** 回报这条状态的网关。与 IpsecSite.gatewayId 不一致 = 有第二台网关在抢同一条站点，
+   *  表现为隧道反复抖动，靠这两个字段对比才看得出来。 */
+  gatewayId: string;
+  state: IpsecState;
+  /** IKE SA 的一对 SPI（各 16 hex）。★这是「真的协商过」最硬的证据：单端伪造不出
+   *  与对端交叉相等的一对 SPI，纯配置回显的假数据这里只会是空串。 */
+  ikeSpiI: string;
+  ikeSpiR: string;
+  /** ESP 双向 SPI，本端入向 = 对端出向。 */
+  childSpiIn: number;
+  childSpiOut: number;
+  /** ESP 实测字节/包计数。UI 上的流量数字只允许来自这四个字段。 */
+  rxBytes: number;
+  txBytes: number;
+  packetsIn: number;
+  packetsOut: number;
+  /** 实际协商定型的套件，如 "AES256-GCM16/PRF-HMAC-SHA256/ECP256"。必须与配置分列展示，
+   *  不一致时高亮——「以为走了国密其实降级了」只有这一格看得出来。 */
+  negotiatedProposal: string;
+  establishedAt: number; // Unix 秒，0 = 未建立
+  rekeyAt: number;       // 软生存期到点（UI 的剩余寿命倒计时按它算）
+  expiresAt: number;     // 硬生存期到点
+  /** 本条回报的生成时刻（Unix 秒）。心跳 15s 一跳，UI 必须据此算新鲜度：
+   *  把 3 分钟前的快照当实时数字展示，和展示种子常量是同一种欺骗。 */
+  reportedAt: number;
+  /** 中文可读的失败原因（如「对端 203.0.113.88:500 无响应（7 次重传超时）」）。 */
+  lastError: string;
+  lastErrorAt: number;
+  /** IKEv2 NOTIFY 码点名（NO_PROPOSAL_CHOSEN / AUTHENTICATION_FAILED / TS_UNACCEPTABLE…）。
+   *  可选：控制面若只回中文原因，UI 就只显示中文，不假装有码点。 */
+  lastErrorCode?: string;
+}
+
 export interface IpsecSite {
   id: string; name: string; peer: string; localSubnet: string; remoteSubnet: string;
   ikeVersion: string; auth: 'psk' | 'cert' | 'sm2cert'; suite: 'standard' | 'gm';
   phase1: IpsecPhase; phase2: IpsecPhase; pfs: boolean; pqHybrid: boolean;
-  status: 'up' | 'down' | 'connecting'; rxBytes: number; txBytes: number; lastUp: string;
+  /** 管理意图：管理员想不想让它开。toggle 只改这一个字段，
+   *  它**不代表隧道真的建起来了**——那个只有 sa.state 能回答。 */
+  enabled: boolean;
+  /** 由哪台网关承载这条站点（最小披露：控制面只把站点下发给对应 CN 的网关）。 */
+  gatewayId?: string;
+  /** PSK 只写不读：控制面永不回原文，只回「配没配 / 指纹 / 版本」。指纹供运维核对两端
+   *  是不是同一把；回显原文没有任何操作价值，只有泄露面。 */
+  hasPsk?: boolean;
+  pskFingerprint?: string;
+  pskVersion?: number;
+  /** 网关实测运行态。缺省 = 这条站点从未被任何网关回报过（≠ 未建立，UI 要分开说）。 */
+  sa?: IpsecSA;
   localRef?: string; remoteRef?: string; // 本端/对端网段引用的地址对象 id（对象库复用）
+
+  /** @deprecated ipsec_sites 的 status/rx_bytes/tx_bytes/last_up 四列已冻结为只读兼容：
+   *  控制面不再写、UI 一律不得渲染——它们正是那份「永远不变的 184 MB」。
+   *  仍留在类型里只是为了让旧后端的响应能通过类型检查，不是给人用的。 */
+  status?: 'up' | 'down' | 'connecting';
+  /** @deprecated 见 status；流量一律读 sa.rxBytes。 */
+  rxBytes?: number;
+  /** @deprecated 见 status；流量一律读 sa.txBytes。 */
+  txBytes?: number;
+  /** @deprecated 见 status；建立时间读 sa.establishedAt（Unix 秒，不是中文相对时间串）。 */
+  lastUp?: string;
 }
 export interface IpsecResp { sites: IpsecSite[] }
+/** PUT /api/v1/ipsec/{id}/psk 的响应：只回指纹与版本，永远不回原文。 */
+export interface IpsecPskResp { fingerprint?: string; version?: number }
 
 /* ── 对象库（store.ObjectBundle）── */
 export interface AddrObject { id: string; name: string; kind: 'ip' | 'cidr' | 'range' | 'domain'; value: string; desc: string }

@@ -12,16 +12,28 @@ import (
 const postureCols = `user,device,platform,os,client_version,checks_json,verdict,score,level,reasons_json,ts`
 
 // SavePostureReport 落库一份终端环境报告（按 (user,device) upsert；User 由 api 层规范化）。
+// 设备上限与写入在同一条语句里判定（SQLite 单写锁下原子）：已存在的 (user,device) 恒放行走 upsert，
+// 新设备仅当当前行数 < MaxPostureDevices 才落行，否则零行受影响 → ErrPostureDeviceCap。
+// 注意 SELECT 必须带 WHERE，否则 INSERT…SELECT 与 ON CONFLICT 组合会触发 SQLite 的解析歧义报错。
 func (s *SQLiteStore) SavePostureReport(ctx context.Context, r PostureReport) error {
 	checks, _ := json.Marshal(r.Checks)
 	reasons, _ := json.Marshal(r.Reasons)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO posture_reports(`+postureCols+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	res, err := s.db.ExecContext(ctx, `INSERT INTO posture_reports(`+postureCols+`)
+SELECT ?,?,?,?,?,?,?,?,?,?,?
+WHERE EXISTS(SELECT 1 FROM posture_reports WHERE user=? AND device=?)
+   OR (SELECT COUNT(*) FROM posture_reports WHERE user=?) < ?
 ON CONFLICT(user,device) DO UPDATE SET platform=excluded.platform, os=excluded.os, client_version=excluded.client_version,
   checks_json=excluded.checks_json, verdict=excluded.verdict, score=excluded.score, level=excluded.level,
   reasons_json=excluded.reasons_json, ts=excluded.ts`,
-		r.User, r.Device, r.Platform, r.OS, r.ClientVersion, string(checks), r.Verdict, r.Score, r.Level, string(reasons), r.TS)
-	return err
+		r.User, r.Device, r.Platform, r.OS, r.ClientVersion, string(checks), r.Verdict, r.Score, r.Level, string(reasons), r.TS,
+		r.User, r.Device, r.User, MaxPostureDevices)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return ErrPostureDeviceCap
+	}
+	return nil
 }
 
 // DeletePostureReport 删除某 (user,device) 的报告（设备退役 / 清理陈旧记录）。
@@ -134,12 +146,4 @@ func (s *SQLiteStore) PostureFreshest(ctx context.Context, account string) (Post
 		return PostureReport{}, false, err
 	}
 	return reports[0], true, nil
-}
-
-// PostureDeviceCount 某账号已存报告的设备数（防单账号用随机 device 无界撑大 posture_reports）。
-func (s *SQLiteStore) PostureDeviceCount(ctx context.Context, user string) (int, error) {
-	key := strings.ToLower(strings.TrimSpace(user))
-	var n int
-	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM posture_reports WHERE user=?`, key).Scan(&n)
-	return n, err
 }

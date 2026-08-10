@@ -323,17 +323,19 @@ sequenceDiagram
 | WebAuthn / passkey 二次认证 | [ceremony_test.go](../control/internal/webauthnx/ceremony_test.go)（需可注册域名，裸 IP 不可用） |
 | 真实在线用户 / 网关活性 | 网关 mTLS 注册上报，[monitor_objects.go](../control/internal/api/monitor_objects.go) |
 | 审计落库 | [audit_sqlite.go](../control/internal/store/audit_sqlite.go) |
+| 组织树 / 用户组落库（含环形父子拒绝、删除守卫、种子部门回填） | [orgs_sqlite.go](../control/internal/store/orgs_sqlite.go)、[orgs_sqlite_test.go](../control/internal/store/orgs_sqlite_test.go)、[orgs_test.go](../control/internal/api/orgs_test.go) |
+
+**组织与用户组的边界**：三张表（`org_units` / `user_groups` / `user_group_members`）+ `users.org_id` 是**目录维度**，当前**不参与授权判定**。资源可达性仍只看 `resources.allow_roles / allow_users` 与有效 JIT 授予（控制面 `buildProfile` 与网关 `registry.Authorize` 两处同构）。要把「按组授权」接进去，必须**两处一起改**并补同构测试，否则会出现「组里加了人却连不上」。用户组成员按 **account** 存，正是为了将来接进授权时能与令牌主体对齐。
 
 ### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
 
-`SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。当前恰好 5 个 Store 方法仍走种子（其余全部已被 SQLite 覆盖）：
+`SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。当前恰好 4 个 Store 方法仍走种子（其余全部已被 SQLite 覆盖，清单由 [coverage_guard_test.go](../control/internal/store/coverage_guard_test.go) 双向钉住）：
 
 | 页面 | store 方法 | 说明 |
 |---|---|---|
 | 网关与隐身 · 区域拓扑 | `Memory.Gateway` | "华东/华南出口"是硬编码拓扑；**真实网关清单**在 `GET /api/v1/gateways`（mTLS 注册来源） |
 | 认证源接入 · 顶部卡片 | `Memory.AuthSrc` | 卡片上的源列表与「1160 用户」等数字是种子。**注意：LDAP/OIDC 接入本身已是真实现**（见下文认证源一节），真实配置走 `GET /api/v1/authsrc/sources`——同一页两个数据源，别混 |
 | 系统管理 · 三权分立/集群 | `Memory.System` | 管理员分组/管理员账号/集群节点全部是演示值，无对应库表 |
-| 策略管理 · 组织树 | `Memory.PolicyBundle` | 组织树是种子；但**策略覆盖**（`SavePolicyOverride`）真落库 |
 | 在线用户 · 无网关回退 | `Memory.OnlineSessions` | 有网关 mTLS 上报时走真实会话（`source=live`），无网关时回退种子（`source=demo`，页面有标注） |
 | 大屏 `/screen` | 前端 `MOCK_*` 常量 | 纯展示 |
 
@@ -401,6 +403,22 @@ sequenceDiagram
 - **`Subject = entryDN` 有代价**：用户改名或跨 OU 移动时 DN 会变，绑定需要重建。AD 的 `objectGUID` 才是真正不变的标识，但它是 AD 专有。
 - **OIDC 没有登出通道**（RP-initiated / back-channel logout 都没做）：**IdP 上禁用了账号，白帝这边 8h 会话照用**。这是目前最需要补的一个洞。
 - **RADIUS / 短信网关 / 商密证书三种类型没有实现**，`Kind.Supported()` 会在保存时明确拒绝，控制台上置灰——不再是「能选但静默不生效」。
+
+### ⚠️ 终端 posture 采集器（三平台都真写了，但只有 macOS 分支是实机验证）
+
+`clients/desktop/src-tauri/src/posture.rs` 分平台采集 6 个基线键（disk_encrypted / sys_integrity / firewall_on / os_version / edr_online / client_version），三态上报：`ok` 之外还有 `unknown`（探不到）。
+
+**能声称**：
+
+- 三平台的采集与解析逻辑**都被编译、都被单测覆盖**。做法是把「跑命令 / 读文件」抽到 `Env` trait 后面，只有「挑哪个平台函数 + 用哪个真实探测源」受 `#[cfg]` 门控——只活在 cfg 里的分支在 mac 上连语法都验不到，那正是此前 Windows/Linux 上报**假数据**的同类问题。14 条单测覆盖三平台键对齐、探不到必须是 unknown、注册表/netsh/lsblk/SELinux 各条解析、指纹稳定性。
+- 三态在控制面有真实消费方：`risk.Evaluate(..., Options{StrictUnknown})` —— observe 下不可判定不计分不抬处置（只进 `Verdict.Unknowns` 回传展示），strict 下与「缺报即拒」同口径视为不合规；两条都有 Go 测试。桌面「接入」页与管理台「终端合规」页都按三态渲染（灰=无法判定）。
+- Windows / Linux 一律走**不需要管理员/root**的读法优先（注册表值、`/sys` 文件、`lsblk`、`firewall-cmd`），拿不到就落 unknown。
+
+**不能声称**：
+
+- **Windows / Linux 分支从未在真机上跑过**。本机只装了 apple 目标（无 clippy、无交叉目标），验证方式是：解析逻辑在 macOS 上 `cargo test` 全绿，两条平台分发臂用临时改写 cfg 谓词的方式各做过一次 `cargo check`。命令输出样本是**按文档构造**的，不是抓来的真实输出。
+- **桌面客户端整体目前还不能在 Windows 上构建**：`main.rs` 的 `tunnel_start` 是 macOS 专属（`osascript` 提权 + `std::os::unix::fs::PermissionsExt`）。Linux 能编但拉不起数据面（同样是 osascript）。采集器分平台是**为后续补这两个平台的数据面做好准备**，不等于这两个平台现在可用。
+- 判据里有取舍：Windows 的 `sys_integrity` 是 Secure Boot（次选 Defender 篡改防护），Linux 的 `sys_integrity` 是 SELinux/AppArmor enforcing、`os_version` 比的是**内核** ≥ 5.10（发行版号各家规则不同，拿来比大小只会误判）。这些都不是行业统一定义，换环境需要重新校准。
 
 ### ⚠️ 声明式但未实现的能力
 

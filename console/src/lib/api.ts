@@ -76,14 +76,31 @@ export interface AppBundle { categories: AppCategory[]; apps: App[] }
 
 /* ── 访问者目录（store.UserDirBundle）── */
 export interface Directory { key: string; name: string; type: 'local' | 'ad' | 'ldap'; users: number; online: number; lastSync: string }
+/** 组织树节点（展示用）：members 是**子树**合计人数，不是直属数。 */
 export interface OrgUnit { key: string; title: string; members: number; children?: OrgUnit[] }
+/** 组织单元（持久化实体，store.Org）。members 为直属成员数。 */
+export interface Org {
+  id: string; name: string; parentId: string; path: string;
+  sort: number; createdAt: string; members: number;
+}
+/** 用户组（store.UserGroup）。kind=static 显式成员；kind=role 按用户展示角色派生（成员只读）。 */
+export interface UserGroup {
+  id: string; name: string; kind: 'static' | 'role';
+  description: string; createdAt: string; members: number;
+}
+/** GET /groups 的一行：用户组 + 它当前的成员账号。 */
+export interface GroupWithMembers extends UserGroup { memberAccounts: string[] }
 export interface DirUser {
   id: string; name: string; account: string; org: string; orgKey: string;
+  /** 组织归属（org_units.id）。org/orgKey 是展示遗物，有 orgId 时由后端对齐到组织表。 */
+  orgId: string;
+  /** 所属用户组 id（含角色组的派生归属）。 */
+  groups: string[];
   device: string; ip: string; auth: string; lastLogin: string;
   online: boolean; status: 'active' | 'locked' | 'disabled' | 'idle'; risk: 'none' | 'low' | 'high';
   roles: string[];
 }
-export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; users: DirUser[] }
+export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; groups: UserGroup[]; users: DirUser[] }
 
 /* ── 终端管理（store.DeviceBundle）── */
 export interface DeviceTrustSetting { enabled: boolean; bindMethod: 'auto' | 'approval'; perUserQuota: number }

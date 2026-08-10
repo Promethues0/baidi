@@ -32,6 +32,15 @@ export interface TunView {
   error: string;        // 最近的失败原因（若有）
   denied: boolean;      // 被控制面定性拒绝（强制下线 / 账号禁用锁定）——不可自愈，别重试
   deniedReason: string; // 拒绝原因（人话，供 UI 显著呈现）
+  /** stale：运行中隧道用的路由/资源映射与**当前剖面**已经不一致，需重连才生效。
+   *
+   * ★这是「隧道参数拉起即定死」的必然后果，必须显式呈现出来。最典型的一次是
+   * 终端合规降级：降级期间接入 → 隧道里没有高敏资源的 VIP /32 与 DNS 记录 →
+   * 修好终端、重新上报、网关侧下一轮就恢复放行，但客户端这半不会重配已建接口，
+   * 用户看到的是「已接入、提示已恢复、财务系统还是打不开」，且没有任何线索。
+   * 同理还有：管理员新授了一个资源、JIT 审批刚通过、网关重启换了证书指纹。 */
+  stale: boolean;
+  staleReason: string;  // 差异说明（哪一项变了），人话
   lines: string[];      // 最近日志尾巴
 }
 
@@ -133,6 +142,7 @@ function parse(s: TunStatusRaw): TunView {
   // 只有未运行时才用当前剖面预览（那时展示的是"下次接入会用什么"）。
   // 直接现算当前剖面会把未钉扎的隧道显示成已钉扎，见 startedOpts 的注释。
   const eff = s.running && startedOpts ? startedOpts : resolveTunOpts();
+  const { stale, staleReason } = staleAgainstProfile(s.running);
   return {
     running: s.running,
     ready,
@@ -149,7 +159,32 @@ function parse(s: TunStatusRaw): TunView {
     error,
     denied,
     deniedReason,
+    stale,
+    staleReason,
     lines: lines.slice(-8)
+  };
+}
+
+/**
+ * 比对「隧道真正在用的那份参数」与「当前剖面会用的那份」，报告是否已经不一致。
+ *
+ * 只比 baidi-tun **拉起后不会再变**的三项：接管网段、资源映射、DNS 记录。
+ * 网关落点/钉扎指纹变了同样要重连，但那属于另一类提示（隧道会自己断），这里不掺进来。
+ *
+ * ★不做的事：不自动重连。重连要重新提权、会打断在途连接，必须由用户决定；
+ * 客户端能做也该做的是**让这件事可见**——静默不一致正是"已接入却打不开"的成因。
+ */
+function staleAgainstProfile(running: boolean): { stale: boolean; staleReason: string } {
+  if (!running || !startedOpts || !profile.data) return { stale: false, staleReason: '' };
+  const now = resolveTunOpts();
+  const diffs: string[] = [];
+  if (now.route !== startedOpts.route) diffs.push('接管网段');
+  if (now.resmap !== startedOpts.resmap) diffs.push('资源映射');
+  if (now.dnsRecords !== startedOpts.dnsRecords) diffs.push('隧道内 DNS 记录');
+  if (!diffs.length) return { stale: false, staleReason: '' };
+  return {
+    stale: true,
+    staleReason: `授权范围已变化（${diffs.join('、')}），当前隧道仍在用接入那一刻的参数——断开后重新接入才会生效`
   };
 }
 

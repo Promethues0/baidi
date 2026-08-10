@@ -68,6 +68,9 @@ type gwResource struct {
 // 把展开结果 SaveResource 回去等于把"某一刻的组织快照"冻成静态 ACL，
 // 之后组织怎么变都不再影响它（与 JIT 授予并入 AllowUsers 是同一条纪律）。
 // degraded 同理每轮现算：终端恢复合规后，下一次轮询名单里就没有他了。
+// ★这只是**网关这半边**自动恢复。客户端那半不自动：baidi-tun 的路由与 DNS 记录
+// 在拉起那一刻定死，降级期间建立的隧道里没有高敏资源的 VIP /32，恢复后仍需重新接入
+// （剖面 warnings 已把这半写进文案，见 api.degradeWarning）。
 func expandForGateway(rs []store.Resource, ix store.SubjectIndex, degraded []string) []gwResource {
 	out := make([]gwResource, 0, len(rs))
 	for _, r := range rs {

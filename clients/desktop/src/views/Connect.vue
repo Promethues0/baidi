@@ -111,6 +111,15 @@
             <icon-exclamation-circle-fill />
             <span>{{ w }}</span>
           </div>
+          <!--
+            隧道参数在拉起那一刻定死：授权范围之后变了（合规降级恢复、管理员新授权、
+            JIT 审批通过），运行中的隧道并不会重配接口路由。不呈现的话，用户看到的是
+            「已接入、控制台说已恢复、资源还是打不开」——无报错、无线索，最难查的一类。
+          -->
+          <div v-if="tun.stale" class="ck-pwarn">
+            <icon-exclamation-circle-fill />
+            <span>{{ tun.staleReason }}</span>
+          </div>
           <template v-if="stage === 'connected'">
             <div class="ck-kv"><span>安全代理网关</span><b class="dk-mono">{{ tun.gateway }}</b></div>
             <div class="ck-kv"><span>加密隧道</span><b class="ok">已建立 · {{ tun.cipher }}</b></div>
@@ -184,7 +193,7 @@ const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
 const showLog = ref(false);
-const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', lines: [] });
+const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [] });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
 // 控制面在剖面里下发的降级告警：网关未上报隧道证书指纹（隧道加密但不认证）、
 // 应用未关联受控资源（点开必然不走隧道）等。这些都是「配置齐全、就是不生效」
@@ -197,7 +206,7 @@ let connectTO = 0;      // 接入超时计时器
 const connectTimedOut = ref(false);
 const denied = ref(false);            // 被控制面强制下线 / 账号禁用（不可自愈）
 const deniedReason = ref('');
-const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', lines: [] };
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [] };
 function stepFromTun(v: TunView): number {
   if (v.ready) return STEPS.length;
   if (v.keepalive) return 3;
@@ -295,7 +304,7 @@ async function connectDev() {
   const r = await knock(session.token);
   if (!r.ok) { stage.value = 'idle'; err2.value = 'SPA 敲门失败：' + (r.detail || '网关不可达'); return; }
   step.value = 3; await sleep(300); step.value = STEPS.length;
-  tun.value = { running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', keepalive: false, error: '', denied: false, deniedReason: '', lines: [(r.detail || 'SPA 敲门成功')] };
+  tun.value = { running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [(r.detail || 'SPA 敲门成功')] };
   stage.value = 'connected'; session.connected = true;
   Message.success('（联调）已敲门 · 真 utun 接管需打包运行');
 }

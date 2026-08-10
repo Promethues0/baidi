@@ -1017,7 +1017,8 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	//
 	// 终端风险降权（disposal=degrade）同轮现算：这批账号进高敏资源的 DenyUsers，
 	// 网关据此**只**拒他们访问高敏资源，普通资源照旧——这就是「优先降权而非终止会话」
-	// 的执行方（PRD 1.5）。恢复合规后下一轮名单里就没有他，无需任何人工操作。
+	// 的执行方（PRD 1.5）。恢复合规后下一轮名单里就没有他，网关侧无需任何人工操作
+	// ——但客户端那半要重连才拿得回路由（隧道参数拉起即定死，见 api.degradeWarning）。
 	degraded := s.degradedUsers(r.Context())
 	gwRes := expandForGateway(rs, s.subjectIndex(r.Context()), degraded)
 

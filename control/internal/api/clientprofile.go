@@ -384,6 +384,14 @@ func (s *Server) degradeStateOf(ctx context.Context, user string) (bool, string)
 // degradeWarning 组装下发给终端的降权告警文案。
 // 只在**确实有资源被摘掉**时才出现：一个降级用户如果本来就没有任何高敏资源的权限，
 // 告诉他"高敏资源已暂停"只会制造困惑（他从来也没有过）。
+//
+// ★恢复那句话必须把两半说清，不能只写「自动恢复」：
+//   - 网关那半确实自动——降权名单每轮现算，下一次策略轮询（≤30s）里就没有他了；
+//   - 客户端那半不自动——baidi-tun 的路由/DNS 记录在 tunnel_start 那一刻定死
+//     （见 clients/desktop/src/lib/tunnel.ts 的 startedOpts），剖面刷新不会重配
+//     已建接口。降权期间接入的隧道里根本没有高敏资源的 VIP /32 与 DNS 记录，
+//     恢复合规后用户看到的是「已接入、提示已恢复、财务系统还是打不开」。
+//     只说自动恢复，等于把这条最难查的失败形态写成了预期行为。
 func degradeWarning(apps []string, reason string) string {
 	if len(apps) == 0 {
 		return ""
@@ -395,7 +403,9 @@ func degradeWarning(apps []string, reason string) string {
 	if reason == "" {
 		reason = "终端环境检查未通过"
 	}
-	return fmt.Sprintf("因终端合规降级：%s 等高敏资源已暂停访问（普通资源不受影响，隧道未断开），原因：%s。修复终端问题并重新上报后自动恢复", names, reason)
+	return fmt.Sprintf("因终端合规降级：%s 等高敏资源已暂停访问（普通资源不受影响，隧道未断开），原因：%s。"+
+		"修复终端问题并重新上报后，网关侧下一轮（30s 内）自动恢复放行；若隧道是在降级期间建立的，"+
+		"还需断开后重新接入——隧道路由在拉起那一刻定死，不重连拿不回这些资源的路由", names, reason)
 }
 
 // assignVIPs 给每个资源 id 分配一个 VIP 主机号。

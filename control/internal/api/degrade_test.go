@@ -197,6 +197,13 @@ func TestDegradeWarnsTheUser(t *testing.T) {
 	if !strings.Contains(w, "隧道未断开") {
 		t.Fatalf("告警须说明这是降权不是断连，否则用户会去重连隧道：%q", w)
 	}
+	// ★恢复那句话必须与客户端实现相符：网关那半自动，客户端那半要重连。
+	// baidi-tun 的路由在 tunnel_start 那一刻定死（tunnel.ts 的 startedOpts），
+	// 降级期间建立的隧道里根本没有高敏资源的 VIP /32——只写「自动恢复」的话，
+	// 用户得到的是「已接入、提示已恢复、财务系统还是打不开」，且毫无线索。
+	if !strings.Contains(w, "重新接入") {
+		t.Fatalf("告警须说明降级期间建立的隧道要重连才拿得回路由：%q", w)
+	}
 
 	// 反例：合规用户不该看到这条告警（无中生有的降权提示同样是误导）
 	f2 := newIsoFixture(t)

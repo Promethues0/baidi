@@ -6,6 +6,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"baidi.dev/control/internal/store"
 )
 
 // DefaultJWTSecret 是未注入 BAIDI_JWT_SECRET 时的开发用默认密钥（可猜，仅限 dev）。
@@ -40,6 +42,13 @@ type Config struct {
 	// AlertChainInterval 审计防篡改链自检间隔（全链重算比其余信号贵，单独节流）。
 	// ★这条循环就是「防篡改链有人定期查」的执行方——链没人查，防篡改只是个说法。
 	AlertChainInterval time.Duration
+	// AuditForwardInterval 审计外送投递循环的间隔；<=0 关闭投递（队列只增不减，启动时告警）。
+	// ★这条循环是外送功能唯一的执行方——没有它，配置齐全但 SIEM 永远收不到东西。
+	AuditForwardInterval time.Duration
+	// AuditForwardQueueMax 每个外送出口的待发队列上界（条），超出即丢新保旧并计数。
+	// 非正值落回 store.DefaultForwardQueueMax：没有上界等于留一个"对端一挂就把磁盘写满"
+	// 的按钮，而磁盘写满会让**审计本身**落不了库——方向完全反了。
+	AuditForwardQueueMax int
 	// MetricsRetentionHours 网关设备状态时序的留存小时数（超期滚动清理）。
 	// ★恒为正：非法/缺省值一律落到 DefaultMetricsRetentionHours，**没有"关闭清理"这一档**。
 	// gateway_metrics 是每网关 15s 一条的写入热点，留一个能关掉清理的开关，
@@ -87,6 +96,10 @@ func Load() Config {
 		// 业务告警：默认每分钟评估一轮，审计链自检每 15 分钟一次。
 		AlertInterval:      envDuration("BAIDI_ALERT_INTERVAL", time.Minute),
 		AlertChainInterval: envDuration("BAIDI_ALERT_CHAIN_INTERVAL", 15*time.Minute),
+		// 审计外送：默认每 5s 投递一轮（够快到"刚发生的事很快就在 SIEM 里"，
+		// 又不至于把一个空队列查成热点）。上界的唯一定义在 store，别在这里另抄一份。
+		AuditForwardInterval: envDuration("BAIDI_AUDIT_FORWARD_INTERVAL", 5*time.Second),
+		AuditForwardQueueMax: envInt("BAIDI_AUDIT_FORWARD_QUEUE_MAX", store.DefaultForwardQueueMax),
 		// 设备状态留存：启动时 + 每小时清理超期采样点（见 store.PurgeExpiredGatewayMetrics）。
 		MetricsRetentionHours: clampMetricsRetention(envInt("BAIDI_METRICS_RETENTION_HOURS", DefaultMetricsRetentionHours)),
 	}

@@ -77,14 +77,18 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 	// UTF-8 BOM：Excel 打开含中文的 CSV 不乱码。
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
 	cw := csv.NewWriter(w)
-	_ = cw.Write([]string{"时间", "类别", "行为人", "源IP", "事件", "判定"})
+	// ★末尾两列是防篡改链的序号与 MAC，与 /audit 列表、外送出口同源（store.AuditEntry）。
+	// 不带它们的话，导出给审计方的那份 CSV 无法被独立验真——只是一堆自称是审计的文本。
+	// 追加在末尾而不是插在中间：既有的下游脚本按前六列取值，不会被这次改动打断。
+	_ = cw.Write([]string{"时间", "类别", "行为人", "源IP", "事件", "判定", "链序号", "链MAC"})
 	n := 0
 	err := cs.ExportAudit(r.Context(), category, from, to, func(e store.AuditEntry) error {
 		n++
 		// 全列过 csvCell：行为人（登录用户名原样入审计）与事件文本都可能含攻击者输入，
 		// 与其逐列判断哪列「可信」，不如统一中和——审计导出就是给人拿电子表格打开的。
 		return cw.Write([]string{csvCell(e.Time), csvCell(e.Category), csvCell(e.User),
-			csvCell(e.SrcIP), csvCell(e.Event), csvCell(e.Verdict)})
+			csvCell(e.SrcIP), csvCell(e.Event), csvCell(e.Verdict),
+			strconv.FormatInt(e.Seq, 10), csvCell(e.MAC)})
 	})
 	cw.Flush()
 	if err != nil {

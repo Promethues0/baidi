@@ -81,6 +81,15 @@ type Server struct {
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
 	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
 	grayObserved map[string]int64
+	// fwdDropReported / fwdDropReportAt 审计外送队列溢出转审计的节流水位：
+	// 出口 id → 已上报过的累计丢弃数 / 上次上报的 Unix 秒（见 reportForwardDrops）。
+	// 内存态、重启即失（最坏结果是重启后多记一条溢出告警，而那本来就该被看见）。
+	fwdDropReported map[string]int64
+	fwdDropReportAt map[string]int64
+	// fwdPumpMu 让审计外送的投递轮次**串行**。后台循环与「立即投递」按钮会同时
+	// 触发 PumpAuditForward，而队列取批不做认领标记（见 ClaimAuditForwardBatch），
+	// 两轮并发就会把同一批送两遍——重复优于丢失，但能避免就别留着。
+	fwdPumpMu sync.Mutex
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
@@ -158,7 +167,8 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{},
-		grayObserved: map[string]int64{}}
+		grayObserved:    map[string]int64{},
+		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{}}
 	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
 	var ls lockout.Store
 	if v, ok := wr.(lockout.Store); ok {
@@ -273,6 +283,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit", s.handleAudit)
 	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /api/v1/audit/export", s.handleAuditExport)
+	// 审计日志外送（PRD ch16 + ch21.6）：RFC 5424 syslog over TCP/TLS + 通用 HTTP JSON。
+	// 归 PermSystem 一权（理由见 auditforward.go 顶部）。真实消费方 = 后台投递循环
+	// StartAuditForwardLoop，队列在 audit_forward_queue，发送成功才出队。
+	mux.HandleFunc("GET /api/v1/audit/forward", s.handleAuditForwardTargets)
+	mux.HandleFunc("POST /api/v1/audit/forward", s.handleSaveAuditForwardTarget)
+	mux.HandleFunc("DELETE /api/v1/audit/forward/{id}", s.handleDeleteAuditForwardTarget)
+	mux.HandleFunc("PUT /api/v1/audit/forward/{id}/secret", s.handleSetAuditForwardSecret)
+	mux.HandleFunc("POST /api/v1/audit/forward/{id}/test", s.handleTestAuditForwardTarget)
+	mux.HandleFunc("POST /api/v1/audit/forward/{id}/flush", s.handleFlushAuditForwardTarget)
 	// 网关与隐身：区域/节点拓扑 + SPA
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
 

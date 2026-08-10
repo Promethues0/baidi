@@ -66,6 +66,9 @@ func main() {
 			}
 		}()
 	}
+	// 审计外送的队列上界注入：入队时判丢弃用的就是这一份，外送页显示的也是它
+	// （与 SetAuditRetentionDays 同一条纪律——展示值必须来自真正在用的那份）。
+	st.SetAuditForwardQueueMax(cfg.AuditForwardQueueMax)
 	// 设备状态时序留存轮转：启动清一次 + 每小时清一次（复用审计留存那条循环的形状）。
 	//
 	// ★节奏比审计的 24h 紧，因为写入率高三个数量级：每网关 15s 一条，24h 的松弛
@@ -140,6 +143,12 @@ func main() {
 	alertCtx, stopAlerts := context.WithCancel(context.Background())
 	defer stopAlerts()
 	srv.StartAlertLoop(alertCtx, cfg.AlertInterval, cfg.AlertChainInterval)
+
+	// 审计日志外送投递循环（PRD ch16 + ch21.6）：把 audit_forward_queue 里的记录
+	// 送到 syslog / SIEM，成功才出队、失败退避重试。
+	// ★与告警循环共用 alertCtx 的取消信号（关服时一起停）；在途的那一批发完即止，
+	// 没发完的留在队列里，下次启动继续——这正是持久化队列存在的意义。
+	srv.StartAuditForwardLoop(alertCtx, cfg.AuditForwardInterval)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

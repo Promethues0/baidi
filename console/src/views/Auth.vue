@@ -83,8 +83,22 @@
       <div class="bd-srctoolbar">
         <div class="bd-srctoolbar__sub">
           按<b>用户目录</b>分组编排 · 共 <b>{{ policies.length }}</b> 条策略 · PC/WEB 端与移动端 APP 分别配置主认证 / 二次认证
+          <span class="bd-srchint">自适应规则由登录链路实时求值：命中增强条件且未被豁免即要求二次认证</span>
         </div>
         <button class="bd-btn" @click="openCreate"><icon-plus />新增策略</button>
+      </div>
+
+      <!-- 能力说明：哪几条能判、判据是什么；判不了的在这里就说清，不留"配了不生效"的想象空间 -->
+      <div class="bd-card bd-capbox">
+        <div class="bd-capbox__h"><icon-info-circle />规则生效说明</div>
+        <div class="bd-caprow" v-for="c in capabilities" :key="c.key" :class="{ off: !c.available }">
+          <span class="bd-tg" :style="tagStyle(c.kind === 'enhance' ? '#FF7D00' : '#00B42A')">
+            {{ c.kind === 'enhance' ? '增强' : '豁免' }}
+          </span>
+          <b class="bd-caprow__n">{{ c.label }}</b>
+          <span v-if="!c.available" class="bd-tg bd-tg--off">本版本不可用</span>
+          <span class="bd-caprow__d">{{ c.available ? c.effect : c.reason }}</span>
+        </div>
       </div>
 
       <div v-for="g in grouped" :key="g.dir" class="bd-pgroup">
@@ -113,7 +127,24 @@
               <span v-else class="bd-link bd-link--disabled" title="默认策略不可删除"><icon-lock />默认</span>
             </div>
           </div>
-          <div class="bd-pcard__scope">{{ p.scope }}</div>
+          <div class="bd-pcard__scope">
+            <span v-if="p.scope">{{ p.scope }}</span>
+            <!-- 真正参与匹配的是下面这些主体；文字说明只是备注 -->
+            <template v-if="p.isDefault">
+              <span class="bd-tg bd-tg--pri">该目录全体用户（默认策略）</span>
+            </template>
+            <template v-else-if="(p.scopeOrgs || []).length || (p.scopeGroups || []).length">
+              <span v-for="o in p.scopeOrgs || []" :key="'o' + o" class="bd-tg" :style="tagStyle('#00B42A')">
+                组织 {{ orgName(o) }}<em class="bd-sub">含子部门</em>
+              </span>
+              <span v-for="g in p.scopeGroups || []" :key="'g' + g" class="bd-tg" :style="tagStyle('#FF7D00')">
+                用户组 {{ groupName(g) }}
+              </span>
+              <span class="bd-tg bd-tg--pri">生效账号 {{ effectiveOf(p).length }}</span>
+            </template>
+            <!-- 未绑定范围的非默认策略匹配不到任何人：如实说出来，别让它看着像在生效 -->
+            <span v-else class="bd-tg bd-tg--warnbox">未绑定适用范围，不会命中任何账号</span>
+          </div>
 
           <!-- 两端分栏 -->
           <div class="bd-platgrid">
@@ -151,7 +182,6 @@
           <div class="bd-pcard__foot">
             <span class="bd-foot__k">自适应</span>
             <span v-for="e in exemptChips(p)" :key="'ex-' + e" class="bd-mtg bd-mtg--ok"><icon-check-circle />{{ e }}</span>
-            <span v-if="p.oneClick" class="bd-mtg bd-mtg--ok"><icon-thunderbolt />一键上线</span>
             <span v-for="e in enhanceChips(p)" :key="'en-' + e" class="bd-mtg bd-mtg--warn"><icon-exclamation-circle />{{ e }}</span>
             <span v-if="!hasAdaptive(p)" class="bd-plat__none">未启用自适应</span>
             <span class="bd-foot__authz"><icon-apps />{{ p.authzApps || '不授权' }}</span>
@@ -187,9 +217,39 @@
           </div>
         </div>
         <div class="bd-form__row">
-          <label class="bd-form__lab">适用范围</label>
+          <label class="bd-form__lab">适用范围说明（仅备注）</label>
           <a-input v-model="editing.scope" placeholder="如：研发中心 / 架构组、外部协作安全组" allow-clear />
         </div>
+        <!-- ★真正参与匹配的适用范围。默认策略覆盖该目录全体用户，不需要（也不能）绑定主体 -->
+        <template v-if="!editing.isDefault">
+          <div class="bd-form__2col">
+            <div class="bd-form__row">
+              <label class="bd-form__lab">适用组织（含子部门） <em>*</em></label>
+              <a-select v-model="editing.scopeOrgs" multiple allow-clear placeholder="不按组织匹配">
+                <a-option v-for="o in orgOpts" :key="o.id" :value="o.id">
+                  {{ o.name }}（{{ o.accounts.length }} 人）
+                </a-option>
+              </a-select>
+            </div>
+            <div class="bd-form__row">
+              <label class="bd-form__lab">适用用户组</label>
+              <a-select v-model="editing.scopeGroups" multiple allow-clear placeholder="不按用户组匹配">
+                <a-option v-for="g in groupOpts" :key="g.id" :value="g.id">
+                  {{ g.name }}（{{ g.accounts.length }} 人）
+                </a-option>
+              </a-select>
+            </div>
+          </div>
+          <div class="bd-form__hint" :class="{ bad: !editingScopeCount }">
+            <template v-if="editing.scopeOrgs.length || editing.scopeGroups.length">
+              当前范围展开后覆盖 <b>{{ editingScopeCount }}</b> 个账号（与登录判定用的是同一次展开）
+            </template>
+            <template v-else>
+              非默认策略必须至少选一个组织或用户组，否则它匹配不到任何账号（保存会被拒绝）
+            </template>
+          </div>
+        </template>
+        <div v-else class="bd-form__hint">默认策略覆盖该用户目录的全体账号，无需绑定组织/用户组。</div>
 
         <!-- 两端认证方式 -->
         <div class="bd-form__platgrid">
@@ -217,22 +277,72 @@
           </div>
         </div>
 
-        <!-- 自适应认证 -->
+        <!-- 自适应 · 增强认证（命中则要求二次认证；每条开关下都写清判据） -->
         <div class="bd-form__sec">
-          <div class="bd-form__sech">自适应 · 免二次认证 / 一键上线</div>
-          <div class="bd-form__checks">
-            <a-checkbox v-model="editing.exempt.trustedDevice">使用授信终端时</a-checkbox>
-            <a-checkbox v-model="editing.exempt.trustedNetwork">满足可信网络时</a-checkbox>
-            <a-checkbox v-model="editing.exempt.winDomain">Windows 域环境时</a-checkbox>
-            <a-checkbox v-model="editing.oneClick">一键上线（保存票据，下次免认证）</a-checkbox>
+          <div class="bd-form__sech">自适应 · 增强认证（命中则要求二次认证）</div>
+          <div class="bd-form__rules">
+            <div class="bd-rulerow">
+              <a-checkbox v-model="editing.enhance.always" :disabled="!can('enhance.always')">
+                范围内一律二次认证
+              </a-checkbox>
+              <div class="bd-rulerow__d">{{ capText('enhance.always') }}</div>
+            </div>
+            <div class="bd-rulerow">
+              <a-checkbox v-model="editing.enhance.weakPwd" :disabled="!can('enhance.weakPwd')">弱密码</a-checkbox>
+              <div class="bd-rulerow__d">{{ capText('enhance.weakPwd') }}</div>
+            </div>
+            <div class="bd-rulerow">
+              <a-checkbox v-model="editing.enhance.offHours" :disabled="!can('enhance.offHours')">非工作时段</a-checkbox>
+              <div class="bd-rulerow__d">{{ capText('enhance.offHours') }}</div>
+              <div v-if="editing.enhance.offHours" class="bd-rulerow__cfg">
+                <span>工作时段</span>
+                <a-time-picker v-model="editing.enhance.workStart" format="HH:mm" style="width: 106px" />
+                <span>—</span>
+                <a-time-picker v-model="editing.enhance.workEnd" format="HH:mm" style="width: 106px" />
+                <a-select v-model="editing.enhance.workDays" multiple placeholder="工作日（默认周一至周五）" style="min-width: 240px">
+                  <a-option v-for="d in WEEKDAYS" :key="d.value" :value="d.value">{{ d.label }}</a-option>
+                </a-select>
+              </div>
+            </div>
+            <!-- ★不可用的规则置灰 + 说明原因，而不是让它看起来能开、开了又静默不生效 -->
+            <div class="bd-rulerow off">
+              <a-checkbox :model-value="false" disabled>异地登录</a-checkbox>
+              <span class="bd-tg bd-tg--off">本版本不可用</span>
+              <div class="bd-rulerow__d">{{ capText('enhance.geoAnomaly') }}</div>
+            </div>
           </div>
         </div>
+
+        <!-- 自适应 · 豁免（只压制上面的策略性增强，压不掉已注册 passkey 的强制断言） -->
         <div class="bd-form__sec">
-          <div class="bd-form__sech">自适应 · 增强认证（命中则强制追加）</div>
-          <div class="bd-form__checks">
-            <a-checkbox v-model="editing.enhance.weakPwd">弱密码</a-checkbox>
-            <a-checkbox v-model="editing.enhance.offHours">异常时间段</a-checkbox>
-            <a-checkbox v-model="editing.enhance.geoAnomaly">异地登录</a-checkbox>
+          <div class="bd-form__sech">自适应 · 免二次认证豁免</div>
+          <div class="bd-form__rules">
+            <div class="bd-rulerow">
+              <a-checkbox v-model="editing.exempt.trustedDevice" :disabled="!can('exempt.trustedDevice')">
+                使用授信终端时
+              </a-checkbox>
+              <div class="bd-rulerow__d">{{ capText('exempt.trustedDevice') }}</div>
+            </div>
+            <div class="bd-rulerow">
+              <a-checkbox v-model="editing.exempt.trustedNetwork" :disabled="!can('exempt.trustedNetwork')">
+                满足可信网络时
+              </a-checkbox>
+              <div class="bd-rulerow__d">{{ capText('exempt.trustedNetwork') }}</div>
+              <div v-if="editing.exempt.trustedNetwork" class="bd-rulerow__cfg">
+                <a-input-tag v-model="editing.exempt.networks" placeholder="输入 CIDR 后回车，如 10.8.0.0/16" allow-clear />
+              </div>
+              <div v-if="editing.exempt.trustedNetwork && !editing.exempt.networks.length" class="bd-form__hint bad">
+                未配置网段时这条豁免永远不会命中，保存会被拒绝
+              </div>
+            </div>
+            <div class="bd-rulerow off">
+              <a-checkbox :model-value="false" disabled>Windows 域环境时</a-checkbox>
+              <span class="bd-tg bd-tg--off">本版本不可用</span>
+              <div class="bd-rulerow__d">{{ capText('exempt.winDomain') }}</div>
+            </div>
+          </div>
+          <div class="bd-form__hint">
+            豁免只压制上面的策略性增强要求：<b>已注册 passkey 的账号仍会被强制断言</b>，策略只能加强、不能削弱。
           </div>
         </div>
 
@@ -257,6 +367,13 @@
           <div>
             按 <b>优先级从上至下</b>逐条求值，命中第一条规则即采用其动作。拖拽手柄可调整优先级；
             条件以「身份 × 终端 × 行为」信号组合，替代手写 JSON 编排。
+            <!-- ★如实标注：这一页是交互沙盘，改动不落库、不参与登录判定。
+                 真正生效的自适应规则在「认证策略」tab（后端 authpolicy.Evaluate 实时求值）。 -->
+            <div class="bd-ruleintro__warn">
+              <icon-exclamation-circle />
+              本页为规则编排<b>交互沙盘</b>：改动不落库、不参与登录判定。真正在登录链路生效的自适应规则请在
+              <span class="bd-link" @click="tab = 'policy'">「认证策略」</span>中配置。
+            </div>
           </div>
         </div>
 
@@ -458,7 +575,8 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
-  type AuthPolicy, type AuthPolicyResp, type PrimaryMethod, type SecondaryMethod,
+  type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type EnhanceRule,
+  type PrimaryMethod, type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
   type LdapConfig, type OidcConfig
 } from '@/lib/api';
@@ -798,23 +916,65 @@ const grouped = computed(() => {
   }));
 });
 
+/* 摘要 chip：只展示**真会生效**的规则，且把判据一起摆出来（网段、工作时段），
+ * 免得管理员要点进抽屉才知道"可信网络"到底指哪几段。 */
 function exemptChips(p: AuthPolicy): string[] {
   const out: string[] = [];
   if (p.exempt.trustedDevice) out.push('授信终端免二次');
-  if (p.exempt.trustedNetwork) out.push('可信网络免二次');
-  if (p.exempt.winDomain) out.push('Windows 域免二次');
+  if (p.exempt.trustedNetwork) out.push(`可信网络免二次（${(p.exempt.networks || []).join('、') || '未配网段'}）`);
   return out;
 }
 function enhanceChips(p: AuthPolicy): string[] {
   const out: string[] = [];
+  if (p.enhance.always) out.push('范围内一律二次认证');
   if (p.enhance.weakPwd) out.push('弱密码增强');
-  if (p.enhance.offHours) out.push('异常时段增强');
-  if (p.enhance.geoAnomaly) out.push('异地登录增强');
+  if (p.enhance.offHours) out.push(`非工作时段增强（${workWindowText(p.enhance)}）`);
   return out;
 }
-function hasAdaptive(p: AuthPolicy): boolean {
-  return p.oneClick || exemptChips(p).length > 0 || enhanceChips(p).length > 0;
+function workWindowText(e: EnhanceRule): string {
+  const days = e.workDays?.length ? e.workDays : [1, 2, 3, 4, 5];
+  const names = ['一', '二', '三', '四', '五', '六', '日'];
+  const ds = days.filter((d) => d >= 1 && d <= 7).map((d) => '周' + names[d - 1]).join('/');
+  return `${ds} ${e.workStart || '09:00'}-${e.workEnd || '18:00'}`;
 }
+function hasAdaptive(p: AuthPolicy): boolean {
+  return exemptChips(p).length > 0 || enhanceChips(p).length > 0;
+}
+
+/* 规则能力：能不能判、判据是什么，全部来自后端（与保存校验同源）。
+ * 拿不到（后端不可达）时保守地按"可用"渲染，避免把可用的开关误置灰。 */
+const capabilities = ref<AuthRuleCapability[]>([]);
+function capOf(key: string): AuthRuleCapability | undefined {
+  return capabilities.value.find((c) => c.key === key);
+}
+function can(key: string): boolean {
+  const c = capOf(key);
+  return c ? c.available : true;
+}
+function capText(key: string): string {
+  const c = capOf(key);
+  if (!c) return '';
+  return c.available ? c.effect : c.reason;
+}
+
+const WEEKDAYS = [
+  { value: 1, label: '周一' }, { value: 2, label: '周二' }, { value: 3, label: '周三' },
+  { value: 4, label: '周四' }, { value: 5, label: '周五' }, { value: 6, label: '周六' }, { value: 7, label: '周日' }
+];
+
+/* 适用范围候选：与资源策略页同一个来源（accounts 是服务端展开好的，含组织子树）。
+ * ★前端绝不自己走组织树——子树语义实现两遍，管理员看到的人数迟早与判定用的对不上。 */
+const orgOpts = ref<SubjectOption[]>([]);
+const groupOpts = ref<SubjectOption[]>([]);
+function orgName(id: string) { return orgOpts.value.find((o) => o.id === id)?.name || id; }
+function groupName(id: string) { return groupOpts.value.find((g) => g.id === id)?.name || id; }
+function expandAccounts(orgIds: string[], groupIds: string[]): string[] {
+  const set = new Set<string>();
+  for (const id of orgIds) orgOpts.value.find((o) => o.id === id)?.accounts.forEach((a) => set.add(a));
+  for (const id of groupIds) groupOpts.value.find((g) => g.id === id)?.accounts.forEach((a) => set.add(a));
+  return [...set];
+}
+function effectiveOf(p: AuthPolicy) { return expandAccounts(p.scopeOrgs || [], p.scopeGroups || []); }
 
 /* 编辑抽屉 */
 const editVisible = ref(false);
@@ -823,15 +983,31 @@ function blankPolicy(): AuthPolicy {
     id: '', name: '', directory: directorySources.value[0]?.key ?? 'local', isDefault: false,
     scope: '', priority: 50, enabled: true,
     pc: { primary: 'ad', secondary: [] }, mobile: { primary: 'ad', secondary: [] },
-    exempt: { trustedDevice: false, trustedNetwork: false, winDomain: false },
-    oneClick: false, enhance: { weakPwd: false, offHours: false, geoAnomaly: false }, authzApps: ''
+    scopeOrgs: [], scopeGroups: [],
+    exempt: { trustedDevice: false, trustedNetwork: false, networks: [], winDomain: false },
+    enhance: {
+      always: false, weakPwd: false, offHours: false,
+      workStart: '09:00', workEnd: '18:00', workDays: [1, 2, 3, 4, 5], geoAnomaly: false
+    },
+    authzApps: ''
   };
 }
+/** 老库读回来的策略可能缺新字段（后端已回填，这里是渲染侧兜底）：补齐再进表单，避免 v-model 挂在 undefined 上。 */
+function normalizePolicy(p: AuthPolicy): AuthPolicy {
+  const b = blankPolicy();
+  return {
+    ...p,
+    scopeOrgs: p.scopeOrgs ?? [], scopeGroups: p.scopeGroups ?? [],
+    exempt: { ...b.exempt, ...(p.exempt ?? {}), networks: p.exempt?.networks ?? [] },
+    enhance: { ...b.enhance, ...(p.enhance ?? {}), workDays: p.enhance?.workDays ?? [] }
+  };
+}
+const editingScopeCount = computed(() => expandAccounts(editing.value.scopeOrgs, editing.value.scopeGroups).length);
 const editing = ref<AuthPolicy>(blankPolicy());
 function openCreate() { editing.value = blankPolicy(); editVisible.value = true; }
 function openEdit(p: AuthPolicy) {
   // 深拷贝，避免抽屉里编辑直接改到列表（取消时还能回滚）
-  editing.value = JSON.parse(JSON.stringify(p));
+  editing.value = normalizePolicy(JSON.parse(JSON.stringify(p)));
   editVisible.value = true;
 }
 async function savePolicy(): Promise<boolean> {
@@ -839,6 +1015,15 @@ async function savePolicy(): Promise<boolean> {
   if (!p.name.trim()) { Message.warning('请填写策略名称'); return false; }
   if (!p.directory) { Message.warning('请选择所属用户目录'); return false; }
   if (!p.pc.primary || !p.mobile.primary) { Message.warning('PC 端与移动端均须配置主认证方式'); return false; }
+  // 与后端 authpolicy.Validate 同口径的前置提醒（真正的闸在后端，这里只是少跑一趟）
+  if (!p.isDefault && !p.scopeOrgs.length && !p.scopeGroups.length) {
+    Message.warning('非默认策略必须绑定适用范围（组织或用户组），否则它匹配不到任何账号');
+    return false;
+  }
+  if (p.exempt.trustedNetwork && !p.exempt.networks.length) {
+    Message.warning('启用「可信网络」豁免必须至少配置一个网段（CIDR）');
+    return false;
+  }
   try {
     await api<{ ok: boolean; policy: AuthPolicy }>('/authpolicy', { method: 'POST', body: JSON.stringify(p) });
     Message.success(p.id ? '策略已更新' : '策略已新增');
@@ -868,7 +1053,10 @@ function removePolicy(p: AuthPolicy) {
 async function loadPolicies() {
   try {
     const r = await api<AuthPolicyResp>('/authpolicy');
-    policies.value = r.policies;
+    policies.value = (r.policies ?? []).map(normalizePolicy);
+    capabilities.value = r.capabilities ?? [];
+    orgOpts.value = r.orgs ?? [];
+    groupOpts.value = r.groups ?? [];
   } catch { /* 后端不可用时保持空列表 */ }
 }
 
@@ -1109,4 +1297,26 @@ onMounted(async () => {
 .bd-form__sec { border: 1px solid var(--bd-fill-2); border-radius: 9px; padding: 12px 14px; background: var(--bd-fill-1); }
 .bd-form__sech { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 10px; }
 .bd-form__checks { display: flex; flex-wrap: wrap; gap: 10px 18px; }
+
+/* ── 规则能力说明 / 规则行（每条开关下面就写清判据，不必点进文档）── */
+.bd-capbox { padding: 12px 16px; margin-bottom: 14px; }
+.bd-capbox__h { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 8px; }
+.bd-caprow { display: flex; align-items: baseline; gap: 8px; padding: 5px 0; border-top: 1px solid var(--bd-fill-2); font-size: 12px; color: var(--bd-t3); }
+.bd-caprow:first-of-type { border-top: none; }
+.bd-caprow.off { opacity: .72; }
+.bd-caprow__n { color: var(--bd-t1); font-weight: 600; flex: none; }
+.bd-caprow__d { color: var(--bd-t3); line-height: 1.6; }
+.bd-tg--warnbox { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
+.bd-sub { font-style: normal; margin-left: 4px; opacity: .75; }
+
+.bd-ruleintro__warn { display: flex; align-items: baseline; gap: 6px; margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--bd-border); color: var(--bd-warning); font-size: 12px; line-height: 1.6; }
+.bd-ruleintro__warn .bd-link { color: var(--bd-primary); }
+
+.bd-form__rules { display: flex; flex-direction: column; gap: 12px; }
+.bd-rulerow { display: flex; flex-direction: column; gap: 4px; }
+.bd-rulerow.off { opacity: .7; }
+.bd-rulerow__d { font-size: 11.5px; color: var(--bd-t3); line-height: 1.6; padding-left: 24px; }
+.bd-rulerow__cfg { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 24px; margin-top: 4px; }
+.bd-form__hint { font-size: 11.5px; color: var(--bd-t3); line-height: 1.6; }
+.bd-form__hint.bad { color: var(--bd-warning); }
 </style>

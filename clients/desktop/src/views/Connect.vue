@@ -136,7 +136,7 @@ import { api, fetchProfile, type PortalLoginResp } from '@/lib/api';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, type TunView } from '@/lib/tunnel';
-import { postureState } from '@/lib/posture';
+import { postureState, collectPosture } from '@/lib/posture';
 
 const authedNow = computed(() => authed());
 const isTauri = tauriRuntime();
@@ -147,12 +147,27 @@ const needMfa = ref(false);
 const mfaReason = ref('');
 const err = ref('');
 const loading = ref(false);
+/** 登录时带上本机终端指纹：控制面的认证策略用它判「授信终端」豁免
+ *  （这台设备以本账号上报过 posture 且判定通过 → 免掉策略性二次认证）。
+ *  ★采集失败不阻断登录：不带指纹 = 未知设备 = 不给豁免，方向是 fail-closed。
+ *  指纹与 posture 上报用的是同一个值，两边对不上就等于豁免永远命不中。 */
+async function localDeviceID(): Promise<string> {
+  try {
+    return (await collectPosture()).device;
+  } catch {
+    return '';
+  }
+}
+
 async function doLogin(withMfa: boolean) {
   loading.value = true; err.value = '';
   try {
     const r = await api<PortalLoginResp>('/portal/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: form.username, password: form.password, mfaCode: withMfa ? form.mfaCode : '' })
+      body: JSON.stringify({
+        username: form.username, password: form.password,
+        mfaCode: withMfa ? form.mfaCode : '', deviceId: await localDeviceID()
+      })
     });
     if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);

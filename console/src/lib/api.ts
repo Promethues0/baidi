@@ -197,19 +197,53 @@ export interface OidcConfig {
 export interface ProbeResp { ok: boolean; detail: string; elapsedMs?: number }
 export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: string }
 
-/* ── 认证策略 · PC/移动端分栏（store.AuthPolicy，FR-AUTH-12）── */
+/* ── 认证策略 · PC/移动端分栏 + 自适应规则（store.AuthPolicy，FR-INTRO-07/08、FR-AUTH-12）──
+ *
+ * ★这些开关是**登录链路真读的**（control/internal/authpolicy.Evaluate），不再是纯展示：
+ * 命中增强条件且未被豁免 → 登录被要求二次认证。因此界面上任何一个勾都必须是真能生效的，
+ * 判不了的规则由后端 capabilities 声明为不可用并在此置灰（不是静默无效）。
+ */
 export type PrimaryMethod = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
 export type SecondaryMethod = 'sms' | 'totp' | 'radius' | 'cert' | 'http';
 export interface AuthMethodSet { primary: PrimaryMethod | ''; secondary: SecondaryMethod[] }
-export interface ExemptRule { trustedDevice: boolean; trustedNetwork: boolean; winDomain: boolean }
-export interface EnhanceRule { weakPwd: boolean; offHours: boolean; geoAnomaly: boolean }
+export interface ExemptRule {
+  trustedDevice: boolean;
+  trustedNetwork: boolean;
+  /** 可信网段 CIDR 列表。trustedNetwork 开启时必须非空，否则后端拒绝保存（空 = 永不命中）。 */
+  networks: string[];
+  /** 已冻结：无域校验能力，后端拒绝开启。 */
+  winDomain: boolean;
+}
+export interface EnhanceRule {
+  /** 范围内一律二次认证（取代此前写死的「账号名以 ext 开头或含外包」启发式）。 */
+  always: boolean;
+  weakPwd: boolean;
+  offHours: boolean;
+  /** 工作时段 HH:MM（空 = 09:00 / 18:00）与工作日 1-7（空 = 周一至周五）。 */
+  workStart: string; workEnd: string; workDays: number[];
+  /** 已冻结：未接入 IP 地理库，后端拒绝开启。 */
+  geoAnomaly: boolean;
+}
 export interface AuthPolicy {
   id: string; name: string; directory: PrimaryMethod | string; isDefault: boolean;
+  /** scope 只是文字说明；真正参与匹配的是 scopeOrgs / scopeGroups。 */
   scope: string; priority: number; enabled: boolean;
   pc: AuthMethodSet; mobile: AuthMethodSet;
-  exempt: ExemptRule; oneClick: boolean; enhance: EnhanceRule; authzApps: string;
+  /** 适用范围：组织（含子树）与用户组。非默认策略两者皆空则匹配不到任何账号，后端拒绝保存。 */
+  scopeOrgs: string[]; scopeGroups: string[];
+  exempt: ExemptRule; enhance: EnhanceRule; authzApps: string;
 }
-export interface AuthPolicyResp { policies: AuthPolicy[] }
+/** 一条规则的能力声明：能不能判、判据是什么、判不了是为什么（后端 authpolicy.Capabilities）。 */
+export interface AuthRuleCapability {
+  key: string; kind: 'enhance' | 'exempt'; label: string;
+  available: boolean; effect: string; reason: string;
+}
+export interface AuthPolicyResp {
+  policies: AuthPolicy[];
+  capabilities?: AuthRuleCapability[];
+  orgs?: SubjectOption[];
+  groups?: SubjectOption[];
+}
 
 /* ── 安全中心（store.SecurityBundle）── */
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }

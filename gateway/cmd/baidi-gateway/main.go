@@ -30,6 +30,7 @@ import (
 	"baidi.dev/gateway/internal/proxy"
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/spa"
+	"baidi.dev/gateway/internal/sysstat"
 )
 
 // version 网关版本号，编译期注入：go build -ldflags "-X main.version=v0.x.y"。
@@ -62,6 +63,8 @@ func main() {
 			"只装 knock 公钥即可——会话令牌用另一把密钥签，其 kid 在本地查不到，从密码学上就敲不开门")
 	acceptHS256 := flag.Bool("accept-hs256", envBool("BAIDI_GW_ACCEPT_HS256", false),
 		"是否接受旧的 HS256 共享密钥令牌（阶段4 起默认 false）；=true 为过渡逃生舱，会让持共享密钥者可伪造令牌")
+	statDisk := flag.String("stat-disk", env("BAIDI_GW_STAT_DISK", "/"),
+		"设备状态里量哪个挂载点的磁盘水位（随心跳上报控制面；采不到的指标报「不可判定」而非 0）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -147,6 +150,10 @@ func main() {
 		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
 		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
 		cp.SetVersion(version)   // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		// 宿主机设备状态（PRD ch5 FR-MON-01）随心跳上报。采样源交给 cplane 在每次
+		// Register 里调一次——CPU 与吞吐是差分指标，采样节奏必须与上报节奏一致。
+		// 首次心跳里这两项必然缺席（还没有第二个采样点），控制面按不可判定落 NULL。
+		cp.SetMetrics(sysstat.New(*statDisk).Sample)
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
 		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关
 		// 本地时钟快于控制面时会把 until 判过期而返回 false，若据此 continue 会连撤窗/断隧道

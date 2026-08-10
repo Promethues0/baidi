@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"baidi.dev/gateway/internal/resource"
+	"baidi.dev/gateway/internal/sysstat"
 )
 
 // Client 访问 baidi-control 的网关接口。
@@ -39,7 +40,14 @@ type Client struct {
 	// events 数据面回执队列：网关把「控制面指令已实际生效」的事实攒在这里，
 	// 随下次心跳带给控制面落审计——否则「已下发」与「已生效」全系统不可区分。
 	events eventQueue
-	httpc  *http.Client
+	// metrics 宿主机设备状态的采样函数（PRD ch5 FR-MON-01）。nil = 本进程不上报，
+	// 心跳报文里连 metrics 字段都不会出现——控制面据此区分「旧网关不会报」与
+	// 「新网关报了但一项都没采到」，后者是一个内容为 {} 的对象。
+	//
+	// ★用函数而不是快照值：CPU 与吞吐是差分指标，必须**每次心跳恰好采一次**。
+	// 存快照会让采样节奏与心跳脱钩，速率的分母就不再是两次上报的真实间隔。
+	metrics func() sysstat.Sample
+	httpc   *http.Client
 }
 
 // SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
@@ -47,6 +55,9 @@ func (c *Client) SetTunnelFP(fp string) { c.tunnelFP = fp }
 
 // SetVersion 设置随注册心跳上报的网关版本号。
 func (c *Client) SetVersion(v string) { c.version = v }
+
+// SetMetrics 装上宿主机设备状态采样源；不调用即不上报（向后兼容：报文里无 metrics 字段）。
+func (c *Client) SetMetrics(fn func() sysstat.Sample) { c.metrics = fn }
 
 // Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实。
 // 措辞必须是已发生的事（"已撤销/已生效"），控制面会原样落审计——谎报即审计失实。
@@ -196,17 +207,24 @@ type Session struct {
 
 // Register 向控制面注册/心跳，同时上报真实活性指标与活跃会话：clients=放行窗口内已授权源数，
 // tunnels=活跃隧道连接数，uptimeSec=网关运行秒数，sessions=当前活跃会话（供监控中心在线用户）。
-// 心跳还捎带 version（编译期注入的网关版本）与 events（数据面回执，发送成功即从队列清除；
-// 失败留队随下次心跳重试）。旧控制面不认识这两个字段时按 JSON 语义直接忽略，不影响注册。
+// 心跳还捎带 version（编译期注入的网关版本）、events（数据面回执，发送成功即从队列清除；
+// 失败留队随下次心跳重试）与 metrics（宿主机设备状态采样，未装采样源则整个字段缺席）。
+// 旧控制面不认识这几个字段时按 JSON 语义直接忽略，不影响注册。
 func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Session) error {
 	evs, through := c.events.snapshot()
-	body, _ := json.Marshal(map[string]any{
+	payload := map[string]any{
 		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
 		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
 		"tunnelFp": c.tunnelFP, // 供控制面转发给客户端做隧道证书钉扎
 		"version":  c.version,
 		"events":   evs,
-	})
+	}
+	// 设备状态：每次心跳采一次（差分指标的间隔 = 上报间隔）。采不到的单项由
+	// Sample 的 omitempty 自然缺席，绝不补 0；整个采样源缺席时连 metrics 键都不加。
+	if c.metrics != nil {
+		payload["metrics"] = c.metrics()
+	}
+	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {
 		return err

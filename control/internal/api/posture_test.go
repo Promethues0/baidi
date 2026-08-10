@@ -80,6 +80,16 @@ func posturePayload(diskOK bool) map[string]any {
 func goodPosture() map[string]any { return posturePayload(true) }
 func badPosture() map[string]any  { return posturePayload(false) }
 
+// unknownDiskPosture 磁盘加密项「探不到」（Linux 非 root / Windows 非管理员的常态）：
+// ok=false 但打了 unknown 标。observe 下不得当成不合规（会误拒真实合规的终端）。
+func unknownDiskPosture() map[string]any {
+	p := posturePayload(false)
+	checks := p["checks"].([]map[string]any)
+	checks[0]["unknown"] = true
+	checks[0]["value"] = "无法判定：未取到 BitLocker 状态"
+	return p
+}
+
 // 上报→评估落库→verdict 回传；gateway 角色拒；非 admin 读 403；输入校验。
 func TestPostureReportAndList(t *testing.T) {
 	h := newTestServer(t)
@@ -149,6 +159,49 @@ func TestPostureBlockClosesLoop(t *testing.T) {
 	}
 	if revokedUsers(t, h)["li.fang"] {
 		t.Fatal("恢复后应移出撤销名单")
+	}
+}
+
+// 不可判定检查项的两种口径：observe（默认）不拦、单列 unknowns；strict 视为不合规并拦住敲门令牌。
+// 反面即本轮要消灭的缺陷：探不到塌缩成 ok=false → 一台合规终端被 block 基线永久拒之门外。
+func TestPostureUnknownChecks(t *testing.T) {
+	// observe（默认）
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, unknownDiskPosture())
+	if code != http.StatusOK || out["verdict"] != "allow" {
+		t.Fatalf("observe 下不可判定不应拦：%d %v", code, out)
+	}
+	unknowns, _ := out["unknowns"].([]any)
+	if len(unknowns) != 1 || !strings.Contains(unknowns[0].(string), "无法判定") {
+		t.Fatalf("不可判定项必须回传给终端展示，got %v", out["unknowns"])
+	}
+	if len(out["reasons"].([]any)) != 0 {
+		t.Fatalf("不可判定不应混进 reasons（那是失败陈述）：%v", out["reasons"])
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusOK {
+		t.Fatalf("observe 下不可判定不应掐断敲门令牌, got %d", code)
+	}
+	// 同一台机器真判定为不合规时仍必须拦住（别把 unknown 做成万能免死金牌）
+	if code, out := doJSON(t, h, "POST", "/api/v1/posture", tok, badPosture()); code != 200 || out["verdict"] != "block" {
+		t.Fatalf("确定的不合规仍应 block: %v", out)
+	}
+
+	// strict：说不清楚就不放行
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, true)
+	s.postureStrict = true
+	hs := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+	code, out = doJSON(t, hs, "POST", "/api/v1/posture", tok, unknownDiskPosture())
+	if code != http.StatusOK || out["verdict"] != "block" {
+		t.Fatalf("strict 下不可判定应视为不合规：%d %v", code, out)
+	}
+	if code, _ := doJSON(t, hs, "POST", "/api/v1/knock-token", tok, nil); code != http.StatusForbidden {
+		t.Fatalf("strict 下不可判定应拦住敲门令牌, got %d", code)
 	}
 }
 

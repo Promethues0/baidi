@@ -13,11 +13,21 @@ const MaxPostureDevices = 20
 var ErrPostureDeviceCap = errors.New("单账号终端设备数超限")
 
 // PostureCheckResult 终端上报的一条检查结果（客户端机械布尔化 + 原始值，策略判定在控制面）。
+//
+// ★三态而非两态：Unknown 表示这项**探不到**（命令缺失 / 权限不足 / 输出无法解释），
+// 既不是合规也不是不合规。塌缩成 OK=false 会把真实合规的终端误拒（Linux 非 root 读不到
+// 防火墙状态是常态），塌缩成 OK=true 则是误放行。两种错法都很难从页面上看出来，
+// 因为报告本身长得完全正常。判定见 risk.Evaluate：observe 下不抬处置、只单列可见，
+// strict（BAIDI_POSTURE_ENFORCE=strict）下视为不合规。
+//
+// 无补列迁移：checks 整列以 JSON 落库（posture_sqlite.go），旧行反序列化后 Unknown=false，
+// 恰好等于旧的两态语义。
 type PostureCheckResult struct {
-	Key   string `json:"key"`
-	Label string `json:"label"`
-	OK    bool   `json:"ok"`
-	Value string `json:"value"`
+	Key     string `json:"key"`
+	Label   string `json:"label"`
+	OK      bool   `json:"ok"`
+	Unknown bool   `json:"unknown"` // 探测不可判定（优先于 OK：Unknown=true 时 OK 无意义）
+	Value   string `json:"value"`
 }
 
 // PostureReport 一台终端设备的最新环境报告 + 风险引擎判定（每 (user,device) 只存最新）。

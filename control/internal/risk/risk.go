@@ -10,6 +10,16 @@ type Verdict struct {
 	Level    string   // low | medium | high（违反 block 基线强制 high）
 	Disposal string   // allow | degrade | gray | block（violated 基线取最严）
 	Reasons  []string // 失败检查的 label（缺失上报的附「（未上报）」）
+	Unknowns []string // 不可判定检查的 label（observe 下不计分不抬处置，但必须让人看见）
+}
+
+// Options 评估口径开关。
+type Options struct {
+	// StrictUnknown 把「不可判定」的检查当成不合规（计分 + 抬处置）。
+	// 由 BAIDI_POSTURE_ENFORCE=strict 驱动，与「缺报/过期即拒」是同一条 fail-closed 口径：
+	// strict 的语义就是「说不清楚就不放行」。默认 observe——不可判定既不计分也不抬处置，
+	// 只进 Unknowns 供页面与上报响应展示（对齐既有的「缺报默认放行」）。
+	StrictUnknown bool
 }
 
 var severityWeight = map[string]int{"high": 25, "medium": 10, "low": 5}
@@ -19,13 +29,14 @@ var disposalRank = map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 
 func DisposalRank(d string) int { return disposalRank[d] }
 
 // Evaluate 用启用且平台适用的基线评估上报的检查结果。
-// 缺失某基线要求的 key 视为该检查失败（缺失即不合规，防选择性上报）。
-func Evaluate(platform string, checks []store.PostureCheckResult, baselines []store.BaselinePolicy) Verdict {
+// 缺失某基线要求的 key 视为该检查失败（缺失即不合规，防选择性上报）；
+// 上报了但标记 Unknown（探不到）的按 opts.StrictUnknown 处理，见 Options。
+func Evaluate(platform string, checks []store.PostureCheckResult, baselines []store.BaselinePolicy, opts Options) Verdict {
 	reported := make(map[string]store.PostureCheckResult, len(checks))
 	for _, c := range checks {
 		reported[c.Key] = c
 	}
-	v := Verdict{Level: "low", Disposal: "allow", Reasons: []string{}}
+	v := Verdict{Level: "low", Disposal: "allow", Reasons: []string{}, Unknowns: []string{}}
 	for _, b := range baselines {
 		if b.Status != "enabled" || !platformApplies(platform, b.Platforms) {
 			continue
@@ -36,7 +47,15 @@ func Evaluate(platform string, checks []store.PostureCheckResult, baselines []st
 				continue
 			}
 			rep, present := reported[c.Key]
-			if present && rep.OK {
+			// ★Unknown 先于 OK 判：客户端探不到时会把 OK 置 false，若先看 OK 就退化成
+			// "不可判定 = 不合规"，恰是本分支要避免的误拒。恶意端把两者都置真也走这条，
+			// 与直接报 OK=true 等价——posture 本就不是对抗被控终端的边界。
+			if present && rep.Unknown {
+				if !opts.StrictUnknown {
+					v.Unknowns = append(v.Unknowns, c.Label+"（无法判定）")
+					continue
+				}
+			} else if present && rep.OK {
 				continue
 			}
 			violated = true
@@ -47,8 +66,11 @@ func Evaluate(platform string, checks []store.PostureCheckResult, baselines []st
 			v.Score += w
 			// reason 是失败陈述而非检查项名（"磁盘已加密"单独出现会读反）
 			reason := c.Label + " 未通过"
-			if !present {
+			switch {
+			case !present:
 				reason = c.Label + "（未上报）"
+			case rep.Unknown:
+				reason = c.Label + "（无法判定，strict 视为不合规）"
 			}
 			v.Reasons = append(v.Reasons, reason)
 		}

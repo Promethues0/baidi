@@ -60,7 +60,9 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load baselines")
 		return
 	}
-	v := risk.Evaluate(b.Platform, b.Checks, baselines)
+	// StrictUnknown 跟随 postureStrict：strict 已是「说不清楚就不放行」（缺报/过期即拒），
+	// 探不到的检查项同口径处理；observe 下不可判定只单列展示，不误拒真实合规的终端。
+	v := risk.Evaluate(b.Platform, b.Checks, baselines, risk.Options{StrictUnknown: s.postureStrict})
 
 	user := normUser(c.Name)
 	// 转换审计口径须与执行闸门一致——都用用户级「跨设备最差」判定，而非单设备前值
@@ -90,8 +92,11 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 	} else if !nowBlocked && prevBlocked {
 		s.audit(r, "security", "终端环境恢复合规，解除接入收缩："+c.Name, "ok")
 	}
+	// unknowns 单独回传：这些项没被计入判定，但终端必须看见「有几项探不到」——
+	// 否则一台探测全失败的机器会显示成完全合规（observe 下判定确实是 allow）。
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"ok": true, "verdict": v.Disposal, "score": v.Score, "level": v.Level, "reasons": v.Reasons,
+		"ok": true, "verdict": v.Disposal, "score": v.Score, "level": v.Level,
+		"reasons": v.Reasons, "unknowns": v.Unknowns,
 	})
 }
 

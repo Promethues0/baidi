@@ -324,8 +324,18 @@ sequenceDiagram
 | 真实在线用户 / 网关活性 | 网关 mTLS 注册上报，[monitor_objects.go](../control/internal/api/monitor_objects.go) |
 | 审计落库 | [audit_sqlite.go](../control/internal/store/audit_sqlite.go) |
 | 组织树 / 用户组落库（含环形父子拒绝、删除守卫、种子部门回填） | [orgs_sqlite.go](../control/internal/store/orgs_sqlite.go)、[orgs_sqlite_test.go](../control/internal/store/orgs_sqlite_test.go)、[orgs_test.go](../control/internal/api/orgs_test.go) |
+| **按组织 / 用户组授权（含子树继承、移出即失效、两处判定同构）** | [subjects.go](../control/internal/store/subjects.go)、[subjects_sqlite_test.go](../control/internal/store/subjects_sqlite_test.go)、[subjects_test.go](../control/internal/api/subjects_test.go) |
 
-**组织与用户组的边界**：三张表（`org_units` / `user_groups` / `user_group_members`）+ `users.org_id` 是**目录维度**，当前**不参与授权判定**。资源可达性仍只看 `resources.allow_roles / allow_users` 与有效 JIT 授予（控制面 `buildProfile` 与网关 `registry.Authorize` 两处同构）。要把「按组授权」接进去，必须**两处一起改**并补同构测试，否则会出现「组里加了人却连不上」。用户组成员按 **account** 存，正是为了将来接进授权时能与令牌主体对齐。
+**按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
+
+- **子树展开只有一处实现**：`store.SubjectIndex`（[subjects.go](../control/internal/store/subjects.go) 纯逻辑 + [subjects_sqlite.go](../control/internal/store/subjects_sqlite.go) 取数）。它靠 `org_units.path` 这条冗余物化路径一次性展平祖先链，不递归查库。
+- **数据面一字未改**：网关的 `resource.Resource` 仍只有角色/账号两维，`registry.Authorize` 原样不动。组织与组在控制面 `expandForGateway` 里展开成账号并进 `AllowUsers` 后才下发——与「数据面不做策略推导」的既有原则一致，也避免网关按 30s 周期缓存一棵可能已经过时的组织树。
+- **控制面两个判定点同构**：`handleGatewayPolicy → expandForGateway`（权威闸）与 `buildProfile → authorizeRes`（剖面路由提示）都只调 `SubjectIndex` 的方法。同构测试见 [subjects_test.go](../control/internal/api/subjects_test.go)：构造「用户仅因所属组织被授权」的场景，同时断言剖面排出了 resmap+route 且网关下发的 `allowUsers` 覆盖该账号，两者同真同假；把人移出组织后两者同时翻假。
+- **展开每次现算、不缓存**：撤权与生效之间不留窗口，把人移出组织下一轮网关轮询即失效。
+- **空展开下发哨兵**（`store.DenyAllSubject`）：只按组织授权、而该组织成员为零时，展开结果为空；若原样下发，网关会因「AllowUsers 与 AllowRoles 皆空 = 不限」退化成**对所有人开放**，而控制面判定的是「对所有人关闭」——方向相反且两侧日志都正常。哨兵是一个含 NUL 字节、任何真实账号都不可能等于的值。
+- 用户组成员按 **account** 存（而非 user id），正是为了在这一步能与令牌主体对齐。
+
+控制台「资源策略」页的编辑器直接吃组织树与用户组真实数据，并显示**展开后的生效账号数**——那份数字与下发网关的展开出自同一次计算，管理员看得见子树语义的实际影响。
 
 ### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
 

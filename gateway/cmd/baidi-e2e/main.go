@@ -34,6 +34,14 @@ import (
 	"baidi.dev/gateway/internal/knock"
 )
 
+// e2eDevice 自检客户端自报的终端指纹。
+//
+// ★自检**不**先上报 posture，因此这台"设备"在控制面的授信终端台账里是未登记的。
+// 这是刻意的：自检跑在授信终端的默认准入模式（observe）下，顺带验证「未登记设备
+// 照常放行 + 留痕」这条默认路径没被改坏。若把准入切成 strict（
+// PUT /api/v1/devices/settings），第 ④ 步会如实失败——那正是该功能生效的证据。
+const e2eDevice = "FP-E2E-SELFCHECK"
+
 type profile struct {
 	Gateway struct {
 		Host, SPAPort, ProxyPort, TunnelPin string
@@ -97,7 +105,7 @@ func main() {
 	ok("被拒绝（隐身）")
 
 	fmt.Println("④ 经控制面换短时效一次性敲门令牌 → SPA 敲门")
-	tok, err := knock.FetchToken(control, lr.Token)
+	tok, err := knock.FetchToken(control, lr.Token, e2eDevice)
 	if err != nil {
 		die("取敲门令牌失败: %v", err)
 	}

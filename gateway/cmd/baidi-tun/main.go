@@ -51,6 +51,7 @@ func main() {
 	dnsListen := flag.String("dns-listen", "", "隧道内 DNS 解析器监听的 VIP（如 10.99.0.53，必须落在 -route 内）；空=不启用，域名类业务将不经隧道")
 	dnsRecords := flag.String("dns-records", "", "\"FQDN\"→IP 记录表 JSON 文件（控制面剖面下发；配了 -dns-listen 才有意义）")
 	dnsDomains := flag.String("dns-domains", "", "交给隧道内解析器的搜索域，逗号分隔（如 corp.internal）：只按域分流，不接管系统全局 DNS")
+	device := flag.String("device", "", "终端硬件指纹（须与 posture 上报同一个值）：随敲门令牌上报，供控制面授信终端准入闸判定；空=不上报（严格模式下会被拒）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -198,6 +199,7 @@ func main() {
 		Gm: *gm, TLCPConfig: tlcpCfg, Resmap: resmap, DefaultRes: *defaultRes,
 		Reknock: *reknock, MTU: mtu, TunnelPin: *pin,
 		DNSListen: dnsIP, DNSRecords: records,
+		Device:    *device,
 	}
 	if err := dataplane.Run(dev, cfg); err != nil {
 		// ★ log.Fatalf 不跑 defer——这里必须显式清理，否则「数据面异常退出」会顺带

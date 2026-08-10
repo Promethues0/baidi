@@ -74,6 +74,13 @@ type Config struct {
 	DNSListen string
 	// DNSRecords FQDN（小写、不带尾点）→ IPv4。由控制面剖面下发，客户端只负责照答。
 	DNSRecords map[string]string
+
+	// Device 终端硬件指纹，随每次取敲门令牌上报给控制面（授信终端准入闸的判据）。
+	// ★必须与 posture 上报用的是**同一个值**（桌面客户端的 collectPosture().device）：
+	// 两处不一致的话，管理员在设备台账里批准的那台机器与敲门时自报的那台对不上，
+	// 严格模式下表现为"批了也连不上"，而两边日志都完全正常。
+	// 空 = 不上报指纹：观察模式照常放行并留痕，严格模式拒（fail-closed）。
+	Device string
 }
 
 // Run 启动数据面，阻塞直到 dev 关闭/出错（关闭 dev 即可优雅停止）。
@@ -238,7 +245,7 @@ type tunneler struct {
 // 是 fail-closed 的正确姿态——零信任下失去策略源就该收窗，而不是拿长效令牌硬撑。
 // 遇 control 定性拒绝（ErrDenied）向 deny 通道上报一次，让 Run 停机并带出原因。
 func (t *tunneler) knock() {
-	tok, err := knock.FetchToken(t.cfg.Control, t.cfg.Token)
+	tok, err := knock.FetchToken(t.cfg.Control, t.cfg.Token, t.cfg.Device)
 	switch {
 	case err == nil:
 	case errors.Is(err, knock.ErrDenied):

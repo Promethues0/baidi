@@ -20,6 +20,7 @@ func main() {
 	spaAddr := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址")
 	token := flag.String("token", "", "baidi-control 签发的会话 JWT")
 	control := flag.String("control", "", "baidi-control 地址(如 http://127.0.0.1:8090)；必填，敲门令牌的唯一合规来源")
+	device := flag.String("device", "", "终端硬件指纹（与 posture 上报同一个值）：授信终端准入闸的判据，严格模式下必填")
 	flag.Parse()
 
 	if *token == "" || *control == "" {
@@ -28,7 +29,7 @@ func main() {
 	}
 
 	// 会话令牌只用来换取敲门令牌，绝不直接敲门——网关 strict 模式会拒。
-	knockTok, ferr := knock.FetchToken(*control, *token)
+	knockTok, ferr := knock.FetchToken(*control, *token, *device)
 	if ferr != nil {
 		fmt.Fprintln(os.Stderr, "获取短时效敲门令牌失败:", ferr)
 		os.Exit(1)

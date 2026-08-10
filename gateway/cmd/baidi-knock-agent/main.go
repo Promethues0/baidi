@@ -29,6 +29,9 @@ func main() {
 		var b struct {
 			Token   string `json:"token"`
 			Control string `json:"control"` // 可覆盖启动期 -control（前端设置页可能指向非本机 control）
+			// Device 终端硬件指纹（授信终端准入闸判据）。dev 联调时由前端带上，
+			// 与 posture 上报同一个值；空 = 不上报（严格模式下 control 会拒，原因原样透出）。
+			Device string `json:"device"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Token == "" {
 			writeJSON(w, 400, map[string]any{"ok": false, "detail": "缺少身份令牌"})
@@ -40,7 +43,7 @@ func main() {
 		if ctrl == "" {
 			ctrl = *control
 		}
-		knockTok, err := knock.FetchToken(ctrl, b.Token)
+		knockTok, err := knock.FetchToken(ctrl, b.Token, b.Device)
 		if err != nil {
 			slog.Warn("dev 敲门取令牌失败", "err", err.Error())
 			writeJSON(w, 200, map[string]any{"ok": false, "detail": err.Error()})

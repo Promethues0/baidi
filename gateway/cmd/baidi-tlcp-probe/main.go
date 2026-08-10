@@ -24,6 +24,7 @@ func main() {
 	serverName := flag.String("servername", "baidi-gateway", "校验的服务器名（须在网关证书 SAN 内）")
 	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障，不校 CA）")
 	resource := flag.String("resource", "", "目标资源 id（多资源路由；空=默认后端）")
+	device := flag.String("device", "", "终端硬件指纹（授信终端准入闸判据；严格模式下必填）")
 	flag.Parse()
 
 	if *token == "" || *control == "" {
@@ -31,7 +32,7 @@ func main() {
 		os.Exit(2)
 	}
 	// ① 换短时效一次性敲门令牌（网关 strict 模式只认它，会话令牌敲不开）
-	knockTok, err := knock.FetchToken(*control, *token)
+	knockTok, err := knock.FetchToken(*control, *token, *device)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "获取短时效敲门令牌失败:", err)
 		os.Exit(1)

@@ -11,6 +11,7 @@
 package knock
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -34,11 +35,22 @@ var fetchClient = &http.Client{Timeout: 5 * time.Second}
 
 // FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti + use=knock）。
 // 遇 403 返回包裹 ErrDenied 的错误并带出服务端原因；其余非 200 视为瞬时错误。
-func FetchToken(control, sessionToken string) (string, error) {
-	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", nil)
+//
+// device 是终端硬件指纹（与 posture 上报、登录 deviceId **同一个值**），供控制面的
+// 授信终端准入闸判定（严格模式下非授信设备直接拒发）。空串 = 不上报指纹：
+// 控制面在观察模式下照常签发并留痕，严格模式下拒——**不带指纹不是错误，是一种状态**，
+// 因此这里不校验也不兜底猜一个值。猜一个（比如拿主机名 hash）会让管理员在设备台账里
+// 看到一台与 posture 上报对不上的幽灵设备，而两处本该是同一台机器。
+func FetchToken(control, sessionToken, device string) (string, error) {
+	body, err := json.Marshal(map[string]string{"device": device})
 	if err != nil {
 		return "", err
 	}
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", bytes.NewReader(body))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	resp, err := fetchClient.Do(req)
 	if err != nil {

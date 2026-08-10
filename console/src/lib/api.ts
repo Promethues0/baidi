@@ -127,12 +127,27 @@ export interface GwZone { key: string; name: string; status: 'healthy' | 'degrad
 export interface SpaStatus { generation: string; authMode: string; protectedPorts: string[]; hidden: boolean; knockOk: boolean }
 export interface GatewayBundle { zones: GwZone[]; spa: SpaStatus }
 
-/* ── 系统管理（store.SystemBundle）── */
-export interface AdminGroup { key: string; name: string; power: 'root' | 'system' | 'security' | 'audit' | 'custom'; builtin: boolean; members: number; scope: string }
-export interface AdminAccount { name: string; account: string; group: string; auth: string; twoFa: boolean; lastLogin: string }
+/* ── 系统管理 · 三权分立（store.SystemBundle）──
+ *
+ * perms 是**执行方真正读的那份**（后端 admin_roles.scope_json，api.requirePerm 逐端点比对）；
+ * scope 只是它的中文摘要。别把摘要当判据渲染成"能做什么"，两者不同源就会出现
+ * 「页面说能做、点下去 403」。
+ */
+export type AdminPerm = 'system' | 'security' | 'audit' | 'admins' | '*';
+export interface AdminRole {
+  key: string; name: string;
+  power: 'root' | 'system' | 'security' | 'audit' | 'custom';
+  builtin: boolean; perms: AdminPerm[]; members: number; scope: string;
+}
+export interface AdminAccount {
+  id: string; name: string; account: string;
+  roleKey: string; roleName: string; power: string;
+  auth: string; twoFa: boolean; lastLogin: string; status: string;
+}
 export interface ClusterNode { name: string; ip: string; role: 'master' | 'backup' | 'center' | 'branch'; status: string }
-export interface ClusterInfo { localNodes: ClusterNode[]; distNodes: ClusterNode[] }
-export interface SystemBundle { adminGroups: AdminGroup[]; admins: AdminAccount[]; cluster: ClusterInfo }
+/** 集群未实现：deployed 恒 false、两个节点列表恒空（与 /diag 的 checkCluster 同口径）。 */
+export interface ClusterInfo { deployed: boolean; note: string; localNodes: ClusterNode[]; distNodes: ClusterNode[] }
+export interface SystemBundle { roles: AdminRole[]; admins: AdminAccount[]; cluster: ClusterInfo }
 
 /* ── 认证源接入（store.AuthSrcBundle）── */
 export interface AuthSource { key: string; name: string; type: 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert'; status: string; users: number; primary: boolean }

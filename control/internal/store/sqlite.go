@@ -395,6 +395,21 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 -- ★"key" 加引号：KEY 是 SQLite 关键字。
 CREATE TABLE IF NOT EXISTS admin_roles (
   "key" TEXT PRIMARY KEY, name TEXT, power TEXT, builtin INTEGER, scope_json TEXT, created_at TEXT
+);
+-- ── 消息通道（PRD ch15.2）──
+-- 配置与凭据**物理分表**（与 auth_source_secrets / ipsec_secrets 同一条推理）。
+-- last_status/last_detail/last_event/last_at 只由**真正发出那一次**写入
+-- （store.RecordNotifySend，SaveNotifyChannel 的 upsert 分支刻意不碰这四列）：
+-- 让保存动作顺手写一次"成功"，页面就会在邮件根本发不出去时长期显示绿色。
+-- ★新表无需回填（区别于补列迁移）：既有库此前根本没有消息通道这回事，
+-- 空表就是正确的初态——"一条通道都没配"与"配了但没生效"必须能分开。
+CREATE TABLE IF NOT EXISTS notify_channels (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, enabled INTEGER, config TEXT,
+  last_status TEXT, last_detail TEXT, last_event TEXT, last_at INTEGER,
+  created_at TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS notify_channel_secrets (
+  channel_id TEXT PRIMARY KEY, nonce BLOB, cipher BLOB, fingerprint TEXT, updated_at TEXT
 );`)
 	if err != nil {
 		return err

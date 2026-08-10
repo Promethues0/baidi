@@ -81,7 +81,10 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 	n := 0
 	err := cs.ExportAudit(r.Context(), category, from, to, func(e store.AuditEntry) error {
 		n++
-		return cw.Write([]string{e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict})
+		// 全列过 csvCell：行为人（登录用户名原样入审计）与事件文本都可能含攻击者输入，
+		// 与其逐列判断哪列「可信」，不如统一中和——审计导出就是给人拿电子表格打开的。
+		return cw.Write([]string{csvCell(e.Time), csvCell(e.Category), csvCell(e.User),
+			csvCell(e.SrcIP), csvCell(e.Event), csvCell(e.Verdict)})
 	})
 	cw.Flush()
 	if err != nil {
@@ -90,6 +93,21 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 	}
 	// 审计措辞只记已发生的事实：流式写完才算导出完成。
 	s.audit(r, "admin", "导出审计日志 CSV（"+exportScopeZh(category, from, to)+"），共 "+strconv.Itoa(n)+" 条", "ok")
+}
+
+// csvCell 中和 CSV 公式注入：以 = + - @ 或制表符/回车开头的单元格在
+// Excel/LibreOffice 里会被当公式求值（DDE 可外带数据甚至执行命令），而行为人
+// 一列就是攻击者可控的登录用户名。csv.Writer 只处理引号与分隔符，不管这个；
+// 前缀单引号是电子表格通行的「强制文本」记号——牺牲一点原样性，换掉这个执行面。
+func csvCell(v string) string {
+	if v == "" {
+		return v
+	}
+	switch v[0] {
+	case '=', '+', '-', '@', '\t', '\r':
+		return "'" + v
+	}
+	return v
 }
 
 // exportScopeZh 拼导出范围的中文描述（供审计留痕）。

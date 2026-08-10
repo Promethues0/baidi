@@ -158,3 +158,51 @@ func TestAuditExportCSV(t *testing.T) {
 		t.Fatal("导出完成后应落一条审计")
 	}
 }
+
+// CSV 公式注入：行为人一列就是攻击者可控的登录用户名，以 = + - @ 开头的
+// 单元格在电子表格里会被当公式求值。导出必须加「强制文本」前缀中和。
+func TestAuditExportNeutralizesFormulaInjection(t *testing.T) {
+	h := newTestServer(t)
+	payload := `=cmd|'/C calc'!A1`
+	req := httptest.NewRequest("POST", "/api/v1/auth/login",
+		strings.NewReader(`{"username":"`+payload+`","password":"wrong"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.RemoteAddr = "203.0.113.9:41234"
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("坏口令登录应 200(ok:false), got %d", rec.Code)
+	}
+
+	req = httptest.NewRequest("GET", "/api/v1/audit/export", nil)
+	req.Header.Set("Authorization", "Bearer "+adminToken())
+	rec = httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	body, _ := io.ReadAll(rec.Body)
+	csvBody := string(body)
+	if !strings.Contains(csvBody, ",'"+payload) {
+		t.Fatalf("公式前缀单元格应被加 ' 中和: %s", csvBody)
+	}
+	if strings.Contains(csvBody, ","+payload) {
+		t.Fatalf("导出不应含裸公式单元格: %s", csvBody)
+	}
+}
+
+// csvCell 口径：危险首字符加前缀，正常值原样。
+func TestCSVCell(t *testing.T) {
+	for in, want := range map[string]string{
+		"":           "",
+		"2026-08-10": "2026-08-10",
+		"管理员登录失败":    "管理员登录失败",
+		"=1+1":       "'=1+1",
+		"+SUM(A1)":   "'+SUM(A1)",
+		"-2+3":       "'-2+3",
+		"@fn":        "'@fn",
+		"\tX":        "'\tX",
+		"\rX":        "'\rX",
+	} {
+		if got := csvCell(in); got != want {
+			t.Fatalf("csvCell(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

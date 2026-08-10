@@ -19,7 +19,7 @@ func TestEventQueueOverflowDropsOldest(t *testing.T) {
 	for i := 0; i < n; i++ {
 		q.push(Event{Kind: fmt.Sprintf("k%d", i)})
 	}
-	got := q.snapshot()
+	got, _ := q.snapshot()
 	if len(got) != maxQueuedEvents {
 		t.Fatalf("队列长度 %d，期望上界 %d", len(got), maxQueuedEvents)
 	}
@@ -39,12 +39,32 @@ func TestEventQueueAckKeepsNewerEvents(t *testing.T) {
 	var q eventQueue
 	q.push(Event{Kind: "a"})
 	q.push(Event{Kind: "b"})
-	batch := q.snapshot()
+	_, through := q.snapshot()
 	q.push(Event{Kind: "c"}) // 模拟发送期间新入队
-	q.ack(len(batch))
-	rest := q.snapshot()
+	q.ack(through)
+	rest, _ := q.snapshot()
 	if len(rest) != 1 || rest[0].Kind != "c" {
 		t.Fatalf("ack 后应只剩发送期间新入队的 c，实际 %+v", rest)
+	}
+}
+
+// 发送期间恰好溢出：push 从队首挤掉一条、队尾补一条，队列长度不变。
+// 若 ack 按条数清理，会把队尾那条从未发出的新回执一并砍掉（静默丢回执）；
+// 按序号清理必须保住它。这是 ack 从 len(batch) 改成序号口径的原因。
+func TestEventQueueAckKeepsEventQueuedDuringOverflow(t *testing.T) {
+	var q eventQueue
+	for i := 0; i < maxQueuedEvents; i++ {
+		q.push(Event{Kind: fmt.Sprintf("k%d", i)})
+	}
+	batch, through := q.snapshot()
+	if len(batch) != maxQueuedEvents {
+		t.Fatalf("前置条件：队列应满，实际 %d", len(batch))
+	}
+	q.push(Event{Kind: "new"}) // 发送期间入队，触发溢出：挤掉 k0，长度仍为上界
+	q.ack(through)
+	rest, _ := q.snapshot()
+	if len(rest) != 1 || rest[0].Kind != "new" {
+		t.Fatalf("发送期间入队的回执必须留存待下次心跳，实际 %+v", rest)
 	}
 }
 
@@ -82,7 +102,7 @@ func TestRegisterCarriesVersionAndEventsAndClearsOnSuccess(t *testing.T) {
 		t.Errorf("kind=%v，期望 revoke-applied", first["kind"])
 	}
 	// 发送成功即清：下次心跳不带旧回执（否则控制面审计会重复记同一事实）。
-	if rest := c.events.snapshot(); len(rest) != 0 {
+	if rest, _ := c.events.snapshot(); len(rest) != 0 {
 		t.Errorf("发送成功后队列应清空，实际还剩 %d 条", len(rest))
 	}
 }
@@ -97,7 +117,7 @@ func TestRegisterFailureKeepsEvents(t *testing.T) {
 	if err := c.Register(0, 0, 1, nil); err == nil {
 		t.Fatal("500 应返回错误")
 	}
-	if rest := c.events.snapshot(); len(rest) != 1 {
+	if rest, _ := c.events.snapshot(); len(rest) != 1 {
 		t.Fatalf("发送失败后回执应留队重试，实际剩 %d 条", len(rest))
 	}
 }

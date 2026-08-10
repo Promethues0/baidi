@@ -70,10 +70,24 @@ func (c *Client) DroppedEvents() int { return c.events.droppedCount() }
 const maxQueuedEvents = 64
 
 // eventQueue 有界回执队列（零值可用）：满则丢最旧并计数。
+//
+// 每条入队回执带一个单调递增序号，ack 按**序号**而非条数清理。用条数会在
+// 「发送期间恰好溢出」时丢掉从未发出的回执：队满时 push 从队首挤掉一条、队尾补一条，
+// 长度不变，随后 ack(n) 按长度从队首砍 n 条就会把队尾那条新回执一并砍掉——它从未
+// 被 snapshot 带走过，控制面永远收不到，且没有任何报错。按序号清理则天然免疫：
+// ack 只删「序号 ≤ 本次带走的最后一条」的条目，新回执序号更大，永远留存。
+// 今天 QueueEvent 只在轮询 goroutine 上调用（触发不了），但队列带锁且 QueueEvent 是
+// 导出 API——将来任一后台 goroutine（如 pf 回收器）入队即中招，故按可并发的正确性写。
 type eventQueue struct {
 	mu      sync.Mutex
-	buf     []Event
+	buf     []queuedEvent
+	nextSeq uint64
 	dropped int
+}
+
+type queuedEvent struct {
+	seq uint64
+	ev  Event
 }
 
 func (q *eventQueue) push(e Event) {
@@ -84,26 +98,36 @@ func (q *eventQueue) push(e Event) {
 		q.buf = q.buf[drop:]
 		q.dropped += drop
 	}
-	q.buf = append(q.buf, e)
+	q.nextSeq++
+	q.buf = append(q.buf, queuedEvent{seq: q.nextSeq, ev: e})
 }
 
-// snapshot 复制当前队列内容（不清空）：发送期间新入队的回执不会被误清。
-func (q *eventQueue) snapshot() []Event {
+// snapshot 复制当前队列内容（不清空）并返回末条序号，供发送成功后 ack。
+// 队列为空时返回的序号为 0，ack(0) 是空操作。
+func (q *eventQueue) snapshot() ([]Event, uint64) {
 	q.mu.Lock()
 	defer q.mu.Unlock()
-	out := make([]Event, len(q.buf))
-	copy(out, q.buf)
-	return out
-}
-
-// ack 发送成功后移除队首 n 条（即本次 snapshot 带走的那批）；发送失败不调用，回执留队重试。
-func (q *eventQueue) ack(n int) {
-	q.mu.Lock()
-	defer q.mu.Unlock()
-	if n > len(q.buf) {
-		n = len(q.buf)
+	if len(q.buf) == 0 {
+		return nil, 0
 	}
-	q.buf = q.buf[n:]
+	out := make([]Event, len(q.buf))
+	for i, qe := range q.buf {
+		out[i] = qe.ev
+	}
+	return out, q.buf[len(q.buf)-1].seq
+}
+
+// ack 发送成功后移除序号 ≤ through 的条目；发送失败不调用，回执留队重试。
+func (q *eventQueue) ack(through uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	keep := q.buf[:0]
+	for _, qe := range q.buf {
+		if qe.seq > through {
+			keep = append(keep, qe)
+		}
+	}
+	q.buf = keep
 }
 
 func (q *eventQueue) droppedCount() int {
@@ -175,7 +199,7 @@ type Session struct {
 // 心跳还捎带 version（编译期注入的网关版本）与 events（数据面回执，发送成功即从队列清除；
 // 失败留队随下次心跳重试）。旧控制面不认识这两个字段时按 JSON 语义直接忽略，不影响注册。
 func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Session) error {
-	evs := c.events.snapshot()
+	evs, through := c.events.snapshot()
 	body, _ := json.Marshal(map[string]any{
 		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
 		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
@@ -191,7 +215,7 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("control 注册返回 %d", resp.StatusCode)
 	}
-	c.events.ack(len(evs)) // 只清本次带走的那批：发送期间新入队的回执留待下次心跳
+	c.events.ack(through) // 只清本次带走的那批：发送期间新入队的回执序号更大，留待下次心跳
 	return nil
 }
 

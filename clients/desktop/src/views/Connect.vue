@@ -69,14 +69,24 @@
       <div class="ck-side">
         <div class="dk-card ck-posture">
           <div class="ck-card__h">终端环境检测
-            <span class="ck-trust" :class="{ bad: postureVerdict?.verdict === 'block' || !allOk }">
-              {{ postureVerdict ? (postureVerdict.verdict === 'block' ? '接入受限' : postureVerdict.verdict === 'allow' && allOk ? '终端可信' : '存在风险') : '采集中…' }}
+            <span class="ck-trust" :class="{ bad: postureVerdict?.verdict === 'block' || hasFail }">
+              {{ trustText }}
             </span>
           </div>
-          <div v-for="p in posture" :key="p.key" class="ck-pi">
-            <component :is="p.ok ? 'IconCheckCircleFill' : 'IconExclamationCircleFill'" :style="{ color: p.ok ? '#00B42A' : '#FF7D00' }" />
+          <!--
+            三态渲染：通过 / 关注 / 无法判定。★先看 unknown 再看 ok——探不到时 ok 恒 false，
+            只看 ok 会把「这项探不到」画成「这项不合规」，用户于是去排查一个根本不存在的问题
+            （Linux 非 root 读不到防火墙、Windows 非管理员读不到 BitLocker 都是常态）。
+          -->
+          <div v-for="p in posture" :key="p.key" class="ck-pi" :title="p.value">
+            <component
+              :is="p.unknown ? 'IconQuestionCircleFill' : p.ok ? 'IconCheckCircleFill' : 'IconExclamationCircleFill'"
+              :style="{ color: p.unknown ? '#86909C' : p.ok ? '#00B42A' : '#FF7D00' }"
+            />
             <span class="ck-pi__l">{{ p.label }}</span>
-            <span class="ck-pi__v" :class="{ warn: !p.ok }">{{ p.ok ? '通过' : '关注' }}</span>
+            <span class="ck-pi__v" :class="{ warn: !p.ok && !p.unknown, undet: p.unknown }">
+              {{ p.unknown ? '无法判定' : p.ok ? '通过' : '关注' }}
+            </span>
           </div>
           <div v-if="posture.length === 0" class="ck-pi" style="color: var(--bd-t3)">正在采集终端环境…</div>
           <div class="ck-report">
@@ -278,8 +288,20 @@ async function connectDev() {
 /* 环境检测：读 App 级共享状态（上报循环脱离视图，切 Tab 不中断） */
 const postureVerdict = computed(() => postureState.verdict);
 const posture = computed(() => postureState.info?.checks ?? []);
-const allOk = computed(() => posture.value.length > 0 && posture.value.every((p) => p.ok));
+// 「确定不合规」与「探不到」必须分开统计：混在一起会把一台控制面判为 allow 的机器
+// 标成"存在风险"，用户去查一个不存在的问题；反过来把探不到当通过则是虚假的安心。
+const hasFail = computed(() => posture.value.some((p) => !p.ok && !p.unknown));
+const hasUndet = computed(() => posture.value.some((p) => p.unknown));
+const allOk = computed(() => posture.value.length > 0 && !hasFail.value && !hasUndet.value);
 const VERDICT_ZH: Record<string, string> = { allow: '合规', degrade: '降权', gray: '灰度', block: '阻断' };
+// 判定文案以**控制面判定**为准（判定权在控制面），本地采集只用来解释原因。
+const trustText = computed(() => {
+  const v = postureVerdict.value;
+  if (!v) return '采集中…';
+  if (v.verdict === 'block') return '接入受限';
+  if (hasFail.value || v.verdict !== 'allow') return '存在风险';
+  return hasUndet.value ? '部分项无法判定' : '终端可信';
+});
 
 /* 重开 app 时若隧道仍在跑，恢复已接入态 */
 onMounted(async () => {
@@ -354,6 +376,8 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-pi__l { flex: 1; color: var(--bd-t1); }
 .ck-pi__v { font-size: 12px; color: var(--bd-success); }
 .ck-pi__v.warn { color: var(--bd-warning); }
+/* 无法判定：中性灰。用红/橙会被读成"不合规"，那正是三态要区分开的东西 */
+.ck-pi__v.undet { color: var(--bd-t3); }
 .ck-report { font-size: 11px; color: var(--bd-t3); padding: 8px 16px 12px; border-top: 1px solid var(--bd-fill-2); margin-top: 4px; }
 .ck-conn { padding-bottom: 8px; }
 .ck-conn.off { opacity: .8; }

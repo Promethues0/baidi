@@ -200,7 +200,9 @@ export interface BaselinePolicy { id: string; name: string; type: 'app-protect' 
 export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
 
 /* ── 终端 posture（安全中心 · 终端合规） ── */
-export interface PostureCheckRow { key: string; label: string; ok: boolean; value: string }
+/** unknown = 终端探不到该项（权限不足/命令缺失），既非合规也非不合规。
+ *  上报时 ok 恒 false（对旧控制面 fail-closed），故渲染必须**先看 unknown**。 */
+export interface PostureCheckRow { key: string; label: string; ok: boolean; unknown?: boolean; value: string }
 export interface PostureRow {
   user: string; device: string; platform: string; os: string; clientVersion: string;
   checks: PostureCheckRow[]; verdict: 'allow' | 'degrade' | 'gray' | 'block';

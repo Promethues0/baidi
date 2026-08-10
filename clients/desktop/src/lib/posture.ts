@@ -7,9 +7,13 @@ import { invoke } from '@tauri-apps/api/core';
 import { api } from './api';
 import { tauriRuntime } from './tunnel';
 
-export interface PostureCheck { key: string; label: string; ok: boolean; value: string }
+/** unknown = 这项探不到（命令缺失/权限不足）。★不是「不合规」：
+ *  Rust 采集器在 unknown 时把 ok 置 false（对旧控制面 fail-closed），
+ *  所以渲染必须先看 unknown，否则会把「无法判定」画成「不合规」。 */
+export interface PostureCheck { key: string; label: string; ok: boolean; unknown?: boolean; value: string }
 export interface PostureInfo { platform: string; os: string; clientVersion: string; device: string; checks: PostureCheck[] }
-export interface PostureVerdict { ok: boolean; verdict: 'allow' | 'degrade' | 'gray' | 'block'; score: number; level: string; reasons: string[] }
+/** unknowns 控制面回传的不可判定项（observe 下不计入判定，但必须让用户看见）。 */
+export interface PostureVerdict { ok: boolean; verdict: 'allow' | 'degrade' | 'gray' | 'block'; score: number; level: string; reasons: string[]; unknowns?: string[] }
 
 /** 最近一次采集结果与控制面判定（全局共享，各视图读取渲染）。 */
 export const postureState = reactive<{ info: PostureInfo | null; verdict: PostureVerdict | null }>({ info: null, verdict: null });
@@ -24,7 +28,9 @@ export async function collectPosture(): Promise<PostureInfo> {
       { key: 'sys_integrity', label: '系统完整性保护开启', ok: true, value: '模拟' },
       { key: 'firewall_on', label: '系统防火墙启用', ok: true, value: '模拟' },
       { key: 'os_version', label: '系统版本合规', ok: true, value: '模拟' },
-      { key: 'edr_online', label: 'EDR 终端防护在线', ok: false, value: '浏览器无法检测' },
+      // 浏览器里确实探不到 EDR——按 unknown 报，不是 ok:false。
+      // 报 false 会让控制面把联调机判成"不合规"，然后开发自己被 block 基线拦在门外。
+      { key: 'edr_online', label: 'EDR 终端防护在线', ok: false, unknown: true, value: '无法判定：浏览器无法枚举进程' },
       { key: 'client_version', label: '客户端为最新版本 v0.1.0', ok: true, value: '0.1.0' }
     ]
   };

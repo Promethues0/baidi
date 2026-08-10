@@ -167,7 +167,16 @@
             <td>{{ p.platform }} · {{ p.os || '—' }}</td>
             <td>{{ p.clientVersion || '—' }}</td>
             <td>
-              <span v-for="c in p.checks" :key="c.key" class="bd-tg" :style="tagStyle(c.ok ? '#00B42A' : '#F53F3F')" style="margin: 1px 3px 1px 0">{{ c.label }}</span>
+              <!--
+                三态：绿=通过 / 红=不合规 / 灰=终端探不到（unknown）。unknown 时终端把 ok 置 false，
+                只按 ok 上色会把"这台机器读不到 BitLocker"画成"这台机器没加密"，
+                管理员据此去追一台其实合规的终端。title 给出终端上报的原始值/原因。
+              -->
+              <span
+                v-for="c in p.checks" :key="c.key" class="bd-tg" :title="c.value"
+                :style="tagStyle(c.unknown ? '#86909C' : c.ok ? '#00B42A' : '#F53F3F')"
+                style="margin: 1px 3px 1px 0"
+              >{{ c.label }}{{ c.unknown ? '（无法判定）' : '' }}</span>
             </td>
             <td><span class="bd-tg" :style="tagStyle(verdictColor(p.verdict))">{{ verdictText(p.verdict) }}</span></td>
             <td><b :style="{ color: p.score >= 60 ? '#F53F3F' : p.score >= 30 ? '#FF7D00' : 'var(--bd-t1)' }">{{ p.score }}</b></td>

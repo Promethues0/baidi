@@ -307,14 +307,24 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
 
 	// ── 写操作（落 SQLite）──
-	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                        // 发布应用
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)  // 设备绑定审批
-	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)             // 保存用户策略覆盖
-	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)              // 读取用户策略覆盖
-	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                      // 新增用户
-	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)       // 禁用/启用/解锁
-	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
-	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword)          // 自助改密
+	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                         // 发布应用
+	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)   // 设备绑定审批
+	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)              // 保存用户策略覆盖
+	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)               // 读取用户策略覆盖
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                       // 新增用户
+	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)        // 禁用/启用/解锁
+	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword)  // 管理员重置口令
+	mux.HandleFunc("PUT /api/v1/users/{id}/membership", s.handleSetUserMembership) // 改组织归属 / 所属用户组
+
+	// 组织与用户组（业务管理 · 用户与角色页内维护；全部 admin）
+	mux.HandleFunc("GET /api/v1/orgs", s.handleOrgs)
+	mux.HandleFunc("POST /api/v1/orgs", s.handleSaveOrg)
+	mux.HandleFunc("DELETE /api/v1/orgs/{id}", s.handleDeleteOrg)
+	mux.HandleFunc("GET /api/v1/groups", s.handleGroups)
+	mux.HandleFunc("POST /api/v1/groups", s.handleSaveGroup)
+	mux.HandleFunc("DELETE /api/v1/groups/{id}", s.handleDeleteGroup)
+	mux.HandleFunc("PUT /api/v1/groups/{id}/members", s.handleSetGroupMembers)
+	mux.HandleFunc("POST /api/v1/auth/password", s.handleChangePassword) // 自助改密
 
 	// ── 网关数据面：注册 + 拉策略（需 gateway/admin 身份）；资源 CRUD（admin）──
 	// ★网关数据面接口只挂 mTLS 监听（见 MTLSHandler）。明文侧仅在迁移期挂载，
@@ -501,12 +511,15 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	u.PassHash = hash
 	// 初始口令是管理员定的（或 demo 默认），不是本人私密——首登必须换掉（FR-DEPLOY-09）。
 	u.MustChangePw = true
+	// orgId / groups 直接由 DirUser 的 json 标签承接（见 store.DirUser）；
+	// 组织不存在或组不可写时回 4xx 而不是 500——那是调用方选错了目标，不是服务端故障。
 	created, err := s.writer.CreateUser(r.Context(), u)
 	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to create user")
+		orgStoreErr(w, err, "failed to create user")
 		return
 	}
-	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+")，已置首登改密", "ok")
+	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+"，组织 "+
+		pickStr(created.OrgID, "无归属")+")，已置首登改密", "ok")
 	httpx.JSON(w, http.StatusCreated, created)
 }
 

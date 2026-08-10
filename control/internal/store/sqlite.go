@@ -224,7 +224,8 @@ CREATE TABLE IF NOT EXISTS users (
   pass_hash TEXT, role TEXT, must_change_pw INTEGER
 );
 CREATE TABLE IF NOT EXISTS resources (
-  id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
+  id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT,
+  allow_groups TEXT, allow_orgs TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
 );
 -- ipsec_sites 只放**配置**（管理员权威）。status/rx_bytes/tx_bytes/last_up 四列已冻结：
 -- 它们是运行态与配置混表时代的遗物，代码不再读写，运行态一律去 ipsec_sa_state。
@@ -367,6 +368,9 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 	// 对象库引用列：旧库表已存在时 CREATE TABLE IF NOT EXISTS 不会补列，逐列幂等 ALTER（忽略已存在）。
 	for _, c := range []struct{ table, col, typ string }{
 		{"resources", "addr_ref", "TEXT"}, {"resources", "svc_ref", "TEXT"},
+		// 授权主体扩展：用户组 / 组织（含子树）。回填见 backfillResourceSubjects。
+		{"resources", "allow_groups", "TEXT"},
+		{"resources", "allow_orgs", "TEXT"},
 		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
 		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
 		// 首登强制改密标志（回填见 backfillMustChangePw）。
@@ -406,6 +410,9 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 	// 已经踩过一次的坑（apps.resource_id）。凡是新增**业务语义列**，
 	// 回填必须与 ALTER 同一处出现，否则下一个加列的人不会想到还有这一步。
 	if err := s.backfillIpsecEnabled(); err != nil {
+		return err
+	}
+	if err := s.backfillResourceSubjects(); err != nil {
 		return err
 	}
 	if err := s.backfillMustChangePw(); err != nil {
@@ -469,6 +476,21 @@ func (s *SQLiteStore) backfillAppResourceID() error {
 		}
 	}
 	return nil
+}
+
+// backfillResourceSubjects 回填 resources.allow_groups / allow_orgs：既有行一律补空数组。
+//
+// ★补列迁移只加列不填值，既有库的新列永久为 NULL——这是 apps.resource_id 踩过的坑。
+// 这两列的语义是「按哪些用户组/组织授权」，空数组 = 不按该维度授权 = 与改造前行为
+// 逐字节一致（判定退回只看 allow_roles/allow_users）。写成 '[]' 而不是留 NULL，
+// 是为了让「这一行已经在新语义下了」这件事在库里看得见，也让读侧的 COALESCE
+// 只承担兜底职责而不是唯一防线。
+func (s *SQLiteStore) backfillResourceSubjects() error {
+	if _, err := s.db.Exec(`UPDATE resources SET allow_groups='[]' WHERE allow_groups IS NULL`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(`UPDATE resources SET allow_orgs='[]' WHERE allow_orgs IS NULL`)
+	return err
 }
 
 // backfillMustChangePw 回填 users.must_change_pw：既有行一律补 0。
@@ -636,7 +658,8 @@ func (s *SQLiteStore) seed() error {
 
 // Resources 从库读受控资源清单（覆盖 Memory 种子）。
 func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users,COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users,
+COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -644,12 +667,14 @@ func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 	out := []Resource{}
 	for rows.Next() {
 		var r Resource
-		var roles, users string
-		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &r.AddrRef, &r.SvcRef); err != nil {
+		var roles, users, groups, orgs string
+		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &groups, &orgs, &r.AddrRef, &r.SvcRef); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(roles), &r.AllowRoles)
 		_ = json.Unmarshal([]byte(users), &r.AllowUsers)
+		_ = json.Unmarshal([]byte(groups), &r.AllowGroups)
+		_ = json.Unmarshal([]byte(orgs), &r.AllowOrgs)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -657,15 +682,27 @@ func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 
 // SaveResource 落库（upsert）一条受控资源。
 func (s *SQLiteStore) SaveResource(ctx context.Context, r Resource) error {
-	roles, _ := json.Marshal(r.AllowRoles)
-	users, _ := json.Marshal(r.AllowUsers)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,addr_ref,svc_ref,updated_at)
-VALUES(?,?,?,?,?,?,?,?)
+	roles, _ := json.Marshal(nonNil(r.AllowRoles))
+	users, _ := json.Marshal(nonNil(r.AllowUsers))
+	groups, _ := json.Marshal(nonNil(r.AllowGroups))
+	orgs, _ := json.Marshal(nonNil(r.AllowOrgs))
+	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,allow_groups,allow_orgs,addr_ref,svc_ref,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, backend=excluded.backend,
   allow_roles=excluded.allow_roles, allow_users=excluded.allow_users,
+  allow_groups=excluded.allow_groups, allow_orgs=excluded.allow_orgs,
   addr_ref=excluded.addr_ref, svc_ref=excluded.svc_ref, updated_at=excluded.updated_at`,
-		r.ID, r.Name, r.Backend, string(roles), string(users), r.AddrRef, r.SvcRef, nowStr())
+		r.ID, r.Name, r.Backend, string(roles), string(users), string(groups), string(orgs), r.AddrRef, r.SvcRef, nowStr())
 	return err
+}
+
+// nonNil 让 nil 切片序列化成 "[]" 而不是 "null"——库里那一列的口径与回填后的
+// 既有行保持一致（都是 '[]'），少一种要在读侧特判的形态。
+func nonNil(ss []string) []string {
+	if ss == nil {
+		return []string{}
+	}
+	return ss
 }
 
 // DeleteResource 删除一条受控资源。

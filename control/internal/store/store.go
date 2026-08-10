@@ -45,6 +45,10 @@ type Store interface {
 	GatewayCerts(ctx context.Context) ([]GatewayCert, error)
 	GatewayCertTrusted(ctx context.Context, fingerprint string) (GatewayCert, bool, error)
 	// 组织与用户组（真实数据域，只有 SQLite 实现）
+	// SubjectIndex 是「组织子树 / 用户组 → 账号」的展开索引：资源授权的组织与组两维
+	// 在控制面靠它展开成账号，网关只收账号。两个判定点（网关策略下发 / 客户端剖面）
+	// 必须都从它取答案，见 subjects.go 顶部说明。
+	SubjectIndex(ctx context.Context) (SubjectIndex, error)
 	OrgUnits(ctx context.Context) ([]Org, error)
 	UserGroups(ctx context.Context) ([]UserGroup, error)
 	GroupMembers(ctx context.Context, groupID string) ([]string, error)

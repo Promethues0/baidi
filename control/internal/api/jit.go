@@ -101,7 +101,8 @@ func (s *Server) handlePortalCreateAccessRequest(w http.ResponseWriter, r *http.
 		httpx.Error(w, http.StatusBadRequest, "该应用不支持自助申请")
 		return
 	}
-	// 目标资源须存在且基线受限（AllowRoles/AllowUsers 非空）——否则本就全开，JIT 无意义（还会误把开放资源缩成仅授予人可访问）。
+	// 目标资源须存在且基线受限（四个主体维度任一非空，见 Resource.Restricted）——
+	// 否则本就全开，JIT 无意义（还会误把开放资源缩成仅授予人可访问）。
 	res, exists, err := s.resourceByID(r.Context(), app.ResourceID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resource")
@@ -111,7 +112,7 @@ func (s *Server) handlePortalCreateAccessRequest(w http.ResponseWriter, r *http.
 		httpx.Error(w, http.StatusBadRequest, "目标资源不存在")
 		return
 	}
-	if len(res.AllowRoles) == 0 && len(res.AllowUsers) == 0 {
+	if !res.Restricted() {
 		httpx.Error(w, http.StatusBadRequest, "目标资源未设访问限制，无需申请")
 		return
 	}

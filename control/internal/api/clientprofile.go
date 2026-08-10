@@ -151,6 +151,10 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		byRes[res.ID] = res
 	}
 
+	// 组织/用户组主体的展开索引。★与 handleGatewayPolicy 用的是同一个 store 方法、
+	// 同一份展开实现：剖面里「有没有这条路由」与网关侧「放不放行」必须同真同假。
+	subjects := s.subjectIndex(ctx)
+
 	// 有效期内的 JIT 授予：把高敏资源临时翻回可访问。读失败按「无授予」处理（fail-closed）。
 	granted := map[string]bool{}
 	if gs, err := s.store.ActiveGrantsFor(ctx, user); err == nil {
@@ -214,11 +218,12 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		}
 		// ── 可访问性判定：必须与网关侧完全同构 ──
 		// 网关的权威闸是 resource.Authorize(静态 ACL)，而控制面在下发网关策略时
-		// 会把有效期内的 JIT 授予**临时并入 AllowUsers**（见 handleGatewayPolicy）。
-		// 所以这里的判定也必须是「静态 ACL ∪ 有效 JIT 授予」——只看静态 ACL 的话，
-		// 用户明明拿到了审批，剖面里却没有该资源的 VIP 与路由，等于审批白批。
+		// 会把**组织/用户组展开出的账号**与**有效期内的 JIT 授予**一并并入 AllowUsers
+		// （见 handleGatewayPolicy → expandForGateway）。所以这里的判定也必须是
+		// 「静态 ACL ∪ 组织/组展开 ∪ 有效 JIT 授予」——少算任何一项的后果都是
+		// 「策略/审批明明生效了，剖面里却没有该资源的 VIP 与路由」，且毫无报错。
 		hasGrant := granted[res.ID]
-		accessible := authorizeRes(user, role, res) || hasGrant
+		accessible := authorizeRes(user, role, res, subjects) || hasGrant
 		sens := "normal"
 		if a.Category == "finance" {
 			sens = "high"
@@ -567,17 +572,8 @@ func pinWarning(fp string) string {
 	return ""
 }
 
-// authorizeRes 与网关 resource.Authorize 同规则：AllowUsers/AllowRoles 都空=不限；
-// 任一非空则须命中其一。两处必须保持一致，否则会出现「剖面里有、连上去被拒」的错配。
-func authorizeRes(user, role string, res store.Resource) bool {
-	if len(res.AllowUsers) > 0 && containsFold(res.AllowUsers, user) {
-		return true
-	}
-	if len(res.AllowRoles) > 0 && containsFold(res.AllowRoles, role) {
-		return true
-	}
-	return len(res.AllowUsers) == 0 && len(res.AllowRoles) == 0
-}
+// authorizeRes 移到 subjects.go：它现在要吃组织/用户组的展开索引，
+// 与「下发给网关那份」共处一个文件，改一处时另一处就在眼前。
 
 func containsFold(ss []string, v string) bool {
 	for _, s := range ss {

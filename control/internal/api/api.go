@@ -10,6 +10,7 @@ import (
 	"net/http"
 	"net/netip"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -922,25 +923,31 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// 组织 / 用户组两维在**控制面**展开成账号后并进 AllowUsers，网关零改动。
+	// ★数据面刻意不知道组织树：判定权留在控制面，且展开每次现算（不缓存），
+	// 把人移出组织后下一轮轮询就失效。展开实现只有 store.SubjectIndex 一份，
+	// 客户端剖面 buildProfile 用的是同一份——两处同构是硬要求，见 subjects.go。
+	gwRes := expandForGateway(rs, s.subjectIndex(r.Context()))
+
 	// JIT 即时访问：把有效授予（active 且未到期）临时并入对应资源的 AllowUsers——网关零改动即经
 	// proxy.Authorize 命中放行。★必须在 seen 排除集（revoked+禁用/锁定+posture-block）完全构建之后：
-	// grant 只加正向 allow，被上游否决的账号在此先剔除（撤销恒胜于授予）。只改内存 DTO（rs 每次现构造），
+	// grant 只加正向 allow，被上游否决的账号在此先剔除（撤销恒胜于授予）。只改内存 DTO（每次现构造），
 	// 绝不 SaveResource 写回；到期后 ActiveGrants 不再 emit，网关下轮 reg.Replace 即失效（惰性回收）。
 	if grants, err := s.store.ActiveGrants(r.Context()); err == nil {
-		idx := make(map[string]int, len(rs))
-		for i := range rs {
-			idx[rs[i].ID] = i
+		idx := make(map[string]int, len(gwRes))
+		for i := range gwRes {
+			idx[gwRes[i].ID] = i
 		}
 		for _, g := range grants {
 			if now >= g.ExpiresAt || seen[normUser(g.User)] {
 				continue // 双保险到期过滤 + 撤销/禁用/posture-block 恒胜
 			}
 			if i, ok := idx[g.ResourceID]; ok {
-				rs[i].AllowUsers = append(rs[i].AllowUsers, g.User)
+				gwRes[i].AllowUsers = append(gwRes[i].AllowUsers, g.User)
 			}
 		}
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs, "revoked": revoked})
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": gwRes, "revoked": revoked})
 }
 
 // GatewayDetail 网关清单条目：注册信息 + 该网关上报的活跃会话明细（就近处置/审计用）。
@@ -967,7 +974,12 @@ func (s *Server) handleGateways(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"gateways": list})
 }
 
-// handleResources 资源清单（管理台用）。
+// handleResources 资源清单 + 可选授权主体（管理台用）。
+//
+// 主体清单里的 accounts 是**已展开**的（组织含全部后代组织的成员），展开在服务端做：
+// 控制台只需把选中的几个主体的账号数组求并集，就能显示"生效账号数"。
+// ★不把组织树丢给浏览器自己走：那等于把子树语义实现第二遍，两份实现迟早对不上，
+// 而管理员看到的数字与网关实际放行的人不一致，是最不该出现的那种偏差。
 func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -977,7 +989,56 @@ func (s *Server) handleResources(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs})
+	orgs, groups, err := s.subjectOptions(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load authorization subjects")
+		return
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": rs, "orgs": orgs, "groups": groups})
+}
+
+// subjectOption 一个可选授权主体（组织或用户组）+ 它当前展开出的账号。
+type subjectOption struct {
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Kind string `json:"kind,omitempty"` // 用户组：static | role
+	Path string `json:"path,omitempty"` // 组织：物化路径，供前端画层级缩进
+	// Accounts 该主体覆盖的账号。组织的这份**已含全部后代组织**的成员——
+	// 与下发网关时并进 AllowUsers 的那份出自同一次展开，数字必然对得上。
+	Accounts []string `json:"accounts"`
+}
+
+// subjectOptions 组装资源编辑器的主体候选清单（组织树 + 用户组），账号已展开。
+func (s *Server) subjectOptions(ctx context.Context) ([]subjectOption, []subjectOption, error) {
+	ix, err := s.store.SubjectIndex(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	orgUnits, err := s.store.OrgUnits(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	groupList, err := s.store.UserGroups(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	orgs := make([]subjectOption, 0, len(orgUnits))
+	for _, o := range orgUnits {
+		accts := ix.OrgAccounts[o.ID]
+		if accts == nil {
+			accts = []string{}
+		}
+		orgs = append(orgs, subjectOption{ID: o.ID, Name: o.Name, Path: o.Path, Accounts: accts})
+	}
+	groups := make([]subjectOption, 0, len(groupList))
+	for _, g := range groupList {
+		accts := ix.GroupAccounts[g.ID]
+		if accts == nil {
+			accts = []string{}
+		}
+		groups = append(groups, subjectOption{ID: g.ID, Name: g.Name, Kind: g.Kind, Accounts: accts})
+	}
+	return orgs, groups, nil
 }
 
 // handleSaveResource 新增/修改一条受控资源（admin），落库后网关下次轮询即生效。
@@ -1009,12 +1070,60 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	// 组织/用户组主体必须真实存在。★不静默丢弃拼错的 id：一个打错的组织 id
+	// 会让整批人拿不到权限，而资源列表上那个标签看起来完全正常——
+	// 与用户组成员写入拒绝未知账号（ErrUnknownAccount）是同一条纪律。
+	if msg, err := s.validateSubjects(r.Context(), res); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to validate authorization subjects")
+		return
+	} else if msg != "" {
+		httpx.Error(w, http.StatusBadRequest, msg)
+		return
+	}
 	if err := s.writer.SaveResource(r.Context(), res); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save resource")
 		return
 	}
-	s.audit(r, "admin", "保存受控资源「"+res.ID+"」("+res.Backend+")", "ok")
+	s.audit(r, "admin", "保存受控资源「"+res.ID+"」("+res.Backend+"，授权 "+
+		strconv.Itoa(len(res.AllowRoles))+" 角色/"+strconv.Itoa(len(res.AllowUsers))+" 账号/"+
+		strconv.Itoa(len(res.AllowGroups))+" 用户组/"+strconv.Itoa(len(res.AllowOrgs))+" 组织)", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "resource": res})
+}
+
+// validateSubjects 校验资源引用的组织/用户组都真实存在。
+// 返回非空 msg = 校验不通过（400 文案）；error = 读库失败（500）。
+func (s *Server) validateSubjects(ctx context.Context, res store.Resource) (string, error) {
+	if len(res.AllowOrgs) > 0 {
+		orgs, err := s.store.OrgUnits(ctx)
+		if err != nil {
+			return "", err
+		}
+		known := make(map[string]bool, len(orgs))
+		for _, o := range orgs {
+			known[o.ID] = true
+		}
+		for _, id := range res.AllowOrgs {
+			if !known[strings.TrimSpace(id)] {
+				return "授权组织 " + id + " 不存在", nil
+			}
+		}
+	}
+	if len(res.AllowGroups) > 0 {
+		gs, err := s.store.UserGroups(ctx)
+		if err != nil {
+			return "", err
+		}
+		known := make(map[string]bool, len(gs))
+		for _, g := range gs {
+			known[g.ID] = true
+		}
+		for _, id := range res.AllowGroups {
+			if !known[strings.TrimSpace(id)] {
+				return "授权用户组 " + id + " 不存在", nil
+			}
+		}
+	}
+	return "", nil
 }
 
 // handleDeleteResource 删除一条受控资源（admin）。

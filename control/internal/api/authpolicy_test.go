@@ -409,3 +409,147 @@ func TestSeedPoliciesHaveNoDeadSwitches(t *testing.T) {
 		}
 	}
 }
+
+// ── 用户目录候选：必须是登录链路真会给出的取值 ──
+//
+// 控制台的「所属用户目录」下拉此前接在 GET /api/v1/authsrc 的演示种子上
+// （恒定只有 local 与 ad），而登录链路把 Directory 置成**真实认证源的 kind**。
+// 于是管理员真配一个 LDAP/OIDC 源之后，那批人登录时一条策略都匹配不到
+// （Match 按目录先筛一刀），而策略页上根本选不出 ldap/oidc——配不出、也修不了。
+func TestAuthDirectoriesComeFromRealSources(t *testing.T) {
+	h, _ := policyEnv(t, nil)
+	adm := adminToken()
+
+	dirs := func() map[string]map[string]any {
+		code, out := doJSON(t, h, "GET", "/api/v1/authpolicy", adm, nil)
+		if code != http.StatusOK {
+			t.Fatalf("读策略 http %d: %v", code, out)
+		}
+		list, _ := out["directories"].([]any)
+		if len(list) == 0 {
+			t.Fatal("响应应带用户目录候选（下拉与保存校验必须同源）")
+		}
+		m := map[string]map[string]any{}
+		for _, d := range list {
+			dm := mapOf(t, d)
+			m[dm["key"].(string)] = dm
+		}
+		return m
+	}
+
+	// 只有本地源时：本地目录恒在；种子策略用到的 ad 保留（否则一编辑就被自己的校验拒掉），
+	// 但如实标注"当前没有已配置的认证源"。
+	before := dirs()
+	if _, ok := before["local"]; !ok {
+		t.Error("本地目录必须恒在候选里")
+	}
+	if d, ok := before["ad"]; !ok {
+		t.Error("存量策略用到的目录必须保留在候选里，否则管理员编辑不了它")
+	} else if d["configured"] != false {
+		t.Error("没有已配置 AD 源时 ad 目录应标为 configured=false")
+	}
+	if _, ok := before["ldap"]; ok {
+		t.Error("没配 LDAP 源时不该凭空出现 ldap 目录")
+	}
+
+	// 真配一个 LDAP 源 → ldap 目录立刻出现在候选里，并标为已配置
+	if code, out := doJSON(t, h, "POST", "/api/v1/authsrc/sources", adm, map[string]any{
+		"name": "研发 LDAP", "kind": "ldap", "enabled": true,
+		"config": `{"url":"ldap://127.0.0.1:389","baseDn":"dc=corp,dc=local"}`,
+	}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("建 LDAP 源 http %d: %v", code, out)
+	}
+	after := dirs()
+	d, ok := after["ldap"]
+	if !ok {
+		t.Fatal("配了 LDAP 源之后 ldap 必须出现在目录候选里——否则永远绑不出一条能命中的策略")
+	}
+	if d["configured"] != true {
+		t.Errorf("已配置的源对应的目录应 configured=true: %v", d)
+	}
+	if srcs, _ := d["sources"].([]any); len(srcs) != 1 || srcs[0] != "研发 LDAP" {
+		t.Errorf("目录应回带认证源名，便于认出这条策略管的是哪个源: %v", d["sources"])
+	}
+
+	// 现在这条 ldap 策略存得进去（此前保存都无从谈起，因为选不出这个目录）
+	putVendorGroup(t, h)
+	if code, out := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.ID, p.Directory = "ap-test-ldap", "ldap"
+	})); code != http.StatusOK {
+		t.Fatalf("绑真实 LDAP 目录的策略应存得进去，得到 %d %v", code, out)
+	}
+	// 而拼错的目录一律拒：存进去也永远匹配不到任何账号
+	code, out := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.ID, p.Directory = "ap-test-typo", "ldaps"
+	}))
+	if code != http.StatusBadRequest {
+		t.Fatalf("不存在的用户目录应 400，得到 %d %v", code, out)
+	}
+}
+
+// 适用范围引用的组织/用户组必须真实存在——与资源授权的 validateSubjects 同一条纪律。
+// 拼错一个 id：covers() 恒 false，策略页上"绑好了"、登录时一次都不命中，
+// 而且是**放松**方向（该二次认证的人静默走了单因素）。
+func TestAuthPolicyScopeRefsValidatedOnSave(t *testing.T) {
+	h, _ := policyEnv(t, nil)
+	putVendorGroup(t, h)
+
+	for _, c := range []struct {
+		name     string
+		mut      func(*store.AuthPolicy)
+		contains string
+	}{
+		{"组织不存在", func(p *store.AuthPolicy) {
+			p.ScopeGroups, p.ScopeOrgs = nil, []string{"no-such-org"}
+		}, "授权组织 no-such-org 不存在"},
+		{"用户组不存在", func(p *store.AuthPolicy) {
+			p.ScopeGroups = []string{"g-typo"}
+		}, "授权用户组 g-typo 不存在"},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			code, out := savePolicy(t, h, vendorPolicy(c.mut))
+			if code != http.StatusBadRequest {
+				t.Fatalf("应 400 拒绝，得到 %d %v", code, out)
+			}
+			errObj, _ := out["error"].(map[string]any)
+			if msg, _ := errObj["message"].(string); !strings.Contains(msg, c.contains) {
+				t.Fatalf("拒绝原因应指名道姓: %v", out)
+			}
+		})
+	}
+	// 真实存在的范围照常存得进去
+	if code, out := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.ScopeOrgs = []string{"dev"}
+	})); code != http.StatusOK {
+		t.Fatalf("真实存在的范围应放行，得到 %d %v", code, out)
+	}
+}
+
+// 删除守卫在 REST 层的表现：被认证策略引用的组织/用户组回 409（不是 500、不是静默成功）。
+func TestDeleteSubjectReferencedByAuthPolicyIs409(t *testing.T) {
+	h, _ := policyEnv(t, nil)
+	adm := adminToken()
+	putVendorGroup(t, h)
+	if code, out := savePolicy(t, h, vendorPolicy(nil)); code != http.StatusOK {
+		t.Fatalf("存策略 http %d: %v", code, out)
+	}
+	code, out := doJSON(t, h, "DELETE", "/api/v1/groups/g-test-vendor", adm, nil)
+	if code != http.StatusConflict {
+		t.Fatalf("被策略引用的用户组应 409，得到 %d %v", code, out)
+	}
+	// 组还在，策略也还在（拒删不能是"删一半"）
+	if code, out := doJSON(t, h, "GET", "/api/v1/groups", adm, nil); code != http.StatusOK ||
+		!strings.Contains(jsonStr(t, out), "g-test-vendor") {
+		t.Fatalf("拒删之后用户组应还在: %d %v", code, out)
+	}
+}
+
+// jsonStr 把响应体重新序列化成字符串，便于做"含某个 id"这类粗粒度断言。
+func jsonStr(t *testing.T, v any) string {
+	t.Helper()
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	return string(b)
+}

@@ -18,7 +18,8 @@ import (
 func orgStoreErr(w http.ResponseWriter, err error, fallback string) {
 	switch {
 	case errors.Is(err, store.ErrOrgHasChildren), errors.Is(err, store.ErrOrgHasMembers),
-		errors.Is(err, store.ErrGroupExists), errors.Is(err, store.ErrGroupDerived):
+		errors.Is(err, store.ErrGroupExists), errors.Is(err, store.ErrGroupDerived),
+		errors.Is(err, store.ErrOrgInAuthPolicy), errors.Is(err, store.ErrGroupInAuthPolicy):
 		httpx.Error(w, http.StatusConflict, err.Error())
 	case errors.Is(err, store.ErrOrgCycle), errors.Is(err, store.ErrUnknownAccount):
 		httpx.Error(w, http.StatusBadRequest, err.Error())

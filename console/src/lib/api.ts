@@ -253,9 +253,20 @@ export interface AuthRuleCapability {
   key: string; kind: 'enhance' | 'exempt'; label: string;
   available: boolean; effect: string; reason: string;
 }
+/** 可被策略绑定的「用户目录」。key 与登录链路给判定的 directory 同一取值域：
+ *  本地哈希命中 = local，外部源命中 = 该认证源的 kind（ldap|ad|oidc）。
+ *  ★这份清单必须由后端下发：前端写死的话，管理员真配的 LDAP/OIDC 源永远进不了下拉，
+ *  而登录链路只按 kind 匹配——策略一条都命中不了，且页面上无从修。 */
+export interface AuthDirectory {
+  key: string; name: string;
+  /** 该目录下是否有已配置的认证源。false = 当前不会有人从这个目录登录（如已删源的存量策略）。 */
+  configured: boolean;
+  sources: string[];
+}
 export interface AuthPolicyResp {
   policies: AuthPolicy[];
   capabilities?: AuthRuleCapability[];
+  directories?: AuthDirectory[];
   orgs?: SubjectOption[];
   groups?: SubjectOption[];
 }

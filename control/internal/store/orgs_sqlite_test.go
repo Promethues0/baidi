@@ -78,17 +78,19 @@ func TestBackfillOrgUnitsIdempotent(t *testing.T) {
 	}
 	ctx := context.Background()
 	first, _ := s1.OrgUnits(ctx)
-	// 删一个空部门（外包人员下无人？种子里 ext.zhou 挂在 ext，先把他挪走）
+	// 删一个空部门（先把客服中心的人挪走）。
+	// ★刻意不用 ext：种子策略 ap-ext-strict 的适用范围绑着它，现在会被拒删守卫拦下
+	// （见 TestDeleteOrgUnitRefusedWhenAuthPolicyReferencesIt）。
 	users, _ := s1.Users(ctx)
 	for _, u := range users.Users {
-		if u.OrgID == "ext" {
+		if u.OrgID == "cs" {
 			if err := s1.SetUserOrg(ctx, u.ID, "dev"); err != nil {
 				t.Fatalf("SetUserOrg: %v", err)
 			}
 		}
 	}
-	if err := s1.DeleteOrgUnit(ctx, "ext"); err != nil {
-		t.Fatalf("DeleteOrgUnit(ext): %v", err)
+	if err := s1.DeleteOrgUnit(ctx, "cs"); err != nil {
+		t.Fatalf("DeleteOrgUnit(cs): %v", err)
 	}
 	s1.Close()
 
@@ -99,11 +101,11 @@ func TestBackfillOrgUnitsIdempotent(t *testing.T) {
 	defer s2.Close()
 	second, _ := s2.OrgUnits(ctx)
 	if len(second) != len(first)-1 {
-		t.Fatalf("重开后组织数应为 %d（删掉 ext），得到 %d：回填重复建部门或复活了已删部门", len(first)-1, len(second))
+		t.Fatalf("重开后组织数应为 %d（删掉 cs），得到 %d：回填重复建部门或复活了已删部门", len(first)-1, len(second))
 	}
 	for _, o := range second {
-		if o.ID == "ext" {
-			t.Fatal("已删除的部门 ext 被下次启动的回填复活了")
+		if o.ID == "cs" {
+			t.Fatal("已删除的部门 cs 被下次启动的回填复活了")
 		}
 	}
 }
@@ -233,6 +235,82 @@ func TestDeleteOrgGuards(t *testing.T) {
 	// 不存在的父
 	if _, err := s.SaveOrgUnit(ctx, Org{Name: "孤儿", ParentID: "nope"}); !errors.Is(err, ErrOrgNotFound) {
 		t.Errorf("父不存在应回 ErrOrgNotFound，得到 %v", err)
+	}
+}
+
+// 删除守卫（认证策略引用）：被策略适用范围绑着的组织/用户组拒删。
+//
+// 少了这道闸，删组织/组的那一刻绑在它上面的二次认证策略就静默失效——
+// 页面上策略还在、只是"生效账号 0"，登录行为无声地退回单因素。
+func TestDeleteOrgUnitRefusedWhenAuthPolicyReferencesIt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// 种子策略 ap-ext-strict 的适用范围是 ScopeOrgs=["ext"]；先把外包部门腾空，
+	// 让"有成员"这道旧闸不再是拒绝的原因。
+	users, _ := s.Users(ctx)
+	for _, u := range users.Users {
+		if u.OrgID == "ext" {
+			if err := s.SetUserOrg(ctx, u.ID, "dev"); err != nil {
+				t.Fatalf("SetUserOrg: %v", err)
+			}
+		}
+	}
+	if err := s.DeleteOrgUnit(ctx, "ext"); !errors.Is(err, ErrOrgInAuthPolicy) {
+		t.Fatalf("被认证策略引用的组织应回 ErrOrgInAuthPolicy，得到 %v", err)
+	}
+	if _, err := s.OrgUnits(ctx); err != nil {
+		t.Fatalf("OrgUnits: %v", err)
+	}
+	orgs, _ := s.OrgUnits(ctx)
+	orgByID(t, orgs, "ext") // 拒删之后组织必须还在
+
+	// 解除绑定后可删（守卫不是死锁：改掉策略范围就放行）
+	pols, err := s.AuthPolicies(ctx)
+	if err != nil {
+		t.Fatalf("AuthPolicies: %v", err)
+	}
+	for _, p := range pols {
+		if len(p.ScopeOrgs) == 0 {
+			continue
+		}
+		p.ScopeOrgs = []string{"dev"}
+		if _, err := s.SaveAuthPolicy(ctx, p); err != nil {
+			t.Fatalf("改策略范围: %v", err)
+		}
+	}
+	if err := s.DeleteOrgUnit(ctx, "ext"); err != nil {
+		t.Fatalf("解除引用后应可删: %v", err)
+	}
+}
+
+func TestDeleteUserGroupRefusedWhenAuthPolicyReferencesIt(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	g, err := s.SaveUserGroup(ctx, UserGroup{Name: "外包协作组", Kind: GroupKindStatic})
+	if err != nil {
+		t.Fatalf("建组: %v", err)
+	}
+	if _, err := s.SaveAuthPolicy(ctx, AuthPolicy{
+		Name: "外包协作组 · 一律二次认证", Directory: "local", Priority: 20, Enabled: true,
+		PC: AuthMethodSet{Primary: "local"}, Mobile: AuthMethodSet{Primary: "local"},
+		ScopeGroups: []string{g.ID}, Enhance: EnhanceRule{Always: true},
+	}); err != nil {
+		t.Fatalf("存策略: %v", err)
+	}
+	if err := s.DeleteUserGroup(ctx, g.ID); !errors.Is(err, ErrGroupInAuthPolicy) {
+		t.Fatalf("被认证策略引用的用户组应回 ErrGroupInAuthPolicy，得到 %v", err)
+	}
+	gs, _ := s.UserGroups(ctx)
+	found := false
+	for _, x := range gs {
+		if x.ID == g.ID {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("拒删之后用户组不应消失")
 	}
 }
 

@@ -575,7 +575,7 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
-  type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type EnhanceRule,
+  type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthDirectory, type EnhanceRule,
   type PrimaryMethod, type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
   type LdapConfig, type OidcConfig
@@ -893,14 +893,30 @@ function primaryLabel(m: string) { return PRIMARY_LABEL[m] ?? m ?? '—'; }
 function primaryColor(m: string) { return PRIMARY_COLOR[m] ?? '#86909C'; }
 function secondaryLabel(m: string) { return SECONDARY_LABEL[m] ?? m; }
 
-/** 目录 key → 友好名（取自认证源；缺失回退到类型名或 key） */
+/* 可作为「用户目录」被策略绑定的取值：**由后端下发**（GET /authpolicy 的 directories）。
+ *
+ * ★这里此前接的是 GET /authsrc 的演示种子（恒定只有 local 与 ad），而登录链路把
+ * directory 置成真实认证源的 kind（local|ldap|ad|oidc）。于是管理员真配一个
+ * LDAP/OIDC 源之后，那批人登录时 Match 按目录先筛一刀就把全部策略筛掉（连默认策略
+ * 都没有）→ 永不二次认证；而策略页上根本选不出 "ldap"，管理员无从修。
+ * 与 capabilities 同一条纪律：前端能选的，后端就得能存。 */
+const directories = ref<AuthDirectory[]>([]);
+/** 目录 key → 友好名（后端下发的目录名优先；拿不到时回退到类型名或 key） */
 function dirName(dir: string) {
-  const src = sources.value.find((s) => s.key === dir);
-  return src ? src.name : (TYPE_LABEL[dir as SrcType] ?? dir);
+  const d = directories.value.find((x) => x.key === dir);
+  if (d) return d.name;
+  return TYPE_LABEL[dir as SrcType] ?? dir;
 }
-/** 可作为「用户目录」被策略绑定的认证源：仅主认证类（本地/AD/LDAP），排除纯二次因子源 */
 const directorySources = computed(() =>
-  sources.value.filter((s) => ['local', 'ad', 'ldap'].includes(s.type)).map((s) => ({ key: s.key, name: s.name }))
+  directories.value.length
+    ? directories.value.map((d) => ({
+        key: d.key,
+        // 未配置认证源的目录如实标注：留着可选（存量策略要能编辑），但不假装它在生效
+        name: d.configured
+          ? (d.sources.length ? `${d.name}（${d.sources.join('、')}）` : d.name)
+          : `${d.name}（当前无已配置认证源）`
+      }))
+    : [{ key: 'local', name: '本地用户目录' }]
 );
 
 /** 按目录分组，组内按优先级升序（小者先匹配，默认策略优先级 100 自然沉底） */
@@ -1055,6 +1071,7 @@ async function loadPolicies() {
     const r = await api<AuthPolicyResp>('/authpolicy');
     policies.value = (r.policies ?? []).map(normalizePolicy);
     capabilities.value = r.capabilities ?? [];
+    directories.value = r.directories ?? [];
     orgOpts.value = r.orgs ?? [];
     groupOpts.value = r.groups ?? [];
   } catch { /* 后端不可用时保持空列表 */ }

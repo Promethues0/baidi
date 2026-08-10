@@ -130,6 +130,11 @@ func (s *SQLiteStore) DeleteOrgUnit(ctx context.Context, id string) error {
 	if n > 0 {
 		return ErrOrgHasMembers
 	}
+	if name, ok, err := authPolicyScopeRef(ctx, tx, scopeColOrgs, id); err != nil {
+		return err
+	} else if ok {
+		return fmt.Errorf("%w（策略「%s」）", ErrOrgInAuthPolicy, name)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM org_units WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -390,6 +395,11 @@ func (s *SQLiteStore) DeleteUserGroup(ctx context.Context, id string) error {
 		return err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	if name, ok, err := authPolicyScopeRef(ctx, tx, scopeColGroups, id); err != nil {
+		return err
+	} else if ok {
+		return fmt.Errorf("%w（策略「%s」）", ErrGroupInAuthPolicy, name)
+	}
 	res, err := tx.ExecContext(ctx, `DELETE FROM user_groups WHERE id=?`, id)
 	if err != nil {
 		return err
@@ -401,6 +411,46 @@ func (s *SQLiteStore) DeleteUserGroup(ctx context.Context, id string) error {
 		return err
 	}
 	return tx.Commit()
+}
+
+// 认证策略适用范围的两列。取值只来自这两个常量，不接受调用方拼字符串（防注入）。
+const (
+	scopeColOrgs   = "scope_orgs"
+	scopeColGroups = "scope_groups"
+)
+
+// authPolicyScopeRef 报告某个组织/用户组 id 是否被任一认证策略的适用范围引用，
+// 命中时回传第一条引用它的策略名（供拒删文案指名道姓）。
+//
+// 逐行解 JSON 而不用 SQL 的 json 函数：这两张表都很小，而 JSON1 扩展是否可用
+// 取决于构建标签——为一次删除守卫引入一个"某些构建下静默不生效"的依赖不划算，
+// 而静默不生效恰恰是本项目最该防的失败形态。
+func authPolicyScopeRef(ctx context.Context, tx *sql.Tx, col, id string) (string, bool, error) {
+	id = strings.TrimSpace(id)
+	if id == "" {
+		return "", false, nil
+	}
+	rows, err := tx.QueryContext(ctx, `SELECT name, COALESCE(`+col+`,'[]') FROM auth_policies`)
+	if err != nil {
+		return "", false, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var name, raw string
+		if err := rows.Scan(&name, &raw); err != nil {
+			return "", false, err
+		}
+		var ids []string
+		if err := json.Unmarshal([]byte(raw), &ids); err != nil {
+			continue // 脏数据不该让删除永远失败；它本来也匹配不到任何账号
+		}
+		for _, v := range ids {
+			if strings.TrimSpace(v) == id {
+				return name, true, nil
+			}
+		}
+	}
+	return "", false, rows.Err()
 }
 
 // knownAccounts 返回库中全部规范化账号的集合（成员写入的存在性校验用）。

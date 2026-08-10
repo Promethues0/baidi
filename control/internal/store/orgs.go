@@ -42,6 +42,18 @@ var (
 	// ErrUnknownAccount 成员清单里有库中不存在的账号。
 	// ★不静默丢弃：拼错一个账号就少一个人有权限，而界面上看不出任何异常。
 	ErrUnknownAccount = errors.New("成员账号在用户目录中不存在")
+	// ErrOrgInAuthPolicy / ErrGroupInAuthPolicy 主体仍被认证策略的适用范围引用，拒删。
+	//
+	// ★为什么这一条必须拦：删掉被引用的组织/用户组，绑在它上面的策略立刻
+	// **静默失效**——covers() 恒 false，那条「一律二次认证」再也命中不了任何人，
+	// 而页面上策略还在、只是"生效账号 0"，登录行为无声地从双因素退回单因素。
+	// 这是放松安全的方向，和对象库「被引用拒删」同一条纪律。
+	//
+	// 刻意**不**拦资源授权（resources.allow_orgs/allow_groups）的引用：那个方向是
+	// fail-closed 的（展开为空 → 下发哨兵 → 谁也连不上），管理员立刻会收到报障，
+	// 与"悄悄少了一道认证"性质不同。
+	ErrOrgInAuthPolicy   = errors.New("该组织仍被认证策略的适用范围引用，请先解除绑定再删除")
+	ErrGroupInAuthPolicy = errors.New("该用户组仍被认证策略的适用范围引用，请先解除绑定再删除")
 )
 
 // 用户组类型。kind 不是装饰性标签，它决定 GroupMembers 从哪里取成员：

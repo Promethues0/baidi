@@ -1198,7 +1198,14 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 // validateSubjects 校验资源引用的组织/用户组都真实存在。
 // 返回非空 msg = 校验不通过（400 文案）；error = 读库失败（500）。
 func (s *Server) validateSubjects(ctx context.Context, res store.Resource) (string, error) {
-	if len(res.AllowOrgs) > 0 {
+	return s.validateSubjectRefs(ctx, res.AllowOrgs, res.AllowGroups)
+}
+
+// validateSubjectRefs 校验一组组织 id / 用户组 id 都真实存在。
+// 资源授权（allowOrgs/allowGroups）与认证策略的适用范围（scopeOrgs/scopeGroups）
+// 共用这一份：两处引用的是同一批主体，校验各写一份迟早只有一边严。
+func (s *Server) validateSubjectRefs(ctx context.Context, orgIDs, groupIDs []string) (string, error) {
+	if len(orgIDs) > 0 {
 		orgs, err := s.store.OrgUnits(ctx)
 		if err != nil {
 			return "", err
@@ -1207,13 +1214,15 @@ func (s *Server) validateSubjects(ctx context.Context, res store.Resource) (stri
 		for _, o := range orgs {
 			known[o.ID] = true
 		}
-		for _, id := range res.AllowOrgs {
+		for _, id := range orgIDs {
+			// 空串一并拒：它进了列表就让"限定了主体"成立（网关侧下发哨兵 = 对所有人关闭），
+			// 却谁也匹配不到——与拼错 id 是同一种错，不该只挡住其中一种。
 			if !known[strings.TrimSpace(id)] {
 				return "授权组织 " + id + " 不存在", nil
 			}
 		}
 	}
-	if len(res.AllowGroups) > 0 {
+	if len(groupIDs) > 0 {
 		gs, err := s.store.UserGroups(ctx)
 		if err != nil {
 			return "", err
@@ -1222,7 +1231,7 @@ func (s *Server) validateSubjects(ctx context.Context, res store.Resource) (stri
 		for _, g := range gs {
 			known[g.ID] = true
 		}
-		for _, id := range res.AllowGroups {
+		for _, id := range groupIDs {
 			if !known[strings.TrimSpace(id)] {
 				return "授权用户组 " + id + " 不存在", nil
 			}

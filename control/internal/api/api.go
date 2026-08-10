@@ -57,6 +57,10 @@ type Server struct {
 	trustedProxies []netip.Prefix
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
 	lockout *lockout.Guard
+	// metricsRetentionHours 设备状态时序的留存小时数，由 main 用清理循环真正消费的
+	// 那一份注入（SetMetricsRetentionHours）。读端点据此把时间窗截断到库里真有数据的
+	// 那一段——不截断的话「周」档会承诺一段早被清掉的历史。0 = 未注入（测试栈）。
+	metricsRetentionHours int
 	// notices 安全事件通知的异步派发器（有界队列 + 单 worker，见 internal/notify）。
 	// 消费方在主流程上（爆破锁定 / 终端判 block），故入队非阻塞、满则丢并计数——
 	// 通知是观测通道，发不出去不改变任何已经做出的安全处置。
@@ -325,6 +329,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/online", s.handleOnline)
 	mux.HandleFunc("POST /api/v1/online/{id}/kick", s.handleKickSession) // 强制下线（admin）
 	mux.HandleFunc("GET /api/v1/userstate", s.handleUserState)
+	// 设备状态：各网关宿主机的当前水位 + 按 range 降采样的趋势（PRD ch5 FR-MON-01/02）
+	mux.HandleFunc("GET /api/v1/monitor/device-stat", s.handleDeviceStat)
 
 	// IPSec VPN 组网：站点清单（配置 + 网关实测运行态）+ CRUD + 启停意图 + PSK 只写不读
 	// ★数据面侧的三个 ipsec 端点只挂 mTLS 监听（见 MTLSHandler），明文口没有它们——
@@ -913,10 +919,15 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// TunnelFP 网关隧道 TLS 证书的 SHA-256 指纹（hex）。网关自签证书每次重启都变，
 		// 随心跳上报即可；控制面转发给客户端做证书钉扎（见 handleClientProfile）。
 		TunnelFP string `json:"tunnelFp"`
-		// Version / Events 是新网关才上报的字段：旧网关缺省即零值，处理逻辑对空值必须无感
-		// （version 空串照存、events 空切片零循环），不得因缺字段报错。
+		// Version / Events / Metrics 是新网关才上报的字段：旧网关缺省即零值，处理逻辑
+		// 对空值必须无感（version 空串照存、events 空切片零循环、metrics 为 nil 即不落点），
+		// 不得因缺字段报错。
 		Version string    `json:"version"` // 网关二进制版本（编译期注入）
 		Events  []gwEvent `json:"events"`  // 数据面回执：网关报告已实际执行的控制面指令
+		// Metrics 宿主机设备状态采样。★是指针：nil（字段缺席）= 这台网关根本不上报指标
+		// （旧版本），与「上报了但一项都没采到」（非 nil 但各项为 nil）必须分得开——
+		// 前者去升级网关，后者去查这台机器为什么读不到 /proc。
+		Metrics *gwMetrics `json:"metrics"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -942,6 +953,10 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP
 	s.mu.Unlock()
+
+	// 设备状态落时序表（缺字段的旧网关在这里是空操作，双向兼容）。
+	// 落库失败只记日志：指标是观测通道，不该让一次写库抖动把网关判成离线。
+	s.recordGatewayMetrics(r, id, b.Metrics)
 
 	// 数据面回执逐条落审计：category=dataplane，行为人=网关自身。措辞只转述网关报告的
 	// 既成事实（「网关 X 报告：…」），控制面不在此替网关下任何断言——审计失实是大忌。

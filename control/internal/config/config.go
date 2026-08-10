@@ -35,7 +35,24 @@ type Config struct {
 	MTLSAddr           string        // 网关接口的 mTLS 监听地址（如 127.0.0.1:8092）；空=不监听
 	GwPlaintextCompat  bool          // 明文口是否仍挂网关接口（阶段4 起默认 false；=1 为过渡逃生舱）
 	AuditRetentionDays int           // 审计日志留存天数（超期滚动清理并锚定防篡改链）；0=不清理
+	// AlertInterval 业务告警周期评估间隔；<=0 关闭周期评估（只剩管理员手动「立即检测」）。
+	AlertInterval time.Duration
+	// AlertChainInterval 审计防篡改链自检间隔（全链重算比其余信号贵，单独节流）。
+	// ★这条循环就是「防篡改链有人定期查」的执行方——链没人查，防篡改只是个说法。
+	AlertChainInterval time.Duration
+	// MetricsRetentionHours 网关设备状态时序的留存小时数（超期滚动清理）。
+	// ★恒为正：非法/缺省值一律落到 DefaultMetricsRetentionHours，**没有"关闭清理"这一档**。
+	// gateway_metrics 是每网关 15s 一条的写入热点，留一个能关掉清理的开关，
+	// 等于留一个把库撑爆的按钮，而且撑爆前毫无征兆（与审计留存的 0=不清理刻意不同）。
+	MetricsRetentionHours int
 }
+
+// DefaultMetricsRetentionHours 设备状态时序默认留存 72 小时。
+// 三天足够覆盖「上周末那次抖动」这类回溯，再长就该导出到时序库而不是压在 SQLite 里。
+const DefaultMetricsRetentionHours = 72
+
+// MinMetricsRetentionHours 留存下限：低于 1 小时的话趋势页的「小时」档自己就看不全了。
+const MinMetricsRetentionHours = 1
 
 // Load 从环境变量装载配置。
 func Load() Config {
@@ -67,6 +84,11 @@ func Load() Config {
 		GwPlaintextCompat: envBool("BAIDI_GW_PLAINTEXT_COMPAT", false),
 		// 审计留存：启动时 + 每 24h 清理超期行，清理段末的链锚点写 audit_meta（见 store.PurgeExpiredAudit）。
 		AuditRetentionDays: envInt("BAIDI_AUDIT_RETENTION_DAYS", 180),
+		// 业务告警：默认每分钟评估一轮，审计链自检每 15 分钟一次。
+		AlertInterval:      envDuration("BAIDI_ALERT_INTERVAL", time.Minute),
+		AlertChainInterval: envDuration("BAIDI_ALERT_CHAIN_INTERVAL", 15*time.Minute),
+		// 设备状态留存：启动时 + 每小时清理超期采样点（见 store.PurgeExpiredGatewayMetrics）。
+		MetricsRetentionHours: clampMetricsRetention(envInt("BAIDI_METRICS_RETENTION_HOURS", DefaultMetricsRetentionHours)),
 	}
 }
 
@@ -108,4 +130,14 @@ func envDuration(k string, def time.Duration) time.Duration {
 		}
 	}
 	return def
+}
+
+// clampMetricsRetention 把设备状态留存夹到合法区间。
+// 非正数（含把 BAIDI_METRICS_RETENTION_HOURS 设成 0 想"关掉清理"的写法）落回默认值，
+// 而不是关闭清理——理由见 Config.MetricsRetentionHours。
+func clampMetricsRetention(h int) int {
+	if h < MinMetricsRetentionHours {
+		return DefaultMetricsRetentionHours
+	}
+	return h
 }

@@ -66,6 +66,10 @@ type Writer interface {
 	SetGroupMembers(ctx context.Context, groupID string, accounts []string) error
 	SetUserOrg(ctx context.Context, userID, orgID string) error
 	SetUserGroups(ctx context.Context, account string, groupIDs []string) error
+	// AppendGatewayMetric 落一条网关宿主机采样点（数据面心跳带上来的设备状态）。
+	// ★这是全系统唯一的高频写入口（每网关 15s 一条），配套的留存清理见
+	// PurgeExpiredGatewayMetrics——它不在本接口里，因为调用方只有 main 的清理循环。
+	AppendGatewayMetric(ctx context.Context, p GatewayMetricPoint) error
 	// 管理员分级分权：自定义角色增删 + 管理员角色分派/撤销。
 	// 三个写方法都自带「最后一名超管不可删/不可降权」的事务内防自锁守卫。
 	SaveAdminRole(ctx context.Context, r AdminRole) (AdminRole, error)
@@ -410,7 +414,32 @@ CREATE TABLE IF NOT EXISTS notify_channels (
 );
 CREATE TABLE IF NOT EXISTS notify_channel_secrets (
   channel_id TEXT PRIMARY KEY, nonce BLOB, cipher BLOB, fingerprint TEXT, updated_at TEXT
-);`)
+);
+-- ── 监控中心 · 设备状态时序（PRD ch5 FR-MON-01/02）──
+-- 网关宿主机的 CPU/内存/磁盘/负载/收发速率，每网关 15s 一条，由数据面随 mTLS 心跳上报
+-- （采集器 gateway/internal/sysstat，落库见 store/metrics_sqlite.go）。
+-- 这也是告警规则 gateway_load（「CPU>80%」那一条）的信号源——此前它一直探测不到本表，
+-- 如实回「等待数据面上报」。
+--
+-- 六个指标列全部**可为 NULL**：NULL = 网关如实报告「这一项采不到」（不可判定），与 0 是两回事。
+-- 任何一层给它 COALESCE(...,0) 兜底，前端就再也分不出「CPU 0%」和「没采到 CPU」，
+-- 而后者恰恰是「CPU>80% 告警对一台失明的网关永久沉默」那种失效。
+--
+-- 主键 (gateway_id, ts) 顺带把写入速率钉死在「每网关每秒最多一行」（写入走 INSERT OR REPLACE）：
+-- 一台发疯或被攻陷的网关靠高频心跳撑爆库这条路直接堵死。
+-- ★列名是 gateway_id 而不是 gw_id：一来与 ipsec_sa_state.gateway_id 同名（同一个概念
+-- 在两张表里叫两个名字，写 JOIN 的人迟早会挑错），二来告警模块的 GatewayMetricsProbe
+-- 读的就是这个列名——对不上的话它会如实回「表结构与读取口径不一致」，
+-- 结果就是「CPU>80%」那条规则在页面上开着、永远不触发。
+-- ★新表无需回填（区别于补列迁移）：既有库此前根本没有设备指标这回事，空表就是正确初态。
+-- 留存上限见 PurgeExpiredGatewayMetrics（BAIDI_METRICS_RETENTION_HOURS，默认 72，不可关闭）。
+CREATE TABLE IF NOT EXISTS gateway_metrics (
+  gateway_id TEXT, ts INTEGER,
+  cpu REAL, mem REAL, disk REAL, load REAL, rx_bps REAL, tx_bps REAL,
+  PRIMARY KEY(gateway_id, ts)
+);
+-- 留存清理是 DELETE ... WHERE ts < ?，趋势查询是 ts 范围扫，两者都吃这条索引
+CREATE INDEX IF NOT EXISTS idx_gateway_metrics_ts ON gateway_metrics(ts);`)
 	if err != nil {
 		return err
 	}

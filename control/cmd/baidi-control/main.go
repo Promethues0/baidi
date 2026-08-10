@@ -66,6 +66,29 @@ func main() {
 			}
 		}()
 	}
+	// 设备状态时序留存轮转：启动清一次 + 每小时清一次（复用审计留存那条循环的形状）。
+	//
+	// ★节奏比审计的 24h 紧，因为写入率高三个数量级：每网关 15s 一条，24h 的松弛
+	// 就是每台网关多留 5760 行。也没有「关闭清理」这一档——cfg 侧已把非法值夹回默认 72，
+	// 清理失败只记日志不退出（观测数据的清理挡不住主业务）。
+	{
+		purgeMetrics := func() {
+			n, perr := st.PurgeExpiredGatewayMetrics(context.Background(), cfg.MetricsRetentionHours)
+			if perr != nil {
+				slog.Error("设备状态留存轮转失败", "err", perr)
+			} else if n > 0 {
+				slog.Info("设备状态留存轮转完成", "deleted", n, "retentionHours", cfg.MetricsRetentionHours)
+			}
+		}
+		purgeMetrics()
+		go func() {
+			t := time.NewTicker(time.Hour)
+			defer t.Stop()
+			for range t.C {
+				purgeMetrics()
+			}
+		}()
+	}
 	secret := []byte(cfg.JWTSecret)
 	// 令牌签名切非对称：control 私钥签、数据面只持公钥。迁移期仍接受存量 HS256 令牌
 	// （BAIDI_ACCEPT_HS256=0 收口）。公钥写在 <私钥路径>.pub，由 deploy 分发给网关。
@@ -102,6 +125,10 @@ func main() {
 	}
 	slog.Info("内部 CA 就绪", "dir", cfg.PKIDir)
 	srv := api.New(st, st, keys, cfg.Env, cfg.DownloadsDir, rp, ca, cfg.GwPlaintextCompat)
+	// 设备状态页的时间窗要按留存期截断，展示值必须来自**上面那条清理循环真正消费的
+	// 那一份**配置（与 SetAuditRetentionDays 同一条纪律）：再读一遍环境变量的副本
+	// 会在两者不一致时让页面承诺一段其实早被删掉的历史。
+	srv.SetMetricsRetentionHours(cfg.MetricsRetentionHours)
 	if cfg.GwPlaintextCompat {
 		slog.Warn("⚠ 逃生舱开启（BAIDI_GW_PLAINTEXT_COMPAT=1）：/api/v1/gateways/* 仍挂在明文口，" +
 			"可用 JWT role=gateway 调用；全部网关切到 mTLS 后请立即关回")

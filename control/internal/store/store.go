@@ -57,6 +57,10 @@ type Store interface {
 	// 每次请求现算，角色不进令牌——降权要立刻算数，不能等 8h 会话过期。
 	AdminRoles(ctx context.Context) ([]AdminRole, error)
 	AdminRoleFor(ctx context.Context, account string) (AdminRole, bool, error)
+	// GatewayMetrics 监控中心「设备状态」页的取数点：各网关最新一条原始采样 +
+	// 查询窗内的降采样时序（PRD ch5 FR-MON-01/02）。降采样在 SQL 里做，
+	// 不把 72 小时的原始点整包打给前端；空桶不返回，掉线段在图上表现为断线而非零线。
+	GatewayMetrics(ctx context.Context, q MetricsQuery) ([]GatewayMetricSeries, error)
 	OrgUnits(ctx context.Context) ([]Org, error)
 	UserGroups(ctx context.Context) ([]UserGroup, error)
 	GroupMembers(ctx context.Context, groupID string) ([]string, error)

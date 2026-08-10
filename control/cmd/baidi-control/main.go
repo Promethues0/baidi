@@ -43,6 +43,26 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	// 审计留存轮转：启动时清一次 + 每 24h 清一次超期行。
+	// 清理段末的链锚点由 PurgeExpiredAudit 落 audit_meta，防篡改链不因轮转断裂。
+	if cfg.AuditRetentionDays > 0 {
+		purge := func() {
+			n, perr := st.PurgeExpiredAudit(context.Background(), cfg.AuditRetentionDays)
+			if perr != nil {
+				slog.Error("审计留存轮转失败", "err", perr)
+			} else if n > 0 {
+				slog.Info("审计留存轮转完成", "deleted", n, "retentionDays", cfg.AuditRetentionDays)
+			}
+		}
+		purge()
+		go func() {
+			t := time.NewTicker(24 * time.Hour)
+			defer t.Stop()
+			for range t.C {
+				purge()
+			}
+		}()
+	}
 	secret := []byte(cfg.JWTSecret)
 	// 令牌签名切非对称：control 私钥签、数据面只持公钥。迁移期仍接受存量 HS256 令牌
 	// （BAIDI_ACCEPT_HS256=0 收口）。公钥写在 <私钥路径>.pub，由 deploy 分发给网关。

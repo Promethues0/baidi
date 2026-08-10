@@ -19,21 +19,22 @@ func InsecureProdSecret(env, secret string) bool {
 
 // Config 控制中心服务端配置。
 type Config struct {
-	Addr              string        // 监听地址，默认 :8090
-	AllowOrigin       string        // CORS 允许来源（开发期 console），默认 *
-	ShutdownTimeout   time.Duration // 优雅关闭超时
-	Env               string        // dev / prod
-	DBPath            string        // SQLite 数据库文件路径
-	JWTSecret         string        // JWT 签名密钥（生产务必经 BAIDI_JWT_SECRET 注入）
-	DownloadsDir      string        // 客户端安装包目录（manifest.json + 安装包）
-	WebauthnRPID      string        // WebAuthn RP ID（可注册域名，如 vpn.example.com / localhost）
-	WebauthnOrigins   string        // WebAuthn 允许来源，逗号分隔（如 https://vpn.example.com）
-	JWTKeyPath        string        // 会话令牌 Ed25519 私钥 PEM（缺失则首启生成；公钥写同名 .pub）
-	JWTKnockKeyPath   string        // 敲门令牌 Ed25519 私钥 PEM；其 .pub 是唯一分发给网关的验证材料
-	AcceptHS256       bool          // 是否接受存量 HS256 令牌（阶段4 起默认 false；=1 为过渡逃生舱）
-	PKIDir            string        // 内部 CA 目录（签发网关 mTLS 客户端证书）；空=禁用 mTLS
-	MTLSAddr          string        // 网关接口的 mTLS 监听地址（如 127.0.0.1:8092）；空=不监听
-	GwPlaintextCompat bool          // 明文口是否仍挂网关接口（阶段4 起默认 false；=1 为过渡逃生舱）
+	Addr               string        // 监听地址，默认 :8090
+	AllowOrigin        string        // CORS 允许来源（开发期 console），默认 *
+	ShutdownTimeout    time.Duration // 优雅关闭超时
+	Env                string        // dev / prod
+	DBPath             string        // SQLite 数据库文件路径
+	JWTSecret          string        // JWT 签名密钥（生产务必经 BAIDI_JWT_SECRET 注入）
+	DownloadsDir       string        // 客户端安装包目录（manifest.json + 安装包）
+	WebauthnRPID       string        // WebAuthn RP ID（可注册域名，如 vpn.example.com / localhost）
+	WebauthnOrigins    string        // WebAuthn 允许来源，逗号分隔（如 https://vpn.example.com）
+	JWTKeyPath         string        // 会话令牌 Ed25519 私钥 PEM（缺失则首启生成；公钥写同名 .pub）
+	JWTKnockKeyPath    string        // 敲门令牌 Ed25519 私钥 PEM；其 .pub 是唯一分发给网关的验证材料
+	AcceptHS256        bool          // 是否接受存量 HS256 令牌（阶段4 起默认 false；=1 为过渡逃生舱）
+	PKIDir             string        // 内部 CA 目录（签发网关 mTLS 客户端证书）；空=禁用 mTLS
+	MTLSAddr           string        // 网关接口的 mTLS 监听地址（如 127.0.0.1:8092）；空=不监听
+	GwPlaintextCompat  bool          // 明文口是否仍挂网关接口（阶段4 起默认 false；=1 为过渡逃生舱）
+	AuditRetentionDays int           // 审计日志留存天数（超期滚动清理并锚定防篡改链）；0=不清理
 }
 
 // Load 从环境变量装载配置。
@@ -64,7 +65,19 @@ func Load() Config {
 		MTLSAddr: env("BAIDI_MTLS_ADDR", ""),
 		// 阶段 4 已收口：网关接口只挂 mTLS 监听，明文口不再挂载该路由。
 		GwPlaintextCompat: envBool("BAIDI_GW_PLAINTEXT_COMPAT", false),
+		// 审计留存：启动时 + 每 24h 清理超期行，清理段末的链锚点写 audit_meta（见 store.PurgeExpiredAudit）。
+		AuditRetentionDays: envInt("BAIDI_AUDIT_RETENTION_DAYS", 180),
 	}
+}
+
+// envInt 读整数环境变量（解析失败取默认）。
+func envInt(k string, def int) int {
+	if v, ok := os.LookupEnv(k); ok {
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
+	}
+	return def
 }
 
 // envBool 读布尔环境变量（1/true/yes/on 为真，0/false/no/off 为假，其余取默认）。

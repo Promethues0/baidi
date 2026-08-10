@@ -16,6 +16,14 @@ type DiskStat struct {
 	RetainDays int `json:"retainDays"`
 }
 
+// AuditVerifyResult 防篡改链全量校验结论（GET /api/v1/audit/verify）。
+type AuditVerifyResult struct {
+	OK      bool `json:"ok"`
+	Checked int  `json:"checked"`
+	// BrokenAt 首个断点行的链内序号 seq（1 起）；ok 时为 0。
+	BrokenAt int64 `json:"brokenAt"`
+}
+
 type AuditEntry struct {
 	Time     string `json:"time"`
 	Category string `json:"category"` // access | auth | admin | security

@@ -7,6 +7,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"net/netip"
 	"os"
 	"strings"
 	"sync"
@@ -45,9 +46,12 @@ type Server struct {
 	// 收口后置 false，网关接口就只剩 mTLS 一条路。
 	gwPlaintextCompat bool
 	postureStrict     bool // BAIDI_POSTURE_ENFORCE=strict：无新鲜 posture 报告也拒发敲门令牌（fail-closed）
-	mu                sync.Mutex
-	gateways          map[string]GatewayInfo // 已注册（在线）网关，按 id
-	gwSess            map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	// trustedProxies 审计源 IP 的信任边界（BAIDI_TRUSTED_PROXIES，CIDR 逗号分隔）：
+	// 只有直连对端落在这些网段内，X-Forwarded-For 才被采信。见 clientIP。
+	trustedProxies []netip.Prefix
+	mu             sync.Mutex
+	gateways       map[string]GatewayInfo // 已注册（在线）网关，按 id
+	gwSess         map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
 	// gwTunnelFP 各网关隧道 TLS 证书的 SHA-256 指纹，按网关 id。网关证书是启动期自签的，
 	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
 	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
@@ -123,8 +127,9 @@ type GwSession struct {
 func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloadsDir string, rp *webauthnx.RP, ca *pki.CA, gwPlaintextCompat bool) *Server {
 	return &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
 		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
-		postureStrict: os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
-		gateways:      map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
+		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
+		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
+		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}}
 }
 
@@ -215,8 +220,10 @@ func (s *Server) Routes() http.Handler {
 
 	// 终端管理：信任设置 + 设备清单 + 绑定审批
 	mux.HandleFunc("GET /api/v1/devices", s.handleDevices)
-	// 审计中心：分类聚合 + 磁盘水位 + 日志
+	// 审计中心：分类聚合 + 磁盘水位 + 日志（admin）+ 防篡改链校验 + CSV 导出
 	mux.HandleFunc("GET /api/v1/audit", s.handleAudit)
+	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
+	mux.HandleFunc("GET /api/v1/audit/export", s.handleAuditExport)
 	// 网关与隐身：区域/节点拓扑 + SPA
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
 
@@ -1014,6 +1021,11 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	// 审计日志本身是敏感面：全量行为轨迹 + 源 IP。放给 role=user 等于
+	// 让任意登录终端摸清管理员操作节奏，只许 admin 读。
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.Audit(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load audit")

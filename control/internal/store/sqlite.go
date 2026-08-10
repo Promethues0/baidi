@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"log/slog"
+	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -71,6 +73,9 @@ type PolicyOverride struct {
 type SQLiteStore struct {
 	*Memory
 	db *sql.DB
+	// auditKey 审计防篡改链的 HMAC-SM3 密钥（BAIDI_AUDIT_HMAC_KEY_FILE，首启自动生成 0600）。
+	// 落在 store 而非 config：migrate 回填与 RecordAudit 落库都要用它，密钥与链同生命周期。
+	auditKey []byte
 }
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
@@ -84,7 +89,16 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err := db.Ping(); err != nil {
 		return nil, err
 	}
-	s := &SQLiteStore{Memory: NewMemory(), db: db}
+	// 审计链密钥必须先于 migrate 就绪：既有库的补列回填要用它补算全链。
+	keyPath := os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE")
+	if keyPath == "" {
+		keyPath = filepath.Join(filepath.Dir(path), "audit-hmac.key")
+	}
+	auditKey, err := loadOrCreateAuditKey(keyPath)
+	if err != nil {
+		return nil, fmt.Errorf("审计链 HMAC 密钥: %w", err)
+	}
+	s := &SQLiteStore{Memory: NewMemory(), db: db, auditKey: auditKey}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -232,8 +246,16 @@ CREATE TABLE IF NOT EXISTS auth_policies (
   id TEXT PRIMARY KEY, name TEXT, directory TEXT, is_default INTEGER, scope TEXT, priority INTEGER, enabled INTEGER,
   pc TEXT, mobile TEXT, exempt TEXT, one_click INTEGER, enhance TEXT, authz_apps TEXT, updated_at TEXT
 );
+-- audit_log 带 HMAC-SM3 防篡改链：seq 链内序号（1 起）、mac = HMAC(key, prev_mac‖字段)。
+-- 事后 UPDATE 任何一行都会让 GET /api/v1/audit/verify 指出断点。
 CREATE TABLE IF NOT EXISTS audit_log (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, category TEXT, actor TEXT, src_ip TEXT, event TEXT, verdict TEXT
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, category TEXT, actor TEXT, src_ip TEXT, event TEXT, verdict TEXT,
+  seq INTEGER, mac TEXT
+);
+-- audit_meta 审计子系统的键值元数据。目前只存留存轮转后的链锚点
+-- （被清理段末行的 seq/mac），verify 从锚点起算——否则轮转会把链打断。
+CREATE TABLE IF NOT EXISTS audit_meta (
+  k TEXT PRIMARY KEY, v TEXT
 );
 CREATE TABLE IF NOT EXISTS baseline_policies (
   id TEXT PRIMARY KEY, name TEXT, type TEXT, scope TEXT, disposal TEXT, status TEXT,
@@ -312,6 +334,9 @@ CREATE TABLE IF NOT EXISTS gateway_certs (
 		// 等于在一条人人可读的列表路径上引入解密调用，与"只写不读"的姿态自相矛盾。
 		// 旧库补列后为 NULL，界面上显示 •••• ——不影响功能，重设一次凭据即补齐。
 		{"auth_source_secrets", "fingerprint", "TEXT"},
+		// 审计防篡改链（旧库补列，回填见 backfillAuditChain）。
+		{"audit_log", "seq", "INTEGER"},
+		{"audit_log", "mac", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -324,6 +349,9 @@ CREATE TABLE IF NOT EXISTS gateway_certs (
 	// 已经踩过一次的坑（apps.resource_id）。凡是新增**业务语义列**，
 	// 回填必须与 ALTER 同一处出现，否则下一个加列的人不会想到还有这一步。
 	if err := s.backfillIpsecEnabled(); err != nil {
+		return err
+	}
+	if err := s.backfillAuditChain(); err != nil {
 		return err
 	}
 	if err := s.ensureAccountUnique(); err != nil {

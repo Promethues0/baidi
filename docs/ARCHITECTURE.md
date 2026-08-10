@@ -327,6 +327,7 @@ sequenceDiagram
 | 组织树 / 用户组落库（含环形父子拒绝、删除守卫、种子部门回填） | [orgs_sqlite.go](../control/internal/store/orgs_sqlite.go)、[orgs_sqlite_test.go](../control/internal/store/orgs_sqlite_test.go)、[orgs_test.go](../control/internal/api/orgs_test.go) |
 | **按组织 / 用户组授权（含子树继承、移出即失效、两处判定同构）** | [subjects.go](../control/internal/store/subjects.go)、[subjects_sqlite_test.go](../control/internal/store/subjects_sqlite_test.go)、[subjects_test.go](../control/internal/api/subjects_test.go) |
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
+| **管理员分级分权 / 三权分立（有真执行方 + 防自锁）** | [admins_sqlite.go](../control/internal/store/admins_sqlite.go)、[api/admins.go](../control/internal/api/admins.go)、[adminrbac_test.go](../control/internal/api/adminrbac_test.go)、[admins_sqlite_test.go](../control/internal/store/admins_sqlite_test.go) |
 
 **按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
 
@@ -341,15 +342,25 @@ sequenceDiagram
 
 ### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
 
-`SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。当前恰好 4 个 Store 方法仍走种子（其余全部已被 SQLite 覆盖，清单由 [coverage_guard_test.go](../control/internal/store/coverage_guard_test.go) 双向钉住）：
+`SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。当前恰好 3 个 Store 方法仍走种子（其余全部已被 SQLite 覆盖，清单由 [coverage_guard_test.go](../control/internal/store/coverage_guard_test.go) 双向钉住）：
 
 | 页面 | store 方法 | 说明 |
 |---|---|---|
 | 网关与隐身 · 区域拓扑 | `Memory.Gateway` | "华东/华南出口"是硬编码拓扑；**真实网关清单**在 `GET /api/v1/gateways`（mTLS 注册来源） |
 | 认证源接入 · 顶部卡片 | `Memory.AuthSrc` | 卡片上的源列表与「1160 用户」等数字是种子。**注意：LDAP/OIDC 接入本身已是真实现**（见下文认证源一节），真实配置走 `GET /api/v1/authsrc/sources`——同一页两个数据源，别混。同页「自适应认证规则」tab 是**交互沙盘**（改动不落库、不参与登录判定，页面已如实标注），真正在登录链路生效的是「认证策略」tab |
-| 系统管理 · 三权分立/集群 | `Memory.System` | 管理员分组/管理员账号/集群节点全部是演示值，无对应库表 |
 | 在线用户 · 无网关回退 | `Memory.OnlineSessions` | 有网关 mTLS 上报时走真实会话（`source=live`），无网关时回退种子（`source=demo`，页面有标注） |
 | 大屏 `/screen` | 前端 `MOCK_*` 常量 | 纯展示 |
+
+**管理员分级分权 / 三权分立（真，PRD ch15.1）**：此前系统管理页整页是 `Memory.System` 种子——五张编造的管理组卡片、八个不存在的管理员账号、三个假集群节点，而权限模型实际只有 `admin|user` 两级：任何管理员都能改用户、改策略、读全量审计。这是全项目最容易被误读成「已实现」的一页。
+
+- **角色落库**：`admin_roles("key", name, power, builtin, scope_json)` + `users.admin_role`（补列 + 回填，见下）。内置四角色 root / system / security / audit 每次启动按 `PowerPerms` 重算 `scope_json` 覆盖，新增权限键时内置角色自动跟上。
+- **执行方是 `api.requirePerm`**，不是页面文案：`scope_json` 里的权限键（`system` / `security` / `audit` / `admins` / `*`）逐端点比对。审计管理员读得到 `/api/v1/audit`（含链校验与导出）却改不了用户与策略；安全管理员管认证源 / 认证策略 / 资源应用 / 用户组织 / 审批，但**读不到全量审计**；系统管理员管网关证书 / 组网 / 对象库 / 锁定阈值 / `/diag`。权限矩阵有双向用例（能做的 2xx、不能做的 403）。
+- **角色现算不进令牌**：写进 8h 会话令牌的话一次降权要等到令牌过期才生效。读不出角色（库抖动 / 角色悬空 / 从未分派）一律 **fail-closed 403**，越权尝试落审计（category=security、verdict=deny）。
+- **补列回填是「不被自己锁在门外」的唯一保证**：既有 `role='admin'` 的账号一次性回填成 root（`admin.role.backfill.v1` 标记）。不回填的话升级后所有管理员立即什么都干不了，而"给自己分配角色"本身也要管理员权限——死锁。做成**一次性**则是另一面：每次启动都补的话，任何造出「是管理员但没角色」的路径都变成「重启即提权到超管」。
+- **防自锁三条路都堵上**：最后一名可登录的超管不可降权（`SetAdminRole`）、不可撤销（`RemoveAdmin`）、不可禁用/锁定（`SetUserStatus`），三处判定在同一个事务内做计数，回 409 + 原因。**已被禁用的 root 不计入剩余超管**——留着一个登不进来的 root 当"还有人管"，等于闸没生效。
+- **自定义角色只能在三权内收缩**：`*` 与 `admins` 保存时拒绝。拿得到它们的自定义角色等价于一个不叫 root 的超管，而防自锁的计数只认 `power=root`。
+- **`POST /api/v1/users` 收口成只建普通用户**：`DirUser.Role` 是能从请求体解出来的字段，放任它带 `admin` 就意味着持 security 权的人一次请求给自己造个管理员。建管理员的唯一入口是 `POST /api/v1/admins`（需 `admins` 权限）。
+- **集群区块如实回「未部署」**：`ClusterInfo.Deployed` 恒 false、节点列表恒空，与 `/diag` 的 `checkCluster`（skip「集群未部署」）同口径。白帝没有节点发现 / 选主 / 主备同步，此前那三个 healthy 节点是在给不存在的能力背书。
 
 ### ✅ IPSec 站点组网（真，但边界很硬）
 

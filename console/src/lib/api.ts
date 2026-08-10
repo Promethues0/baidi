@@ -140,11 +140,31 @@ export interface DiskStat { usedPct: number; totalGB: number; retainDays: number
 export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
 
-/* ── 网关与隐身（store.GatewayBundle）── */
-export interface GwNode { name: string; ip: string; role: 'primary' | 'backup'; status: string; loadPct: number }
-export interface GwZone { key: string; name: string; status: 'healthy' | 'degraded' | 'down'; apps: number; clients: number; nodes: GwNode[] }
+/* ── 网关与隐身（GET /api/v1/gateway → api.GatewayPageBundle）──
+ *
+ * ★数据源是 mTLS 注册心跳的在线登记（与 GET /api/v1/gateways、诊断页同一份），
+ * 不再是「华东/华南出口」那张编造的区域拓扑。区域、主备角色、负载百分比三个维度
+ * 已整体去掉：白帝没有区域概念、没有选主、也不采集负载，画出来就是假的。
+ */
+export interface GwNode {
+  id: string; proxy: string; spa: string;
+  online: boolean; lastSeen: number; uptime: number;
+  clients: number; tunnels: number; sessions: number;
+  /** 网关二进制版本；旧网关不上报则为空串。 */
+  version: string;
+}
+export interface GatewayBundle {
+  nodes: GwNode[];
+  total: number; online: number; sessions: number;
+  /** 判定"在线"的心跳窗口秒数（页面据此说清判据，而不是让人猜阈值）。 */
+  onlineWindowSec: number;
+  /** 控制面签发的敲门令牌有效期（秒）。 */
+  knockTokenTtlSec: number;
+}
+
+/** SPA 隐身概览（安全中心页 store.SecurityBundle 仍在用；该处 generation/hidden/knockOk
+ *  三项目前仍是种子，见后端 store/security.go 的注释）。 */
 export interface SpaStatus { generation: string; authMode: string; protectedPorts: string[]; hidden: boolean; knockOk: boolean }
-export interface GatewayBundle { zones: GwZone[]; spa: SpaStatus }
 
 /* ── 系统管理 · 三权分立（store.SystemBundle）──
  *

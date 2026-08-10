@@ -18,7 +18,10 @@ type Store interface {
 	// 敲门闸与设备登记分别消费这两项——没有真实消费方的开关不进这个结构体。
 	DeviceTrustSetting(ctx context.Context) (DeviceTrustSetting, error)
 	Audit(ctx context.Context) (AuditBundle, error)
-	Gateway(ctx context.Context) (GatewayBundle, error)
+	// ★这里曾经有 Gateway(ctx) (GatewayBundle, error)：网关与隐身页的「华东/华南
+	// 出口」区域拓扑。它已从 Store 移除而不是补一份 SQLite 实现——网关的权威事实
+	// 不在库里，而在 api.Server.gateways（mTLS 注册心跳的在线登记，与 GET /gateways、
+	// diag 的 checkGateways/checkStealth 同源）。落一张网关表反而会造出第二个真相。
 	System(ctx context.Context) (SystemBundle, error)
 	AuthSrc(ctx context.Context) (AuthSrcBundle, error)
 	Security(ctx context.Context) (SecurityBundle, error)

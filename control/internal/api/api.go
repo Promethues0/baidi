@@ -303,7 +303,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/audit/forward/{id}/secret", s.handleSetAuditForwardSecret)
 	mux.HandleFunc("POST /api/v1/audit/forward/{id}/test", s.handleTestAuditForwardTarget)
 	mux.HandleFunc("POST /api/v1/audit/forward/{id}/flush", s.handleFlushAuditForwardTarget)
-	// 网关与隐身：区域/节点拓扑 + SPA
+	// 网关与隐身：已注册网关节点 + 敲门口径（数据源 = mTLS 注册心跳，见 gatewaypage.go）
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
 
 	// 系统管理：三权分立（管理员角色 + 管理员账号）+ 集群状态。
@@ -1493,14 +1493,8 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, b)
 }
 
-func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
-	b, err := s.store.Gateway(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load gateway")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, b)
-}
+// handleGateway 已搬到 gatewaypage.go：它现在按 mTLS 注册心跳的真实网关构建，
+// 不再读 store 的区域拓扑种子（那张「华东/华南出口」是编的）。
 
 func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 	b, err := s.store.Apps(r.Context())

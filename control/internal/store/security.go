@@ -8,6 +8,21 @@ type SecurityBundle struct {
 	Spa       SpaStatus        `json:"spa"`
 }
 
+// SpaStatus SPA 服务隐身概览。
+//
+// ★类型原本住在 store/gateway.go 里，那个文件连同它的「华东/华南出口」种子拓扑
+// 已整体删除（网关与隐身页改由 api 层按 mTLS 注册心跳的真实网关构建，见
+// api/gatewaypage.go）。这里只剩安全中心页在用，且这一份**仍是种子**：
+// generation/hidden/knockOk 三项在控制面没有真实来源（控制面不从外部实测端口
+// 可见性），下一波脱壳时应按同样口径处理。
+type SpaStatus struct {
+	Generation     string   `json:"generation"` // G2 | G3 | G4
+	AuthMode       string   `json:"authMode"`
+	ProtectedPorts []string `json:"protectedPorts"`
+	Hidden         bool     `json:"hidden"`
+	KnockOK        bool     `json:"knockOk"`
+}
+
 // BaselinePolicy 安全基线策略（应用防护 / 上线准入），含分平台条件与处置。
 type BaselinePolicy struct {
 	ID        string          `json:"id"`

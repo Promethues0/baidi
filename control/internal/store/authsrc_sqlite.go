@@ -239,13 +239,25 @@ func (s *SQLiteStore) BindExternalUser(ctx context.Context, sourceID string, ext
 	if name == "" {
 		name = account
 	}
+	// 组织归属必须落 org_id，不能只写展示用的 org/org_key。
+	//
+	// ★此前这里写的是 org='外部目录', org_key='ext'，org_id 留空，症状分两头且都不报错：
+	//   - 控制台按 orgKey 过滤组织树，这批人**看起来**就在「外包人员」部门下；
+	//   - 而 store.SubjectIndex 是 users JOIN org_units ON o.id=u.org_id，org_id 为空
+	//     的行直接被排除 → 把资源授权给该组织、或把「一律二次认证」策略绑到该组织，
+	//     对外部目录来的账号一律不生效。资源侧 fail-closed（连不上，可查），
+	//     策略侧 fail-open（该强制二次认证的人静默走单因素）——后者正是要防的。
+	orgID, orgName, err := ensureExternalOrgUnit(ctx, tx)
+	if err != nil {
+		return Credential{}, err
+	}
 	id := "u-" + uuid.NewString()[:8]
 	// role 恒为 user：外部目录说你是谁，不代表你在白帝里是管理员。
 	// 提权必须是白帝这侧的显式动作，否则谁能改 AD 的组，谁就能给自己发管理员。
 	if _, err := tx.ExecContext(ctx,
-		`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		id, name, account, "外部目录", "ext", "—", "—", "外部认证源", "—", 0, "active", "none",
+		`INSERT INTO users(id,name,account,org,org_key,org_id,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		id, name, account, orgName, orgID, orgID, "—", "—", "外部认证源", "—", 0, "active", "none",
 		`["外部用户"]`, nowStr(), "", "user"); err != nil {
 		return Credential{}, err
 	}
@@ -266,6 +278,73 @@ ON CONFLICT(source_id,subject) DO UPDATE SET user_id=excluded.user_id, username=
 		return Credential{}, err
 	}
 	return Credential{ID: id, Name: name, Account: account, Role: "user", Status: "active", PassHash: ""}, nil
+}
+
+// externalOrgUnitID 外部目录账号的组织归属 id。
+//
+// 沿用种子组织树里「外包人员」那个 id：既有库升级上来时它已经存在（backfillOrgUnits
+// 建的），种子策略 ap-ext-strict 的适用范围也正是它——换一个新 id 反而会让存量授权
+// 与策略集体落空。
+const externalOrgUnitID = "ext"
+
+// extUserOrgBackfillMarker 一次性标记：把外部账号的 org_id 从 org_key 补齐只做一次。
+//
+// ★做成一次性而不是每次启动都补：管理员完全可能显式把某个账号的组织归属清空
+// （org_id=''），每次启动都按陈旧的 org_key 补回去，等于管理员的操作被静默撤销。
+const extUserOrgBackfillMarker = "org.extuser.orgid.v1"
+
+// ensureExternalOrgUnit 确保「外部目录」这个组织单元存在，返回它的 id 与名称。
+//
+// 为什么要当场建而不是"没有就算了"：没有组织归属的外部账号既不被任何组织授权覆盖，
+// 也不被任何按组织生效的认证策略覆盖——后者是 fail-open 的（该二次认证的人不被要求），
+// 而且从页面上完全看不出来。宁可多一个组织单元，也不要一批"谁都管不到"的账号。
+func ensureExternalOrgUnit(ctx context.Context, tx *sql.Tx) (string, string, error) {
+	var name string
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT name FROM org_units WHERE id=?`, externalOrgUnitID).Scan(&name); err {
+	case nil:
+		return externalOrgUnitID, name, nil
+	case sql.ErrNoRows:
+	default:
+		return "", "", err
+	}
+	// 挂到根组织下（有根就挂根，没有就做一个顶层组织）。物化 path 的算法与
+	// SaveOrgUnit 一致：父 path + 自己的 id + "/"，否则子树查询会漏掉它。
+	parent, parentPath := "", "/"
+	switch err := tx.QueryRowContext(ctx,
+		`SELECT id, COALESCE(path,'/') FROM org_units WHERE COALESCE(parent_id,'')='' ORDER BY COALESCE(created_at,''), id LIMIT 1`).
+		Scan(&parent, &parentPath); err {
+	case nil:
+	case sql.ErrNoRows:
+		parent, parentPath = "", "/"
+	default:
+		return "", "", err
+	}
+	name = "外部目录"
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO org_units(id,name,parent_id,path,sort,created_at) VALUES(?,?,?,?,?,?)`,
+		externalOrgUnitID, name, parent, parentPath+externalOrgUnitID+"/", 95, nowStr()); err != nil {
+		return "", "", err
+	}
+	return externalOrgUnitID, name, nil
+}
+
+// backfillExternalUserOrg 给「有 org_key、没 org_id」的存量行补上组织归属。
+//
+// 直接受益的是外部目录账号：BindExternalUser 在本轮之前只写 org_key='ext'，
+// 那批行在 SubjectIndex 里被 JOIN 排除，组织授权与策略适用范围一个都覆盖不到。
+// 语句与 backfillOrgUnits 第 3 步同形，但**独立标记**——那一步的标记早已置位，
+// 借它的车这批行永远补不上（补列/回填只跑一次这条纪律的另一面）。
+func (s *SQLiteStore) backfillExternalUserOrg(ctx context.Context) error {
+	if _, done, err := s.Setting(ctx, extUserOrgBackfillMarker); err != nil || done {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE users SET org_id=org_key WHERE COALESCE(org_id,'')='' AND COALESCE(org_key,'')<>''
+		   AND org_key IN (SELECT id FROM org_units)`); err != nil {
+		return err
+	}
+	return s.SetSetting(ctx, extUserOrgBackfillMarker, nowStr())
 }
 
 // seedLocalAuthSource 确保「本地目录」这条认证源恒存在。

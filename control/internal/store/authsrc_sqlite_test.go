@@ -295,3 +295,157 @@ func TestAuthSourceSecret_指纹不解密即可读到(t *testing.T) {
 		t.Fatalf("改凭据后指纹应更新，实得 %q——不更新会让管理员以为还是旧的那把", one.SecretFingerprint)
 	}
 }
+
+// ★外部账号必须真正落进组织：org_id 是 SubjectIndex 的 JOIN 键，只写 org_key
+// 会让这批人"页面上在外包部门里、授权与策略却一个都覆盖不到"。
+//
+// 两个方向各一条断言，正是这个洞两头都不报错的原因：
+//   - 资源侧把资源授权给该组织 → 展开里必须有他（此前是 fail-closed：连不上）；
+//   - 策略侧种子策略 ap-ext-strict（ScopeOrgs=["ext"]）→ 覆盖必须成立
+//     （此前是 fail-open：该强制二次认证的人静默走单因素，谁也看不见）。
+func TestBindExternalUser_落进组织并被主体展开覆盖(t *testing.T) {
+	st := newAuthSrcStore(t)
+	ctx := context.Background()
+
+	c, err := st.BindExternalUser(ctx, "ldap-1", ExternalIdentity{
+		Subject: "CN=wu.tao,OU=Vendor,DC=corp", Username: "wu.tao", DisplayName: "吴涛",
+	})
+	if err != nil {
+		t.Fatalf("绑定失败：%v", err)
+	}
+	b, err := st.Users(ctx)
+	if err != nil {
+		t.Fatalf("Users: %v", err)
+	}
+	var bound DirUser
+	for _, u := range b.Users {
+		if u.Account == c.Account {
+			bound = u
+		}
+	}
+	if bound.OrgID == "" {
+		t.Fatal("外部账号的 org_id 为空：SubjectIndex 按 org_id JOIN，这批人不会被任何组织授权/策略覆盖")
+	}
+
+	ix, err := st.SubjectIndex(ctx)
+	if err != nil {
+		t.Fatalf("SubjectIndex: %v", err)
+	}
+	hit := func(accs []string) bool {
+		for _, a := range accs {
+			if a == strings.ToLower(c.Account) {
+				return true
+			}
+		}
+		return false
+	}
+	if !hit(ix.OrgAccounts[bound.OrgID]) {
+		t.Errorf("外部账号未出现在自己所属组织 %s 的展开里：%v", bound.OrgID, ix.OrgAccounts[bound.OrgID])
+	}
+	// 子树继承：授权给根组织也应覆盖他
+	orgs, _ := st.OrgUnits(ctx)
+	for _, o := range orgs {
+		if o.ParentID == "" && !hit(ix.OrgAccounts[o.ID]) {
+			t.Errorf("授权给根组织 %s 未覆盖外部账号（子树继承断了）", o.ID)
+		}
+	}
+	// 种子策略 ap-ext-strict 的适用范围（ScopeOrgs=["ext"]）必须真的圈到他
+	if !hit(ix.OrgAccounts["ext"]) {
+		t.Error("绑「外包人员」组织的认证策略覆盖不到外部账号——该强制二次认证的人会静默走单因素")
+	}
+}
+
+// 组织被管理员删掉之后，下一个外部身份首登要能把它建回来——
+// 没有组织归属的外部账号谁都管不到，而且从页面上看不出来。
+func TestBindExternalUser_外部组织缺失时当场建出(t *testing.T) {
+	st := newAuthSrcStore(t)
+	ctx := context.Background()
+	// 先腾空并删掉 ext（种子策略引用着它，先解除绑定）
+	users, _ := st.Users(ctx)
+	for _, u := range users.Users {
+		if u.OrgID == externalOrgUnitID {
+			if err := st.SetUserOrg(ctx, u.ID, "dev"); err != nil {
+				t.Fatalf("SetUserOrg: %v", err)
+			}
+		}
+	}
+	pols, _ := st.AuthPolicies(ctx)
+	for _, p := range pols {
+		if len(p.ScopeOrgs) > 0 {
+			p.ScopeOrgs = []string{"dev"}
+			if _, err := st.SaveAuthPolicy(ctx, p); err != nil {
+				t.Fatalf("改策略范围: %v", err)
+			}
+		}
+	}
+	if err := st.DeleteOrgUnit(ctx, externalOrgUnitID); err != nil {
+		t.Fatalf("删外部组织: %v", err)
+	}
+
+	c, err := st.BindExternalUser(ctx, "oidc-1", ExternalIdentity{
+		Subject: "sub-9527", Username: "sun.li", DisplayName: "孙丽",
+	})
+	if err != nil {
+		t.Fatalf("绑定失败：%v", err)
+	}
+	orgs, _ := st.OrgUnits(ctx)
+	var ext Org
+	for _, o := range orgs {
+		if o.ID == externalOrgUnitID {
+			ext = o
+		}
+	}
+	if ext.ID == "" {
+		t.Fatal("外部组织缺失时未被建回来")
+	}
+	if ext.Path != "/root/"+externalOrgUnitID+"/" {
+		t.Errorf("物化 path 必须与 SaveOrgUnit 同算法（父 path + id + /），得到 %q", ext.Path)
+	}
+	ix, _ := st.SubjectIndex(ctx)
+	found := false
+	for _, a := range ix.OrgAccounts[externalOrgUnitID] {
+		if a == strings.ToLower(c.Account) {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("新建的外部组织没能把账号展开出来")
+	}
+}
+
+// 存量行回填：本轮之前 BindExternalUser 只写 org_key='ext'、org_id 为空。
+// 补列/补写必须配回填，否则那批账号永远在 SubjectIndex 之外（无报错、无痕迹）。
+func TestBackfillExternalUserOrg(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "extorg.db")
+	s1, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open#1: %v", err)
+	}
+	ctx := context.Background()
+	c, err := s1.BindExternalUser(ctx, "ldap-1", ExternalIdentity{
+		Subject: "CN=legacy,OU=Vendor,DC=corp", Username: "legacy.user",
+	})
+	if err != nil {
+		t.Fatalf("绑定失败：%v", err)
+	}
+	// 退回旧形态：org_id 清空 + 抹掉回填标记
+	if _, err := s1.db.ExecContext(ctx, `UPDATE users SET org_id='' WHERE account=?`, c.Account); err != nil {
+		t.Fatalf("退回旧形态: %v", err)
+	}
+	if _, err := s1.db.ExecContext(ctx, `DELETE FROM settings WHERE k=?`, extUserOrgBackfillMarker); err != nil {
+		t.Fatalf("删标记: %v", err)
+	}
+	s1.Close()
+
+	s2, err := OpenSQLite(path)
+	if err != nil {
+		t.Fatalf("open#2: %v", err)
+	}
+	defer s2.Close()
+	b, _ := s2.Users(ctx)
+	for _, u := range b.Users {
+		if u.Account == c.Account && u.OrgID == "" {
+			t.Fatal("既有外部账号的 org_id 未被回填：这批人永远不在任何组织授权/策略的覆盖里")
+		}
+	}
+}

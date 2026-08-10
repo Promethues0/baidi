@@ -142,6 +142,12 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err := s.backfillOrgUnits(context.Background()); err != nil {
 		return nil, err
 	}
+	// ★必须排在 backfillOrgUnits 之后：它只补「org_key 指向一个真实存在的组织」的行，
+	// 而那些组织正是上一步建出来的。补的是本轮之前 BindExternalUser 留下的
+	// 「org_key='ext' 但 org_id 为空」——那批行在 SubjectIndex 里被 JOIN 排除。
+	if err := s.backfillExternalUserOrg(context.Background()); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 

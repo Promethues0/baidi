@@ -3,7 +3,7 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">系统管理</div>
-        <div class="bd-page__sub">三权分立 · 分级分权 · 集群</div>
+        <div class="bd-page__sub">三权分立 · 分级分权 · 消息通道 · 集群</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '未连控制中心' }}</a-tag>
@@ -13,6 +13,7 @@
     <!-- Tab 切换 -->
     <div class="bd-tabs">
       <span class="bd-tab" :class="{ on: tab === 'admin' }" @click="tab = 'admin'">管理员与三权分立</span>
+      <span class="bd-tab" :class="{ on: tab === 'notify' }" @click="tab = 'notify'">消息通道</span>
       <span class="bd-tab" :class="{ on: tab === 'cluster' }" @click="tab = 'cluster'">集群</span>
     </div>
 
@@ -125,6 +126,166 @@
       </div>
     </div>
 
+    <!-- ============ 消息通道（PRD ch15.2）============ -->
+    <div v-show="tab === 'notify'">
+      <div class="bd-section-title">消息通道</div>
+      <div class="bd-sep__note">
+        <icon-notification />
+        <span>
+          安全事件（<b>账号被爆破锁定</b>、<b>终端被判不合规</b>）会向下面每一条<b>已启用</b>的通道各发一份。
+          发送成功与失败都会落审计，并写进「上次发送」列——那一列显示的是<b>真正发出去那一次</b>的结果，
+          保存配置不会把它刷成绿色。
+        </span>
+      </div>
+      <div v-if="smsNote" class="bd-warn">
+        <icon-exclamation-circle-fill />{{ smsNote }}
+      </div>
+      <div v-if="notifyErr" class="bd-warn"><icon-exclamation-circle-fill />{{ notifyErr }}</div>
+      <div v-if="dropped > 0" class="bd-warn">
+        <icon-exclamation-circle-fill />
+        通知队列已累计丢弃 <b>{{ dropped }}</b> 条（队列满时丢新保旧）。安全处置本身不受影响，但这段时间的告警确实没发出去。
+      </div>
+
+      <div class="bd-tablecard">
+        <div class="bd-toolbar">
+          <span class="bd-hint">凭据（SMTP 口令 / 请求头 token）加密独立存放，<b>只写不读</b>——界面只能看到指纹前 8 位。</span>
+          <div style="margin-left: auto; display: flex; gap: 10px">
+            <button class="bd-btn bd-btn--ghost" @click="reloadNotify"><icon-refresh />刷新</button>
+            <button class="bd-btn" @click="openChannel()"><icon-plus />新建通道</button>
+          </div>
+        </div>
+        <table class="bd-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>目标</th>
+              <th>状态</th>
+              <th>凭据</th>
+              <th>上次发送</th>
+              <th class="r">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="c in channels" :key="c.id">
+              <td><b>{{ c.name }}</b><i class="bd-mono" style="display: block">{{ c.id }}</i></td>
+              <td>
+                <span class="bd-tg" :style="tagStyle(kindColor(c.kind))">{{ kindText(c.kind) }}</span>
+              </td>
+              <td class="bd-mono bd-target">{{ channelTarget(c) }}</td>
+              <td>
+                <span v-if="c.enabled" class="bd-tg" :style="tagStyle('#00B42A')">已启用</span>
+                <span v-else class="bd-tg" :style="tagStyle('#86909C')">已停用</span>
+              </td>
+              <td>
+                <span v-if="c.hasSecret" class="bd-mono">已配置 · {{ c.secretFingerprint }}</span>
+                <span v-else class="bd-hint">未配置</span>
+              </td>
+              <td>
+                <span v-if="!c.lastStatus" class="bd-hint">从未发送</span>
+                <span v-else>
+                  <span class="bd-tg" :style="tagStyle(c.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                    {{ c.lastStatus === 'ok' ? '成功' : '失败' }}
+                  </span>
+                  <i class="bd-mono" style="display: block">{{ lastAtText(c.lastAt) }} · {{ c.lastEvent }}</i>
+                  <i class="bd-lastdetail">{{ c.lastDetail }}</i>
+                </span>
+              </td>
+              <td class="r">
+                <span class="bd-link" @click="testChannel(c)">测试</span>
+                <span class="bd-link" style="margin-left: 12px" @click="openChannel(c)">编辑</span>
+                <span class="bd-link" style="margin-left: 12px" @click="openSecret(c)">设凭据</span>
+                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeChannel(c)">删除</span>
+              </td>
+            </tr>
+            <tr v-if="!channels.length">
+              <td colspan="7" class="bd-empty">
+                还没有任何消息通道——安全事件目前只落审计，不会主动通知任何人。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 新建 / 编辑消息通道 -->
+    <a-modal v-model:visible="chanOpen" :title="chanForm.id ? '编辑消息通道' : '新建消息通道'"
+      :confirm-loading="saving" @ok="submitChannel" @cancel="chanOpen = false">
+      <a-form :model="chanForm" layout="vertical">
+        <a-form-item label="名称"><a-input v-model="chanForm.name" placeholder="如 SOC 邮件组" /></a-form-item>
+        <a-form-item label="类型">
+          <a-select v-model="chanForm.kind" :disabled="!!chanForm.id">
+            <a-option v-for="k in supportedKinds" :key="k" :value="k">{{ kindText(k) }}</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model="chanForm.enabled">启用（安全事件会向它发送）</a-checkbox>
+        </a-form-item>
+
+        <template v-if="chanForm.kind === 'smtp'">
+          <a-form-item label="服务器">
+            <a-input v-model="chanForm.host" placeholder="smtp.corp.example" style="flex: 2" />
+            <a-input-number v-model="chanForm.port" placeholder="端口" :min="1" :max="65535" style="margin-left: 8px; width: 120px" />
+          </a-form-item>
+          <a-form-item label="传输加密" help="STARTTLS 协商失败绝不降级明文——后端会直接报错，不会偷偷用明文把口令发出去">
+            <a-select v-model="chanForm.tlsMode">
+              <a-option value="starttls">STARTTLS（587/25，推荐）</a-option>
+              <a-option value="implicit">隐式 TLS（465）</a-option>
+              <a-option value="plaintext">明文（仅限本机中继；此模式下不允许配置认证）</a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="认证方式">
+            <a-select v-model="chanForm.authMode">
+              <a-option value="none">匿名（内网按 IP 放行的中继）</a-option>
+              <a-option value="plain">AUTH PLAIN</a-option>
+              <a-option value="login">AUTH LOGIN（Exchange / 部分国产网关只认它）</a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item v-if="chanForm.authMode !== 'none'" label="账号" help="口令走「设凭据」单独提交，只写不读">
+            <a-input v-model="chanForm.username" placeholder="alarm@corp.example" />
+          </a-form-item>
+          <a-form-item label="发件人"><a-input v-model="chanForm.from" placeholder="baidi@corp.example" /></a-form-item>
+          <a-form-item label="收件人" help="多个用逗号分隔；为空时发送会直接报错，不会静默丢弃">
+            <a-input v-model="chanForm.recipients" placeholder="soc@corp.example, ops@corp.example" />
+          </a-form-item>
+          <a-form-item label="服务端证书名（可选）" help="用 IP 连接但证书签的是主机名时填这里，比跳过证书校验正确得多">
+            <a-input v-model="chanForm.serverName" placeholder="mail.corp.example" />
+          </a-form-item>
+          <a-form-item label="自定义 CA（可选，PEM）" help="填了就只信这一把——内网 MTA 多是私有 CA 签的，'系统池 ∪ 私有 CA' 反而更宽">
+            <a-textarea v-model="chanForm.caCert" :auto-size="{ minRows: 2, maxRows: 5 }"
+              placeholder="-----BEGIN CERTIFICATE-----" />
+          </a-form-item>
+        </template>
+
+        <template v-else>
+          <a-form-item label="URL"><a-input v-model="chanForm.url" placeholder="https://hook.corp.example/baidi" /></a-form-item>
+          <a-form-item label="凭据头名（可选）" help="填了就必须再用「设凭据」提交头值；头值加密存放，只写不读">
+            <a-input v-model="chanForm.secretHeader" placeholder="Authorization" />
+          </a-form-item>
+          <a-form-item :label="chanForm.kind === 'sms' ? '手机号' : '收件人（进载荷 to 字段，可空）'"
+            :help="chanForm.kind === 'sms' ? '多个用逗号分隔；为空时发送直接报错' : '多个用逗号分隔'">
+            <a-input v-model="chanForm.recipients" :placeholder="chanForm.kind === 'sms' ? '13800000000' : 'soc@corp.example'" />
+          </a-form-item>
+          <div v-if="chanForm.kind === 'sms'" class="bd-hint" style="margin-bottom: 12px; line-height: 1.7">
+            短信通道<b>就是一次 webhook 调用</b>：白帝把 <i class="bd-mono">{{ '{ mobiles, text }' }}</i> POST 给这个 URL，
+            由你自己搭的一跳转成运营商 / 云厂商的请求。白帝<b>不实现</b>任何短信网关协议。
+          </div>
+        </template>
+      </a-form>
+    </a-modal>
+
+    <!-- 设置通道凭据 -->
+    <a-modal v-model:visible="secretOpen" title="设置通道凭据" :confirm-loading="saving"
+      @ok="submitSecret" @cancel="secretOpen = false">
+      <a-form :model="secretForm" layout="vertical">
+        <a-form-item label="通道"><a-input v-model="secretForm.name" disabled /></a-form-item>
+        <a-form-item label="凭据"
+          help="SMTP 通道填口令；webhook / 短信通道填凭据头的取值（如 Bearer xxx）。提交后无法回显，只能覆盖。">
+          <a-input-password v-model="secretForm.secret" placeholder="提交后只写不读" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
     <!-- ============ 集群（未部署的诚实空态）============ -->
     <div v-show="tab === 'cluster'">
       <div class="bd-card bd-empty bd-empty--lg">
@@ -192,9 +353,13 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo } from '@/lib/api';
+import {
+  api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo,
+  type NotifyChannel, type NotifyChannelsResp, type NotifyTestResp, type SaveNotifyChannelResp,
+  type SmtpChannelConfig, type WebhookChannelConfig
+} from '@/lib/api';
 
-const tab = ref<'admin' | 'cluster'>('admin');
+const tab = ref<'admin' | 'notify' | 'cluster'>('admin');
 const live = ref(false);
 const err = ref('');
 const kw = ref('');
@@ -269,7 +434,185 @@ async function load(toast = false) {
   }
 }
 function reload() { void load(true); }
-onMounted(() => { void load(); });
+onMounted(() => { void load(); void loadNotify(); });
+
+/* ── 消息通道（PRD ch15.2）────────────────────────────────────────────
+ * 全部来自 GET /api/v1/notify/channels（notify_channels 表）。这一页刻意**没有**
+ * 内置演示数据：编一条假的 SMTP 配置，比空着更容易让人以为告警已经能发出去。
+ */
+const channels = ref<NotifyChannel[]>([]);
+const supportedKinds = ref<string[]>(['smtp', 'webhook', 'sms']);
+const smsNote = ref('');
+const dropped = ref(0);
+const notifyErr = ref('');
+
+async function loadNotify(toast = false) {
+  try {
+    const b = await api<NotifyChannelsResp>('/notify/channels');
+    channels.value = b.channels ?? [];
+    supportedKinds.value = b.supportedKinds?.length ? b.supportedKinds : supportedKinds.value;
+    smsNote.value = b.smsNote ?? '';
+    dropped.value = b.droppedNotices ?? 0;
+    notifyErr.value = '';
+    if (toast) Message.success('已刷新');
+  } catch (e) {
+    channels.value = [];
+    const msg = e instanceof Error ? e.message : String(e);
+    notifyErr.value = msg.includes('403')
+      ? '当前角色无权查看消息通道（该页归系统管理员一权）'
+      : '未连控制中心，消息通道不可用：' + msg;
+    if (toast) Message.error('刷新失败');
+  }
+}
+function reloadNotify() { void loadNotify(true); }
+
+function kindText(k: string) {
+  switch (k) {
+    case 'smtp': return '邮件 SMTP';
+    case 'webhook': return 'Webhook';
+    // ★如实标注：这条通道不是短信协议实现，只是把消息 POST 给用户自己的对接服务。
+    case 'sms': return '短信（webhook 适配）';
+    default: return k;
+  }
+}
+function kindColor(k: string) {
+  return k === 'smtp' ? '#165DFF' : k === 'sms' ? '#722ED1' : '#00B42A';
+}
+function parseCfg<T>(raw: string): Partial<T> {
+  try { return JSON.parse(raw || '{}') as Partial<T>; } catch { return {}; }
+}
+/** 目标列显示的是配置里真实要拨过去的那个地址，不是通道名。 */
+function channelTarget(c: NotifyChannel) {
+  if (c.kind === 'smtp') {
+    const cfg = parseCfg<SmtpChannelConfig>(c.config);
+    return cfg.host ? `${cfg.host}:${cfg.port || (cfg.tlsMode === 'implicit' ? 465 : 587)}` : '—';
+  }
+  return parseCfg<WebhookChannelConfig>(c.config).url || '—';
+}
+function lastAtText(ts?: number) {
+  if (!ts) return '—';
+  return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false });
+}
+function splitList(s: string) {
+  return s.split(/[,，\s]+/).map((x) => x.trim()).filter(Boolean);
+}
+
+const chanOpen = ref(false);
+const chanForm = reactive({
+  id: '', name: '', kind: 'smtp', enabled: true,
+  // smtp
+  host: '', port: 587, tlsMode: 'starttls', authMode: 'none', username: '',
+  from: '', serverName: '', caCert: '',
+  // webhook / sms
+  url: '', secretHeader: '',
+  // 两类共用
+  recipients: ''
+});
+
+function openChannel(c?: NotifyChannel) {
+  Object.assign(chanForm, {
+    id: '', name: '', kind: supportedKinds.value[0] ?? 'smtp', enabled: true,
+    host: '', port: 587, tlsMode: 'starttls', authMode: 'none', username: '',
+    from: '', serverName: '', caCert: '', url: '', secretHeader: '', recipients: ''
+  });
+  if (c) {
+    chanForm.id = c.id; chanForm.name = c.name; chanForm.kind = c.kind; chanForm.enabled = c.enabled;
+    if (c.kind === 'smtp') {
+      const cfg = parseCfg<SmtpChannelConfig>(c.config);
+      chanForm.host = cfg.host ?? ''; chanForm.port = cfg.port ?? 587;
+      chanForm.tlsMode = cfg.tlsMode ?? 'starttls'; chanForm.authMode = cfg.authMode ?? 'none';
+      chanForm.username = cfg.username ?? ''; chanForm.from = cfg.from ?? '';
+      chanForm.serverName = cfg.serverName ?? '';
+      chanForm.caCert = cfg.caCert ?? '';
+      chanForm.recipients = (cfg.recipients ?? []).join(', ');
+    } else {
+      const cfg = parseCfg<WebhookChannelConfig>(c.config);
+      chanForm.url = cfg.url ?? ''; chanForm.secretHeader = cfg.secretHeader ?? '';
+      chanForm.recipients = (cfg.recipients ?? []).join(', ');
+    }
+  }
+  chanOpen.value = true;
+}
+
+async function submitChannel() {
+  if (!chanForm.name.trim()) { Message.warning('名称不能为空'); return; }
+  const config: SmtpChannelConfig | WebhookChannelConfig = chanForm.kind === 'smtp'
+    ? {
+        host: chanForm.host.trim(), port: Number(chanForm.port) || 0,
+        tlsMode: chanForm.tlsMode as SmtpChannelConfig['tlsMode'],
+        serverName: chanForm.serverName.trim() || undefined,
+        caCert: chanForm.caCert.trim() || undefined,
+        authMode: chanForm.authMode as SmtpChannelConfig['authMode'],
+        username: chanForm.username.trim() || undefined,
+        from: chanForm.from.trim(),
+        recipients: splitList(chanForm.recipients)
+      }
+    : {
+        url: chanForm.url.trim(),
+        secretHeader: chanForm.secretHeader.trim() || undefined,
+        recipients: splitList(chanForm.recipients)
+      };
+  saving.value = true;
+  try {
+    const r = await api<SaveNotifyChannelResp>('/notify/channels', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: chanForm.id, name: chanForm.name.trim(), kind: chanForm.kind,
+        enabled: chanForm.enabled, config
+      })
+    });
+    // 后端「保存即校验」：配置存下了但当前不可用时要把原因原样显示，
+    // 不能只报一句"已保存"——那正是"配置齐全却发不出去"的温床。
+    if (r.warning) Message.warning(r.warning);
+    else Message.success('消息通道已落库');
+    chanOpen.value = false;
+    await loadNotify();
+  } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }
+}
+
+const secretOpen = ref(false);
+const secretForm = reactive({ id: '', name: '', secret: '' });
+function openSecret(c: NotifyChannel) {
+  secretForm.id = c.id; secretForm.name = `${c.name}（${kindText(c.kind)}）`; secretForm.secret = '';
+  secretOpen.value = true;
+}
+async function submitSecret() {
+  if (!secretForm.secret) { Message.warning('凭据不能为空'); return; }
+  saving.value = true;
+  try {
+    await api(`/notify/channels/${encodeURIComponent(secretForm.id)}/secret`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: secretForm.secret })
+    });
+    Message.success('凭据已更新（只写不读，界面只保留指纹）');
+    secretOpen.value = false;
+    await loadNotify();
+  } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }
+}
+
+/** 测试连接：后端真发一条消息，成功与失败都是真实结果（不存在"假成功"）。 */
+async function testChannel(c: NotifyChannel) {
+  try {
+    const r = await api<NotifyTestResp>(`/notify/channels/${encodeURIComponent(c.id)}/test`, { method: 'POST' });
+    if (r.ok) Message.success(`「${c.name}」发送成功：${r.detail}`);
+    else Message.error(`「${c.name}」发送失败：${r.detail}`);
+  } catch (e) { opError(e, '测试失败'); } finally { await loadNotify(); }
+}
+
+function removeChannel(c: NotifyChannel) {
+  Modal.warning({
+    title: '删除消息通道',
+    content: `删除「${c.name}」及其凭据。删掉最后一条通道后，账号被爆破锁定、终端被判不合规都不会再通知任何人（仍会落审计）。`,
+    hideCancel: false,
+    onOk: async () => {
+      try {
+        await api(`/notify/channels/${encodeURIComponent(c.id)}`, { method: 'DELETE' });
+        Message.success('通道已删除');
+        await loadNotify();
+      } catch (e) { opError(e, '删除失败'); }
+    }
+  });
+}
 
 /* ── 写操作 ── */
 function opError(e: unknown, fallback: string) {
@@ -422,6 +765,13 @@ function removeRole(g: AdminRole) {
 /* 搜索框内 input 复位 */
 .bd-searchbox input { border: none; background: transparent; outline: none; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
 .bd-btn--ghost :deep(svg), .bd-btn :deep(svg) { font-size: 14px; }
+
+/* 消息通道表 */
+.bd-target { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-lastdetail {
+  display: block; max-width: 320px; font-size: 11.5px; color: var(--bd-t3);
+  line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
 
 /* 空态 */
 .bd-empty { text-align: center; color: var(--bd-t3); padding: 28px 0; }

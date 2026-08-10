@@ -149,6 +149,74 @@ export interface ClusterNode { name: string; ip: string; role: 'master' | 'backu
 export interface ClusterInfo { deployed: boolean; note: string; localNodes: ClusterNode[]; distNodes: ClusterNode[] }
 export interface SystemBundle { roles: AdminRole[]; admins: AdminAccount[]; cluster: ClusterInfo }
 
+/* ── 消息通道（store.NotifyChannel，PRD ch15.2）──
+ *
+ * ★三种类型的边界要照实说：smtp / webhook 是真实现；sms **就是一次 webhook 调用**
+ * （载荷 mobiles + text），白帝不实现任何短信网关协议——后端会把这句话随
+ * smsNote 一起下发，界面照抄，不许自己写成"已支持某某云短信"。
+ */
+export type NotifyKind = 'smtp' | 'webhook' | 'sms';
+
+export interface NotifyChannel {
+  id: string;
+  name: string;
+  kind: NotifyKind | string;
+  enabled: boolean;
+  /** 非敏感配置 JSON 字符串（敏感项在独立加密表，不在这里）。 */
+  config: string;
+  /** 凭据是否已配置。原文永不回显——只写不读。 */
+  hasSecret: boolean;
+  /** 凭据指纹前 8 位，供核对"是不是同一把"。 */
+  secretFingerprint?: string;
+  /** 上次发送结果。★只由**真正发出那一次**写入，保存配置不会碰它。 */
+  lastStatus?: 'ok' | 'fail' | '';
+  lastDetail?: string;
+  lastEvent?: string;
+  lastAt?: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface NotifyChannelsResp {
+  channels: NotifyChannel[];
+  /** 后端真实实现了的类型；控制台据此置灰未实现项。 */
+  supportedKinds: string[];
+  /** 通知队列溢出被丢弃的**真实**累计条数：区分"压根没触发"与"触发了但没发出去"。 */
+  droppedNotices: number;
+  /** 短信通道的诚实标注，由后端下发、界面原样展示。 */
+  smsNote: string;
+}
+
+/** SMTP 通道配置（与 control 的 smtpChannelDTO 对齐）。 */
+export interface SmtpChannelConfig {
+  host: string;
+  port?: number;
+  tlsMode: 'starttls' | 'implicit' | 'plaintext';
+  serverName?: string;
+  caCert?: string;
+  insecureSkipVerify?: boolean;
+  authMode: 'none' | 'plain' | 'login';
+  username?: string;
+  from: string;
+  fromName?: string;
+  recipients: string[];
+  timeoutSec?: number;
+}
+
+/** Webhook / 短信通道配置（与 control 的 webhookChannelDTO 对齐）。 */
+export interface WebhookChannelConfig {
+  url: string;
+  headers?: Record<string, string>;
+  /** 凭据要注入的头名；头值在加密表里，只写不读。 */
+  secretHeader?: string;
+  /** webhook: 载荷里的 to；sms: 手机号。 */
+  recipients?: string[];
+  timeoutSec?: number;
+}
+
+export interface NotifyTestResp { ok: boolean; detail: string; elapsedMs?: number }
+export interface SaveNotifyChannelResp { ok: boolean; channel: NotifyChannel; warning?: string }
+
 /* ── 认证源接入（store.AuthSrcBundle）── */
 export interface AuthSource { key: string; name: string; type: 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert'; status: string; users: number; primary: boolean }
 export interface RuleCond { field: 'weakPwd' | 'geoAnomaly' | 'offHours' | 'riskScore' | 'untrustedDevice' | 'newDevice'; op: 'is' | 'gt' | 'in'; value: string }

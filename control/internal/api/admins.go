@@ -42,6 +42,36 @@ func (s *Server) requirePerm(w http.ResponseWriter, r *http.Request, perm string
 	return true
 }
 
+// requirePerms 要求**同时**持有多个权限键（交集，全过才放行）。
+//
+// ★存在的理由：三权分立里有一类动作跨了两权，任何单权都不该独自完成。目前唯一的
+// 用例是审计外送出口的增删（见 auditforward.go 的文件头）——它同时是"控制面往外拨号
+// 的运维配置"（system）和"决定全量审计正文流向哪台机器"（audit）。只挂 system 的话，
+// 一个读不到 /api/v1/audit 的系统管理员可以把全量审计实时外送到自己的收集器上，
+// 「只有审计权能读全量日志」这条不变量被整体绕开。
+//
+// 内置角色里只有 root 同时持有这些键；三权分立下的正解是由超管操作，或由超管建一个
+// 显式含 system+audit 的自定义角色（NormalizeCustomPerms 允许这种收缩组合）。
+func (s *Server) requirePerms(w http.ResponseWriter, r *http.Request, perms ...string) bool {
+	role, ok := s.currentAdminRole(w, r)
+	if !ok {
+		return false
+	}
+	for _, p := range perms {
+		if role.Allows(p) {
+			continue
+		}
+		c, _ := auth.FromContext(r.Context())
+		s.audit(r, "security", "拒绝越权："+c.Sub+"（角色「"+role.Name+"」）访问 "+
+			r.Method+" "+r.URL.Path+" 需要同时持有权限 "+strings.Join(perms, "+")+
+			"，缺少 "+p, "deny")
+		httpx.Error(w, http.StatusForbidden, "角色「"+role.Name+"」无权执行该操作（需要同时持有权限："+
+			strings.Join(perms, " + ")+"，当前缺少："+p+"）")
+		return false
+	}
+	return true
+}
+
 // currentAdminRole 解析调用方**此刻**生效的管理员角色，并在不通过时写好应答与审计。
 //
 // 令牌里的 role=admin 只是入场券；判据是 store.AdminRoleFor 现算的

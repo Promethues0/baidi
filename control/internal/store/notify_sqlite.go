@@ -143,6 +143,17 @@ ON CONFLICT(channel_id) DO UPDATE SET nonce=excluded.nonce, cipher=excluded.ciph
 	return err
 }
 
+// DeleteNotifyChannelSecret 清掉某通道的凭据（幂等，没有也不报错）。
+//
+// ★消费方是"通道目的地被改动"这一刻（api.handleSaveNotifyChannel）：AAD 绑 channel id
+// 挡住的是"把密文行剪贴到另一条通道上"，挡不住"记录还在原地、SMTP 主机被换成攻击者的"——
+// 后者改一次 config 再点一次「测试」，企业邮箱口令就以 AUTH PLAIN 送到了对面。
+// 保存**不改目的地**时仍然一律不动凭据（改个显示名不该让告警发不出去）。
+func (s *SQLiteStore) DeleteNotifyChannelSecret(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM notify_channel_secrets WHERE channel_id=?`, id)
+	return err
+}
+
 func (s *SQLiteStore) NotifyChannelSecret(ctx context.Context, id string) (NotifyChannelSecret, bool, error) {
 	sec := NotifyChannelSecret{ChannelID: id}
 	err := s.db.QueryRowContext(ctx,

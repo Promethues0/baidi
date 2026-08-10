@@ -188,6 +188,12 @@ func (s *SQLiteStore) AuditForwardSecret(ctx context.Context, id string) (AuditF
 	return sec, true, nil
 }
 
+// DeleteAuditForwardSecret 清掉某出口的凭据（幂等）。语义见接口注释。
+func (s *SQLiteStore) DeleteAuditForwardSecret(ctx context.Context, id string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM audit_forward_secrets WHERE target_id=?`, id)
+	return err
+}
+
 // ── 队列 ──
 
 // SetAuditForwardQueueMax 注入每出口的队列上界。

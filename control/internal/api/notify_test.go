@@ -165,6 +165,57 @@ func TestNotifyChannels_增改删与凭据只写不读(t *testing.T) {
 	}
 }
 
+// 改目的地即清凭据；不改目的地则一律不动。
+//
+// ★攻击面：SaveNotifyChannel 刻意不碰凭据表（改个显示名不该让告警发不出去），
+// 于是持 PermSystem 的管理员带上**已有通道的 id** 把 SMTP 主机换成自己的机器，
+// 再点一次「测试」，buildNotifyChannel 就会把解密后的企业邮箱口令以 AUTH PLAIN 送过去。
+// AAD 绑 channel id 挡的是"密文跨记录剪贴"，挡不住"记录还在原地、目的地被换掉"。
+func TestNotifyChannels_改目的地即清凭据(t *testing.T) {
+	f := newNotifyFixture(t)
+	tok := makeAdmin(t, f.h, "sys.admin", "system")
+	url, _ := hookServer(t, http.StatusOK)
+	id := createHookChannel(t, f, tok, "SOC webhook", url, true)
+
+	// ① 只改显示名：凭据必须还在。
+	code, out := doJSON(t, f.h, "POST", "/api/v1/notify/channels", tok, map[string]any{
+		"id": id, "name": "SOC webhook（主）", "kind": "webhook", "enabled": true,
+		"config": map[string]any{"url": url, "secretHeader": "Authorization", "timeoutSec": 5},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("改名 http %d: %v", code, out)
+	}
+	if out["secretCleared"] == true || out["channel"].(map[string]any)["hasSecret"] != true {
+		t.Fatalf("只改显示名不该清凭据：%v", out)
+	}
+
+	// ② 把 URL 换成攻击者的地址：凭据必须当场清掉，且请求头里再也拿不到它。
+	evilURL, evilGot := hookServer(t, http.StatusOK)
+	code, out = doJSON(t, f.h, "POST", "/api/v1/notify/channels", tok, map[string]any{
+		"id": id, "name": "SOC webhook（主）", "kind": "webhook", "enabled": true,
+		"config": map[string]any{"url": evilURL, "secretHeader": "Authorization", "timeoutSec": 5},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("改 URL http %d: %v", code, out)
+	}
+	if out["secretCleared"] != true || out["channel"].(map[string]any)["hasSecret"] != false {
+		t.Fatalf("改了目的地必须清凭据：%v", out)
+	}
+	// 现在去「测试」：应当因为"配了凭据头却没有凭据"而失败，且新地址收不到任何请求。
+	code, out = doJSON(t, f.h, "POST", "/api/v1/notify/channels/"+id+"/test", tok, nil)
+	if code != http.StatusOK || out["ok"] != false {
+		t.Fatalf("凭据被清后测试应如实失败：%d %v", code, out)
+	}
+	for _, p := range evilGot() {
+		if h, _ := p["_authHeader"].(string); h != "" {
+			t.Fatalf("★换了目的地之后凭据仍被送了出去：%q", h)
+		}
+	}
+	if !auditHasEvent(t, f.h, "原有凭据已一并清除") {
+		t.Fatal("凭据被清这件事必须落审计")
+	}
+}
+
 // ★「测试连接」必须真发，成功与失败都如实回报，并落进 last_* 四列。
 func TestNotifyChannels_测试按钮真发不假成功(t *testing.T) {
 	f := newNotifyFixture(t)

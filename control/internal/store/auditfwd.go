@@ -114,6 +114,12 @@ type AuditForwardStore interface {
 	SaveAuditForwardSecret(ctx context.Context, sec AuditForwardSecret) error
 	// AuditForwardSecret 取凭据密文。★调用点必须极少：只有"构造 Forwarder"这一处。
 	AuditForwardSecret(ctx context.Context, id string) (AuditForwardSecret, bool, error)
+	// DeleteAuditForwardSecret 清掉某出口的凭据（幂等，没有也不报错）。
+	//
+	// ★消费方是"出口地址被改动"这一刻（api.handleSaveAuditForwardTarget）：AAD 绑
+	// target id 挡住的是"把密文行剪贴到另一条记录上"，挡不住"记录还在原地、目的地被换掉"——
+	// 后者只要改一次 config 再点一次「测试」，凭据头就原样出现在攻击者收到的请求里。
+	DeleteAuditForwardSecret(ctx context.Context, id string) error
 
 	// ClaimAuditForwardBatch 取一批到期可发的记录（按队列 id 升序 = 审计落库序）。
 	// 顺序是硬要求：seq 乱序到达会让 SIEM 侧的链校验白做。

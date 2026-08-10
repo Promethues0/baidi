@@ -16,17 +16,28 @@ import (
 	"baidi.dev/control/internal/store"
 )
 
-// ── 审计日志外送 · 管理端点（PRD ch16 + ch21.6，全部 requirePerm(PermSystem)）──
+// ── 审计日志外送 · 管理端点（PRD ch16 + ch21.6）──
 //
-//	GET    /api/v1/audit/forward              出口清单 + 积压 / 丢弃 / 上次成败
-//	POST   /api/v1/audit/forward              新增 / 修改
-//	DELETE /api/v1/audit/forward/{id}         删除（连同凭据与积压）
-//	PUT    /api/v1/audit/forward/{id}/secret  设置凭据（只写不读）
-//	POST   /api/v1/audit/forward/{id}/test    真发一条测试记录
+//	GET    /api/v1/audit/forward              出口清单 + 积压 / 丢弃 / 上次成败   system
+//	POST   /api/v1/audit/forward              新增 / 修改                        system + audit
+//	DELETE /api/v1/audit/forward/{id}         删除（连同凭据与积压）              system + audit
+//	PUT    /api/v1/audit/forward/{id}/secret  设置凭据（只写不读）                system
+//	POST   /api/v1/audit/forward/{id}/test    真发一条测试记录                    system
+//	POST   /api/v1/audit/forward/{id}/flush   立即投递                            system
 //
-// ★归 system 那一权而不是 audit：这是"控制面往外拨号"的运维配置，与消息通道、
-// 网关证书、组网同类。另一半理由是结构性的——PermAudit 按设计是**只读**权
-// （见 store.PermAudit 的注释），让它持有写端点会在权限模型上开一个口子。
+// ★为什么增删要**两权同时持有**（requirePerms(PermSystem, PermAudit)）：
+// 「只有审计权能读全量审计」是三权分立里最硬的一条不变量（GET /api/v1/audit 挂的是
+// PermAudit，注释写明"才谈得上『定策略的人不看自己的痕迹』"）。而新增一个启用中的出口
+// 就是在开一条**全量审计的实时读通道**——从那一刻起每一条审计（含 seq/mac）都会被
+// 原样 POST 到出口地址。只挂 system 的话，一个读不到 /audit 的系统管理员填一个自己的
+// URL 就绕开了整条不变量。反过来只挂 audit 也不行：PermAudit 按设计是**只读**权
+// （见 store.PermAudit），让它单独持有写端点是在权限模型上开另一个口子。两权取交集
+// 才同时成立。删除同理要两权：单方面掐掉外送是"关掉看自己痕迹的那条线"，
+// 是同一个不变量的镜像面。
+//
+// ★其余三个端点只要 system：它们都作用在一个**已经由审计权同意过的目的地**上
+// （设凭据 / 连通性自检 / 把积压立刻推出去），既不新增读通道也不改变流向，
+// 属于日常运维。目的地一旦被改动，凭据会被就地清空并要求重设（见 handleSaveAuditForwardTarget）。
 //
 // ★读端点同样走 requirePerm 现算角色：出口配置里有 SIEM 主机名、内网收集器地址
 // 这类内网拓扑信息，且"外送配到哪去了"本身就是攻击者想知道的事。
@@ -118,9 +129,9 @@ func (s *Server) handleAuditForwardTargets(w http.ResponseWriter, r *http.Reques
 	})
 }
 
-// handleSaveAuditForwardTarget 新增 / 修改出口。
+// handleSaveAuditForwardTarget 新增 / 修改出口（system + audit 两权同持，见文件头）。
 func (s *Server) handleSaveAuditForwardTarget(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePerm(w, r, store.PermSystem) {
+	if !s.requirePerms(w, r, store.PermSystem, store.PermAudit) {
 		return
 	}
 	fs, ok := s.auditForwardStore(w)
@@ -149,6 +160,17 @@ func (s *Server) handleSaveAuditForwardTarget(w http.ResponseWriter, r *http.Req
 	if len(b.Config) > 0 {
 		cfg = string(b.Config)
 	}
+	// 改目的地要清凭据：先把旧配置读出来比对（见 auditForwardCredentialExposure）。
+	var prev store.AuditForwardTarget
+	hadPrev := false
+	if strings.TrimSpace(b.ID) != "" {
+		p, found, ferr := fs.AuditForwardTargetByID(r.Context(), b.ID)
+		if ferr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to load audit forward target")
+			return
+		}
+		prev, hadPrev = p, found
+	}
 	rec, err := fs.SaveAuditForwardTarget(r.Context(), store.AuditForwardTarget{
 		ID: b.ID, Name: b.Name, Kind: string(kind), Enabled: b.Enabled, Config: cfg,
 	})
@@ -156,14 +178,66 @@ func (s *Server) handleSaveAuditForwardTarget(w http.ResponseWriter, r *http.Req
 		httpx.Error(w, http.StatusInternalServerError, "failed to save audit forward target")
 		return
 	}
+	cleared := false
+	if hadPrev && prev.HasSecret &&
+		auditForwardCredentialExposure(prev.Kind, prev.Config) != auditForwardCredentialExposure(rec.Kind, rec.Config) {
+		if derr := fs.DeleteAuditForwardSecret(r.Context(), rec.ID); derr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "目的地已变更但凭据清除失败，请重试")
+			return
+		}
+		cleared = true
+		// 清完重读：响应里的 hasSecret 必须是库里此刻的事实。
+		if again, found, ferr := fs.AuditForwardTargetByID(r.Context(), rec.ID); ferr == nil && found {
+			rec = again
+		}
+	}
 	// 保存即校验：配置写错要当场知道，而不是等到审计堆满队列才发现发不出去。
 	// 构造失败不拒绝保存（管理员可能分两步：先存配置、再设凭据），但把原因带回去。
 	var warn string
 	if _, berr := s.buildAuditForwarder(r.Context(), rec); berr != nil {
 		warn = "配置已保存，但当前还不可用：" + berr.Error()
 	}
-	s.audit(r, "admin", "保存审计外送出口「"+rec.Name+"」（"+rec.Kind+"，"+enabledZh(rec.Enabled)+"）", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "target": rec, "warning": warn})
+	msg := "保存审计外送出口「" + rec.Name + "」（" + rec.Kind + "，" + enabledZh(rec.Enabled) + "）"
+	if cleared {
+		msg += "：目的地或传输保护已变更，该出口原有凭据已一并清除，需重新设置"
+		warn = "目的地（或传输保护方式）已变更，原凭据已被清除，请重新设置凭据后再测试。" + warn
+	}
+	s.audit(r, "admin", msg, "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "target": rec, "warning": warn, "secretCleared": cleared,
+	})
+}
+
+// auditForwardCredentialExposure 抽出配置里决定「凭据会被送到哪、以什么保护级别送」的那几项。
+//
+// 与 notifyCredentialExposure 同一条纪律，理由也同构：SaveAuditForwardTarget 刻意不动
+// 凭据表，于是只要带上**已有出口的 id** 把 url 改成自己的收集器，再点一次「测试」，
+// Authorization 头的值就原样出现在攻击者收到的那个请求里。AAD 绑 target id 挡不住这一面。
+//
+// syslog 出口没有凭据（本版本不做客户端证书认证），仍然把 host/port/TLS 材料算进来——
+// 哪天补上凭据也不会漏掉这一处。
+func auditForwardCredentialExposure(kind, cfg string) string {
+	if strings.TrimSpace(cfg) == "" {
+		cfg = "{}"
+	}
+	switch forward.Kind(kind) {
+	case forward.KindSyslog:
+		var d syslogTargetDTO
+		if err := json.Unmarshal([]byte(cfg), &d); err != nil {
+			return "syslog|unparsable|" + cfg
+		}
+		return fmt.Sprintf("syslog|%s|%d|%t|%s|%s",
+			strings.TrimSpace(d.Host), d.Port, d.TLS,
+			strings.TrimSpace(d.ServerName), strings.TrimSpace(d.CACert))
+	case forward.KindHTTP:
+		var d httpTargetDTO
+		if err := json.Unmarshal([]byte(cfg), &d); err != nil {
+			return "http|unparsable|" + cfg
+		}
+		return "http|" + strings.TrimSpace(d.URL) + "|" +
+			strings.TrimSpace(d.SecretHeader) + "|" + strings.TrimSpace(d.CACert)
+	}
+	return kind + "|" + cfg
 }
 
 func enabledZh(v bool) string {
@@ -173,8 +247,9 @@ func enabledZh(v bool) string {
 	return "已停用"
 }
 
+// handleDeleteAuditForwardTarget 删除出口（system + audit 两权同持，见文件头）。
 func (s *Server) handleDeleteAuditForwardTarget(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePerm(w, r, store.PermSystem) {
+	if !s.requirePerms(w, r, store.PermSystem, store.PermAudit) {
 		return
 	}
 	fs, ok := s.auditForwardStore(w)

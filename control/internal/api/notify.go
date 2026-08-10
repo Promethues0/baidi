@@ -38,6 +38,7 @@ type notifyStore interface {
 	DeleteNotifyChannel(ctx context.Context, id string) error
 	SaveNotifyChannelSecret(ctx context.Context, sec store.NotifyChannelSecret) error
 	NotifyChannelSecret(ctx context.Context, id string) (store.NotifyChannelSecret, bool, error)
+	DeleteNotifyChannelSecret(ctx context.Context, id string) error
 	RecordNotifySend(ctx context.Context, id, status, detail, event string, at int64) error
 }
 
@@ -145,6 +146,17 @@ func (s *Server) handleSaveNotifyChannel(w http.ResponseWriter, r *http.Request)
 	if len(b.Config) > 0 {
 		cfg = string(b.Config)
 	}
+	// 改目的地要清凭据：先把旧配置读出来比对（见 notifyCredentialExposure）。
+	var prev store.NotifyChannel
+	hadPrev := false
+	if strings.TrimSpace(b.ID) != "" {
+		p, found, ferr := ns.NotifyChannelByID(r.Context(), b.ID)
+		if ferr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to load notify channel")
+			return
+		}
+		prev, hadPrev = p, found
+	}
 	rec, err := ns.SaveNotifyChannel(r.Context(), store.NotifyChannel{
 		ID: b.ID, Name: b.Name, Kind: string(kind), Enabled: b.Enabled, Config: cfg,
 	})
@@ -152,14 +164,69 @@ func (s *Server) handleSaveNotifyChannel(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, http.StatusInternalServerError, "failed to save notify channel")
 		return
 	}
+	cleared := false
+	if hadPrev && prev.HasSecret &&
+		notifyCredentialExposure(prev.Kind, prev.Config) != notifyCredentialExposure(rec.Kind, rec.Config) {
+		if derr := ns.DeleteNotifyChannelSecret(r.Context(), rec.ID); derr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "目的地已变更但凭据清除失败，请重试")
+			return
+		}
+		cleared = true
+		// 清完重读：响应里的 hasSecret 必须是库里此刻的事实，不能停在保存前那一份。
+		if again, found, ferr := ns.NotifyChannelByID(r.Context(), rec.ID); ferr == nil && found {
+			rec = again
+		}
+	}
 	// 保存即校验：配置写错要当场知道，而不是等到真出安全事件那一刻才发现发不出去。
 	// 构造失败不拒绝保存（管理员可能分几步填：先存配置、再设凭据），但把原因带回去。
 	var warn string
 	if _, _, berr := s.buildNotifyChannel(r.Context(), rec); berr != nil {
 		warn = "配置已保存，但当前还不可用：" + berr.Error()
 	}
-	s.audit(r, "admin", "保存消息通道「"+rec.Name+"」（"+rec.Kind+"）", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "channel": rec, "warning": warn})
+	msg := "保存消息通道「" + rec.Name + "」（" + rec.Kind + "）"
+	if cleared {
+		msg += "：目的地或传输保护已变更，该通道原有凭据已一并清除，需重新设置"
+		warn = "目的地（或传输保护方式）已变更，原凭据已被清除，请重新设置凭据后再测试。" + warn
+	}
+	s.audit(r, "admin", msg, "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "channel": rec, "warning": warn, "secretCleared": cleared,
+	})
+}
+
+// notifyCredentialExposure 抽出配置里决定「凭据会被送到哪、以什么保护级别送」的那几项。
+//
+// ★这是"改目的地即清凭据"的判据。为什么必须有：SaveNotifyChannel 刻意不动凭据表
+// （改个显示名不该让告警发不出去），于是持 PermSystem 的管理员只要带上**已有通道的 id**
+// 把 host 改成自己的机器，再点一次「测试」，buildNotifyChannel 就会把解密后的企业邮箱
+// 口令以 AUTH PLAIN 送过去。AAD 绑 channel id 挡的是"密文跨记录剪贴"，挡不住这一面。
+//
+// 传输保护也算在内（tlsMode / insecureSkipVerify / serverName / caCert）：把 starttls
+// 改成 plaintext 等于把口令交给链路上任何一跳，与直接改主机名是同一件事。
+// 反过来，收件人、显示名、启用开关这些改动**不清**凭据——那才是日常编辑。
+func notifyCredentialExposure(kind, cfg string) string {
+	if strings.TrimSpace(cfg) == "" {
+		cfg = "{}"
+	}
+	switch notify.Kind(kind) {
+	case notify.KindSMTP:
+		var d smtpChannelDTO
+		if err := json.Unmarshal([]byte(cfg), &d); err != nil {
+			return "smtp|unparsable|" + cfg // 解析不了就按"整段都算目的地"处理（保守方向）
+		}
+		return fmt.Sprintf("smtp|%s|%d|%s|%s|%t|%s|%s",
+			strings.TrimSpace(d.Host), d.Port, strings.TrimSpace(d.TLSMode),
+			strings.TrimSpace(d.ServerName), d.InsecureSkipVerify,
+			strings.TrimSpace(d.CACert), strings.TrimSpace(d.AuthMode))
+	case notify.KindWebhook, notify.KindSMS:
+		var d webhookChannelDTO
+		if err := json.Unmarshal([]byte(cfg), &d); err != nil {
+			return "webhook|unparsable|" + cfg
+		}
+		return "webhook|" + strings.TrimSpace(d.URL) + "|" + strings.TrimSpace(d.SecretHeader)
+	}
+	// 未知类型（保存时已被拒，这里是纵深）：任何改动都当成改了目的地。
+	return kind + "|" + cfg
 }
 
 func (s *Server) handleDeleteNotifyChannel(w http.ResponseWriter, r *http.Request) {

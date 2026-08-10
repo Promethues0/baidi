@@ -272,6 +272,62 @@ func TestSyslogEscapesStructuredData(t *testing.T) {
 	}
 }
 
+// SD 参数截断不得留下悬空反斜杠。
+//
+// ★这是一条**免认证可触发**的回归：门户登录失败时 actor 就是请求体里那个用户名，
+// 攻击者可以自己填。先转义后截断的写法会在截断点落进 `\"` 中间时输出以单个 `\` 收尾，
+// 把随后拼上的闭合引号转义掉 —— actor 这个 SD-PARAM 永远不闭合，srcIp/verdict 与
+// 整段 MSG 全被吞进它的值里，SIEM 侧丢掉 seq/mac 两格结构化字段。
+func TestSyslogSDParamTruncationKeepsElementClosed(t *testing.T) {
+	// 逐个长度扫一遍，保证截断点落在转义序列中间的那些长度都不会漏。
+	for n := 1; n <= 600; n++ {
+		v := "A" + strings.Repeat(`"`, n)
+		esc := sdEscape(v)
+		if len([]rune(esc)) > sdParamMaxRunes {
+			t.Fatalf("n=%d：转义后 %d 字符，超过上界 %d", n, len([]rune(esc)), sdParamMaxRunes)
+		}
+		// 结尾的反斜杠必须成对（成对 = 一个被转义的字面反斜杠；落单 = 会吃掉闭合引号）。
+		trailing := 0
+		for i := len(esc) - 1; i >= 0 && esc[i] == '\\'; i-- {
+			trailing++
+		}
+		if trailing%2 != 0 {
+			t.Fatalf("n=%d：转义结果以 %d 个反斜杠收尾（奇数即悬空）：…%q", n, trailing, tailOf(esc, 8))
+		}
+	}
+
+	// 端到端：拿那个构造出来的用户名真发一条，SD 必须仍能被逐字段解析出来。
+	addr, frames := syslogSink(t, FramingOctet, nil)
+	host, portStr, _ := net.SplitHostPort(addr)
+	port, _ := strconv.Atoi(portStr)
+	f, _ := NewSyslog(SyslogConfig{Host: host, Port: port, Hostname: "ctl-1"})
+	if err := f.Send(context.Background(), []Record{{
+		Time: "2026-08-11 09:15:04", Category: "auth", Verdict: "fail",
+		User: "A" + strings.Repeat(`"`, 256), SrcIP: "203.0.113.7",
+		Event: "门户登录失败：用户名或密码错误", Seq: 9, MAC: "beef",
+	}}); err != nil {
+		t.Fatalf("发送失败: %v", err)
+	}
+	got := waitFrames(t, frames, 1)
+	_, _, _, _, _, _, sd, body := splitSyslog(t, got[0])
+	for _, key := range []string{`seq="9"`, `mac="beef"`, `srcIp="203.0.113.7"`, `verdict="fail"`} {
+		if !strings.Contains(sd, key) {
+			t.Errorf("actor 未闭合，把后面的字段吞掉了：缺 %s\nSD=%q", key, sd)
+		}
+	}
+	if !strings.Contains(body, "门户登录失败") {
+		t.Errorf("MSG 被未闭合的 SD 吃掉了：%q", body)
+	}
+}
+
+// tailOf 取字符串末尾若干字节（错误信息用）。
+func tailOf(s string, n int) string {
+	if len(s) <= n {
+		return s
+	}
+	return s[len(s)-n:]
+}
+
 // TLS 路径：CA 对上就能发；CA 对不上必须失败。
 //
 // ★后半段才是重点。本实现**没有**跳过证书校验的开关，这条用例就是它的守卫：

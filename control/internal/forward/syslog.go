@@ -332,13 +332,48 @@ func syslogTime(ts string) string {
 	return t.Format("2006-01-02T15:04:05.000000Z07:00")
 }
 
+// sdParamMaxRunes 单个 SD-PARAM 取值的**输出**长度上界（转义之后计）。
+const sdParamMaxRunes = 512
+
 // sdEscape 转义 SD-PARAM 取值里的 " \ ]（RFC 5424 §6.3.3），并压成单行。
 // 不转义 ] 的话，事件文案里一个右方括号就能提前闭合 SD 元素，
 // 后半截内容会被收集端当成 MSG——一条被悄悄截断的审计。
+//
+// ★截断必须按**输出**长度逐字符累加，转义序列要么整体写入、要么整体不写。
+// 原先的写法是"先整体转义、再截到 512"，截断点落在 `\"` 这对序列中间时输出以单个
+// `\` 收尾，message() 紧接着拼上的闭合引号被它转义掉 —— 这个 SD-PARAM 从此不再闭合，
+// 后面的 srcIp/verdict 与整段 MSG 全被吞进它的值里，收集端多半整条解析失败或退回 MSG。
+// 而这条路径**全程免认证**：门户登录失败的审计里 actor 就是请求体里那个用户名，
+// 一个由 257 个引号构成的用户名就能让针对自己的那条审计在 SIEM 侧丢掉 seq/mac 两格 ——
+// 而那两格正是"外部独立验真"这件事的全部价值。
 func sdEscape(v string) string {
-	v = oneLine(v)
-	r := strings.NewReplacer(`\`, `\\`, `"`, `\"`, `]`, `\]`)
-	return truncRunes(r.Replace(v), 512)
+	var b strings.Builder
+	out := 0
+	for _, c := range oneLine(v) {
+		esc := ""
+		switch c {
+		case '\\':
+			esc = `\\`
+		case '"':
+			esc = `\"`
+		case ']':
+			esc = `\]`
+		}
+		if esc != "" {
+			if out+2 > sdParamMaxRunes {
+				break
+			}
+			b.WriteString(esc)
+			out += 2
+			continue
+		}
+		if out+1 > sdParamMaxRunes {
+			break
+		}
+		b.WriteRune(c)
+		out++
+	}
+	return b.String()
 }
 
 // printASCII 把 HEADER 字段收敛成 RFC 5424 允许的 PRINTUSASCII（33-126）并限长。

@@ -57,6 +57,14 @@ type Writer interface {
 	// 网关客户端证书：签发登记 + 吊销
 	SaveGatewayCert(ctx context.Context, c GatewayCert) error
 	RevokeGatewayCert(ctx context.Context, fingerprint, reason string) error
+	// 组织与用户组：组织树增删改 + 用户组增删改 + 成员/归属写入
+	SaveOrgUnit(ctx context.Context, o Org) (Org, error)
+	DeleteOrgUnit(ctx context.Context, id string) error
+	SaveUserGroup(ctx context.Context, g UserGroup) (UserGroup, error)
+	DeleteUserGroup(ctx context.Context, id string) error
+	SetGroupMembers(ctx context.Context, groupID string, accounts []string) error
+	SetUserOrg(ctx context.Context, userID, orgID string) error
+	SetUserGroups(ctx context.Context, account string, groupIDs []string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -113,6 +121,13 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	if err := s.ensureCredentials(); err != nil {
+		return nil, err
+	}
+	// ★组织回填必须排在 seed/ensureCredentials 之后：它要按 users.org_key 把既有
+	// 用户挂到组织上，而全新库在 migrate 阶段 users 表还是空的（放 migrate 里会
+	// 静默空转，种子用户永远没有 org_id）。这条顺序依赖是 backfillOrgUnits 唯一的
+	// 前提，改动建库流程时别把它挪回 migrate。
+	if err := s.backfillOrgUnits(context.Background()); err != nil {
 		return nil, err
 	}
 	return s, nil
@@ -327,7 +342,25 @@ CREATE TABLE IF NOT EXISTS login_lockouts (
 -- （internal/lockout，BAIDI_LOCKOUT_* 环境变量的运行时覆盖）。
 CREATE TABLE IF NOT EXISTS settings (
   k TEXT PRIMARY KEY, v TEXT, updated_at TEXT
-);`)
+);
+-- ── 组织与用户组（PRD ch6 FR-USER）──
+-- org_units 邻接表（parent_id）+ 冗余物化路径 path（形如 /root/dev/）。
+-- 冗余 path 不是为了少写一次 JOIN，而是环检测的判据：把父设成自己的后代时，
+-- 该父的 path 里必然含 "/<自己的 id>/"，一次包含判断即可拒绝（见 SaveOrgUnit）。
+CREATE TABLE IF NOT EXISTS org_units (
+  id TEXT PRIMARY KEY, name TEXT, parent_id TEXT, path TEXT, sort INTEGER, created_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_org_units_parent ON org_units(parent_id);
+-- kind 决定成员从哪来：static=显式成员表；role=按 users.roles 派生（只读）。
+CREATE TABLE IF NOT EXISTS user_groups (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, description TEXT, created_at TEXT
+);
+-- 成员按 **account**（规范化小写）存而非 user id：account 是令牌主体，
+-- 也是将来「按组授权」在网关侧唯一能对齐的键。
+CREATE TABLE IF NOT EXISTS user_group_members (
+  group_id TEXT, account TEXT, PRIMARY KEY(group_id, account)
+);
+CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(account);`)
 	if err != nil {
 		return err
 	}
@@ -358,6 +391,9 @@ CREATE TABLE IF NOT EXISTS settings (
 		// 审计防篡改链（旧库补列，回填见 backfillAuditChain）。
 		{"audit_log", "seq", "INTEGER"},
 		{"audit_log", "mac", "TEXT"},
+		// 组织归属。★回填见 backfillOrgUnits——它**不在这里调用**而在 seed() 之后
+		// （全新库跑 migrate 时 users 表还是空的，放这儿会静默空转）。
+		{"users", "org_id", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -640,9 +676,9 @@ func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) insertUser(u DirUser) error {
 	roles, _ := json.Marshal(u.Roles)
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw))
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID)
 	return err
 }
 
@@ -663,13 +699,36 @@ func b2i(b bool) int {
 	return 0
 }
 
-// Users 覆盖：身份源/组织树走种子，用户清单从库读取。
+// Users 覆盖：身份源走种子；**组织树与用户组走库**（org_units / user_groups），
+// 用户清单从库读取并带上组织归属与所属组。
+//
+// ★展示用的 org / org_key 两列是组织表出现之前的遗物。org_id 一旦有值就以
+// org_units 为准覆盖它们——否则改了部门名，用户列表里还挂着旧名字，
+// 而两个数字都"看起来是真的"。org_key 同步成 org_id，让前端按组织过滤
+// 与组织树的节点 key 天然对齐。
 func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
 	b, err := s.Memory.Users(ctx)
 	if err != nil {
 		return UserDirBundle{}, err
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles FROM users ORDER BY created_at`)
+	orgs, err := s.OrgUnits(ctx)
+	if err != nil {
+		return UserDirBundle{}, err
+	}
+	b.OrgTree = buildOrgTree(orgs)
+	groups, err := s.UserGroups(ctx)
+	if err != nil {
+		return UserDirBundle{}, err
+	}
+	b.Groups = groups
+	memberships, err := s.GroupMemberships(ctx)
+	if err != nil {
+		return UserDirBundle{}, err
+	}
+	rows, err := s.db.QueryContext(ctx, `
+SELECT u.id,u.name,u.account,u.org,u.org_key,u.device,u.ip,u.auth,u.last_login,u.online,u.status,u.risk,u.roles,
+       COALESCE(u.org_id,''), COALESCE(o.name,'')
+FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 	if err != nil {
 		return UserDirBundle{}, err
 	}
@@ -678,19 +737,30 @@ func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
 	for rows.Next() {
 		var u DirUser
 		var online int
-		var roles string
-		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin, &online, &u.Status, &u.Risk, &roles); err != nil {
+		var roles, orgName string
+		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin,
+			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName); err != nil {
 			return UserDirBundle{}, err
 		}
 		u.Online = online == 1
 		_ = json.Unmarshal([]byte(roles), &u.Roles)
+		if u.OrgID != "" && orgName != "" {
+			u.Org, u.OrgKey = orgName, u.OrgID
+		}
+		u.GroupIDs = memberships[strings.ToLower(strings.TrimSpace(u.Account))]
+		if u.GroupIDs == nil {
+			u.GroupIDs = []string{}
+		}
 		us = append(us, u)
+	}
+	if err := rows.Err(); err != nil {
+		return UserDirBundle{}, err
 	}
 	b.Users = us
 	return b, nil
 }
 
-// CreateUser 新增用户落库。
+// CreateUser 新增用户落库（含组织归属与 static 组成员）。
 func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error) {
 	u.ID = "u-" + uuid.NewString()[:8]
 	if u.Status == "" {
@@ -708,8 +778,29 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error
 	if u.Role == "" {
 		u.Role = roleFromDisplay(u.Roles)
 	}
+	// 组织归属：id 必须真实存在，同时把展示用的 org/org_key 对齐到组织表，
+	// 否则新用户的列表行会显示调用方随手传来的部门名。
+	if u.OrgID = strings.TrimSpace(u.OrgID); u.OrgID != "" {
+		var name string
+		switch err := s.db.QueryRowContext(ctx, `SELECT name FROM org_units WHERE id=?`, u.OrgID).Scan(&name); err {
+		case nil:
+			u.Org, u.OrgKey = name, u.OrgID
+		case sql.ErrNoRows:
+			return DirUser{}, ErrOrgNotFound
+		default:
+			return DirUser{}, err
+		}
+	}
 	if err := s.insertUser(u); err != nil {
 		return DirUser{}, err
+	}
+	if len(u.GroupIDs) > 0 {
+		if err := s.SetUserGroups(ctx, u.Account, u.GroupIDs); err != nil {
+			return DirUser{}, err
+		}
+	}
+	if u.GroupIDs == nil {
+		u.GroupIDs = []string{}
 	}
 	return u, nil
 }

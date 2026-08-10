@@ -44,6 +44,11 @@ type Store interface {
 	// 网关客户端证书白名单（mTLS 机器身份）
 	GatewayCerts(ctx context.Context) ([]GatewayCert, error)
 	GatewayCertTrusted(ctx context.Context, fingerprint string) (GatewayCert, bool, error)
+	// 组织与用户组（真实数据域，只有 SQLite 实现）
+	OrgUnits(ctx context.Context) ([]Org, error)
+	UserGroups(ctx context.Context) ([]UserGroup, error)
+	GroupMembers(ctx context.Context, groupID string) ([]string, error)
+	GroupMemberships(ctx context.Context) (map[string][]string, error)
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。

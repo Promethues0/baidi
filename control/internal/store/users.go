@@ -2,11 +2,14 @@ package store
 
 import "context"
 
-// UserDirBundle 访问者目录页：身份源 + 组织树 + 用户清单。
+// UserDirBundle 访问者目录页：身份源 + 组织树 + 用户组目录 + 用户清单。
 type UserDirBundle struct {
 	Directories []Directory `json:"directories"`
 	OrgTree     []OrgUnit   `json:"orgTree"`
-	Users       []DirUser   `json:"users"`
+	// Groups 用户组目录。随用户清单一起下发，前端才能把 DirUser.GroupIDs 显示成组名，
+	// 不必为每个用户再查一次组。
+	Groups []UserGroup `json:"groups"`
+	Users  []DirUser   `json:"users"`
 }
 
 type Directory struct {
@@ -27,11 +30,16 @@ type OrgUnit struct {
 
 // DirUser 目录中的用户（含实时在线态供池化卡片展示）。
 type DirUser struct {
-	ID        string   `json:"id"`
-	Name      string   `json:"name"`
-	Account   string   `json:"account"`
-	Org       string   `json:"org"`
-	OrgKey    string   `json:"orgKey"`
+	ID      string `json:"id"`
+	Name    string `json:"name"`
+	Account string `json:"account"`
+	Org     string `json:"org"`
+	OrgKey  string `json:"orgKey"`
+	// OrgID 组织归属（org_units.id）。org / orgKey 是组织表出现前的展示遗物，
+	// OrgID 有值时以组织表为准回填那两列（见 SQLiteStore.Users）。
+	OrgID string `json:"orgId"`
+	// GroupIDs 所属用户组 id（含角色组的派生归属）。读取时实算，写入走 SetUserGroups。
+	GroupIDs  []string `json:"groups"`
 	Device    string   `json:"device"`
 	IP        string   `json:"ip"`
 	Auth      string   `json:"auth"`

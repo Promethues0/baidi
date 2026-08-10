@@ -53,6 +53,7 @@
             <span class="dg-stat dg-stat--pass"><b>{{ bundle.pass }}</b>正常</span>
             <span class="dg-stat dg-stat--warn"><b>{{ bundle.warn }}</b>关注</span>
             <span class="dg-stat dg-stat--fail"><b>{{ bundle.fail }}</b>异常</span>
+            <span v-if="bundle.skip" class="dg-stat dg-stat--skip"><b>{{ bundle.skip }}</b>跳过</span>
           </div>
           <div class="dg-hero__bar">
             <span v-if="bundle.pass" class="seg pass" :style="{ flex: bundle.pass }" />
@@ -153,17 +154,17 @@ function fmtUptime(sec: number): string {
 /* 降级演示数据（对齐后端 DiagBundle，便于无后端时预览） */
 const MOCK: DiagBundle = {
   generatedAt: '', component: 'baidi-control · 控制中心', version: '0.3.0', env: 'dev', uptime: '—',
-  score: 72, pass: 4, warn: 5, fail: 0,
+  score: 81, pass: 5, warn: 3, fail: 0, skip: 1,
   checks: [
     { key: 'control', category: 'control', name: '控制面 baidi-control', status: 'pass', summary: '控制中心进程运行正常，API 响应中', metric: 'v0.3.0 · 运行 —', hint: '' },
     { key: 'db', category: 'storage', name: '管理数据库 SQLite', status: 'pass', summary: '数据库连接正常，读写可用', metric: '往返 —', hint: '' },
-    { key: 'audit-disk', category: 'storage', name: '审计日志留存', status: 'pass', summary: '审计日志留存正常，磁盘水位健康', metric: '占用 62% · 512GB · 留存 180 天', hint: '' },
+    { key: 'audit-disk', category: 'storage', name: '审计日志留存', status: 'pass', summary: '审计日志留存正常，磁盘水位健康', metric: '审计 2040 行 · 库文件 1.6MB · 磁盘余 212.3GB / 494.4GB（占用 57%）· 留存 180 天', hint: '' },
     { key: 'gateways', category: 'dataplane', name: '数据面网关在线', status: 'warn', summary: '尚无数据面网关注册（控制面可独立运行）', metric: '在线 0 / 注册 0', hint: '以 -control 指向本控制面启动 baidi-gateway 即自动注册' },
-    { key: 'spa', category: 'stealth', name: 'SPA 服务隐身', status: 'pass', summary: 'SPA 单包授权生效，受保护端口对未授权源不可见', metric: 'G3 · 守护 3 端口', hint: '' },
-    { key: 'cluster', category: 'cluster', name: '集群高可用', status: 'warn', summary: '1 个集群节点降级', metric: '健康 4 · 降级 1 · 故障 0 / 共 5', hint: '关注降级节点负载与链路' },
-    { key: 'authsrc', category: 'identity', name: '认证源可达', status: 'warn', summary: '1 个认证源异常：商密证书 (SM2)', metric: '在线 5 / 接入 6', hint: '核对异常认证源的连通与凭据' },
-    { key: 'posture', category: 'posture', name: '访问威胁压力', status: 'warn', summary: '登录失败数偏高，关注异常登录', metric: '拒绝 173 · 失败 62 · 二次鉴权 53 · 在线 186', hint: '结合用户状态页排查锁定账号' },
-    { key: 'secret', category: 'security', name: '密钥与传输安全', status: 'warn', summary: '使用开发默认 JWT 密钥（控制面回环 HTTP，前置 nginx 终止 TLS）', metric: '默认密钥 · 开发', hint: '上线前经 BAIDI_JWT_SECRET 注入随机密钥' }
+    { key: 'spa', category: 'stealth', name: 'SPA 服务隐身', status: 'warn', summary: '无网关经 mTLS 注册，隐身状态未知', metric: '在线 0 / 注册 0', hint: '以 -control + mTLS 证书启动 baidi-gateway，注册后此处才有事实可报' },
+    { key: 'cluster', category: 'cluster', name: '集群高可用', status: 'skip', summary: '集群未部署：白帝当前为单机形态，无节点发现/选主机制', metric: '单机 · 1 进程 + SQLite', hint: '本版本无 HA 能力；如需冗余请依赖外部手段（备份恢复/冷备），不要按\'集群健康\'规划容量' },
+    { key: 'authsrc', category: 'identity', name: '认证源配置', status: 'pass', summary: '已配置 1 个认证源（连通性以「测试连接」实测为准）', metric: '启用 1 / 配置 1', hint: '' },
+    { key: 'posture', category: 'posture', name: '访问威胁压力', status: 'pass', summary: '访问态势平稳，拒绝/二次鉴权为策略正常拦截', metric: '拒绝 0 · 失败 0 · 二次鉴权 0 · 在线 —（无网关上报）', hint: '' },
+    { key: 'secret', category: 'security', name: '密钥与传输安全', status: 'warn', summary: '令牌已切 Ed25519 非对称签名，但仍接受存量 HS256 令牌（升级兼容窗口）', metric: '迁移窗口开启', hint: '存量 8h 会话令牌全部自然过期后，置 BAIDI_ACCEPT_HS256=0 收口' }
   ]
 };
 
@@ -174,10 +175,10 @@ const live = ref(false);
 const loading = ref(false);
 const denied = ref(false); // 后端 403（非 admin）：显式提示而非静默降级演示
 
-/* 问题优先排序：异常 → 关注 → 正常 */
-const RANK: Record<DiagStatus, number> = { fail: 0, warn: 1, pass: 2 };
+/* 问题优先排序：异常 → 关注 → 正常 → 跳过；未知枚举兜底排最后（别让 NaN 搅乱排序） */
+const RANK: Record<DiagStatus, number> = { fail: 0, warn: 1, pass: 2, skip: 3 };
 const sortedChecks = computed<DiagCheck[]>(() =>
-  [...bundle.value.checks].sort((a, b) => RANK[a.status] - RANK[b.status])
+  [...bundle.value.checks].sort((a, b) => (RANK[a.status] ?? 9) - (RANK[b.status] ?? 9))
 );
 
 /* 健康分环 */
@@ -208,7 +209,9 @@ const CAT: Record<DiagCategory, { label: string; icon: string }> = {
 };
 function catLabel(c: DiagCategory) { return CAT[c]?.label ?? c; }
 function catIcon(c: DiagCategory) { return CAT[c]?.icon ?? 'IconInfoCircle'; }
-function statusLabel(s: DiagStatus) { return s === 'pass' ? '正常' : s === 'warn' ? '关注' : '异常'; }
+/* 未知枚举原样显示（不误标成"异常"），后端加新状态时页面稳定降级 */
+const STATUS_LABEL: Record<string, string> = { pass: '正常', warn: '关注', fail: '异常', skip: '跳过' };
+function statusLabel(s: DiagStatus) { return STATUS_LABEL[s] ?? s; }
 
 function nowStamp() {
   const d = new Date();
@@ -332,6 +335,7 @@ onMounted(load);
 .dg-stat--pass b { color: var(--bd-success); }
 .dg-stat--warn b { color: var(--bd-warning); }
 .dg-stat--fail b { color: var(--bd-danger); }
+.dg-stat--skip b { color: var(--bd-t3); }
 .dg-hero__bar { display: flex; height: 8px; border-radius: 5px; overflow: hidden; background: var(--bd-fill-2); }
 .dg-hero__bar .seg { display: block; }
 .dg-hero__bar .pass { background: var(--bd-success); }
@@ -352,6 +356,7 @@ onMounted(load);
 .dg-card.is-pass { border-left-color: var(--bd-success); }
 .dg-card.is-warn { border-left-color: var(--bd-warning); }
 .dg-card.is-fail { border-left-color: var(--bd-danger); }
+.dg-card.is-skip { border-left-color: var(--bd-t4); }
 .dg-card__head { display: flex; align-items: center; gap: 11px; }
 .dg-card__icon {
   width: 34px; height: 34px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center;
@@ -364,6 +369,7 @@ onMounted(load);
 .dg-badge.pass { color: var(--bd-success); background: var(--bd-tag-green-bg); }
 .dg-badge.warn { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
 .dg-badge.fail { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
+.dg-badge.skip { color: var(--bd-t2); background: var(--bd-fill-2); }
 .dg-card__summary { font-size: 13px; color: var(--bd-t2); line-height: 1.6; margin-top: 11px; }
 .dg-card__metric {
   display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-t3);
@@ -385,6 +391,7 @@ onMounted(load);
 .dg-item__dot.is-pass { background: var(--bd-success); }
 .dg-item__dot.is-warn { background: var(--bd-warning); }
 .dg-item__dot.is-fail { background: var(--bd-danger); }
+.dg-item__dot.is-skip { background: var(--bd-t4); }
 .dg-item__l { font-weight: 600; color: var(--bd-t1); font-family: ui-monospace, monospace; }
 .dg-item__v { margin-left: auto; color: var(--bd-t3); }
 

@@ -73,9 +73,16 @@ type PolicyOverride struct {
 type SQLiteStore struct {
 	*Memory
 	db *sql.DB
+	// path 数据库文件路径。诊断的磁盘水位实测（AuditDiskStat）要拿它量库文件
+	// 与所在文件系统的真实占用——没有它就只能报种子编的数字。
+	path string
 	// auditKey 审计防篡改链的 HMAC-SM3 密钥（BAIDI_AUDIT_HMAC_KEY_FILE，首启自动生成 0600）。
 	// 落在 store 而非 config：migrate 回填与 RecordAudit 落库都要用它，密钥与链同生命周期。
 	auditKey []byte
+	// auditRetainDays 审计留存天数展示值。由 main 用「purge 循环真正消费的那份配置」注入
+	// （SetAuditRetentionDays）；0 = 未配置滚动清理。刻意不在 store 里重复读环境变量——
+	// 展示值必须来自数据面真正在用的那份，而不是又解析一遍可能不一致的副本。
+	auditRetainDays int
 }
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
@@ -98,7 +105,7 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("审计链 HMAC 密钥: %w", err)
 	}
-	s := &SQLiteStore{Memory: NewMemory(), db: db, auditKey: auditKey}
+	s := &SQLiteStore{Memory: NewMemory(), db: db, path: path, auditKey: auditKey}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}

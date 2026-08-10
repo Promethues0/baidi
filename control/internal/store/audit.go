@@ -16,6 +16,39 @@ type DiskStat struct {
 	RetainDays int `json:"retainDays"`
 }
 
+// AuditDiskStat 审计存储的实测水位（运维诊断/审计页共用）：
+// 行数来自 COUNT(*)，库文件字节数来自 os.Stat（含 WAL/SHM），
+// 文件系统容量来自 syscall.Statfs——全部是量出来的，没有一个字段是种子编的。
+type AuditDiskStat struct {
+	Rows    int64 // audit_log 当前行数
+	DBBytes int64 // 库文件实际占用（主库 + -wal + -shm）
+	// FSTotalBytes / FSFreeBytes 库文件所在文件系统的总容量与可用余量。
+	// FSSupported=false 表示当前平台没有 Statfs（Windows 兜底），容量两项无意义。
+	FSTotalBytes uint64
+	FSFreeBytes  uint64
+	FSSupported  bool
+	// RetainDays 滚动清理天数（0=未配置）。来源见 SQLiteStore.auditRetainDays 的注释。
+	RetainDays int
+}
+
+// UsedPct 文件系统占用百分比（0-100）；平台不支持时返回 0。
+func (d AuditDiskStat) UsedPct() int {
+	if !d.FSSupported || d.FSTotalBytes == 0 {
+		return 0
+	}
+	return int(float64(d.FSTotalBytes-d.FSFreeBytes)/float64(d.FSTotalBytes)*100 + 0.5)
+}
+
+// ToDiskStat 折算成审计页磁贴的口径（平台不支持容量探测时两项为 0，如实示弱）。
+func (d AuditDiskStat) ToDiskStat() DiskStat {
+	ds := DiskStat{RetainDays: d.RetainDays}
+	if d.FSSupported {
+		ds.UsedPct = d.UsedPct()
+		ds.TotalGB = int(d.FSTotalBytes >> 30)
+	}
+	return ds
+}
+
 // AuditVerifyResult 防篡改链全量校验结论（GET /api/v1/audit/verify）。
 type AuditVerifyResult struct {
 	OK      bool `json:"ok"`

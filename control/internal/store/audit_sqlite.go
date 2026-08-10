@@ -301,11 +301,37 @@ func (s *SQLiteStore) ExportAudit(ctx context.Context, category, from, to string
 	return rows.Err()
 }
 
+// SetAuditRetentionDays 注入审计留存天数的展示值。
+// 调用点只有 main：把 purge 循环真正消费的 cfg.AuditRetentionDays 原样传进来，
+// 保证审计页/诊断页展示的留存天数就是清理任务在用的那一份。
+func (s *SQLiteStore) SetAuditRetentionDays(days int) {
+	s.auditRetainDays = days
+}
+
+// AuditDiskStat 实测审计存储水位：行数 COUNT(*) + 库文件（含 WAL/SHM）大小 + 文件系统余量。
+// 此前诊断页的"占用 62%"是 Memory 种子编的——运维对着编造的水位做不了任何决策。
+func (s *SQLiteStore) AuditDiskStat(ctx context.Context) (AuditDiskStat, error) {
+	d := AuditDiskStat{RetainDays: s.auditRetainDays}
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log`).Scan(&d.Rows); err != nil {
+		return d, err
+	}
+	// WAL 模式下热数据可能大部分躺在 -wal 里，只量主库会明显偏小。
+	for _, p := range []string{s.path, s.path + "-wal", s.path + "-shm"} {
+		if fi, err := os.Stat(p); err == nil {
+			d.DBBytes += fi.Size()
+		}
+	}
+	d.FSTotalBytes, d.FSFreeBytes, d.FSSupported = fsUsage(filepath.Dir(s.path))
+	return d, nil
+}
+
 // Audit 覆盖：日志从 audit_log 实时读取（最近 200 条），分类计数与今日总量按库聚合；
-// 磁盘水位等静态指标沿用 Memory 种子。
+// 磁盘水位改为实测（AuditDiskStat），不再沿用 Memory 种子的编造值。
 func (s *SQLiteStore) Audit(ctx context.Context) (AuditBundle, error) {
-	base, _ := s.Memory.Audit(ctx) // 复用 Disk 等静态字段
-	out := AuditBundle{Disk: base.Disk, Categories: []KV{}, Logs: []AuditEntry{}}
+	out := AuditBundle{Categories: []KV{}, Logs: []AuditEntry{}}
+	if ds, err := s.AuditDiskStat(ctx); err == nil {
+		out.Disk = ds.ToDiskStat()
+	}
 
 	rows, err := s.db.QueryContext(ctx, `SELECT ts,category,actor,src_ip,event,verdict FROM audit_log ORDER BY id DESC LIMIT 200`)
 	if err != nil {

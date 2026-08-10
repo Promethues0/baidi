@@ -414,7 +414,8 @@ export interface ClientDownload {
 export interface DownloadsResp { clients: ClientDownload[] }
 
 /* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
-export type DiagStatus = 'pass' | 'warn' | 'fail';
+/* skip = 该能力未部署（如集群），不参与健康分；渲染时对未知枚举兜底为中性样式，别让页面崩 */
+export type DiagStatus = 'pass' | 'warn' | 'fail' | 'skip';
 export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';
 export interface DiagItem { label: string; value: string; status?: DiagStatus }
 export interface DiagCheck {
@@ -424,6 +425,6 @@ export interface DiagCheck {
 }
 export interface DiagBundle {
   generatedAt: string; component: string; version: string; env: string; uptime: string;
-  score: number; pass: number; warn: number; fail: number;
+  score: number; pass: number; warn: number; fail: number; skip?: number;
   checks: DiagCheck[];
 }

@@ -43,6 +43,9 @@ func main() {
 		os.Exit(1)
 	}
 	defer st.Close()
+	// 把留存天数注入展示层：审计页/诊断页显示的就是下面 purge 循环真正消费的这一份，
+	// 不是种子编的 180，也不是 store 里再读一遍环境变量的副本。
+	st.SetAuditRetentionDays(cfg.AuditRetentionDays)
 	// 审计留存轮转：启动时清一次 + 每 24h 清一次超期行。
 	// 清理段末的链锚点由 PurgeExpiredAudit 落 audit_meta，防篡改链不因轮转断裂。
 	if cfg.AuditRetentionDays > 0 {

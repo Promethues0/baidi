@@ -24,16 +24,18 @@ import (
 )
 
 // seedExemptions 已知仍落回 Memory 种子的 Store 接口方法。
-// 每补一个真 SQLite 实现，必须同步从这里删除对应条目（否则本测试会失败提醒你）。
-var seedExemptions = map[string]string{
-	// 系统管理 > 认证源页的列表数据来自种子（真实配置走 AuthSources/AuthSourceByID
-	// 等 SQLite 方法，但聚合 Bundle 仍是 Memory 演示数据）。补真实现时从此清单删除。
-	"AuthSrc": "系统管理·认证源页聚合 Bundle 吃种子",
-	// 网关管理页（节点列表/状态）整页来自种子，未接 gateways 注册心跳的真实数据。
-	"Gateway": "网关管理页节点数据吃种子",
-	// 监控中心在线会话列表来自种子，未接会话/令牌的真实运行态。
-	"OnlineSessions": "监控中心·在线会话列表吃种子",
-}
+//
+// ★清单现在是空的：曾经的五项已全部脱壳——
+//   - System / Devices：补上了真 SQLite 实现；
+//   - AuthSrc：改由 auth_sources 真实行构建（(*SQLiteStore).AuthSrc）；
+//   - Gateway：整个方法从 Store 移除，网关与隐身页改由 api 层按 mTLS 注册心跳
+//     的在线登记构建（api/gatewaypage.go）——真相不在库里，就不该在 Store 上留口子；
+//   - OnlineSessions：整个方法从 Store 移除，无网关上报即空态（安全读数不编）。
+//
+// 新增接口方法若要吃种子，必须在此登记并说明理由：哪个页面在吃、为什么暂时没有
+// 真实数据源、以及补真实现的路径。登记本身不是通行证——先问一句"这个页面是不是
+// 干脆不该显示这块数据"，删掉一块假面板通常比给它配一份假数据更接近正确答案。
+var seedExemptions = map[string]string{}
 
 // TestSQLiteStoreCoversStoreInterface 双向断言：
 // 接口方法 ∖ SQLiteStore 显式方法 == seedExemptions 的键集合。

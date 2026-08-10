@@ -20,7 +20,7 @@
 | **13** | 深信服设备联动与第三方设备管理 | ➖ | 深信服专有联动（EDR/AC 私有协议）不做；**保留开放 API/标准化第三方联动**（见 ch21） |
 | 14 | 主动防御（欺骗防御 / 恶意识别） | ➖ | **仅处置末端真实**（强制下线/账号冻结/JIT 撤销真落数据面）；安全雷达/蜜罐诱捕/恶意识别未实现，规划页未建 |
 | 15 | 系统管理 | ✅ | `SystemCerts/License/RBAC/Logging/Notify/Time/HA/Backup/Report/Diag` |
-| 16 | 审计中心（日志） | ➖ | 写操作实时落库已真（45+ 审计点）；HMAC-SM3 防篡改链/留存轮转/Syslog 外送在建 |
+| 16 | 审计中心（日志） | ➖ | 写操作实时落库已真（45+ 审计点，admin 门 + XFF 信任边界）；HMAC-SM3 防篡改链（/audit/verify 全链校验）、留存轮转（BAIDI_AUDIT_RETENTION_DAYS，链锚点接续）、CSV 流式导出均已真；Syslog 外送未做 |
 | 17 | IPSec VPN 组网 | ✅ | `GatewayIpsec` 站点编排（复用烛龙 IPSEC 引擎） |
 | 18 | 地址转换（NAT） | ❌ | SNAT/DNAT/端口映射未实现（仅 IPSec 内建 NAT-T 穿越，属第 17 章能力，不是本章的 NAT） |
 | 19 | 典型部署场景 | ✅ | 文档级，后续补 |

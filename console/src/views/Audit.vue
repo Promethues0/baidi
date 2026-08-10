@@ -3,11 +3,11 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">审计中心</div>
-        <div class="bd-page__sub">全链路留痕 · 跨设备查询 · 合规出口</div>
+        <div class="bd-page__sub">全链路留痕 · HMAC-SM3 防篡改链 · CSV 合规出口</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn" @click="openWizard"><icon-search />高级查询与导出</button>
+        <button class="bd-btn" @click="openExport"><icon-download />导出 CSV</button>
         <button class="bd-btn bd-btn--ghost" @click="cfg = true"><icon-settings />日志配置</button>
       </div>
     </div>
@@ -82,95 +82,37 @@
       <div class="bd-pager">共 {{ shownLogs.length }} 条记录 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</div>
     </div>
 
-    <!-- 高级导出向导 -->
-    <a-modal v-model:visible="wiz.open" :width="640" :footer="false" title="高级查询与导出" unmount-on-close>
-      <!-- 步进指示 -->
-      <div class="bd-steps">
-        <div v-for="(s, i) in stepLabels" :key="i" class="bd-step" :class="{ on: wiz.step === i, done: wiz.step > i }">
-          <span class="bd-step__n">{{ wiz.step > i ? '✓' : i + 1 }}</span>{{ s }}
-          <icon-right v-if="i < stepLabels.length - 1" class="bd-step__arr" />
-        </div>
-      </div>
-
-      <!-- 步骤 1：搜索模式（分支点） -->
-      <div v-if="wiz.step === 0" class="bd-wbody">
-        <div class="bd-wtitle">选择搜索模式</div>
-        <div class="bd-wdesc">先确定模式，下一步将按所选模式动态加载对应查询字段。</div>
-        <div class="bd-modes">
-          <button class="bd-mode" :class="{ on: wiz.mode === 'precise' }" @click="wiz.mode = 'precise'">
-            <icon-search class="bd-mode__ic" />
-            <b>日志精准搜索</b>
-            <i>按账号 / 设备四元组 / 源 IP 锁定具体行为链路</i>
-          </button>
-          <button class="bd-mode" :class="{ on: wiz.mode === 'bulk' }" @click="wiz.mode = 'bulk'">
-            <icon-archive class="bd-mode__ic" />
-            <b>常见日志全量导出</b>
-            <i>按日志类型批量导出系统 / 监控 / 扫描 / 安全日志</i>
-          </button>
-        </div>
-      </div>
-
-      <!-- 步骤 2：按模式分支 -->
-      <div v-else-if="wiz.step === 1" class="bd-wbody">
-        <!-- 精准分支 -->
-        <template v-if="wiz.mode === 'precise'">
-          <div class="bd-wtitle">精准搜索场景</div>
-          <div class="bd-wdesc">选择分析场景，下方将加载对应输入字段。</div>
-          <a-radio-group v-model="wiz.scene" direction="vertical" class="bd-scenes">
-            <a-radio value="account">账号分析<i class="bd-scene__h">按用户名追溯该账号全部访问 / 认证记录</i></a-radio>
-            <a-radio value="outbound">设备出向行为<i class="bd-scene__h">按四元组（源/目的 IP·端口）分析终端外联</i></a-radio>
-            <a-radio value="inbound">设备入向行为<i class="bd-scene__h">按源 IP 分析对终端 / 资源的访问来源</i></a-radio>
-          </a-radio-group>
-          <div class="bd-field">
-            <label v-if="wiz.scene === 'account'">用户名</label>
-            <label v-else-if="wiz.scene === 'outbound'">四元组</label>
-            <label v-else>源 IP</label>
-            <a-input v-if="wiz.scene === 'account'" v-model="wiz.account" placeholder="如 zhangsan / zhangsan@corp" allow-clear />
-            <a-input v-else-if="wiz.scene === 'outbound'" v-model="wiz.quad" placeholder="如 10.1.2.3:50321 → 203.0.113.8:443" allow-clear />
-            <a-input v-else v-model="wiz.srcIp" placeholder="如 192.168.10.24" allow-clear />
-          </div>
-        </template>
-
-        <!-- 全量分支 -->
-        <template v-else>
-          <div class="bd-wtitle">日志类型（可多选）</div>
-          <div class="bd-wdesc">勾选需要全量导出的日志类型。</div>
-          <a-checkbox-group v-model="wiz.bulkTypes" class="bd-checks">
-            <a-checkbox v-for="t in bulkTypeOpts" :key="t.value" :value="t.value">
-              <b>{{ t.label }}</b><i class="bd-scene__h">{{ t.desc }}</i>
-            </a-checkbox>
-          </a-checkbox-group>
-        </template>
-      </div>
-
-      <!-- 步骤 3：设备 + 时间 + 导出 -->
-      <div v-else class="bd-wbody">
-        <div class="bd-wtitle">导出范围与确认</div>
+    <!-- 导出（真实调用 GET /api/v1/audit/export，流式 CSV 附件）。
+         只暴露后端真支持的条件：类别 + 时间范围——此前向导里的设备多选 / 四元组 /
+         日志类型（系统服务/监控/扫描）后端并不存在，留着只是假象，已删。 -->
+    <a-modal v-model:visible="exp.open" :width="520" :footer="false" title="导出审计日志（CSV）" unmount-on-close>
+      <div class="bd-wbody bd-wbody--slim">
+        <div class="bd-wdesc">按条件从 baidi-control 导出全量审计日志（不限于页面上最近 200 条）。</div>
         <div class="bd-field">
-          <label>设备（可多选）</label>
-          <a-select v-model="wiz.devices" multiple placeholder="选择目标设备" allow-clear>
-            <a-option v-for="d in deviceOpts" :key="d" :value="d">{{ d }}</a-option>
+          <label>日志类别</label>
+          <a-select v-model="exp.category" style="width: 100%">
+            <a-option value="all">全部类别</a-option>
+            <a-option value="access">访问决策</a-option>
+            <a-option value="auth">登录认证</a-option>
+            <a-option value="admin">管理操作</a-option>
+            <a-option value="security">安全事件</a-option>
           </a-select>
         </div>
         <div class="bd-field">
-          <label>时间范围</label>
-          <a-range-picker v-model="wiz.range" show-time style="width: 100%" />
+          <label>时间范围（留空 = 不限）</label>
+          <a-range-picker v-model="exp.range" show-time style="width: 100%" />
         </div>
         <div class="bd-recap">
           <icon-info-circle />
-          模式「<b>{{ wiz.mode === 'precise' ? '日志精准搜索' : '常见日志全量导出' }}</b>」 ·
-          <template v-if="wiz.mode === 'precise'">场景「{{ sceneLabel }}」</template>
-          <template v-else>{{ wiz.bulkTypes.length }} 类日志</template>
-          · {{ wiz.devices.length || '全部' }} 台设备
+          导出「<b>{{ expCatLabel }}</b>」{{ exp.range?.length === 2 ? ` · ${exp.range[0]} 至 ${exp.range[1]}` : ' · 全部时间' }}
         </div>
       </div>
-
-      <!-- 步进按钮 + 门禁 -->
       <div class="bd-wfoot">
-        <button v-if="wiz.step > 0" class="bd-btn bd-btn--ghost" @click="wiz.step--">上一步</button>
+        <button class="bd-btn bd-btn--ghost" @click="exp.open = false">取消</button>
         <div style="flex: 1" />
-        <button v-if="wiz.step < 2" class="bd-btn" :disabled="!canNext" :style="{ opacity: canNext ? 1 : 0.5 }" @click="wiz.step++">下一步</button>
-        <button v-else class="bd-btn" @click="doExport"><icon-download />导出</button>
+        <button class="bd-btn" :disabled="exp.busy" :style="{ opacity: exp.busy ? 0.6 : 1 }" @click="doExport">
+          <icon-download />{{ exp.busy ? '导出中…' : '导出' }}
+        </button>
       </div>
     </a-modal>
 
@@ -191,7 +133,7 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AuditBundle, type AuditEntry, type KV } from '@/lib/api';
+import { api, getToken, type AuditBundle, type AuditEntry, type KV } from '@/lib/api';
 
 const live = ref(false);
 const cfg = ref(false);
@@ -269,49 +211,53 @@ function verdictLabel(v: AuditEntry['verdict']) {
 }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
-/* ── 高级导出向导 ── */
-const stepLabels = ['搜索模式', '查询字段', '范围与导出'];
-const wiz = reactive({
+/* ── CSV 导出（GET /api/v1/audit/export，admin） ── */
+const exp = reactive({
   open: false,
-  step: 0,
-  mode: '' as '' | 'precise' | 'bulk',
-  scene: 'account' as 'account' | 'outbound' | 'inbound',
-  account: '', quad: '', srcIp: '',
-  bulkTypes: [] as string[],
-  devices: [] as string[],
-  range: [] as string[]
+  category: 'all' as 'all' | 'access' | 'auth' | 'admin' | 'security',
+  range: [] as string[],
+  busy: false
 });
-const bulkTypeOpts = [
-  { value: 'service', label: '系统服务', desc: '服务启停 / 进程守护 / 配置变更' },
-  { value: 'monitor', label: '系统监控', desc: 'CPU / 内存 / 隧道吞吐指标' },
-  { value: 'scan', label: '文件扫描', desc: '终端文件完整性与病毒扫描' },
-  { value: 'safe', label: '系统安全', desc: '入侵检测 / 暴破防护 / 异常告警' }
-];
-const deviceOpts = ['网关-华东-01', '网关-华东-02', '网关-华南-01', '终端-WIN-张伟', '终端-MAC-李娜'];
-const sceneLabel = computed(() => ({ account: '账号分析', outbound: '设备出向行为', inbound: '设备入向行为' }[wiz.scene]));
+const expCatLabel = computed(
+  () => ({ all: '全部类别', access: '访问决策', auth: '登录认证', admin: '管理操作', security: '安全事件' }[exp.category])
+);
 
-function openWizard() {
-  wiz.open = true; wiz.step = 0; wiz.mode = '';
-  wiz.scene = 'account'; wiz.account = ''; wiz.quad = ''; wiz.srcIp = '';
-  wiz.bulkTypes = []; wiz.devices = []; wiz.range = [];
+function openExport() {
+  exp.open = true;
+  exp.category = 'all';
+  exp.range = [];
+  exp.busy = false;
 }
 
-/* 门禁：未选模式不可下一步；第二步精准需填字段 / 全量需勾类型 */
-const canNext = computed(() => {
-  if (wiz.step === 0) return !!wiz.mode;
-  if (wiz.step === 1) {
-    if (wiz.mode === 'precise') {
-      const v = wiz.scene === 'account' ? wiz.account : wiz.scene === 'outbound' ? wiz.quad : wiz.srcIp;
-      return !!v.trim();
-    }
-    return wiz.bulkTypes.length > 0;
+/* 后端回 CSV 附件（非 JSON），api() 封装只吃 JSON，这里直接 fetch blob 触发下载。 */
+async function doExport() {
+  exp.busy = true;
+  try {
+    const qs = new URLSearchParams();
+    if (exp.category !== 'all') qs.set('category', exp.category);
+    if (exp.range?.[0]) qs.set('from', exp.range[0]);
+    if (exp.range?.[1]) qs.set('to', exp.range[1]);
+    const res = await fetch(`/api/v1/audit/export?${qs.toString()}`, {
+      headers: { Authorization: `Bearer ${getToken()}` }
+    });
+    if (!res.ok) throw new Error(`${res.status}`);
+    const blob = await res.blob();
+    // 文件名跟随后端 Content-Disposition（带导出日期），解析失败再兜底
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const name = /filename="([^"]+)"/.exec(cd)?.[1] ?? `baidi-audit-${new Date().toISOString().slice(0, 10)}.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    exp.open = false;
+    Message.success(`已导出 ${name}`);
+  } catch {
+    Message.error('导出失败：需已连 baidi-control 且以管理员登录');
+  } finally {
+    exp.busy = false;
   }
-  return true;
-});
-
-function doExport() {
-  wiz.open = false;
-  Message.success('导出任务已创建');
 }
 
 /* ── 拉取 ── */
@@ -351,33 +297,11 @@ onMounted(async () => {
 .bd-pill2.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); border-color: var(--bd-primary-b); }
 .bd-pill2--time.on { color: var(--bd-primary); }
 
-/* ── 向导 ── */
-.bd-steps { display: flex; align-items: center; gap: 6px; padding: 4px 0 18px; border-bottom: 1px solid var(--bd-fill-2); margin-bottom: 18px; }
-.bd-step { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--bd-t3); }
-.bd-step__n { width: 20px; height: 20px; border-radius: 50%; background: var(--bd-fill-2); color: var(--bd-t3); font-size: 11px; display: inline-flex; align-items: center; justify-content: center; font-weight: 600; flex: none; }
-.bd-step.on { color: var(--bd-t1); font-weight: 600; }
-.bd-step.on .bd-step__n { background: var(--bd-primary); color: #fff; }
-.bd-step.done .bd-step__n { background: var(--bd-success); color: #fff; }
-.bd-step__arr { color: var(--bd-t4); font-size: 13px; margin: 0 2px; }
-
+/* ── 导出弹窗 ── */
 .bd-wbody { min-height: 220px; }
-.bd-wtitle { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-wbody--slim { min-height: 0; }
 .bd-wdesc { font-size: 12.5px; color: var(--bd-t3); margin: 4px 0 16px; }
 
-/* 模式分支卡 */
-.bd-modes { display: flex; gap: 14px; }
-.bd-mode { flex: 1; text-align: left; background: #fff; border: 1.5px solid var(--bd-border); border-radius: var(--bd-radius); padding: 18px 16px; cursor: pointer; transition: all .15s; display: flex; flex-direction: column; gap: 4px; }
-.bd-mode:hover { border-color: var(--bd-primary-b); }
-.bd-mode.on { border-color: var(--bd-primary); background: var(--bd-primary-1); box-shadow: 0 2px 10px rgba(22, 93, 255, .12); }
-.bd-mode__ic { font-size: 22px; color: var(--bd-primary); margin-bottom: 6px; }
-.bd-mode b { font-size: 14px; color: var(--bd-t1); }
-.bd-mode i { font-style: normal; font-size: 12px; color: var(--bd-t3); line-height: 1.5; }
-
-/* 场景单选 / 字段 */
-.bd-scenes { display: flex; flex-direction: column; gap: 4px; margin-bottom: 14px; }
-.bd-scene__h { display: block; font-style: normal; font-size: 11.5px; color: var(--bd-t3); margin-top: 2px; }
-.bd-checks { display: flex; flex-direction: column; gap: 10px; }
-.bd-checks b { font-size: 13px; color: var(--bd-t1); font-weight: 500; }
 .bd-field { margin-top: 14px; }
 .bd-field label { display: block; font-size: 12.5px; color: var(--bd-t2); font-weight: 500; margin-bottom: 8px; }
 

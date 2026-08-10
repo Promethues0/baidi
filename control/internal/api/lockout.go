@@ -40,15 +40,26 @@ func remainStr(until int64) string {
 }
 
 // noteLoginFailure 登记一次登录失败；若触发新锁定则写审计（category=security，
-// 只记确实建立了的锁定——Fail 返回的就是已发生的事实）。
+// 只记确实建立了的锁定——Fail 返回的就是已发生的事实）并向消息通道发一条通知。
+//
+// ★通知是**异步入队**的：一台连不上的 SMTP 服务器不得把登录接口拖成 15 秒一次，
+// 那等于给了攻击者一个比爆破本身更省事的拒绝服务面。锁定本身在 Fail 返回时
+// 就已经生效，通知发不发得出去改变不了这一点（见 notify 包顶部的取舍说明）。
 func (s *Server) noteLoginFailure(r *http.Request, account string) {
 	for _, lk := range s.lockout.Fail(r.Context(), normUser(account), s.clientIP(r)) {
 		subj := "账号 " + lk.Key
 		if lk.Kind == store.LockKindIP {
 			subj = "来源 IP " + lk.Key
 		}
+		until := time.Unix(lk.Until, 0).Format("2006-01-02 15:04:05")
 		s.auditAs(r, account, "security",
 			subj+" 触发登录防爆破锁定（"+lk.Reason+"，锁定至 "+time.Unix(lk.Until, 0).Format("15:04")+"）", "deny")
+		s.notifySecurityEvent("lockout", "【白帝】登录防爆破锁定："+subj,
+			"检测到连续登录失败，已建立临时锁定。\n\n对象："+subj+
+				"\n触发原因："+lk.Reason+
+				"\n锁定至："+until+
+				"\n请求来源 IP："+s.clientIP(r)+
+				"\n\n锁定到期自动解除；需要提前解除请在控制台「安全防护 → 用户状态」处理。")
 	}
 }
 

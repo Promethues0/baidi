@@ -18,6 +18,7 @@ import (
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/lockout"
+	"baidi.dev/control/internal/notify"
 	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
@@ -55,7 +56,11 @@ type Server struct {
 	// 只有直连对端落在这些网段内，X-Forwarded-For 才被采信。见 clientIP。
 	trustedProxies []netip.Prefix
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
-	lockout  *lockout.Guard
+	lockout *lockout.Guard
+	// notices 安全事件通知的异步派发器（有界队列 + 单 worker，见 internal/notify）。
+	// 消费方在主流程上（爆破锁定 / 终端判 block），故入队非阻塞、满则丢并计数——
+	// 通知是观测通道，发不出去不改变任何已经做出的安全处置。
+	notices  *notify.Dispatcher
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -152,7 +157,17 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		ls = v
 	}
 	s.lockout = lockout.New(ls)
+	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
+	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
+}
+
+// Close 释放 Server 持有的后台资源（当前只有通知派发器）。
+// 在 http.Server.Shutdown 之后调用：先停止收新请求，再把在途通知发完。
+func (s *Server) Close() {
+	if s.notices != nil {
+		s.notices.Close()
+	}
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单/安装包分发）。供 auth 中间件使用。
@@ -269,6 +284,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authsrc/sources/{id}", s.handleDeleteAuthSource)
 	mux.HandleFunc("PUT /api/v1/authsrc/sources/{id}/secret", s.handleSetAuthSourceSecret)
 	mux.HandleFunc("POST /api/v1/authsrc/sources/{id}/probe", s.handleProbeAuthSource)
+	// 消息通道（PRD ch15.2）：SMTP / webhook / 短信(=webhook 适配)。归 PermSystem 一权。
+	// 真实消费方：安全事件通知（爆破锁定、终端判 block），见 notify.go 尾部。
+	mux.HandleFunc("GET /api/v1/notify/channels", s.handleNotifyChannels)
+	mux.HandleFunc("POST /api/v1/notify/channels", s.handleSaveNotifyChannel)
+	mux.HandleFunc("DELETE /api/v1/notify/channels/{id}", s.handleDeleteNotifyChannel)
+	mux.HandleFunc("PUT /api/v1/notify/channels/{id}/secret", s.handleSetNotifyChannelSecret)
+	mux.HandleFunc("POST /api/v1/notify/channels/{id}/test", s.handleTestNotifyChannel)
 	// 登录防爆破：生效锁定清单 + 管理员解锁 + 阈值配置读写（admin，配置消费方=登录链路 Guard）
 	mux.HandleFunc("GET /api/v1/security/lockouts", s.handleLockouts)
 	mux.HandleFunc("POST /api/v1/security/lockouts/unlock", s.handleUnlockLockout)

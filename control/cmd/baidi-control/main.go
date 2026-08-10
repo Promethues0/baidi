@@ -164,4 +164,8 @@ func main() {
 	if err := httpServer.Shutdown(ctx); err != nil {
 		slog.Error("graceful shutdown failed", "err", err)
 	}
+	// ★排在 Shutdown 之后：先停止接新请求，再把队列里在途的安全事件通知发完。
+	// 反过来的话，Shutdown 期间那批请求新产生的通知会直接落进一个已关闭的队列——
+	// 恰恰是"关服务前最后那几条告警"最需要送到。
+	srv.Close()
 }

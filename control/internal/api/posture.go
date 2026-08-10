@@ -90,6 +90,13 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 	nowBlocked := nowWorst.Verdict == "block"
 	if nowBlocked && !prevBlocked {
 		s.audit(r, "security", "终端环境不合规，自动收缩接入："+c.Name+"（"+strings.Join(nowWorst.Reasons, "、")+"）", "deny")
+		// 通知只在**转入** block 那一次发（与审计同一条判据）：posture 是每次上报都来一遍的，
+		// 按"当前是 block"发的话，一台不合规的终端会按上报频率把管理员的邮箱刷爆，
+		// 而真正需要被看见的是"状态变了"这一刻。异步入队，不阻塞上报应答。
+		s.notifySecurityEvent("posture-block", "【白帝】终端不合规，接入已收缩："+c.Name,
+			"该账号的终端合规判定已转入 block，接入被自动收缩（拒发敲门令牌 + 撤窗断隧道）。\n\n账号："+c.Name+
+				"\n触发设备："+b.Device+"（"+b.Platform+" "+b.OS+"）\n命中基线："+strings.Join(nowWorst.Reasons, "、")+
+				"\n\n终端整改后重新上报即自动解除；本条只在判定**转入** block 时发一次。")
 	} else if !nowBlocked && prevBlocked {
 		s.audit(r, "security", "终端环境恢复合规，解除接入收缩："+c.Name, "ok")
 	}

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"log/slog"
 	"net"
 	"net/http"
@@ -96,6 +97,22 @@ func (s *Server) auditAs(r *http.Request, actor, category, event, verdict string
 		Category: category,
 		User:     actor,
 		SrcIP:    s.clientIP(r),
+		Event:    event,
+		Verdict:  verdict,
+	})
+}
+
+// auditBG 落一条**没有请求上下文**的审计（后台 goroutine 用：消息通道派发等）。
+//
+// 行为人固定为 system、来源 IP 记 "—"：这两格必须如实为空，而不是借上一次请求的值。
+// 把异步动作记到某个管理员头上，会让审计里出现"他当时根本没点这个按钮"的行为，
+// 而这类错记在事后追责时是最难自证的一种。
+func (s *Server) auditBG(ctx context.Context, category, event, verdict string) {
+	_ = s.writer.RecordAudit(ctx, store.AuditEntry{
+		Time:     time.Now().Format("2006-01-02 15:04:05"),
+		Category: category,
+		User:     "system",
+		SrcIP:    "—",
 		Event:    event,
 		Verdict:  verdict,
 	})

@@ -162,7 +162,7 @@ func ipsecConfigWarning(site store.IpsecSite) string {
 
 // handleSaveIpsec 新增 / 修改一条站点（admin）。
 func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	is, ok := s.ipsecStore(w)
@@ -256,7 +256,7 @@ func validIpsecPeer(s string) bool {
 
 // handleDeleteIpsec 删除一条站点（admin）。密钥行与运行态行同事务连带清除。
 func (s *Server) handleDeleteIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	is, ok := s.ipsecStore(w)
@@ -279,7 +279,7 @@ func (s *Server) handleDeleteIpsec(w http.ResponseWriter, r *http.Request) {
 // 这在一个以审计闭环为卖点的系统里是最不能接受的一类缺陷。
 // 现在只记「下发启用意图」，真正的 up/down 由网关回报后另记（见 ipsec_gateway.go）。
 func (s *Server) handleToggleIpsec(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	is, ok := s.ipsecStore(w)
@@ -360,7 +360,7 @@ const minPSKLen = 20
 // 后者照抄 handleIssueGatewayCert 的姿态：服务端不提供任何回读路径，
 // 管理员没抄下来就只能重新生成。回显没有操作价值（配错了重设即可），只有泄露面。
 func (s *Server) handleSetIpsecPSK(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	is, ok := s.ipsecStore(w)

@@ -62,7 +62,7 @@ func (s *Server) handleLockouts(w http.ResponseWriter, r *http.Request) {
 
 // handleUnlockLockout 管理员解锁一条防爆破锁定（body {kind,key}）。
 func (s *Server) handleUnlockLockout(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var b struct {
@@ -104,7 +104,7 @@ func (s *Server) handleLockoutConfig(w http.ResponseWriter, r *http.Request) {
 // 这是策略页「同 IP / 同用户名连续登录错误锁定」开关与阈值的真实后端——
 // 消费方是登录链路的 Guard，本配置不是摆设。
 func (s *Server) handleSaveLockoutConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	var c lockout.Config

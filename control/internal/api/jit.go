@@ -169,7 +169,7 @@ func (s *Server) handleAccessRequests(w http.ResponseWriter, r *http.Request) {
 // handleDecideAccessRequest 管理员审批处置（admin）。body {decision, reason, ttlMinutes?}。
 // 通过时同事务内建时限授予并回填 grant_id；职责分离闸拒绝审批人==申请人；并发二次处置回 409。
 func (s *Server) handleDecideAccessRequest(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	c, _ := auth.FromContext(r.Context())
@@ -218,7 +218,7 @@ func (s *Server) handleJitGrants(w http.ResponseWriter, r *http.Request) {
 
 // handleRevokeGrant 管理员提前撤销一条授予（admin）。撤销后网关下轮轮询即失去 allow。
 func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")

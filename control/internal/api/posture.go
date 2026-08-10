@@ -169,7 +169,7 @@ func (s *Server) handlePostureList(w http.ResponseWriter, r *http.Request) {
 // ★安全语义：删掉一条 block 报告会把该用户从"跨设备最差"判定里摘除 → 若无其他 block 设备，
 // 该用户即刻解除接入收缩（等价于"退役问题设备后放行"）。故审计为 security 事件留痕。
 func (s *Server) handleDeletePostureReport(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	user := r.PathValue("user")

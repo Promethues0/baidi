@@ -17,9 +17,9 @@ type auditChainStore interface {
 	ExportAudit(ctx context.Context, category, from, to string, fn func(store.AuditEntry) error) error
 }
 
-// handleAuditVerify GET /api/v1/audit/verify（admin）：HMAC-SM3 全链重算，返回 {ok, checked, brokenAt}。
+// handleAuditVerify GET /api/v1/audit/verify（PermAudit）：HMAC-SM3 全链重算，返回 {ok, checked, brokenAt}。
 func (s *Server) handleAuditVerify(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermAudit) {
 		return
 	}
 	cs, ok := s.store.(auditChainStore)
@@ -43,10 +43,10 @@ func normDayBound(v, bound string) string {
 	return v
 }
 
-// handleAuditExport GET /api/v1/audit/export?category=&from=&to=（admin）：流式导出 CSV 附件。
+// handleAuditExport GET /api/v1/audit/export?category=&from=&to=（PermAudit）：流式导出 CSV 附件。
 // 逐行写出不整表进内存；文件名带导出日期。
 func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermAudit) {
 		return
 	}
 	cs, ok := s.store.(auditChainStore)

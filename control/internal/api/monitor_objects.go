@@ -78,7 +78,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 // 除显示覆盖层外，把账号记入封禁表（kickBanTTL）；网关下次轮询即撤销放行窗口、
 // 切断该账号活跃隧道、封禁期内拒绝重新敲门，控制面同时拒发敲门令牌。
 func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -178,7 +178,7 @@ func (s *Server) handleObjectsUsage(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	kind := r.PathValue("kind")
@@ -228,7 +228,7 @@ func (s *Server) handleSaveObject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteObject(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	kind := r.PathValue("kind")

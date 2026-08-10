@@ -44,7 +44,7 @@ func (s *Server) handleAuthPolicies(w http.ResponseWriter, r *http.Request) {
 
 // handleSaveAuthPolicy 新增 / 修改一条认证策略（admin）。
 func (s *Server) handleSaveAuthPolicy(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var p store.AuthPolicy
@@ -75,7 +75,7 @@ func (s *Server) handleSaveAuthPolicy(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteAuthPolicy 删除一条认证策略（admin）；默认策略由 store 层拒绝删除。
 func (s *Server) handleDeleteAuthPolicy(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")

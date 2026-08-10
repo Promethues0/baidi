@@ -72,7 +72,7 @@ func (s *Server) handleAuthSources(w http.ResponseWriter, r *http.Request) {
 
 // handleSaveAuthSource 新增 / 修改认证源。
 func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	aw, ok := s.authSrcWriter(w)
@@ -127,7 +127,7 @@ func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDeleteAuthSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	aw, ok := s.authSrcWriter(w)
@@ -149,7 +149,7 @@ func (s *Server) handleDeleteAuthSource(w http.ResponseWriter, r *http.Request) 
 //
 // **只写不读**：没有任何端点能把它读回去。
 func (s *Server) handleSetAuthSourceSecret(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	aw, ok := s.authSrcWriter(w)
@@ -212,7 +212,7 @@ func (s *Server) handleSetAuthSourceSecret(w http.ResponseWriter, r *http.Reques
 // ★这个按钮此前是纯装饰。现在它真的去连目录 / 拉发现文档，
 // 并把**真实**失败原因回给管理员——「配置写错了」和「网络不通」在这里能分开。
 func (s *Server) handleProbeAuthSource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	aw, ok := s.authSrcWriter(w)

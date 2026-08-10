@@ -45,7 +45,7 @@ func (s *Server) handleOrgs(w http.ResponseWriter, r *http.Request) {
 
 // handleSaveOrg 新增/修改组织单元（admin）。id 为空即新建。
 func (s *Server) handleSaveOrg(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var o store.Org
@@ -69,7 +69,7 @@ func (s *Server) handleSaveOrg(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteOrg 删除组织单元（admin）。有子部门或有成员时 409 拒删。
 func (s *Server) handleDeleteOrg(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -113,7 +113,7 @@ func (s *Server) handleGroups(w http.ResponseWriter, r *http.Request) {
 
 // handleSaveGroup 新增/修改用户组（admin）。
 func (s *Server) handleSaveGroup(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var g store.UserGroup
@@ -144,7 +144,7 @@ func (s *Server) handleSaveGroup(w http.ResponseWriter, r *http.Request) {
 
 // handleDeleteGroup 删除用户组（admin），成员关系一并清除。
 func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -158,7 +158,7 @@ func (s *Server) handleDeleteGroup(w http.ResponseWriter, r *http.Request) {
 
 // handleSetGroupMembers 全量覆写一个 static 组的成员（admin）。
 func (s *Server) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -185,7 +185,7 @@ func (s *Server) handleSetGroupMembers(w http.ResponseWriter, r *http.Request) {
 // handleSetUserMembership 改某用户的组织归属与所属用户组（admin）。
 // orgId 传空串 = 清空归属；groups 省略则不动组关系（区别于传空数组 = 清空）。
 func (s *Server) handleSetUserMembership(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")

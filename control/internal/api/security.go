@@ -24,7 +24,7 @@ var validBaselineStatus = map[string]bool{"enabled": true, "disabled": true}
 
 // handleSaveBaseline 新增/修改一条安全基线（admin）。落库后风险引擎即用新规则评估后续上报。
 func (s *Server) handleSaveBaseline(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var b store.BaselinePolicy
@@ -81,7 +81,7 @@ func (s *Server) warnIfNoEnabledBaseline(r *http.Request) {
 
 // handleDeleteBaseline 删除一条安全基线（admin）。
 func (s *Server) handleDeleteBaseline(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")

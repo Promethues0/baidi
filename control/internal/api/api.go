@@ -249,8 +249,14 @@ func (s *Server) Routes() http.Handler {
 	// 网关与隐身：区域/节点拓扑 + SPA
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
 
-	// 系统管理：三权分立 + 集群
+	// 系统管理：三权分立（管理员角色 + 管理员账号）+ 集群状态。
+	// 读=任意 admin（审计管理员要能监督权限分布）；写=PermAdmins（只有超管持有）。
 	mux.HandleFunc("GET /api/v1/system", s.handleSystem)
+	mux.HandleFunc("POST /api/v1/admin-roles", s.handleSaveAdminRole)
+	mux.HandleFunc("DELETE /api/v1/admin-roles/{key}", s.handleDeleteAdminRole)
+	mux.HandleFunc("POST /api/v1/admins", s.handleCreateAdmin)
+	mux.HandleFunc("PUT /api/v1/admins/{account}/role", s.handleSetAdminRole)
+	mux.HandleFunc("DELETE /api/v1/admins/{account}", s.handleRemoveAdmin)
 	// 认证源接入：认证源 + 自适应规则
 	mux.HandleFunc("GET /api/v1/authsrc", s.handleAuthSrc)
 	// 认证源接入（真落库、真探测、真参与登录）：
@@ -521,7 +527,7 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var u store.DirUser
@@ -549,6 +555,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.PassHash = hash
+	// ★这条路只建**普通用户**：DirUser.Role 是可从请求体解出来的字段，放任它带 "admin"
+	// 就意味着持 security 权的管理员一次请求即可给自己造一个管理员账号——三权分立
+	// 立刻失效，且列表上看不出异常。管理员的建立与角色分派唯一入口是
+	// POST /api/v1/admins（需 PermAdmins，只有超管持有）。
+	u.Role = "user"
+	u.AdminRole = ""
 	// 建号是明文唯一可得的另一处：强度判定必须在这里落，否则新账号的 pw_strength 是
 	// unknown，「弱密码」增强规则对刚建的账号永远不命中（静默失效的经典形态）。
 	u.PwStrength = auth.PasswordStrength(u.Account, pw)
@@ -567,7 +579,7 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -580,7 +592,9 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.writer.SetUserStatus(r.Context(), id, body.Status); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to set user status")
+		// 防自锁：禁用/锁定最后一名超管回 409（与降权、撤销同一道闸，只是走了另一个端点）。
+		s.audit(r, "admin", "用户 "+id+" 置「"+statusZh[body.Status]+"」未生效："+err.Error(), "fail")
+		adminStoreErr(w, err, "failed to set user status")
 		return
 	}
 	// 数据面联动：禁用/锁定 → 入封禁表（经网关策略轮询捎带撤窗+断隧道，同强制下线管道）；
@@ -612,7 +626,7 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 
 // handleResetUserPassword 管理员重置指定用户口令（admin 门）。
 func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -1109,7 +1123,7 @@ func (s *Server) subjectOptions(ctx context.Context) ([]subjectOption, []subject
 
 // handleSaveResource 新增/修改一条受控资源（admin），落库后网关下次轮询即生效。
 func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var res store.Resource
@@ -1203,7 +1217,7 @@ func (s *Server) validateSubjects(ctx context.Context, res store.Resource) (stri
 
 // handleDeleteResource 删除一条受控资源（admin）。
 func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -1216,7 +1230,7 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var a store.App
@@ -1234,7 +1248,7 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	id := r.PathValue("id")
@@ -1256,7 +1270,7 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSavePolicy(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	node := r.PathValue("node")
@@ -1292,15 +1306,6 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"exists": true, "override": po})
 }
 
-func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
-	b, err := s.store.System(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load system")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, b)
-}
-
 func (s *Server) handleAuthSrc(w http.ResponseWriter, r *http.Request) {
 	b, err := s.store.AuthSrc(r.Context())
 	if err != nil {
@@ -1330,8 +1335,9 @@ func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	// 审计日志本身是敏感面：全量行为轨迹 + 源 IP。放给 role=user 等于
-	// 让任意登录终端摸清管理员操作节奏，只许 admin 读。
-	if !s.requireAdmin(w, r) {
+	// 让任意登录终端摸清管理员操作节奏。三权分立下更进一步：**只有审计权**能读——
+	// 安全管理员能定策略却读不到全量日志，才谈得上"定策略的人不看自己的痕迹"。
+	if !s.requirePerm(w, r, store.PermAudit) {
 		return
 	}
 	b, err := s.store.Audit(r.Context())

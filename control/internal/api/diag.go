@@ -58,7 +58,7 @@ type pinger interface {
 
 // handleDiag 运维诊断：对控制面各子系统做一次真实体检（admin）。
 func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	ctx := r.Context()

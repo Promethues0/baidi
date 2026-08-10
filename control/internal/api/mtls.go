@@ -141,7 +141,7 @@ func (s *Server) MTLSConfig(ca *pki.CA, serverCert tls.Certificate) *tls.Config 
 // handleIssueGatewayCert 给一台网关签发 mTLS 客户端证书（admin）。
 // 私钥只在响应里返回一次，服务端不留存——控制面只记指纹用于白名单/吊销。
 func (s *Server) handleIssueGatewayCert(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	if s.ca == nil {
@@ -190,7 +190,7 @@ func (s *Server) handleGatewayCerts(w http.ResponseWriter, r *http.Request) {
 
 // handleRevokeGatewayCert 吊销一张网关证书（admin）：下次握手即被拒。
 func (s *Server) handleRevokeGatewayCert(w http.ResponseWriter, r *http.Request) {
-	if !s.requireAdmin(w, r) {
+	if !s.requirePerm(w, r, store.PermSystem) {
 		return
 	}
 	fp := r.PathValue("fingerprint")

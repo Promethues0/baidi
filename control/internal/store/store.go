@@ -11,6 +11,12 @@ type Store interface {
 	Apps(ctx context.Context) (AppBundle, error)
 	Users(ctx context.Context) (UserDirBundle, error)
 	Devices(ctx context.Context) (DeviceBundle, error)
+	// DeviceByFingerprint 授信终端准入闸的取数点（api.deviceAdmissionGate）：
+	// 敲门令牌签发前查「这个账号名下的这个指纹是什么状态」。
+	DeviceByFingerprint(ctx context.Context, account, fingerprint string) (Device, bool, error)
+	// DeviceTrustSetting 准入模式（observe|strict）与绑定方式（auto|approval）。
+	// 敲门闸与设备登记分别消费这两项——没有真实消费方的开关不进这个结构体。
+	DeviceTrustSetting(ctx context.Context) (DeviceTrustSetting, error)
 	Audit(ctx context.Context) (AuditBundle, error)
 	Gateway(ctx context.Context) (GatewayBundle, error)
 	System(ctx context.Context) (SystemBundle, error)

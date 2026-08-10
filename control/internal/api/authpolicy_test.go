@@ -246,10 +246,24 @@ func TestPolicyTrustedDeviceExempts(t *testing.T) {
 	})); code != http.StatusOK {
 		t.Fatal("保存策略失败")
 	}
-	// 带上这台已登记设备的指纹 → 豁免。
+	// ★上报过 ≠ 授信：默认绑定方式是「审批绑定」，这台设备此刻是 pending。
+	// 改造前这里只看"曾上报过 posture"，于是任何终端上报一次就自动拿到免二次认证资格，
+	// 管理员在终端管理页的批准/吊销对登录链路毫无影响。现在两处同源（trusted_devices.status）。
+	if out := policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.7:5000", "FP-MAC-TEST", ""); out["needMfa"] != true {
+		t.Fatalf("pending 设备（尚未批准）不应被豁免: %v", out)
+	}
+
+	// 管理员批准该终端后才豁免。
+	approveDevice(t, h, "li.fang", "FP-MAC-TEST")
 	if out := policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.7:5000", "FP-MAC-TEST", ""); out["ok"] != true {
 		t.Fatalf("授信终端应被豁免: %v", out)
 	}
+	// 吊销之后立刻失去豁免（同一条 status 判据，不需要用户重新登录以外的任何操作）。
+	revokeDevice(t, h, "li.fang", "FP-MAC-TEST", "设备遗失")
+	if out := policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.7:5000", "FP-MAC-TEST", ""); out["needMfa"] != true {
+		t.Fatalf("已吊销设备不应被豁免: %v", out)
+	}
+	approveDevice(t, h, "li.fang", "FP-MAC-TEST")
 	// 换一台从没上报过的设备（以及浏览器登录不带指纹）→ 不豁免。
 	if out := policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.7:5000", "FP-OTHER", ""); out["needMfa"] != true {
 		t.Fatalf("未登记设备不应被豁免: %v", out)

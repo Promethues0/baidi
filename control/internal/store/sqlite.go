@@ -20,7 +20,21 @@ import (
 // Memory 仅作只读种子，不实现 Writer。
 type Writer interface {
 	CreateApp(ctx context.Context, a App) (App, error)
-	DecideApproval(ctx context.Context, id, decision, reason string) error
+	// DecideApproval 设备绑定审批落库，**同事务**把关联设备置为 trusted / revoked。
+	// 返回被联动的设备（found=false = 该审批单没有关联设备，迁移前遗留的单子）。
+	DecideApproval(ctx context.Context, id, decision, reason, by string) (Device, bool, error)
+	// ── 授信终端生命周期（PRD ch9 FR-EP-10/12/13/14/15）──
+	// EnrollDevice 终端上报时的登记（幂等；created=true 才是新设备）。单账号上限
+	// MaxDevicesPerAccount 在同一事务内判定，超限回 ErrDeviceCap。
+	EnrollDevice(ctx context.Context, account, fingerprint, name, platform, bind string) (Device, bool, error)
+	// SetDeviceStatus 批准 / 吊销 / 打回。返回 (改动前, 改动后)，供审计如实措辞。
+	SetDeviceStatus(ctx context.Context, id, status, by, reason string) (Device, Device, error)
+	RenameDevice(ctx context.Context, id, name string) (Device, error)
+	// DeleteDevice 删设备登记 + 同删它的 posture 报告（两表口径统一的执行处）。
+	DeleteDevice(ctx context.Context, id string) (Device, error)
+	// PurgeStaleDevices 清理陈旧设备（跳过 revoked，理由见实现顶部）。
+	PurgeStaleDevices(ctx context.Context, staleDays int) ([]Device, error)
+	SaveDeviceTrustSetting(ctx context.Context, st DeviceTrustSetting) (DeviceTrustSetting, error)
 	SavePolicyOverride(ctx context.Context, node, title, settings string, customCount int) error
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
@@ -328,6 +342,22 @@ CREATE TABLE IF NOT EXISTS posture_reports (
   checks_json TEXT, verdict TEXT, score INTEGER, level TEXT, reasons_json TEXT, ts INTEGER,
   PRIMARY KEY(user, device)
 );
+-- ── 授信终端（PRD ch9 FR-EP-10/12/13/14/15）──
+-- 设备是一等实体：pending|trusted|revoked 状态机 + 敲门令牌签发时的准入判据
+-- （api.deviceAdmissionGate）。此前"硬件指纹"只被上报和展示，从来不是任何判据。
+--
+-- ★UNIQUE(account,fingerprint) 而不是把指纹设成全局主键：同一台机器可能有多个
+-- 账号登录（共用工位机），各账号的授信是各自的事——按指纹全局唯一的话，A 的设备
+-- 被吊销会连带把 B 挡在门外，而页面上完全看不出这两条记录是同一台机器。
+-- 与 posture_reports 的主键 (user, device) 是同一套键，两表按 (账号,指纹) 一一对应。
+CREATE TABLE IF NOT EXISTS trusted_devices (
+  id TEXT PRIMARY KEY, account TEXT, fingerprint TEXT, name TEXT, platform TEXT,
+  status TEXT, first_seen INTEGER, last_seen INTEGER,
+  approved_by TEXT, approved_at INTEGER, approval_id TEXT, revoke_reason TEXT,
+  UNIQUE(account, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_trusted_devices_account ON trusted_devices(account);
+CREATE INDEX IF NOT EXISTS idx_trusted_devices_approval ON trusted_devices(approval_id);
 CREATE TABLE IF NOT EXISTS access_requests (
   id TEXT PRIMARY KEY, usr TEXT, resource_id TEXT, resource_name TEXT, reason TEXT,
   ttl_minutes INTEGER, status TEXT, timeline TEXT, submitted_at TEXT,
@@ -586,6 +616,12 @@ CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(tar
 	if err := s.backfillAuthPolicyScope(); err != nil {
 		return err
 	}
+	// 授信终端：用既有 posture_reports 回填设备台账。★不做这一步的后果不是"页面少点数据"，
+	// 而是切到 strict 准入的那一刻全体存量终端被判未登记、集体拒发敲门令牌。
+	// 放在 migrate 里安全的理由见 backfillTrustedDevices 顶部（posture_reports 从不播种）。
+	if err := s.backfillTrustedDevices(); err != nil {
+		return err
+	}
 	if err := s.ensureAccountUnique(); err != nil {
 		return err
 	}
@@ -777,19 +813,9 @@ func (s *SQLiteStore) seed() error {
 			}
 		}
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM approvals`).Scan(&n); err != nil {
-		return err
-	}
-	if n == 0 {
-		b, _ := s.Memory.Devices(ctx)
-		for _, ap := range b.Approvals {
-			tl, _ := json.Marshal(ap.Timeline)
-			if _, err := s.db.Exec(`INSERT INTO approvals(id,usr,device,fingerprint,submitted_at,reason,status,timeline,decided_at,decide_reason) VALUES(?,?,?,?,?,?,?,?,'','')`,
-				ap.ID, ap.User, ap.Device, ap.Fingerprint, ap.SubmittedAt, ap.Reason, ap.Status, string(tl)); err != nil {
-				return err
-			}
-		}
-	}
+	// ★不播种设备绑定审批：审批单现在是设备生命周期的一环（approvals.id ↔
+	// trusted_devices.approval_id）。播一批与任何真实设备都对不上的申请，点「通过」
+	// 只会得到一个成功 toast 而没有任何设备被置为授信——正是"页面看起来在工作"的那类假象。
 	if err := s.db.QueryRow(`SELECT COUNT(*) FROM users`).Scan(&n); err != nil {
 		return err
 	}
@@ -1230,50 +1256,6 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 		return App{}, err
 	}
 	return a, nil
-}
-
-// Devices 覆盖：设备 + 信任设置走种子，待审批队列从库读取（只取 pending）。
-func (s *SQLiteStore) Devices(ctx context.Context) (DeviceBundle, error) {
-	b, err := s.Memory.Devices(ctx)
-	if err != nil {
-		return DeviceBundle{}, err
-	}
-	rows, err := s.db.QueryContext(ctx, `SELECT id,usr,device,fingerprint,submitted_at,reason,status,timeline FROM approvals WHERE status='pending' ORDER BY submitted_at DESC`)
-	if err != nil {
-		return DeviceBundle{}, err
-	}
-	defer rows.Close()
-	var aps []TrustApproval
-	for rows.Next() {
-		var ap TrustApproval
-		var tl string
-		if err := rows.Scan(&ap.ID, &ap.User, &ap.Device, &ap.Fingerprint, &ap.SubmittedAt, &ap.Reason, &ap.Status, &tl); err != nil {
-			return DeviceBundle{}, err
-		}
-		_ = json.Unmarshal([]byte(tl), &ap.Timeline)
-		aps = append(aps, ap)
-	}
-	b.Approvals = aps
-	return b, nil
-}
-
-// DecideApproval 审批落库（通过/驳回 + 理由 + 决策时间），并追加一条时间线事件。
-func (s *SQLiteStore) DecideApproval(ctx context.Context, id, decision, reason string) error {
-	var tl string
-	if err := s.db.QueryRowContext(ctx, `SELECT timeline FROM approvals WHERE id=?`, id).Scan(&tl); err != nil {
-		return err
-	}
-	var events []ApprovalEvent
-	_ = json.Unmarshal([]byte(tl), &events)
-	title, kind := "审批通过", "notify"
-	if decision == "rejected" {
-		title, kind = "审批驳回", "risk"
-	}
-	events = append(events, ApprovalEvent{Time: nowStr(), Kind: kind, Title: title, Detail: pick(reason, "管理员已处置，已通知申请人")})
-	nb, _ := json.Marshal(events)
-	_, err := s.db.ExecContext(ctx, `UPDATE approvals SET status=?, decided_at=?, decide_reason=?, timeline=? WHERE id=?`,
-		decision, nowStr(), reason, string(nb), id)
-	return err
 }
 
 // SavePolicyOverride upsert 用户策略覆盖。

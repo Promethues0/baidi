@@ -74,11 +74,25 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		Checks: b.Checks, Verdict: v.Disposal, Score: v.Score, Level: v.Level, Reasons: v.Reasons,
 		TS: time.Now().Unix(),
 	}
-	// 设备基数上限在 store 写入语句内原子判定（handler 层 check-then-act 在并发突发下会越过上限）。
+	// ★设备台账登记排在报告落库**之前**：单账号设备上限（MaxDevicesPerAccount）的
+	// 权威判定点是 trusted_devices（两表按 (账号,指纹) 一一对应，口径必须只有一份）。
+	// 反过来先落报告的话，超限时会留下一条没有设备登记的孤儿报告——终端管理页看不见它，
+	// 而它照样把「跨设备取最差」的判定拉低，管理员翻遍设备页也找不到那台机器。
+	// 上限判定在 EnrollDevice 的事务内原子完成（handler 层 check-then-act 在并发突发下会越界）。
+	if _, _, derr := s.enrollReportingDevice(r, user, b.Device, b.Platform, b.OS); derr != nil {
+		if errors.Is(derr, store.ErrDeviceCap) {
+			httpx.Error(w, http.StatusForbidden,
+				fmt.Sprintf("终端设备数超限（最多 %d 台），请在管理台「终端管理」页清理陈旧设备后重试", store.MaxDevicesPerAccount))
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "failed to enroll device")
+		return
+	}
+	// 设备基数上限在 store 写入语句内也各有一道（纵深，正常路径下先被 EnrollDevice 拦住）。
 	if err := s.writer.SavePostureReport(r.Context(), rep); err != nil {
 		if errors.Is(err, store.ErrPostureDeviceCap) {
 			httpx.Error(w, http.StatusForbidden,
-				fmt.Sprintf("终端设备数超限（最多 %d 台），请联系管理员清理", store.MaxPostureDevices))
+				fmt.Sprintf("终端设备数超限（最多 %d 台），请在管理台「终端管理」页清理陈旧设备后重试", store.MaxDevicesPerAccount))
 			return
 		}
 		httpx.Error(w, http.StatusInternalServerError, "failed to save posture report")
@@ -191,7 +205,13 @@ func (s *Server) handleDeletePostureReport(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	if deleted {
-		s.audit(r, "security", "删除终端报告："+user+" / 设备 "+device+"（设备退役，若为 block 报告则解除该设备触发的接入收缩）", "ok")
+		// ★措辞把两表的关系说清楚：删的是**报告**，设备登记（trusted_devices）仍在，
+		// 因此单账号设备名额也没有被释放。要退役整台设备走「终端管理」页的删除
+		// （那一处同删两表）。不写清楚的话，管理员会在这里反复删报告、纳闷为什么
+		// 还是提示设备数超限——而两处操作在页面上看起来是同一件事。
+		s.audit(r, "security", "删除终端环境报告："+user+" / 设备 "+device+
+			"（若为 block 报告则解除该设备触发的接入收缩；设备登记与授信状态不变，名额未释放——"+
+			"整台设备退役请在「终端管理」页删除）", "ok")
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
 }

@@ -81,6 +81,9 @@ type Server struct {
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
 	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
 	grayObserved map[string]int64
+	// deviceObserved 授信终端「观察模式放行」审计的节流水位："账号|指纹" → 上次落审计的 Unix 秒。
+	// 与 grayObserved 同一条理由：敲门令牌是每 15s 一次的保活热路径，不节流会把审计冲垮。
+	deviceObserved map[string]int64
 	// fwdDropReported / fwdDropReportAt 审计外送队列溢出转审计的节流水位：
 	// 出口 id → 已上报过的累计丢弃数 / 上次上报的 Unix 秒（见 reportForwardDrops）。
 	// 内存态、重启即失（最坏结果是重启后多记一条溢出告警，而那本来就该被看见）。
@@ -168,6 +171,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{},
 		grayObserved:    map[string]int64{},
+		deviceObserved:  map[string]int64{},
 		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{}}
 	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
 	var ls lockout.Store
@@ -277,8 +281,15 @@ func (s *Server) Routes() http.Handler {
 	// 访问者目录：身份源 + 组织树 + 用户清单
 	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
 
-	// 终端管理：信任设置 + 设备清单 + 绑定审批
+	// 终端管理 · 授信终端（PRD ch9 FR-EP-10/12/13/14/15）：准入设置 + 设备台账 + 绑定审批。
+	// 读=任意管理员（角色现算）；写=PermSecurity（与设备绑定审批、posture 报告删除同一权——
+	// 它们改的是同一件事：谁的哪台终端能进来）。真实消费方 = deviceAdmissionGate（敲门令牌闸）。
 	mux.HandleFunc("GET /api/v1/devices", s.handleDevices)
+	mux.HandleFunc("PUT /api/v1/devices/settings", s.handleSaveDeviceTrustSetting)
+	mux.HandleFunc("POST /api/v1/devices/{id}/status", s.handleSetDeviceStatus) // 批准 / 吊销 / 打回
+	mux.HandleFunc("PUT /api/v1/devices/{id}/name", s.handleRenameDevice)
+	mux.HandleFunc("DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
+	mux.HandleFunc("POST /api/v1/devices/cleanup-stale", s.handleCleanupStaleDevices)
 	// 审计中心：分类聚合 + 磁盘水位 + 日志（admin）+ 防篡改链校验 + CSV 导出
 	mux.HandleFunc("GET /api/v1/audit", s.handleAudit)
 	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
@@ -874,6 +885,14 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	// 终端指纹（可选请求体）：客户端自报，与 posture 上报、登录 deviceId 是同一个值。
+	// 旧客户端不发请求体 → 空指纹 → 观察模式放行、严格模式拒（见 deviceAdmissionGate）。
+	// 解码失败不报错：这里的语义是"没带指纹"，不是"请求非法"——把老客户端打成 400
+	// 会在升级窗口里把整批终端断在门外。
+	var kb struct {
+		Device string `json:"device"`
+	}
+	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&kb)
 	if ri, banned := s.revokedActive(c.Name); banned {
 		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 在强制下线封禁期内（"+ri.Reason+"）", "deny")
 		httpx.Error(w, http.StatusForbidden, "已被强制下线，暂时无法接入")
@@ -910,6 +929,15 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 			httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
 			return
 		}
+	}
+	// 授信终端闸（第四道）：这台设备是不是被允许接入。
+	// ★放在最后一道：前三道（封禁 / 账号状态 / 终端合规）都是**账号**维度的否决，
+	// 它们成立时连"这是哪台设备"都不必问；设备闸是账号通过之后的最后一层收缩。
+	// 严格模式拒发；观察模式放行并按 (账号,指纹) 节流留痕；已吊销设备两种模式都拒。
+	if adm := s.deviceAdmissionGate(r, c.Name, kb.Device); !adm.Allowed {
+		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 的终端未获授信（"+adm.Reason+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "终端未获授信："+adm.Reason)
+		return
 	}
 	// Use=knock 是给数据面的用途自证：网关 strict 模式只接受本处签发的令牌，
 	// 会话令牌/MFA 票据（Use 为空）一律拒绝敲门——堵死"持 8h 会话令牌直连数据面、
@@ -1356,13 +1384,32 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "decision must be approved|rejected")
 		return
 	}
-	if err := s.writer.DecideApproval(r.Context(), id, body.Decision, body.Reason); err != nil {
+	// ★同事务联动设备状态：通过 → trusted，驳回 → revoked。
+	// 分两步写的话，「批了但设备还是 pending」会是一个无报错、只在用户连不上时
+	// 才被发现的状态——设备生命周期与审批单必须一起翻。
+	dev, linked, err := s.writer.DecideApproval(r.Context(), id, body.Decision, body.Reason, actorOf(r))
+	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to decide approval")
 		return
 	}
 	decZh := map[string]string{"approved": "通过", "rejected": "驳回"}[body.Decision]
-	s.audit(r, "admin", "设备绑定审批 "+id+"："+decZh, "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "decision": body.Decision})
+	resp := map[string]any{"ok": true, "id": id, "decision": body.Decision, "deviceLinked": linked}
+	switch {
+	case !linked:
+		// 审计只记已发生的事：这张单子没有关联设备，批了也不会有任何终端被置为授信。
+		s.audit(r, "admin", "设备绑定审批 "+id+"："+decZh+"（该审批单未关联任何终端登记，未改变任何设备的授信状态）", "ok")
+	case body.Decision == "approved":
+		resp["device"] = dev
+		s.audit(r, "security", "设备绑定审批 "+id+"：通过，终端已置为授信——"+dev.Account+" / "+dev.Name+
+			"（指纹 "+shortFP(dev.Fingerprint)+"）", "ok")
+	default:
+		until := s.banAccountForDevice(dev, body.Reason)
+		resp["device"] = dev
+		resp["banUntil"] = until
+		resp["blastRadius"] = deviceRevokeBlastRadius
+		s.audit(r, "security", "设备绑定审批 "+id+"：驳回。"+deviceRevokeAudit(dev, body.Reason, until), "deny")
+	}
+	httpx.JSON(w, http.StatusOK, resp)
 }
 
 func (s *Server) handleSavePolicy(w http.ResponseWriter, r *http.Request) {
@@ -1420,14 +1467,8 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, b)
 }
 
-func (s *Server) handleDevices(w http.ResponseWriter, r *http.Request) {
-	b, err := s.store.Devices(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load devices")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, b)
-}
+// handleDevices 已搬到 devices.go（授信终端主线）：它现在有权限闸、有真实数据源、
+// 且与准入判定共用同一份设置，留在这里只会让下一个改设备逻辑的人漏掉半边。
 
 func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	// 审计日志本身是敏感面：全量行为轨迹 + 源 IP。放给 role=user 等于

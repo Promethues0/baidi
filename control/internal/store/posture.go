@@ -5,9 +5,6 @@ import (
 	"errors"
 )
 
-// MaxPostureDevices 单账号最多留存的终端设备报告数（防用随机 device 无界撑大 posture_reports）。
-const MaxPostureDevices = 20
-
 // ── 风险处置四档：每一档的**可执行**语义 ──
 //
 // 四个常量不是标签，每一档都有确定的执行方（无执行方的档位就是 config-only，本项目已吃过亏）：
@@ -44,6 +41,9 @@ func DisposalRank(d string) int { return disposalRank[d] }
 
 // ErrPostureDeviceCap 新设备写入超出单账号上限。上限判定与写入在同一条 SQL 里原子完成
 // （见 SQLiteStore.SavePostureReport），而非 handler 层 check-then-act——后者在并发突发下会越过上限。
+//
+// ★上限常量是 MaxDevicesPerAccount（定义在 devices.go），与授信终端台账
+// trusted_devices **共用同一份**。两表按 (账号,指纹) 一一对应，各算各的会分家。
 var ErrPostureDeviceCap = errors.New("单账号终端设备数超限")
 
 // PostureCheckResult 终端上报的一条检查结果（客户端机械布尔化 + 原始值，策略判定在控制面）。

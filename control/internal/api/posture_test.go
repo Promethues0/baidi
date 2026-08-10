@@ -240,7 +240,7 @@ func TestPostureRejectsUnknownPlatform(t *testing.T) {
 	}
 }
 
-// 设备基数上限：单账号超过 store.MaxPostureDevices 台新设备被拒（防无界撑大 posture_reports）。
+// 设备基数上限：单账号超过 store.MaxDevicesPerAccount 台新设备被拒（防无界撑大 posture_reports）。
 func TestPostureDeviceCap(t *testing.T) {
 	h := newTestServer(t)
 	tok := userToken("li.fang")
@@ -249,7 +249,7 @@ func TestPostureDeviceCap(t *testing.T) {
 		code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body)
 		return code
 	}
-	for i := 0; i < store.MaxPostureDevices; i++ {
+	for i := 0; i < store.MaxDevicesPerAccount; i++ {
 		if code := post(fmt.Sprintf("DEV-%d", i)); code != http.StatusOK {
 			t.Fatalf("第 %d 台应 200, got %d", i, code)
 		}
@@ -273,7 +273,7 @@ func TestPostureDeviceCapConcurrentBurst(t *testing.T) {
 		code, _ := doJSON(t, h, "POST", "/api/v1/posture", tok, body)
 		return code
 	}
-	for i := 0; i < store.MaxPostureDevices-1; i++ {
+	for i := 0; i < store.MaxDevicesPerAccount-1; i++ {
 		if code := post(fmt.Sprintf("SEED-%d", i)); code != http.StatusOK {
 			t.Fatalf("seed %d: %d", i, code)
 		}

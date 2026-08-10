@@ -112,9 +112,14 @@ type Input struct {
 	ClientIP netip.Addr
 	// DeviceID 客户端自报的设备指纹（登录请求体 deviceId）；空 = 未知设备（浏览器登录常态）。
 	DeviceID string
-	// DeviceKnown 该指纹曾以本账号上报过 posture；DeviceVerdict 是该设备最新判定
-	// （allow / degrade / gray / block）。授信终端豁免要求 Known 且判定为 allow：
-	// 一台已知但不合规的终端不叫"授信"。
+	// DeviceKnown 该指纹在本账号名下的设备台账里且状态为 **trusted**（store.trusted_devices）；
+	// DeviceVerdict 是该设备最新的 posture 判定（allow / degrade / gray / block）。
+	// 授信终端豁免要求两者同时成立：一台已批准但当前不合规的终端不叫"授信"，
+	// 一台合规但尚未批准（pending）的终端也不叫"授信"。
+	//
+	// ★口径与敲门准入闸（api.deviceAdmissionGate）同源，都是 trusted_devices 的 status。
+	// 此前这里的判据是"曾上报过 posture 即算授信"——那意味着任何终端只要上报一次
+	// 就自动获得免二次认证的资格，管理员在终端管理页做的批准/吊销对它毫无影响。
 	DeviceKnown   bool
 	DeviceVerdict string
 	// PwStrength 口令强度标记 auth.PwWeak | auth.PwStrong | auth.PwUnknown。

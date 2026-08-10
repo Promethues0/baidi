@@ -26,8 +26,9 @@ type AuthMethodSet struct {
 // 那条是账号自己选择的强认证，策略只能加强、不能削弱（见 api.secondFactor 的求值顺序，
 // 以及 authpolicy_test.go 里钉住这条的用例）。
 type ExemptRule struct {
-	// TrustedDevice 授信终端豁免。判据：该账号**曾用这个设备指纹上报过 posture**，
-	// 且该设备最新判定为 allow。指纹由客户端在登录时随请求带上（deviceId）。
+	// TrustedDevice 授信终端豁免。判据：该指纹在本账号名下的设备台账（trusted_devices）里
+	// 且状态为 **trusted**，且该设备最新 posture 判定为 allow。指纹由客户端在登录时
+	// 随请求带上（deviceId）。授信状态与敲门准入闸（api.deviceAdmissionGate）同源。
 	//
 	// ★诚实边界：设备指纹不是秘密，客户端自报、可被伪造。所以它只用于**降低二次认证
 	// 要求**，绝不用于放宽任何授权——授权闸始终在网关侧 resource.Authorize。

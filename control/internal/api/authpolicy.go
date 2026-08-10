@@ -246,13 +246,25 @@ func (s *Server) stepUpDecision(r *http.Request, cred store.Credential, lc login
 	if a, perr := netip.ParseAddr(s.clientIP(r)); perr == nil {
 		in.ClientIP = a
 	}
-	// 授信终端豁免的判据：这台设备**以本账号**上报过 posture，且最新判定为 allow。
-	// 读失败按"未知设备"处理（不给豁免）——豁免方向的 fail-closed。
+	// 授信终端豁免的判据（两条同时成立）：
+	//  ① 这台设备在本账号名下的设备台账里、且状态为 trusted（管理员批准过 / 自动绑定放过）；
+	//  ② 它最新的 posture 判定为 allow。
+	//
+	// ★① 的口径与敲门准入闸 api.deviceAdmissionGate **同源**（都是 trusted_devices.status）。
+	// 改造前这里只看 ②「曾上报过 posture」，于是任何终端上报一次就自动获得免二次认证资格，
+	// 而管理员在终端管理页的批准/吊销对登录链路毫无影响——两处对"授信终端"给出两个答案，
+	// 且都不报错。豁免是**削弱**认证强度的方向，两条判据里任何一条读失败都不给豁免。
 	if lc.DeviceID != "" {
-		if rep, found, perr := s.store.PostureReportFor(ctx, in.Account, lc.DeviceID); perr != nil {
-			slog.Warn("终端报告读取失败，授信终端豁免按未知设备处理", "账号", cred.Account, "err", perr.Error())
-		} else if found {
-			in.DeviceKnown, in.DeviceVerdict = true, rep.Verdict
+		dev, found, derr := s.store.DeviceByFingerprint(ctx, in.Account, lc.DeviceID)
+		switch {
+		case derr != nil:
+			slog.Warn("设备台账读取失败，授信终端豁免按未知设备处理", "账号", cred.Account, "err", derr.Error())
+		case found && dev.Status == store.DeviceStatusTrusted:
+			if rep, ok, perr := s.store.PostureReportFor(ctx, in.Account, lc.DeviceID); perr != nil {
+				slog.Warn("终端报告读取失败，授信终端豁免按未知设备处理", "账号", cred.Account, "err", perr.Error())
+			} else if ok {
+				in.DeviceKnown, in.DeviceVerdict = true, rep.Verdict
+			}
 		}
 	}
 	return authpolicy.Evaluate(pols, in), true

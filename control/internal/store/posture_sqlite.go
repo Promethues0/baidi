@@ -13,7 +13,7 @@ const postureCols = `user,device,platform,os,client_version,checks_json,verdict,
 
 // SavePostureReport 落库一份终端环境报告（按 (user,device) upsert；User 由 api 层规范化）。
 // 设备上限与写入在同一条语句里判定（SQLite 单写锁下原子）：已存在的 (user,device) 恒放行走 upsert，
-// 新设备仅当当前行数 < MaxPostureDevices 才落行，否则零行受影响 → ErrPostureDeviceCap。
+// 新设备仅当当前行数 < MaxDevicesPerAccount 才落行，否则零行受影响 → ErrPostureDeviceCap。
 // 注意 SELECT 必须带 WHERE，否则 INSERT…SELECT 与 ON CONFLICT 组合会触发 SQLite 的解析歧义报错。
 func (s *SQLiteStore) SavePostureReport(ctx context.Context, r PostureReport) error {
 	checks, _ := json.Marshal(r.Checks)
@@ -26,7 +26,7 @@ ON CONFLICT(user,device) DO UPDATE SET platform=excluded.platform, os=excluded.o
   checks_json=excluded.checks_json, verdict=excluded.verdict, score=excluded.score, level=excluded.level,
   reasons_json=excluded.reasons_json, ts=excluded.ts`,
 		r.User, r.Device, r.Platform, r.OS, r.ClientVersion, string(checks), r.Verdict, r.Score, r.Level, string(reasons), r.TS,
-		r.User, r.Device, r.User, MaxPostureDevices)
+		r.User, r.Device, r.User, MaxDevicesPerAccount)
 	if err != nil {
 		return err
 	}

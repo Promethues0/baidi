@@ -137,14 +137,14 @@ func (s *Server) buildProvider(ctx context.Context, rec store.AuthSourceRec) (an
 //
 // 返回 (凭据, 命中的源, 是否命中, 错误)。错误只在「所有源都不可用」这类
 // 运维故障时非 nil——调用方据此区分「密码错」与「目录挂了」。
-func (s *Server) authenticateExternal(ctx context.Context, username, password string) (store.Credential, string, bool, error) {
+func (s *Server) authenticateExternal(ctx context.Context, username, password string) (store.Credential, string, string, bool, error) {
 	as := s.authSrcStore()
 	if as == nil {
-		return store.Credential{}, "", false, nil
+		return store.Credential{}, "", "", false, nil
 	}
 	srcs, err := as.AuthSources(ctx)
 	if err != nil {
-		return store.Credential{}, "", false, err
+		return store.Credential{}, "", "", false, err
 	}
 
 	// unavailable 记录「源本身出故障」的次数。★它与「凭据错」必须分开统计：
@@ -177,9 +177,11 @@ func (s *Server) authenticateExternal(ctx context.Context, username, password st
 			})
 			if berr != nil {
 				slog.Error("外部身份绑定失败", "源", rec.Name, "subject", id.Subject, "err", berr.Error())
-				return store.Credential{}, rec.Name, false, berr
+				return store.Credential{}, rec.Name, rec.Kind, false, berr
 			}
-			return cred, rec.Name, true, nil
+			// 第三个返回值是源的 kind（ldap/ad/oidc）：认证策略按用户目录分组，
+			// 登录链路是唯一知道"这个人是被哪个目录认出来的"的地方。
+			return cred, rec.Name, rec.Kind, true, nil
 		case errors.Is(err, authsrc.ErrInvalidCredentials):
 			// 这个源不认识他/口令不对：继续问下一个源。不记 unavailable。
 			continue
@@ -192,10 +194,10 @@ func (s *Server) authenticateExternal(ctx context.Context, username, password st
 	}
 
 	if len(unavailable) > 0 {
-		return store.Credential{}, "", false,
+		return store.Credential{}, "", "", false,
 			fmt.Errorf("%w：%s", authsrc.ErrSourceUnavailable, strings.Join(unavailable, "、"))
 	}
-	return store.Credential{}, "", false, nil
+	return store.Credential{}, "", "", false, nil
 }
 
 func ldapTLSMode(s string) ldapsrc.TLSMode {

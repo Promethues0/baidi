@@ -54,6 +54,11 @@ type DirUser struct {
 	// 置位期间登录只拿到 15min 受限令牌（Use=pwreset），调不到任何业务端点。
 	// 不序列化：消费方是登录链路（Credential），目录 API 无人读它。
 	MustChangePw bool `json:"-"`
+	// PwStrength 口令强度标记 weak | strong | unknown（auth.Pw*）。建号时由 API 层按明文判定，
+	// 之后只由 SetUserPassword 更新。消费方是认证策略的「弱密码」增强规则——登录链路
+	// 只有 bcrypt 哈希，判不出强度，只能消费这个在设密码那一刻落下的标记。
+	// 不序列化：它是判定材料，不是目录展示字段（管理台另有专门口径展示）。
+	PwStrength string `json:"-"`
 }
 
 // Credential 登录校验所需的账号凭据（含口令哈希，仅内部使用）。
@@ -66,6 +71,8 @@ type Credential struct {
 	PassHash string
 	// MustChangePw 首登强制改密标志：为真时登录链路不发会话令牌，改签受限改密令牌。
 	MustChangePw bool
+	// PwStrength 口令强度标记 weak | strong | unknown（auth.Pw*），认证策略「弱密码」规则的判据。
+	PwStrength string
 }
 
 func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {

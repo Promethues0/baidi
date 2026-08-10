@@ -73,7 +73,7 @@ func TestSetUserPassword(t *testing.T) {
 
 	cred, _, _ := st.Credential(ctx, "li.fang")
 	newHash, _ := auth.HashPassword("N3w-Pass!")
-	if err := st.SetUserPassword(ctx, cred.ID, newHash, true); err != nil {
+	if err := st.SetUserPassword(ctx, cred.ID, newHash, true, auth.PasswordStrength("li.fang", "N3w-Pass!")); err != nil {
 		t.Fatalf("SetUserPassword: %v", err)
 	}
 	after, _, _ := st.Credential(ctx, "li.fang")
@@ -88,7 +88,7 @@ func TestSetUserPassword(t *testing.T) {
 	}
 	// 自助改密路径（mustChange=false）清标志
 	selfHash, _ := auth.HashPassword("Self-Pass-8")
-	if err := st.SetUserPassword(ctx, cred.ID, selfHash, false); err != nil {
+	if err := st.SetUserPassword(ctx, cred.ID, selfHash, false, auth.PasswordStrength("li.fang", "Self-Pass-8")); err != nil {
 		t.Fatalf("SetUserPassword(clear): %v", err)
 	}
 	if cleared, _, _ := st.Credential(ctx, "li.fang"); cleared.MustChangePw {

@@ -25,7 +25,8 @@ type Writer interface {
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
-	SetUserPassword(ctx context.Context, id, hash string, mustChange bool) error
+	// SetUserPassword 落口令哈希 + 首登改密标志 + 口令强度标记（strength 见 auth.PasswordStrength）。
+	SetUserPassword(ctx context.Context, id, hash string, mustChange bool, strength string) error
 	SaveResource(ctx context.Context, r Resource) error
 	DeleteResource(ctx context.Context, id string) error
 	// ★IPSec 的读写不在 Writer 里，收敛到 IpsecStore（见 ipsec_state.go）：
@@ -177,7 +178,10 @@ func (s *SQLiteStore) ensureCredentials() error {
 		if err != nil {
 			return err
 		}
-		if _, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=? WHERE pass_hash IS NULL OR pass_hash=''`, hash); err != nil {
+		// 回填的是 demo 口令，强度如实标记（与 seed 同口径）。
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE users SET pass_hash=?, pw_strength=? WHERE pass_hash IS NULL OR pass_hash=''`,
+			hash, auth.PasswordStrength("", seedPassword)); err != nil {
 			return err
 		}
 	}
@@ -195,6 +199,7 @@ func (s *SQLiteStore) ensureCredentials() error {
 			ID: "u-admin", Name: "安全管理员", Account: "admin", Org: "安全运营", OrgKey: "sec",
 			Device: "—", IP: "—", Auth: "口令+MFA", LastLogin: "—", Status: "active", Risk: "none",
 			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash,
+			PwStrength: auth.PasswordStrength("admin", seedPassword),
 		})
 	}
 	return nil
@@ -221,7 +226,7 @@ CREATE TABLE IF NOT EXISTS policy_overrides (
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT, account TEXT, org TEXT, org_key TEXT, device TEXT,
   ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT,
-  pass_hash TEXT, role TEXT, must_change_pw INTEGER
+  pass_hash TEXT, role TEXT, must_change_pw INTEGER, pw_strength TEXT
 );
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT,
@@ -265,9 +270,13 @@ CREATE TABLE IF NOT EXISTS service_objects (
 CREATE TABLE IF NOT EXISTS time_objects (
   id TEXT PRIMARY KEY, name TEXT, kind TEXT, spec TEXT, descr TEXT, updated_at TEXT
 );
+-- auth_policies.one_click 已冻结：对应的「一键上线」从模型删除（要一整套设备绑定的
+-- 长效免认证票据，本轮不做），代码不再读写该列。留着不删只为旧库能直接启动。
+-- scope_orgs / scope_groups 才是参与匹配的适用范围（scope 一列是文字说明，仅展示）。
 CREATE TABLE IF NOT EXISTS auth_policies (
   id TEXT PRIMARY KEY, name TEXT, directory TEXT, is_default INTEGER, scope TEXT, priority INTEGER, enabled INTEGER,
-  pc TEXT, mobile TEXT, exempt TEXT, one_click INTEGER, enhance TEXT, authz_apps TEXT, updated_at TEXT
+  pc TEXT, mobile TEXT, exempt TEXT, one_click INTEGER, enhance TEXT, authz_apps TEXT, updated_at TEXT,
+  scope_orgs TEXT, scope_groups TEXT
 );
 -- audit_log 带 HMAC-SM3 防篡改链：seq 链内序号（1 起）、mac = HMAC(key, prev_mac‖字段)。
 -- 事后 UPDATE 任何一行都会让 GET /api/v1/audit/verify 指出断点。
@@ -398,6 +407,13 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 		// 组织归属。★回填见 backfillOrgUnits——它**不在这里调用**而在 seed() 之后
 		// （全新库跑 migrate 时 users 表还是空的，放这儿会静默空转）。
 		{"users", "org_id", "TEXT"},
+		// 口令强度标记（认证策略「弱密码」增强规则的唯一判据）。回填见 backfillPwStrength：
+		// 既有行只能是 unknown——库里只有 bcrypt 哈希，明文早已不可得，回填成 strong
+		// 等于凭空宣称"这些口令是强的"，弱密码规则会对全部存量账号静默失效。
+		{"users", "pw_strength", "TEXT"},
+		// 认证策略的真实适用范围（组织含子树 / 用户组）。回填见 backfillAuthPolicyScope。
+		{"auth_policies", "scope_orgs", "TEXT"},
+		{"auth_policies", "scope_groups", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -419,6 +435,12 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 		return err
 	}
 	if err := s.backfillAuditChain(); err != nil {
+		return err
+	}
+	if err := s.backfillPwStrength(); err != nil {
+		return err
+	}
+	if err := s.backfillAuthPolicyScope(); err != nil {
 		return err
 	}
 	if err := s.ensureAccountUnique(); err != nil {
@@ -504,6 +526,45 @@ func (s *SQLiteStore) backfillMustChangePw() error {
 	return err
 }
 
+// backfillPwStrength 回填 users.pw_strength：既有行一律补 unknown（不是 strong，也不是 weak）。
+//
+// ★这是本项目「补列必须配回填」这条规矩里语义最要紧的一次：
+//   - 补成 strong → 「弱密码要求二次认证」对全部存量账号静默失效，页面上策略是开的；
+//   - 补成 weak   → 全体存量账号登录都被抬到二次认证，且没人说得清凭什么；
+//   - 补成 unknown → 如实表达「这条口令是在强度判定存在之前设的，判不了」。
+//
+// unknown 不命中弱密码规则（不可判定 ≠ 不合规，与 posture 三态同口径），
+// 用户改一次口令即由 SetUserPassword 补齐真实判定。
+func (s *SQLiteStore) backfillPwStrength() error {
+	_, err := s.db.Exec(`UPDATE users SET pw_strength=? WHERE pw_strength IS NULL OR pw_strength=''`, auth.PwUnknown)
+	return err
+}
+
+// backfillAuthPolicyScope 回填 auth_policies 的两列适用范围为空数组，
+// 并**清掉既有行上两个已冻结的开关**（enhance.geoAnomaly / exempt.winDomain）。
+//
+// ★清开关这一步不是洁癖：这两条规则白帝判不了（没有 IP 地理库、没有域校验能力），
+// 保存接口从此拒绝开启、控制台置灰。若不同步清掉库里已经为 true 的行，
+// 界面上就会永久留着两个"打开了但永远不会生效"的勾——正是本轮要消灭的形态。
+// 用 SQLite 的 json_set 原地改，避免把整列反序列化再写回（那会顺手覆盖掉未知字段）。
+func (s *SQLiteStore) backfillAuthPolicyScope() error {
+	if _, err := s.db.Exec(`UPDATE auth_policies SET scope_orgs='[]' WHERE scope_orgs IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE auth_policies SET scope_groups='[]' WHERE scope_groups IS NULL`); err != nil {
+		return err
+	}
+	if _, err := s.db.Exec(
+		`UPDATE auth_policies SET enhance=json_set(enhance,'$.geoAnomaly',json('false'))
+		 WHERE json_valid(enhance) AND json_extract(enhance,'$.geoAnomaly')=1`); err != nil {
+		return err
+	}
+	_, err := s.db.Exec(
+		`UPDATE auth_policies SET exempt=json_set(exempt,'$.winDomain',json('false'))
+		 WHERE json_valid(exempt) AND json_extract(exempt,'$.winDomain')=1`)
+	return err
+}
+
 // addColumnIfMissing 幂等地为表补一列；列已存在（duplicate column name）视为成功。
 //
 // ★不带 DEFAULT 是有意的：新列在既有行上就是 NULL，而 NULL 正是「这一行还没被
@@ -559,10 +620,14 @@ func (s *SQLiteStore) seed() error {
 		// 种子口令 baidi@123 是公开的，生产不该允许它长期可用。仅首次建库时生效
 		// （users 表非空不再进这个分支）；演示站不置，保住 admin/baidi@123 的演示流程。
 		seedMustChange := os.Getenv("BAIDI_SEED_MUST_CHANGE") == "1"
+		// 种子口令的强度**如实判定**（baidi@123 就是弱口令，不到 10 位且在常见弱口令表里）。
+		// 这里是全流程中少数明文可得的地方，谎报成 strong 就等于让「弱密码」规则从首启起失灵。
+		seedStrength := auth.PasswordStrength("", seedPassword)
 		for _, u := range b.Users {
 			u.PassHash = hash
 			u.Role = roleFromDisplay(u.Roles)
 			u.MustChangePw = seedMustChange
+			u.PwStrength = seedStrength
 			if err := s.insertUser(u); err != nil {
 				return err
 			}
@@ -572,6 +637,7 @@ func (s *SQLiteStore) seed() error {
 			ID: "u-admin", Name: "安全管理员", Account: "admin", Org: "安全运营", OrgKey: "sec",
 			Device: "—", IP: "—", Auth: "口令+MFA", LastLogin: "—", Status: "active", Risk: "none",
 			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash, MustChangePw: seedMustChange,
+			PwStrength: seedStrength,
 		}); err != nil {
 			return err
 		}
@@ -713,9 +779,13 @@ func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) insertUser(u DirUser) error {
 	roles, _ := json.Marshal(u.Roles)
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID)
+	// PwStrength 空 = 建号方没有判过强度（只可能是没走 API 的历史路径），如实落 unknown。
+	if u.PwStrength == "" {
+		u.PwStrength = auth.PwUnknown
+	}
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength)
 	return err
 }
 
@@ -846,10 +916,11 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error
 func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credential, bool, error) {
 	key := strings.ToLower(strings.TrimSpace(account))
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,''),COALESCE(must_change_pw,0) FROM users WHERE lower(trim(account))=? LIMIT 1`, key)
+		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,''),COALESCE(must_change_pw,0),
+  COALESCE(NULLIF(pw_strength,''),?) FROM users WHERE lower(trim(account))=? LIMIT 1`, auth.PwUnknown, key)
 	var c Credential
 	var mustChange int
-	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash, &mustChange); err {
+	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash, &mustChange, &c.PwStrength); err {
 	case nil:
 		c.MustChangePw = mustChange == 1
 		if c.Role == "" {
@@ -863,11 +934,19 @@ func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credentia
 	}
 }
 
-// SetUserPassword 落库某用户的口令哈希（bcrypt），并同一条 UPDATE 里写首登改密标志：
+// SetUserPassword 落库某用户的口令哈希（bcrypt）、首登改密标志与**口令强度标记**。
 // 管理员重置传 mustChange=true（初始口令必须被本人换掉），自助改密传 false（清标志）。
-// 标志与口令同语句原子更新——分两条写，中间挤进一次登录就会拿错令牌形态。
-func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string, mustChange bool) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=?, must_change_pw=? WHERE id=?`, hash, b2i(mustChange), id)
+// 三者同语句原子更新——分几条写，中间挤进一次登录就会拿到彼此不一致的判定材料。
+//
+// ★strength 必须在这里落：登录链路只有 bcrypt 哈希，判不出强度（见 auth/strength.go）。
+// 调用方传 auth.PasswordStrength(account, 明文) 的结果；传空视为 unknown（不命中弱密码规则）。
+func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string, mustChange bool, strength string) error {
+	if strength == "" {
+		strength = auth.PwUnknown
+	}
+	_, err := s.db.ExecContext(ctx,
+		`UPDATE users SET pass_hash=?, must_change_pw=?, pw_strength=? WHERE id=?`,
+		hash, b2i(mustChange), strength, id)
 	return err
 }
 

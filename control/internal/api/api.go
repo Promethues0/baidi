@@ -81,6 +81,9 @@ func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 // statusZh 目录账号状态中文名（审计/提示文案共用）。
 var statusZh = map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "挂起"}
 
+// pwStrengthZh 口令强度标记中文名（审计文案用；unknown = 判定存在之前设的口令）。
+var pwStrengthZh = map[string]string{auth.PwWeak: "弱", auth.PwStrong: "强", auth.PwUnknown: "未知"}
+
 // accountBlocked 报告目录状态是否禁止接入（禁用/锁定拒登录、拒发敲门令牌）。
 func accountBlocked(status string) bool { return status == "disabled" || status == "locked" }
 
@@ -364,6 +367,10 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		Username string `json:"username"`
 		Password string `json:"password"`
 		MfaCode  string `json:"mfaCode"`
+		// DeviceID 客户端自报的终端指纹（与 posture 上报同一个值）。
+		// 消费方是认证策略的「授信终端」豁免：这台设备以本账号上报过 posture 且判定通过时，
+		// 可免掉策略驱动的二次认证。浏览器登录不带它 = 未知设备 = 不给豁免（fail-closed）。
+		DeviceID string `json:"deviceId"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Username == "" || b.Password == "" {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
@@ -373,6 +380,9 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	if s.loginGateLocked(w, r, b.Username) {
 		return
 	}
+	// 认证策略按**用户目录**分组，而"这个人是被哪个目录认出来的"只有登录链路当场知道：
+	// 本地哈希命中 = local，外部源命中 = 该源的 kind。猜不得——猜错就会挑到别的目录的策略。
+	lc := loginCtx{Directory: "local", DeviceID: strings.TrimSpace(b.DeviceID)}
 	// 真实凭据校验：查目录账号 + bcrypt 口令哈希（不再是"任意用户名 + baidi@123"）
 	cred, found, err := s.store.Credential(r.Context(), b.Username)
 	if err != nil {
@@ -384,7 +394,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		//
 		// ★顺序是「先本地、后外部」而不是反过来：本地目录里有 admin 这种
 		// 高权账号，把它交给外部目录先答，等于把本地管理员的认证权外包出去。
-		extCred, srcName, hit, aerr := s.authenticateExternal(r.Context(), b.Username, b.Password)
+		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r.Context(), b.Username, b.Password)
 		switch {
 		case aerr != nil:
 			// ★认证源故障绝不能回「用户名或密码错误」：那会让运维去查用户而不是查目录，
@@ -402,6 +412,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cred = extCred
+		lc.Directory = srcKind // 认证策略按目录分组：这一步之后才知道是哪个目录认出的他
 		s.auditAs(r, cred.Account, "auth", "经外部认证源「"+srcName+"」认证通过", "ok")
 	}
 	// 账号状态门：禁用/锁定的目录账号口令对了也不放行（也不进 MFA 流程）
@@ -413,7 +424,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// legacy 回落路径需要读 mfaCode，经 context 传给 secondFactor（避免重复解码请求体）。
-	if resp, done := s.secondFactor(r.WithContext(withLegacyMfaCode(r.Context(), b.MfaCode)), cred); done {
+	if resp, done := s.secondFactor(r.WithContext(withLegacyMfaCode(r.Context(), b.MfaCode)), cred, lc); done {
 		httpx.JSON(w, http.StatusOK, resp)
 		return
 	}
@@ -510,6 +521,9 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.PassHash = hash
+	// 建号是明文唯一可得的另一处：强度判定必须在这里落，否则新账号的 pw_strength 是
+	// unknown，「弱密码」增强规则对刚建的账号永远不命中（静默失效的经典形态）。
+	u.PwStrength = auth.PasswordStrength(u.Account, pw)
 	// 初始口令是管理员定的（或 demo 默认），不是本人私密——首登必须换掉（FR-DEPLOY-09）。
 	u.MustChangePw = true
 	// orgId / groups 直接由 DirUser 的 json 标签承接（见 store.DirUser）；
@@ -586,12 +600,24 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
+	// 口令强度只能在这一刻判（登录时只有 bcrypt 哈希）——判定结果随口令同语句落库，
+	// 供认证策略的「弱密码」增强规则消费。
+	u, found, uerr := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
+	if uerr != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	acct := ""
+	if found {
+		acct = u.Account
+	}
+	strength := auth.PasswordStrength(acct, body.Password)
 	// 管理员知道这把新口令 → 它只是过渡口令，置首登改密逼本人换掉。
-	if err := s.writer.SetUserPassword(r.Context(), id, hash, true); err != nil {
+	if err := s.writer.SetUserPassword(r.Context(), id, hash, true, strength); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
 		return
 	}
-	s.audit(r, "admin", "重置用户 "+id+" 的登录口令，已置首登改密", "ok")
+	s.audit(r, "admin", "重置用户 "+id+" 的登录口令（强度判定："+pwStrengthZh[strength]+"），已置首登改密", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
@@ -632,12 +658,14 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
-	if err := s.writer.SetUserPassword(r.Context(), cred.ID, hash, false); err != nil {
+	strength := auth.PasswordStrength(cred.Account, body.New)
+	if err := s.writer.SetUserPassword(r.Context(), cred.ID, hash, false, strength); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
 		return
 	}
-	s.audit(r, "auth", "自助修改登录口令", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
+	// 强度判定随改密落库，登录链路的「弱密码」规则消费的就是这一刻的结论。
+	s.audit(r, "auth", "自助修改登录口令（强度判定："+pwStrengthZh[strength]+"）", "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "pwStrength": strength})
 }
 
 // handleAdminLogin 管理员登录（真实凭据校验，要求 admin 角色）→ 签发 admin 角色 JWT。
@@ -677,7 +705,8 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// 管理台是权限最高面，同门户一样过二次因子（已注册 passkey 即强制断言）。
-	if resp, done := s.secondFactor(r, cred); done {
+	// 管理台是浏览器面：目录恒为 local（管理员账号只可能来自本地目录），且没有终端指纹。
+	if resp, done := s.secondFactor(r, cred, loginCtx{Directory: "local"}); done {
 		httpx.JSON(w, http.StatusOK, resp)
 		return
 	}

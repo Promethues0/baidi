@@ -14,6 +14,7 @@ import (
 	"github.com/go-webauthn/webauthn/webauthn"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/authpolicy"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
@@ -41,23 +42,24 @@ func (s *Server) webauthnEnabled() bool { return s.rp != nil }
 // 生产配置 BAIDI_WEBAUTHN_RPID/ORIGIN 后此路径不可达。
 const legacyDemoCode = "123456"
 
-// riskyAccount 自适应二次认证的启发式：外包/未授信账号。
-func riskyAccount(account string) bool {
-	return strings.HasPrefix(account, "ext") || strings.Contains(account, "外包")
-}
-
 // secondFactor 决定本次登录是否需要二次因子，并返回应直接回给客户端的响应。
 // done=true 表示登录尚未完成（已产出 needWebauthn/needMfa 响应或拒绝），调用方直接回传。
 //
-// 判定顺序：
-//   - 已注册 passkey 且 RP 已配置 → 必须 WebAuthn 断言（抗钓鱼，最强）；
-//   - 未注册 passkey 但属风险账号 → RP 已配置时要求先注册 passkey（引导，不放行）；
-//     RP 未配置（裸 IP 演示站/dev）→ 回落 legacy 演示验证码，保证演示可用；
-//   - 其余 → 单因子口令放行（与现状一致）。
+// 判定顺序（顺序本身就是安全语义，别调换）：
+//  1. 已注册 passkey 且 RP 已配置 → **无条件**要求 WebAuthn 断言（抗钓鱼，最强）；
+//  2. 否则按认证策略求值（internal/authpolicy）：命中增强条件且未被豁免 → 要求二次认证。
+//     RP 已配置时要求先注册 passkey（引导，不放行）；RP 未配置（裸 IP 演示站/dev）
+//     回落 legacy 演示验证码，保证演示可用；
+//  3. 其余 → 单因子口令放行。
+//
+// ★第 1 步排在策略之前，是「策略只能加强、不能削弱」这条语义的落点：
+// 账号自己注册了 passkey，就没有任何一条豁免规则（可信网络 / 授信终端）能把它降级成单因素。
+// 反过来若先算策略、命中豁免就直接放行，passkey 会变成"有时候要、有时候不要"，
+// 而且这种削弱在日志里看不出来——authpolicy_test.go 有用例钉住这条顺序。
 //
 // ★零凭据不锁死：普通账号无 passkey 照常登录，登录后可去 /portal/security 注册——
 // 避免"无 passkey→无法登录→无法进注册页"的 bootstrap 死锁。
-func (s *Server) secondFactor(r *http.Request, cred store.Credential) (map[string]any, bool) {
+func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCtx) (map[string]any, bool) {
 	account := normUser(cred.Account)
 	n := 0
 	if s.webauthnEnabled() {
@@ -69,32 +71,46 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential) (map[strin
 			return map[string]any{"ok": false, "reason": "二次认证服务暂不可用，请稍后重试"}, true
 		}
 	}
-	switch {
-	case n > 0:
-		s.auditAs(r, cred.Account, "security", "登录触发 passkey 二次认证", "mfa")
+	if n > 0 {
+		s.auditAs(r, cred.Account, "auth", "登录触发 passkey 二次认证（账号已注册 passkey）", "mfa")
 		return map[string]any{
 			"ok": false, "needWebauthn": true, "ticket": s.signMfaTicket(account),
 			"reason": "请用已注册的 passkey（Touch ID / Windows Hello / 安全密钥）完成二次认证",
 		}, true
-	case riskyAccount(account) && s.webauthnEnabled():
-		s.auditAs(r, cred.Account, "security", "风险账号未注册 passkey，登录被拒", "deny")
-		return map[string]any{
-			"ok": false, "needEnroll": true,
-			"reason": "该账号为未授信/外包账号，须先注册 passkey 才能接入，请联系管理员协助录入",
-		}, true
-	case riskyAccount(account):
+	}
+
+	dec, ok := s.stepUpDecision(r, cred, lc)
+	if !ok {
+		// 判定材料读不到：不能把"不知道该不该要二次认证"当成"不需要"。
+		s.auditAs(r, cred.Account, "auth", "认证策略判定材料读取失败，拒绝登录", "fail")
+		return map[string]any{"ok": false, "reason": "认证策略暂不可用，请稍后重试"}, true
+	}
+	switch {
+	case dec.RequireMFA:
+		// 审计记的是已经发生的事实：这次登录因为哪条条件被抬到了二次认证。
+		s.auditAs(r, cred.Account, "auth", dec.Summary(), "mfa")
+		if s.webauthnEnabled() {
+			return map[string]any{
+				"ok": false, "needEnroll": true,
+				"reason": dec.Summary() + "；该账号尚未注册 passkey，请先注册后再接入（可联系管理员协助录入）",
+			}, true
+		}
 		// legacy 演示回落：RP 未配置（如裸 IP 演示站），保留演示验证码路径。
-		return s.legacySecondFactor(r, cred)
+		return s.legacySecondFactor(r, cred, dec)
+	case dec.Exempted:
+		// 豁免也是一次发生过的判定，必须留痕：否则"为什么这次没要二次认证"无从回答。
+		s.auditAs(r, cred.Account, "auth", dec.Summary(), "ok")
 	}
 	return nil, false
 }
 
 // legacySecondFactor 未配置 WebAuthn 时的演示验证码路径（仅演示环境可达）。
-func (s *Server) legacySecondFactor(r *http.Request, cred store.Credential) (map[string]any, bool) {
+// reason 取自策略决策——此前这里写死"检测到未授信终端/异地登录"，那两件事当时根本没判过。
+func (s *Server) legacySecondFactor(r *http.Request, cred store.Credential, dec authpolicy.Decision) (map[string]any, bool) {
 	code := legacyMfaCode(r)
 	if code == "" {
-		s.auditAs(r, cred.Account, "security", "终端用户登录触发自适应二次认证（legacy 演示码，WebAuthn 未配置）", "mfa")
-		return map[string]any{"ok": false, "needMfa": true, "reason": "检测到未授信终端/异地登录，需短信二次认证"}, true
+		s.auditAs(r, cred.Account, "auth", dec.Summary()+"（WebAuthn 未配置，回落 legacy 演示验证码）", "mfa")
+		return map[string]any{"ok": false, "needMfa": true, "reason": dec.Summary() + "，请完成短信二次认证"}, true
 	}
 	if code != legacyDemoCode {
 		return map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：" + legacyDemoCode + "）"}, true

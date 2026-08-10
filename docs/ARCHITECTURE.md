@@ -324,6 +324,7 @@ sequenceDiagram
 | WebAuthn / passkey 二次认证 | [ceremony_test.go](../control/internal/webauthnx/ceremony_test.go)（需可注册域名，裸 IP 不可用） |
 | 真实在线用户 / 网关活性 | 网关 mTLS 注册上报，[monitor_objects.go](../control/internal/api/monitor_objects.go) |
 | 审计落库 | [audit_sqlite.go](../control/internal/store/audit_sqlite.go) |
+| **审计外送 Syslog/SIEM（RFC 5424 over TCP/TLS + HTTP JSON，持久化队列 + 退避重试 + 上界与丢弃计数）** | [internal/forward/](../control/internal/forward/)、[syslog_test.go](../control/internal/forward/syslog_test.go)（进程内 TCP 接收端跑真报文往返 + TLS 反例）、[auditfwd_sqlite_test.go](../control/internal/store/auditfwd_sqlite_test.go)、[api/auditforward_test.go](../control/internal/api/auditforward_test.go)（真审计 → 真投递 → 与 /audit 列表比对 seq/mac） |
 | **网关设备状态采集（CPU/内存/磁盘/负载/吞吐，随心跳上报 + 时序落库 + 降采样）** | [internal/sysstat/](../gateway/internal/sysstat/)、[sysstat_test.go](../gateway/internal/sysstat/sysstat_test.go)（本机真采一次断言值域）、[metrics_sqlite_test.go](../control/internal/store/metrics_sqlite_test.go)、[api/metrics_test.go](../control/internal/api/metrics_test.go) |
 | 组织树 / 用户组落库（含环形父子拒绝、删除守卫、种子部门回填） | [orgs_sqlite.go](../control/internal/store/orgs_sqlite.go)、[orgs_sqlite_test.go](../control/internal/store/orgs_sqlite_test.go)、[orgs_test.go](../control/internal/api/orgs_test.go) |
 | **按组织 / 用户组授权（含子树继承、移出即失效、两处判定同构）** | [subjects.go](../control/internal/store/subjects.go)、[subjects_sqlite_test.go](../control/internal/store/subjects_sqlite_test.go)、[subjects_test.go](../control/internal/api/subjects_test.go) |
@@ -398,6 +399,21 @@ sequenceDiagram
 - **不实现**：EAP、IKEv1、MOBIKE、IKE 分片、配置载荷 CP/虚拟 IP 下发、ESN、传输模式、AH、IPComp、TFC padding、多 TS 对与 narrowing、窗口 >1、后量子混合（`pqHybrid` 字段保留但无效，装载期告警）。
 - **不做 PMTUD**：内层包超过隧道 MTU 直接丢弃并计数（可见），不静默截断。
 - **自实现的密码学协议，未经安全审计**。与项目整体定位一致（README 已声明研究/演示用途）。
+
+### ✅ 审计日志外送 Syslog / SIEM（真，PRD ch16 + ch21.6）
+
+此前白帝的审计**只落库、没有任何外发出口**：全部证据留在被审计方自己的机器上。这在合规语境下是结构性问题——持库文件写权限的人同时是被审计对象时，「事后不可抵赖」只剩 HMAC 链一道，而链本身也在同一个文件里，整库替换（连同 `audit-hmac.key`）之后 `/audit/verify` 依然全绿。
+
+- **外送把链搬到另一台机器上**，这才是本功能的价值：每条记录都带链的 `seq` 与 `mac`，SIEM 侧能独立发现「控制面那边的第 N 条与我收到的第 N 条不是同一条」。因此 seq/mac 不是可选字段——缺了它外送就退化成"日志复制"。
+- **口径同源**：外送的记录、`GET /api/v1/audit` 列表、CSV 导出三者是**同一个结构体**（`store.AuditEntry`，`forward.Record` 是它的类型别名），CSV 也补了「链序号 / 链MAC」两列。各出口自建 DTO 的话，下一次加字段一定只改其中一两处。
+- **两种出口**：`syslog` 走 **RFC 5424 报文 + RFC 6587 帧（octet-counting / LF 两种）**，TCP，可选 TLS；`http` 是通用 JSON 批量出口。**刻意不做 UDP**——审计日志用 UDP 会在抖动/对端忙时静默丢包，而"丢了"两端都看不见。TLS 路径**没有**跳过证书校验的开关（证书对不上请填 `serverName` 或 `caCert`）：外送内容是全量审计，那种开关一旦存在就会被永久打开；`syslog_test.go` 里有一条"换一把无关 CA 必须连不上"的反例守着它。
+- **可靠性**：审计落库的**同一个事务**里给每个启用中的出口入队一行（`audit_forward_queue`）；后台 pump 批量取、**发送成功才出队**，失败整批留队 + 退避（5s/15s/1min/5min/15min 封顶）。外送失败既不丢审计、也不阻塞主流程——入队失败只记 `slog.Error` 不回滚，因为"少一条外送"远好过"少一条审计"。
+- **为什么是独立队列表而不是在 `audit_log` 上加 `forwarded` 列**：加列必须配一次性回填把既有行标成已处理，漏了回填就会在**开启外送的那一刻**把 180 天历史整段重发。独立队列让"不重发历史"结构性成立——历史行从来不进队列，不需要任何回填，也不会被下一个改代码的人破坏。出口上记的 `start_audit_id` 只用于把"历史不补发"这件事显式说给管理员看。
+- **队列有上界（默认 20000/出口）**：没有上界的话，一个连不上的出口会把库涨到磁盘写满，而磁盘写满会让**审计本身**落不了库——为了不丢外送反而丢了审计，方向完全反了。溢出**丢新保旧**（留下的是连续的最早一段，SIEM 侧 seq 仍连续），丢弃累计落库、控制台红条显示，并按出口节流转成一条 `security` 审计。
+- **权限**归 `PermSystem`（与消息通道同类：控制面往外拨号的运维配置）；`PermAudit` 按设计是只读权，不持有写端点。
+- **控制台**：系统管理 →「日志外送」。审计中心那个「日志配置」弹窗（四个类别留痕开关 + 保留天数 + Syslog 转发）**整体删除**——它全是显示层假配置，其中 Syslog 那一格正是本轮做成真的这件事。
+
+**不能声称**：未与商用 SIEM（Splunk / QRadar / 奇安信 / 天融信…）做过实机对接验证；报文按 RFC 5424/6587 逐字段对齐并有进程内接收端的往返用例，但**「按标准写」与「实测互通」是两回事**（同 IPSec 那条边界）。也不做 syslog 的客户端证书认证与本地缓冲文件。
 
 ### ✅ 分离式 DNS（split-DNS，真，但系统解析器那一段未实机验证）
 

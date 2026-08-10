@@ -66,6 +66,12 @@ type Writer interface {
 	SetGroupMembers(ctx context.Context, groupID string, accounts []string) error
 	SetUserOrg(ctx context.Context, userID, orgID string) error
 	SetUserGroups(ctx context.Context, account string, groupIDs []string) error
+	// 业务告警：规则增删改 + 产生告警（自带冷却期去重）+ 处置状态机。
+	// RaiseAlert 的 created=false 表示"冷却期内已有同规则同对象的告警"，不是错误。
+	SaveAlertRule(ctx context.Context, r AlertRule) (AlertRule, error)
+	DeleteAlertRule(ctx context.Context, id string) error
+	RaiseAlert(ctx context.Context, a Alert, cooldownSec int) (Alert, bool, error)
+	SetAlertStatus(ctx context.Context, id, status, by string, at int64) (Alert, error)
 	// AppendGatewayMetric 落一条网关宿主机采样点（数据面心跳带上来的设备状态）。
 	// ★这是全系统唯一的高频写入口（每网关 15s 一条），配套的留存清理见
 	// PurgeExpiredGatewayMetrics——它不在本接口里，因为调用方只有 main 的清理循环。
@@ -400,6 +406,24 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 CREATE TABLE IF NOT EXISTS admin_roles (
   "key" TEXT PRIMARY KEY, name TEXT, power TEXT, builtin INTEGER, scope_json TEXT, created_at TEXT
 );
+-- ── 业务告警（PRD ch5 FR-MON-21~25）──
+-- alert_rules 是「什么算异常」的定义，kind 决定它读哪份真实信号（见 store/alerts.go）。
+-- cooldown_sec 独立成列而不塞进 threshold_json：它对所有 kind 都生效，是告警页可用性的
+-- 硬约束（网关离线会持续成立，不冷却的话每轮评估刷一条，一小时把页面冲垮）。
+CREATE TABLE IF NOT EXISTS alert_rules (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, threshold_json TEXT, enabled INTEGER,
+  channels_json TEXT, cooldown_sec INTEGER, created_at TEXT, updated_at TEXT
+);
+-- alerts 是**待办实体**（区别于 audit_log 那条只追加的流水）：有状态机、有处置人。
+-- object_key 是去重键的另一半：只按 rule_id 去重的话，三台网关同时离线只会留下一条，
+-- 另外两台在页面上根本不存在。
+CREATE TABLE IF NOT EXISTS alerts (
+  id TEXT PRIMARY KEY, rule_id TEXT, kind TEXT, category TEXT, severity TEXT,
+  title TEXT, detail TEXT, object_key TEXT, status TEXT,
+  triggered_at INTEGER, handled_at INTEGER, handled_by TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_dedup ON alerts(rule_id, object_key, triggered_at);
+CREATE INDEX IF NOT EXISTS idx_alerts_status ON alerts(status, triggered_at);
 -- ── 消息通道（PRD ch15.2）──
 -- 配置与凭据**物理分表**（与 auth_source_secrets / ipsec_secrets 同一条推理）。
 -- last_status/last_detail/last_event/last_at 只由**真正发出那一次**写入
@@ -526,6 +550,12 @@ CREATE INDEX IF NOT EXISTS idx_gateway_metrics_ts ON gateway_metrics(ts);`)
 		return err
 	}
 	if err := s.ensureAccountUnique(); err != nil {
+		return err
+	}
+	// 告警规则播种（一次性标记，见 alertRuleSeedMarker）。放 migrate 里是安全的：
+	// 它**不读任何业务表**，只按 alertKindSpecs 建规则——与 backfillOrgUnits 那种
+	// 「要按 users 现有行回填、必须排在 seed 之后」的回填不是一回事。
+	if err := s.seedAlertRules(context.Background()); err != nil {
 		return err
 	}
 	return s.seedLocalAuthSource()

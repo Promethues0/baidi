@@ -3,7 +3,7 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">资源策略 · 数据面授权</div>
-        <div class="bd-page__sub">受 SPA 门控的后端资源（id→后端 + 角色/用户细粒度授权）· control 托管，网关注册后周期热拉取生效</div>
+        <div class="bd-page__sub">受 SPA 门控的后端资源（id→后端 + 角色/用户/用户组/组织细粒度授权）· control 托管，网关注册后周期热拉取生效</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
@@ -57,7 +57,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>授权角色</th><th>授权用户</th><th class="r">操作</th></tr>
+          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="r in resources" :key="r.id">
@@ -81,12 +81,28 @@
               </template>
               <span v-else class="bd-anyt">不限</span>
             </td>
+            <td>
+              <template v-if="(r.allowOrgs || []).length || (r.allowGroups || []).length">
+                <span v-for="o in r.allowOrgs || []" :key="'o' + o" class="bd-rtag" :style="tagStyle('#00B42A')">
+                  <icon-apps />{{ orgName(o) }}
+                </span>
+                <span v-for="g in r.allowGroups || []" :key="'g' + g" class="bd-rtag" :style="tagStyle('#FF7D00')">
+                  <icon-user-group />{{ groupName(g) }}
+                </span>
+                <!-- ★把子树语义的实际影响显式写出来：授权「ACME 集团」看着只是一个标签，
+                     实际覆盖的是整棵树上的所有人。数字与网关放行的那批人同源。 -->
+                <a-tooltip :content="effectiveTip(r)">
+                  <span class="bd-effect">生效 {{ effectiveOf(r).length }} 个账号</span>
+                </a-tooltip>
+              </template>
+              <span v-else class="bd-anyt">未按组织/用户组授权</span>
+            </td>
             <td class="r">
               <span class="bd-link" @click="openEdit(r)">编辑</span>
               <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="del(r)">删除</span>
             </td>
           </tr>
-          <tr v-if="!resources.length"><td colspan="6" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
+          <tr v-if="!resources.length"><td colspan="7" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
         </tbody>
       </table>
     </div>
@@ -121,6 +137,28 @@
         <div class="bd-uform__f"><label>授权用户（逗号分隔，空＝不限）</label>
           <a-input v-model="usersText" placeholder="如 li.ming, zhang.wei" />
         </div>
+        <div class="bd-uform__f"><label>授权组织（空＝不按组织授权）</label>
+          <a-select v-model="form.allowOrgs" multiple allow-clear placeholder="不按组织授权">
+            <a-option v-for="o in orgOpts" :key="o.id" :value="o.id">
+              {{ indentOf(o) }}{{ o.name }} · {{ o.accounts.length }} 人
+            </a-option>
+          </a-select>
+          <div class="bd-uform__hint">★含子树：授权某组织即涵盖它**全部后代组织**的用户。括号里的人数已按子树算好（与网关实际放行口径同源）</div>
+        </div>
+        <div class="bd-uform__f"><label>授权用户组（空＝不按用户组授权）</label>
+          <a-select v-model="form.allowGroups" multiple allow-clear placeholder="不按用户组授权">
+            <a-option v-for="g in groupOpts" :key="g.id" :value="g.id">
+              {{ g.name }}<template v-if="g.kind === 'role'"> · 角色派生</template> · {{ g.accounts.length }} 人
+            </a-option>
+          </a-select>
+        </div>
+        <div v-if="form.allowOrgs.length || form.allowGroups.length" class="bd-effectbox">
+          展开后生效账号 <b>{{ formEffective.length }}</b> 个
+          <span v-if="formEffective.length">：{{ formEffective.slice(0, 8).join('、') }}<template v-if="formEffective.length > 8"> 等</template></span>
+          <!-- 空集必须显式提示：控制面把它如实下发成「拒绝所有人」，
+               管理员若以为"选了组织就有人能进"，会一直查不到为什么连不上。 -->
+          <em v-else>—— 所选组织/用户组当前没有任何成员，该资源将拒绝所有人（角色/账号维度另算）</em>
+        </div>
         <div class="bd-uform__foot">
           <button class="bd-btn bd-btn--ghost" @click="formOpen = false">取消</button>
           <button class="bd-btn" :disabled="saving" @click="save">{{ editing ? '保存' : '创建' }}并落库</button>
@@ -133,10 +171,14 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type Resource, type ResourcesResp, type GatewayReg, type GatewaysResp, type AddrObject, type ServiceObject, type ObjectBundle } from '@/lib/api';
+import { api, type Resource, type ResourcesResp, type SubjectOption, type GatewayReg, type GatewaysResp, type AddrObject, type ServiceObject, type ObjectBundle } from '@/lib/api';
 
 const live = ref(false);
 const resources = ref<Resource[]>([]);
+// 授权主体候选。accounts 由控制面**展开好**（组织那份已含全部后代组织的成员）——
+// 前端只做集合并，不自己走组织树，见 SubjectOption 的说明。
+const orgOpts = ref<SubjectOption[]>([]);
+const groupOpts = ref<SubjectOption[]>([]);
 const gateways = ref<GatewayReg[]>([]);
 const addrs = ref<AddrObject[]>([]);
 const services = ref<ServiceObject[]>([]);
@@ -177,7 +219,9 @@ function seenAgo(ts: number) {
 async function load() {
   try {
     const r = await api<ResourcesResp>('/resources');
-    resources.value = r.resources; live.value = true;
+    resources.value = r.resources;
+    orgOpts.value = r.orgs || []; groupOpts.value = r.groups || [];
+    live.value = true;
   } catch { live.value = false; }
   try {
     const g = await api<GatewaysResp>('/gateways');
@@ -196,11 +240,35 @@ function refLabel(r: Resource) {
   return parts.join(' · ');
 }
 
+/* ── 授权主体：展示与展开 ──
+   展开只做一件事：把选中主体的 accounts **求并集**。子树语义已经在服务端算进
+   accounts 里了（授权 root 那条就已经含全树的人），前端再走一遍树等于把同一套
+   语义实现两遍——两份实现一旦漂移，管理员看到的人数与网关实际放行的人就对不上。 */
+function orgName(id: string) { return orgOpts.value.find((o) => o.id === id)?.name || id; }
+function groupName(id: string) { return groupOpts.value.find((g) => g.id === id)?.name || id; }
+function indentOf(o: SubjectOption) {
+  const depth = Math.max(0, (o.path || '').split('/').filter(Boolean).length - 1);
+  return '　'.repeat(depth);
+}
+function expandAccounts(orgIds: string[], groupIds: string[]) {
+  const set = new Set<string>();
+  for (const id of orgIds) orgOpts.value.find((o) => o.id === id)?.accounts.forEach((a) => set.add(a));
+  for (const id of groupIds) groupOpts.value.find((g) => g.id === id)?.accounts.forEach((a) => set.add(a));
+  return [...set].sort();
+}
+function effectiveOf(r: Resource) { return expandAccounts(r.allowOrgs || [], r.allowGroups || []); }
+function effectiveTip(r: Resource) {
+  const list = effectiveOf(r);
+  return list.length ? `组织/用户组展开后：${list.join('、')}` : '所选组织/用户组当前没有任何成员，该维度不会放行任何人';
+}
+
 const formOpen = ref(false);
 const editing = ref(false);
 const saving = ref(false);
-const form = reactive<{ id: string; name: string; backend: string; allowRoles: string[]; addrRef: string; svcRef: string }>({ id: '', name: '', backend: '', allowRoles: [], addrRef: '', svcRef: '' });
+const form = reactive<{ id: string; name: string; backend: string; allowRoles: string[]; allowGroups: string[]; allowOrgs: string[]; addrRef: string; svcRef: string }>(
+  { id: '', name: '', backend: '', allowRoles: [], allowGroups: [], allowOrgs: [], addrRef: '', svcRef: '' });
 const usersText = ref('');
+const formEffective = computed(() => expandAccounts(form.allowOrgs, form.allowGroups));
 
 // 选择对象时自动回填 backend（保持可手动覆盖，backend 始终权威）
 function onRefChange() {
@@ -217,13 +285,15 @@ function onRefChange() {
 
 function openCreate() {
   editing.value = false;
-  form.id = ''; form.name = ''; form.backend = ''; form.allowRoles = []; form.addrRef = ''; form.svcRef = ''; usersText.value = '';
+  form.id = ''; form.name = ''; form.backend = ''; form.allowRoles = []; form.allowGroups = []; form.allowOrgs = [];
+  form.addrRef = ''; form.svcRef = ''; usersText.value = '';
   formOpen.value = true;
 }
 function openEdit(r: Resource) {
   editing.value = true;
   form.id = r.id; form.name = r.name; form.backend = r.backend;
   form.allowRoles = [...(r.allowRoles || [])];
+  form.allowGroups = [...(r.allowGroups || [])]; form.allowOrgs = [...(r.allowOrgs || [])];
   form.addrRef = r.addrRef || ''; form.svcRef = r.svcRef || '';
   usersText.value = (r.allowUsers || []).join(', ');
   formOpen.value = true;
@@ -236,7 +306,11 @@ async function save() {
   try {
     await api('/resources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ id: form.id, name: form.name, backend: form.backend, allowRoles: form.allowRoles, allowUsers, addrRef: form.addrRef || undefined, svcRef: form.svcRef || undefined })
+      body: JSON.stringify({
+        id: form.id, name: form.name, backend: form.backend,
+        allowRoles: form.allowRoles, allowUsers, allowGroups: form.allowGroups, allowOrgs: form.allowOrgs,
+        addrRef: form.addrRef || undefined, svcRef: form.svcRef || undefined
+      })
     });
     Message.success(`资源「${form.id}」已落库，网关下次轮询即生效`);
     formOpen.value = false;
@@ -288,7 +362,11 @@ onUnmounted(() => clearInterval(timer));
 .bd-gw__nums b { color: var(--bd-primary, #165DFF); font-weight: 600; }
 .bd-gw__seen { font-size: 12px; color: var(--bd-t3, #86909c); flex: none; }
 .bd-rid { color: var(--bd-accent, #165DFF); font-weight: 600; }
-.bd-rtag { display: inline-block; padding: 1px 8px; border-radius: 4px; font-size: 12px; margin-right: 6px; }
+.bd-rtag { display: inline-flex; align-items: center; gap: 3px; padding: 1px 8px; border-radius: 4px; font-size: 12px; margin-right: 6px; }
+.bd-effect { display: inline-block; font-size: 12px; color: var(--bd-t3, #86909c); border-bottom: 1px dashed var(--bd-border, #e5e6eb); cursor: default; }
+.bd-effectbox { font-size: 12.5px; color: var(--bd-t2, #4e5969); background: var(--bd-fill-2, #f2f3f5); border-radius: 6px; padding: 8px 10px; margin-bottom: 12px; line-height: 1.6; }
+.bd-effectbox b { color: var(--bd-accent, #165DFF); }
+.bd-effectbox em { font-style: normal; color: var(--bd-warning, #ff7d00); }
 .bd-anyt { font-size: 12px; color: var(--bd-t4, #c9cdd4); }
 .bd-empty { text-align: center; color: var(--bd-t3, #86909c); padding: 28px 0; }
 .bd-uform__f .req { color: var(--bd-danger, #f53f3f); margin-left: 2px; }

@@ -228,8 +228,23 @@ export interface PostureRow {
 export interface PostureResp { reports: PostureRow[] }
 
 /* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
-export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[]; addrRef?: string; svcRef?: string }
-export interface ResourcesResp { resources: Resource[] }
+export interface Resource {
+  id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[];
+  /** 授权用户组 id（store.Resource.AllowGroups）。控制面下发网关前展开成账号，数据面看不到组。 */
+  allowGroups?: string[];
+  /** 授权组织 id（store.Resource.AllowOrgs）。★含子树：授权某组织即涵盖其全部后代组织的用户。 */
+  allowOrgs?: string[];
+  addrRef?: string; svcRef?: string;
+}
+/**
+ * 可选授权主体（组织或用户组）+ 它当前覆盖的账号。
+ *
+ * ★accounts 是**服务端展开好**的（组织那份已含全部后代组织的成员），与下发给网关时
+ * 并进 allowUsers 的是同一次展开。前端只做集合并，绝不自己走组织树——
+ * 子树语义实现两遍，迟早会让管理员看到的人数与网关实际放行的人对不上。
+ */
+export interface SubjectOption { id: string; name: string; kind?: 'static' | 'role'; path?: string; accounts: string[] }
+export interface ResourcesResp { resources: Resource[]; orgs?: SubjectOption[]; groups?: SubjectOption[] }
 export interface GwSess { ip: string; user: string; role: string; since: number }
 export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number; clients: number; tunnels: number; uptime: number; version?: string; sessions?: GwSess[] }
 export interface GatewaysResp { gateways: GatewayReg[] }

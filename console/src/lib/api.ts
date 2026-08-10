@@ -102,12 +102,29 @@ export interface DirUser {
 }
 export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; groups: UserGroup[]; users: DirUser[] }
 
-/* ── 终端管理（store.DeviceBundle）── */
-export interface DeviceTrustSetting { enabled: boolean; bindMethod: 'auto' | 'approval'; perUserQuota: number }
+/* ── 终端管理 · 授信终端（store.DeviceBundle）── */
+
+/** 准入模式：observe = 非授信终端照常放行但留痕；strict = 拒发敲门令牌（连不进数据面）。 */
+export type DeviceTrustMode = 'observe' | 'strict';
+export type DeviceStatus = 'pending' | 'trusted' | 'revoked';
+export interface DeviceTrustSetting {
+  mode: DeviceTrustMode;
+  bindMethod: 'auto' | 'approval';
+  staleDays: number;
+  /** 单账号设备上限。**只读**：判定写死在原子 SQL 里，前端按它置灰并注明「内置上限」。 */
+  perUserQuota: number;
+}
+/** 一台已登记终端。verdict/os/clientVersion/stale 是后端读时派生，不落库。 */
 export interface Device {
-  id: string; name: string; fingerprint: string; user: string;
-  assetClass: 'enterprise' | 'personal' | 'managed'; os: string; clientVersion: string;
-  online: boolean; tags: string[];
+  id: string; account: string; fingerprint: string; name: string; platform: string;
+  status: DeviceStatus;
+  firstSeen: number; lastSeen: number;
+  approvedBy: string; approvedAt: number; approvalId: string; revokeReason: string;
+  stale: boolean;
+  os: string; clientVersion: string;
+  /** 最近一次 posture 判定；**空串 = 从未上报**（不是 allow）。 */
+  verdict: '' | 'allow' | 'degrade' | 'gray' | 'block';
+  level: string; postureTs: number;
 }
 export interface ApprovalEvent { time: string; kind: 'submit' | 'login' | 'review' | 'notify' | 'risk'; title: string; detail: string }
 export interface TrustApproval {

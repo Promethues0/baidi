@@ -35,6 +35,20 @@ export function setProfileError(msg: string): void {
 }
 
 /** 客户端会话与接入状态（终端 Agent 全局状态）。 */
+/**
+ * 本机终端指纹（collectPosture().device 的最近一次值）。
+ *
+ * ★放在 store 而不是从 posture.ts 直接取，是为了避免 tunnel.ts ↔ posture.ts 的循环依赖；
+ * 更要紧的是让「指纹只有一个来源」在代码结构上成立——posture 上报、登录 deviceId、
+ * 敲门令牌三处必须是**同一个值**。三处各采一次的话，管理员在设备台账里批准的那台机器
+ * 与敲门时自报的那台可能对不上，严格准入模式下表现为「批了也连不上」，两边日志都正常。
+ */
+export const device = reactive({ id: '' });
+
+export function setDeviceID(id: string): void {
+  device.id = id.trim();
+}
+
 export const session = reactive({
   token: ls.getItem('baidi_client_token') || '',
   user: ls.getItem('baidi_client_user') || '',

@@ -4,7 +4,7 @@
  *  - 浏览器 dev：经本地 baidi-knock-agent（/knock 代理）发起真实敲门 + 隧道可达性验证。
  * 两条路径都执行"真链路"敲门，区别只是谁来发 UDP 包。
  */
-import { config, profile } from './store';
+import { config, profile, device } from './store';
 
 /**
  * 敲门目标地址：控制面剖面下发的网关落点优先，设置页配置兜底。
@@ -38,7 +38,10 @@ export async function knock(token: string): Promise<KnockResult> {
     const shellMod = '@tauri-apps/plugin-shell';
     const shell = (await import(/* @vite-ignore */ shellMod)) as { Command: { sidecar: (b: string, a: string[]) => { execute: () => Promise<{ code: number | null; stdout: string; stderr: string }> } } };
     const out = await shell.Command.sidecar('binaries/baidi-knock',
-      ['-spa', spaTarget(), '-token', token, '-control', control]).execute();
+      ['-spa', spaTarget(), '-token', token, '-control', control,
+        // 终端指纹：控制面「授信终端」准入闸的判据，与 posture 上报同一个值。
+        // 还没采过一轮时是空串，baidi-knock 照常发（观察模式放行并留痕，严格模式明确拒）。
+        '-device', device.id]).execute();
     return { ok: out.code === 0, detail: (out.stdout || out.stderr || '').trim() };
   }
 
@@ -46,7 +49,7 @@ export async function knock(token: string): Promise<KnockResult> {
   try {
     const res = await fetch('/knock', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ token, control })
+      body: JSON.stringify({ token, control, device: device.id })
     });
     return (await res.json()) as KnockResult;
   } catch {

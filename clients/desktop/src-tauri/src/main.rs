@@ -57,6 +57,14 @@ struct TunOpts {
     // dns_records FQDN→VIP 记录表（JSON 字符串），落盘后经 -dns-records 交给 root 数据面。
     #[serde(default)]
     dns_records: String,
+    // device 终端硬件指纹（与 posture 上报同一个值，来自 collectPosture().device）。
+    // 随每次取敲门令牌上报给控制面，是「授信终端」准入闸的判据。
+    //
+    // ★两处必须是同一个值：设备台账里被管理员批准的那台机器，与敲门时自报的那台，
+    // 对不上的症状是严格准入模式下「批了也连不上」，而两边日志都完全正常。
+    // 空串 = 不上报（观察模式照常接入并留痕，严格模式会被控制面拒并带回原因）。
+    #[serde(default)]
+    device: String,
 }
 
 /// 定位随 app 打包的 baidi-tun。确定性顺序：同名 → 当前架构三元组名 → 排序后首个 baidi-tun*。
@@ -112,6 +120,10 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
         "-control".into(), opts.control,
         "-reknock".into(), "15s".into(),
     ];
+    if !opts.device.trim().is_empty() {
+        args.push("-device".into());
+        args.push(opts.device.trim().into());
+    }
     if opts.gm {
         args.push("-gm".into());
         args.push("-insecure".into());

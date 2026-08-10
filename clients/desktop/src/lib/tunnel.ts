@@ -5,7 +5,7 @@
  *  - 浏览器 dev：无 utun（需 root + Tauri），退化为经 baidi-knock-agent 的真实敲门探测，
  *    供 UI 联调；不接管系统流量。
  */
-import { config, session, profile } from './store';
+import { config, session, profile, device } from './store';
 
 export function tauriRuntime(): boolean {
   return typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
@@ -80,7 +80,12 @@ export function resolveTunOpts() {
     // 空串让 Rust 侧清掉上一轮的遗留文件，避免换用户/换策略后仍按旧记录作答。
     dnsListen: dns?.server?.trim() || '',
     dnsDomains: dns?.domains?.length ? dns.domains.join(',') : '',
-    dnsRecords: dns?.records && Object.keys(dns.records).length ? JSON.stringify(dns.records) : ''
+    dnsRecords: dns?.records && Object.keys(dns.records).length ? JSON.stringify(dns.records) : '',
+    // 终端指纹：随敲门令牌上报给控制面，供「授信终端」准入闸判定。
+    // 取的是 posture 采集写进 store 的那一份——与设备台账里那台机器同一个值。
+    // 空（还没采过一轮）时不传：控制面在观察模式下照常放行并留痕，严格模式会明确拒绝
+    // 并带回原因，好过在这里兜底猜一个与台账对不上的值。
+    device: device.id
   };
 }
 

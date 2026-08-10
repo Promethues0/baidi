@@ -6,6 +6,7 @@ import { reactive } from 'vue';
 import { invoke } from '@tauri-apps/api/core';
 import { api } from './api';
 import { tauriRuntime } from './tunnel';
+import { setDeviceID } from './store';
 
 /** unknown = 这项探不到（命令缺失/权限不足）。★不是「不合规」：
  *  Rust 采集器在 unknown 时把 ok 置 false（对旧控制面 fail-closed），
@@ -20,7 +21,12 @@ export const postureState = reactive<{ info: PostureInfo | null; verdict: Postur
 
 /** 采集：Tauri 走 Rust 真实探测；浏览器联调回退模拟（标注 DEV-BROWSER，仍走真实上报管道）。 */
 export async function collectPosture(): Promise<PostureInfo> {
-  if (tauriRuntime()) return await invoke<PostureInfo>('collect_posture');
+  if (tauriRuntime()) {
+    const info = await invoke<PostureInfo>('collect_posture');
+    setDeviceID(info.device);
+    return info;
+  }
+  setDeviceID('DEV-BROWSER');
   return {
     platform: 'macOS', os: '浏览器联调（模拟采集）', clientVersion: '0.1.0', device: 'DEV-BROWSER',
     checks: [
@@ -45,6 +51,8 @@ export async function reportPosture(): Promise<{ info: PostureInfo; verdict: Pos
     });
     postureState.info = info;
     postureState.verdict = verdict;
+    // 指纹归口到 store：敲门令牌与登录 deviceId 都从这一份取（见 store.device 的说明）。
+    setDeviceID(info.device);
     return { info, verdict };
   } catch { return null; }
 }

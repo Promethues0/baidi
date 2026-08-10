@@ -18,7 +18,8 @@ import type { BadgeKey } from '@/nav';
 export const badgeCounts = reactive<Partial<Record<BadgeKey, number>>>({});
 
 interface AlertsResp { counts: { pending: number; ignored: number; handled: number } }
-/** source=live 时 sessions 来自网关上报；demo 是无网关时的种子回退（见 api.handleOnline）。 */
+/** source 恒为 live：会话只有网关上报这一个来源（无网关即空态）。
+ *  'demo' 只可能来自尚未升级的旧后端，见下方兼容判断。 */
 interface OnlineResp { sessions: unknown[]; source: 'live' | 'demo' }
 interface UserStateResp { buckets: { key: string; count: number }[] }
 
@@ -38,9 +39,10 @@ export async function refreshBadges(): Promise<void> {
     }),
     load('online', async () => {
       const r = await api<OnlineResp>('/online');
-      // ★只在**真实会话**（网关上报）时给角标。无网关时后端会回退种子演示会话
-      // （source=demo，在线用户页上有标注），把那 10 条画成角标就等于换个地方
-      // 继续显示写死的 '10'——本次改造要消灭的正是这个。
+      // ★只认网关上报的真实会话。后端那份"无网关时回退 10 条演示会话"的种子已删除，
+      // 现在无网关就是 0（"确实没有人在线"是有效信息，与"我不知道"不同）。
+      // 这一行留作**旧后端兼容闸**：万一对接的是尚未升级的控制面（仍会回 demo），
+      // 宁可不显示角标，也不把编造的 10 条换个地方继续画出来。
       if (r.source !== 'live') throw new Error('demo source');
       return r.sessions?.length ?? 0;
     }),

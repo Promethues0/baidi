@@ -17,8 +17,13 @@ func (s *Server) objectExists(ctx context.Context, kind, id string) (bool, error
 
 // ── 监控中心 · 在线用户 ──
 
-// handleOnline 返回实时在线会话：优先聚合在线数据面网关上报的真实敲门会话（source=live），
-// 无网关上报时回退演示种子（source=demo）；两者都叠加"已强制下线"覆盖层。
+// handleOnline 返回实时在线会话：**唯一来源**是在线数据面网关上报的真实敲门会话
+// （离线网关的会话快照不计入），叠加"已强制下线"覆盖层。
+//
+// ★这里曾经有一条回退：没有网关上报时渲染 store 里的 10 条演示会话（source=demo）。
+// 已删除。在线用户是安全读数——空着说明"没有网关在报"，编 10 条会话则等于告诉
+// 管理员"接入链路是通的、正有人在用"，而真实情况可能是数据面根本没起来。
+// 页面 source 恒为 live：控制台自己在后端不可达时的内置降级演示与本端点无关。
 func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) { // 在线会话（账号/IP/网关/踢人原因）属监控中心敏感数据，仅 admin 可见
 		return
@@ -27,7 +32,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	window := int64(gatewayOnlineWindow / time.Second)
 
 	// 聚合在线网关上报的真实会话（离线网关的会话不计入）
-	var real []store.OnlineSession
+	sessions := []store.OnlineSession{}
 	s.mu.Lock()
 	for id, sess := range s.gwSess {
 		gw, ok := s.gateways[id]
@@ -36,7 +41,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, se := range sess {
 			loginT := time.Unix(se.Since, 0)
-			real = append(real, store.OnlineSession{
+			sessions = append(sessions, store.OnlineSession{
 				ID: id + ":" + se.IP, User: se.User, Account: se.User,
 				Org: "—", IP: se.IP, Location: "—", Device: "—", OS: "—",
 				Auth: "SPA 敲门", App: "—", Gateway: id,
@@ -46,18 +51,6 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
-
-	source := "live"
-	sessions := real
-	if len(sessions) == 0 {
-		source = "demo"
-		var err error
-		sessions, err = s.store.OnlineSessions(r.Context())
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
-			return
-		}
-	}
 
 	s.mu.Lock()
 	for i := range sessions {
@@ -70,7 +63,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"sessions":    sessions,
 		"generatedAt": now.Format(time.RFC3339),
-		"source":      source,
+		"source":      "live",
 	})
 }
 
@@ -82,7 +75,9 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
-	// 解析会话账号：先查网关上报的真实会话（id 形如 gwid:ip），未命中再退演示种子。
+	// 解析会话账号：只认网关上报的真实会话（id 形如 gwid:ip）。演示种子那条回退分支
+	// 已随种子一起删除——它会让管理员"下线"一个并不存在的人，落一条同样不存在的
+	// 处置审计，还顺手把这个虚构账号写进封禁表（真会挡住同名真人重新敲门）。
 	// 仅允许下线真实存在的会话：既是正确的 404 语义，也避免覆盖层/封禁表被任意 id 无限撑大。
 	var user string
 	s.mu.Lock()
@@ -94,22 +89,6 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
-	if user == "" {
-		sessions, err := s.store.OnlineSessions(r.Context())
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "failed to load sessions")
-			return
-		}
-		for _, ss := range sessions {
-			if ss.ID == id {
-				user = ss.Account
-				if user == "" {
-					user = ss.User
-				}
-				break
-			}
-		}
-	}
 	if user == "" {
 		httpx.Error(w, http.StatusNotFound, "session not found")
 		return

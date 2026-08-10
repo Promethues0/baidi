@@ -25,21 +25,13 @@ type OnlineSession struct {
 	KickReason string `json:"kickReason,omitempty"`
 }
 
-// OnlineSessions 返回演示用的实时会话清单。
-func (m *Memory) OnlineSessions(_ context.Context) ([]OnlineSession, error) {
-	return []OnlineSession{
-		{ID: "s-1001", User: "李明", Account: "li.ming", Org: "研发中心 / 平台组", IP: "10.20.13.42", Location: "杭州 · 公司内网", Device: "MAC-研发-08", OS: "macOS 14.4", Auth: "AD 域 + 设备证书", App: "研发 Git 仓库", Gateway: "gw-east-01", LoginAt: "09:12", Duration: "3h 41m", Trust: "trusted", Risk: "none", Status: "online"},
-		{ID: "s-1002", User: "王芳", Account: "wang.fang", Org: "财务中心 / 核算组", IP: "10.20.7.9", Location: "杭州 · 公司内网", Device: "WIN-财务-21", OS: "Windows 11", Auth: "本地口令 + 短信 MFA", App: "财务核算系统", Gateway: "gw-east-01", LoginAt: "08:50", Duration: "4h 03m", Trust: "trusted", Risk: "none", Status: "online"},
-		{ID: "s-1003", User: "外包-赵磊", Account: "ext.zhao", Org: "外部协作 / 驻场", IP: "203.0.113.77", Location: "上海 · 公网接入", Device: "未授信-Win-3", OS: "Windows 10", Auth: "本地口令 + 短信 MFA", App: "OA 协同办公", Gateway: "gw-south-01", LoginAt: "10:31", Duration: "2h 22m", Trust: "untrusted", Risk: "high", Status: "online"},
-		{ID: "s-1004", User: "陈静", Account: "chen.jing", Org: "市场中心 / 品牌组", IP: "198.51.100.14", Location: "北京 · 异地登录", Device: "MAC-市场-05", OS: "macOS 13.6", Auth: "AD 域", App: "OA 协同办公", Gateway: "gw-east-01", LoginAt: "11:05", Duration: "1h 48m", Trust: "trusted", Risk: "low", Status: "online"},
-		{ID: "s-1005", User: "刘强", Account: "liu.qiang", Org: "研发中心 / 架构组", IP: "10.20.13.61", Location: "杭州 · 公司内网", Device: "WIN-研发-17", OS: "Windows 11", Auth: "AD 域 + 设备证书", App: "研发 Git 仓库", Gateway: "gw-east-01", LoginAt: "09:40", Duration: "3h 13m", Trust: "trusted", Risk: "none", Status: "online"},
-		{ID: "s-1006", User: "svc-bot-04", Account: "svc.bot.04", Org: "系统账号 / 自动化", IP: "10.30.5.8", Location: "杭州 · IDC", Device: "容器节点", OS: "Linux", Auth: "API 密钥", App: "研发 Git 仓库", Gateway: "gw-east-02", LoginAt: "00:00", Duration: "13h 05m", Trust: "unknown", Risk: "low", Status: "online"},
-		{ID: "s-1007", User: "周婷", Account: "zhou.ting", Org: "人力中心", IP: "10.20.9.30", Location: "杭州 · 公司内网", Device: "MAC-人力-02", OS: "macOS 14.2", Auth: "本地口令", App: "OA 协同办公", Gateway: "gw-east-01", LoginAt: "13:20", Duration: "0h 28m", Trust: "trusted", Risk: "none", Status: "online"},
-		{ID: "s-1008", User: "外包-孙伟", Account: "ext.sun", Org: "外部协作 / 远程", IP: "203.0.113.122", Location: "深圳 · 公网接入", Device: "未授信-Android-3", OS: "Android 13", Auth: "本地口令 + 短信 MFA", App: "OA 协同办公", Gateway: "gw-south-01", LoginAt: "12:55", Duration: "0h 53m", Trust: "untrusted", Risk: "high", Status: "online"},
-		{ID: "s-1009", User: "黄磊", Account: "huang.lei", Org: "销售中心 / 华东", IP: "10.20.11.4", Location: "杭州 · 公司内网", Device: "WIN-销售-33", OS: "Windows 11", Auth: "AD 域", App: "OA 协同办公", Gateway: "gw-east-01", LoginAt: "11:48", Duration: "1h 05m", Trust: "trusted", Risk: "none", Status: "online"},
-		{ID: "s-1010", User: "吴敏", Account: "wu.min", Org: "财务中心 / 资金组", IP: "10.20.7.18", Location: "杭州 · 公司内网", Device: "WIN-财务-09", OS: "Windows 10", Auth: "本地口令 + 短信 MFA", App: "财务核算系统", Gateway: "gw-east-01", LoginAt: "10:10", Duration: "2h 43m", Trust: "trusted", Risk: "low", Status: "online"},
-	}, nil
-}
+// ★曾经这里有一份 10 条的演示会话种子（李明/王芳/外包-赵磊…），由
+// api.handleOnline 在「没有网关上报真实会话」时回退渲染。已整体删除：
+// 「在线用户」是安全读数——管理员看着 10 条编造的在线会话，得到的是
+// "系统正在被使用、接入链路是通的"这种错误的安全感，而真实情况可能是
+// 一台网关都没起。无网关上报时正确的答案是空态，不是好看的假数据。
+// 会话现在**只有一个来源**：网关注册心跳里的 sessions（见 api.handleOnline）。
+
 
 // ── 监控中心 · 用户状态（风险 / 异常态势）──
 

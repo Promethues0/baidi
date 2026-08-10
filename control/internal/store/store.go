@@ -36,7 +36,9 @@ type Store interface {
 	// 见 api.handleGatewayPolicy 与 api.buildProfile。
 	PostureUsersByDisposal(ctx context.Context, disposal string) ([]string, error)
 	Resources(ctx context.Context) ([]Resource, error)
-	OnlineSessions(ctx context.Context) ([]OnlineSession, error)
+	// ★这里曾经有 OnlineSessions(ctx) ([]OnlineSession, error)：无网关上报时回退的
+	// 10 条演示会话。已移除——在线会话的唯一来源是网关注册心跳（api.Server.gwSess），
+	// 没有网关就是空态。安全读数宁可空着，也不能编。
 	UserStates(ctx context.Context) (UserStateBundle, error)
 	Ipsec(ctx context.Context) ([]IpsecSite, error)
 	Objects(ctx context.Context) (ObjectBundle, error)

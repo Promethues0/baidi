@@ -8,8 +8,10 @@
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
+        <!-- source 恒为 live：后端只有网关上报这一个来源，无网关即空态（演示种子已删除）。
+             留着这个标记是为了在对接旧后端时仍能看出数据从哪来。 -->
         <a-tag v-if="live" :color="source === 'live' ? 'arcoblue' : 'gray'" bordered>
-          {{ source === 'live' ? '真实接入 · 网关上报' : '演示数据 · 无网关上报' }}
+          {{ source === 'live' ? '真实接入 · 网关上报' : '旧版后端演示数据' }}
         </a-tag>
         <a-button @click="load">
           <template #icon><icon-refresh /></template>刷新
@@ -124,8 +126,14 @@
               </template>
             </td>
           </tr>
+          <!-- 空态要区分"筛没了"和"根本没有人在线"：后者是安全读数，
+               含义是数据面此刻没有任何接入，不该和筛选结果为空混为一谈。 -->
           <tr v-if="!shown.length">
-            <td colspan="10" class="bd-empty">无匹配会话</td>
+            <td colspan="10" class="bd-empty">
+              <template v-if="sessions.length">无匹配会话（当前筛选条件下）</template>
+              <template v-else-if="live">尚无网关上报在线会话：数据面网关未注册，或当前无人接入</template>
+              <template v-else>无匹配会话</template>
+            </td>
           </tr>
         </tbody>
       </table>

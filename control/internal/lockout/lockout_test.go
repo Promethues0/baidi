@@ -2,6 +2,7 @@ package lockout
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -130,6 +131,113 @@ func TestUnlock(t *testing.T) {
 	}
 	if ok, _ := g.Unlock(ctx, store.LockKindAccount, "u"); ok {
 		t.Fatal("重复解锁应报未找到")
+	}
+}
+
+// fakeStore 记录落库/删库动作的假实现：验证锁定的持久化生命周期（存 → 到期被清）。
+type fakeStore struct {
+	saved map[string]store.Lockout // kind␀key → 最近一次落库的锁定
+}
+
+func newFakeStore() *fakeStore { return &fakeStore{saved: map[string]store.Lockout{}} }
+
+func (f *fakeStore) SaveLockout(_ context.Context, l store.Lockout) error {
+	f.saved[lockKey(l.Kind, l.Key)] = l
+	return nil
+}
+func (f *fakeStore) DeleteLockout(_ context.Context, kind, key string) (bool, error) {
+	kk := lockKey(kind, key)
+	_, ok := f.saved[kk]
+	delete(f.saved, kk)
+	return ok, nil
+}
+func (f *fakeStore) ActiveLockouts(context.Context) ([]store.Lockout, error) { return nil, nil }
+func (f *fakeStore) Setting(context.Context, string) (string, bool, error)   { return "", false, nil }
+func (f *fakeStore) SetSetting(context.Context, string, string) error        { return nil }
+
+// 失败计数表有界：账号维度的键是攻击者可控的（未认证请求随便编用户名就多一个键），
+// 海量随机用户名刷失败不能让 fails 无界增长。
+func TestFailMapBounded(t *testing.T) {
+	g, _ := newTestGuard()
+	for i := 0; i < maxFailKeys+50; i++ {
+		g.Fail(ctx, fmt.Sprintf("spam-%06d", i), "")
+	}
+	g.mu.Lock()
+	n := len(g.fails)
+	_, newest := g.fails[lockKey(store.LockKindAccount, fmt.Sprintf("spam-%06d", maxFailKeys+49))]
+	g.mu.Unlock()
+	if n > maxFailKeys {
+		t.Fatalf("失败计数键数应有界（≤%d），实际 %d", maxFailKeys, n)
+	}
+	if !newest {
+		t.Fatal("淘汰不应牺牲最新的键（应淘汰最旧的）")
+	}
+}
+
+// 达上限时优先清扫已整体滑出窗口的死键，而不是淘汰仍在窗口内的活计数。
+func TestFailMapEvictSweepsDeadKeysFirst(t *testing.T) {
+	g, now := newTestGuard()
+	for i := 0; i < maxFailKeys; i++ {
+		g.Fail(ctx, fmt.Sprintf("old-%06d", i), "")
+	}
+	*now = now.Add(11 * time.Minute) // 全部滑出 10m 窗口
+	g.Fail(ctx, "fresh", "")
+	g.mu.Lock()
+	n := len(g.fails)
+	_, fresh := g.fails[lockKey(store.LockKindAccount, "fresh")]
+	g.mu.Unlock()
+	if n != 1 || !fresh {
+		t.Fatalf("死键应被整批清扫、只留新键：len=%d fresh=%v", n, fresh)
+	}
+}
+
+// 到期锁定的库中行在运行期被回收：Check 逐键懒清理与限频全量清扫都要同步删库，
+// 不能等到下次重启才靠 ActiveLockouts 收尸（长跑进程的 login_lockouts 只增不减）。
+func TestExpiredLockoutPurgedFromStoreAtRuntime(t *testing.T) {
+	fs := newFakeStore()
+	g := New(fs)
+	now := time.Unix(1_700_000_000, 0)
+	g.now = func() time.Time { return now }
+
+	lockUp := func(account string) {
+		for i := 0; i < 5; i++ {
+			g.Fail(ctx, account, "")
+		}
+	}
+	lockUp("u1")
+	lockUp("u2")
+	if len(fs.saved) != 2 {
+		t.Fatalf("两条锁定应已落库: %v", fs.saved)
+	}
+
+	now = now.Add(16 * time.Minute) // 超过 15m 锁定时长
+	// 只查 u1：逐键懒清理删 u1；同时限频全量清扫兜底删掉没人再查的 u2
+	if _, hit := g.Check("u1", ""); hit {
+		t.Fatal("到期锁定不应再命中")
+	}
+	if len(fs.saved) != 0 {
+		t.Fatalf("到期锁定的库中行应在运行期被清掉: %v", fs.saved)
+	}
+}
+
+// Active 懒清理到期项时同样同步删库。
+func TestActivePurgesExpiredFromStore(t *testing.T) {
+	fs := newFakeStore()
+	g := New(fs)
+	now := time.Unix(1_700_000_000, 0)
+	g.now = func() time.Time { return now }
+	for i := 0; i < 5; i++ {
+		g.Fail(ctx, "u", "")
+	}
+	if len(fs.saved) != 1 {
+		t.Fatalf("锁定应已落库: %v", fs.saved)
+	}
+	now = now.Add(16 * time.Minute)
+	if ls := g.Active(); len(ls) != 0 {
+		t.Fatalf("到期锁定不应出现在 Active: %v", ls)
+	}
+	if len(fs.saved) != 0 {
+		t.Fatalf("Active 清理到期项应同步删库: %v", fs.saved)
 	}
 }
 

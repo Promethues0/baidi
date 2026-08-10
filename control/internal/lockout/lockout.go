@@ -27,6 +27,16 @@ import (
 // settingKey 运行时配置在 settings 表里的键。
 const settingKey = "lockout_config"
 
+// maxFailKeys 失败计数表的键数上限。账号维度的键是攻击者可控的——未认证请求
+// 随便编一个不存在的用户名就多一个键，不设上限则「海量随机用户名刷登录失败」
+// 会让 fails 无界增长直至 OOM。达到上限时先清扫已整体滑出窗口的死键，
+// 仍满则淘汰最久没有新失败的那个键（它离自然滑出最近，误伤面最小）。
+const maxFailKeys = 4096
+
+// sweepIntervalSec 到期锁定全量清扫的最小间隔（秒）。逐键懒清理只覆盖
+// 「又被查到的键」，攻击者制造的一次性键没人再查，得靠周期兜底回收内存与库中过期行。
+const sweepIntervalSec = 60
+
 // Store 是本包需要的持久化能力（*store.SQLiteStore 实现）。抽小接口而非直依赖，
 // 与 api/login_authsrc.go 的 authSourceStore 同一姿态：单测塞假实现即可。
 type Store interface {
@@ -96,10 +106,11 @@ type Guard struct {
 	st  Store            // 可为 nil（纯内存，仅测试 / Memory 后端），nil 时重启即丢锁定
 	now func() time.Time // 可注入时钟（单测滑动窗口用）
 
-	mu    sync.Mutex
-	cfg   Config
-	fails map[string][]int64       // kind␀key → 窗口内失败时间戳
-	locks map[string]store.Lockout // kind␀key → 生效锁定
+	mu        sync.Mutex
+	cfg       Config
+	fails     map[string][]int64       // kind␀key → 窗口内失败时间戳（键数受 maxFailKeys 约束）
+	locks     map[string]store.Lockout // kind␀key → 生效锁定
+	lastSweep int64                    // 上次到期锁定全量清扫的时刻（Unix 秒）
 }
 
 func lockKey(kind, key string) string { return kind + "\x00" + key }
@@ -158,34 +169,72 @@ func (g *Guard) SetConfig(ctx context.Context, c Config) error {
 
 // Check 报告账号或源 IP 是否处于锁定期（懒清理到期项，账号锁优先返回）。
 // 维度开关关闭时该维度不拦——开关的语义就是「这道闸要不要」，关了还拦等于假开关的反面。
+// 顺路做一次限频的到期锁定全量清扫：登录是最稳定的高频入口，挂在这里不需要后台任务。
 func (g *Guard) Check(account, ip string) (store.Lockout, bool) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now().Unix()
+	expired := g.sweepLocked(now)
+	var (
+		res store.Lockout
+		hit bool
+	)
 	if g.cfg.AccountEnabled && account != "" {
-		if l, ok := g.activeLocked(store.LockKindAccount, account, now); ok {
-			return l, true
-		}
+		res, hit = g.activeLocked(store.LockKindAccount, account, now, &expired)
 	}
-	if g.cfg.IPEnabled && ip != "" {
-		if l, ok := g.activeLocked(store.LockKindIP, ip, now); ok {
-			return l, true
-		}
+	if !hit && g.cfg.IPEnabled && ip != "" {
+		res, hit = g.activeLocked(store.LockKindIP, ip, now, &expired)
 	}
-	return store.Lockout{}, false
+	g.purgeStore(expired)
+	return res, hit
 }
 
-// activeLocked 须持锁调用。
-func (g *Guard) activeLocked(kind, key string, now int64) (store.Lockout, bool) {
+// activeLocked 须持锁调用。到期的锁定从内存移除并追加进 expired，由调用方交给 purgeStore 删库。
+func (g *Guard) activeLocked(kind, key string, now int64, expired *[]store.Lockout) (store.Lockout, bool) {
 	l, ok := g.locks[lockKey(kind, key)]
 	if !ok {
 		return store.Lockout{}, false
 	}
 	if now >= l.Until {
 		delete(g.locks, lockKey(kind, key)) // 到期即自动解锁
+		*expired = append(*expired, l)
 		return store.Lockout{}, false
 	}
 	return l, true
+}
+
+// sweepLocked 须持锁调用：至多每 sweepIntervalSec 一次全量清扫到期锁定，
+// 返回被移除的清单（调用方交给 purgeStore 删库）。
+func (g *Guard) sweepLocked(now int64) []store.Lockout {
+	if now < g.lastSweep+sweepIntervalSec {
+		return nil
+	}
+	g.lastSweep = now
+	var expired []store.Lockout
+	for kk, l := range g.locks {
+		if now >= l.Until {
+			delete(g.locks, kk)
+			expired = append(expired, l)
+		}
+	}
+	return expired
+}
+
+// purgeStore 须持锁调用（与 fail1 的 SaveLockout 同姿态——放锁后再删会与同键
+// 重建锁交错，误删刚落库的新行）：把已到期并移出内存的锁定同步从库里删掉。
+// 不做这步的话，过期行只会在下次重启（New → ActiveLockouts 懒清理）时回收，
+// 长跑进程的 login_lockouts 表只增不减。删失败无伤拦截正确性（运行期以内存为准），
+// 行会在下次清扫或重启时再试，记告警留痕即可。
+func (g *Guard) purgeStore(expired []store.Lockout) {
+	if g.st == nil || len(expired) == 0 {
+		return
+	}
+	ctx := context.Background()
+	for _, l := range expired {
+		if _, err := g.st.DeleteLockout(ctx, l.Kind, l.Key); err != nil {
+			slog.Warn("清理已到期的登录锁定落库行失败（下次清扫再试）", "kind", l.Kind, "key", l.Key, "err", err.Error())
+		}
+	}
 }
 
 // Fail 登记一次登录失败（口令错 / WebAuthn 断言失败）。窗口内累计达到阈值即创建锁定并落库，
@@ -213,6 +262,9 @@ func (g *Guard) Fail(ctx context.Context, account, ip string) []store.Lockout {
 func (g *Guard) fail1(ctx context.Context, kind, key string, now time.Time) (store.Lockout, bool) {
 	kk := lockKey(kind, key)
 	cut := now.Unix() - int64(g.cfg.WindowSec)
+	if _, exists := g.fails[kk]; !exists && len(g.fails) >= maxFailKeys {
+		g.evictFailKey(cut) // 新键且已达上限：先腾位，保证 fails 键数有界
+	}
 	win := make([]int64, 0, len(g.fails[kk])+1)
 	for _, ts := range g.fails[kk] {
 		if ts > cut { // 窗口外的历史失败滑出，不累计
@@ -239,6 +291,27 @@ func (g *Guard) fail1(ctx context.Context, kind, key string, now time.Time) (sto
 		}
 	}
 	return l, true
+}
+
+// evictFailKey 须持锁调用：先清扫全部已整体滑出窗口的死键（时间戳全部 ≤ cut 的键
+// 已经不可能再贡献锁定，只是没人再碰它才留在表里）；清完仍达上限则淘汰最后一次
+// 失败最早的那个键——它离自然滑出最近，丢掉的计数价值最低。
+func (g *Guard) evictFailKey(cut int64) {
+	var oldestKey string
+	var oldestTS int64
+	for kk, ts := range g.fails {
+		last := ts[len(ts)-1] // 追加序即时间序，末位就是最新一次失败
+		if last <= cut {
+			delete(g.fails, kk)
+			continue
+		}
+		if oldestKey == "" || last < oldestTS {
+			oldestKey, oldestTS = kk, last
+		}
+	}
+	if len(g.fails) >= maxFailKeys && oldestKey != "" {
+		delete(g.fails, oldestKey)
+	}
 }
 
 // Success 登录成功，清零该账号的失败计数。
@@ -272,19 +345,22 @@ func (g *Guard) Unlock(ctx context.Context, kind, key string) (bool, error) {
 	return removed, nil
 }
 
-// Active 返回当前生效的锁定清单（懒清理到期项；kind、key 排序保证 UI 稳定）。
+// Active 返回当前生效的锁定清单（懒清理到期项并同步删库；kind、key 排序保证 UI 稳定）。
 func (g *Guard) Active() []store.Lockout {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.now().Unix()
 	out := []store.Lockout{}
+	var expired []store.Lockout
 	for kk, l := range g.locks {
 		if now >= l.Until {
 			delete(g.locks, kk)
+			expired = append(expired, l)
 			continue
 		}
 		out = append(out, l)
 	}
+	g.purgeStore(expired)
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Kind != out[j].Kind {
 			return out[i].Kind < out[j].Kind

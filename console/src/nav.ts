@@ -6,10 +6,22 @@ export interface NavLeaf {
   title: string;
   path: string;
   icon: string;                   // Arco 图标组件名
-  badge?: string;                 // 右侧角标文案
+  /**
+   * 右侧角标的**数据来源键**（不是字面量）。
+   *
+   * ★这里此前是写死的 '10' / '2'：一个永远显示 10 的"在线用户"角标，
+   * 与真实值一致纯属巧合，而它在页面上与真实计数长得一模一样——
+   * 假数据里最便宜也最容易长期留存的一种。现在角标值由 AppLayout 按这个键
+   * 从真实接口取（见 src/lib/badges.ts），取不到就**不显示**（不显示 0，
+   * 也不回落到任何编造值）。
+   */
+  badgeKey?: BadgeKey;
   badgeKind?: 'count' | 'alert';  // count=灰色计数；alert=红色告警
   done?: boolean;                 // 是否已按设计稿落地（否则 ComingSoon 占位）
 }
+
+/** 角标数据源键：online=在线会话数；risk=需关注用户数；alerts=未处理业务告警数。 */
+export type BadgeKey = 'online' | 'risk' | 'alerts';
 export interface NavGroup {
   label: string;
   children: NavLeaf[];
@@ -20,8 +32,9 @@ export const NAV: NavGroup[] = [
     label: '监控中心',
     children: [
       { title: '安全概览', path: '/monitor/overview', icon: 'IconDashboard', done: true },
-      { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badge: '10', badgeKind: 'count', done: true },
-      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '2', badgeKind: 'alert', done: true },
+      { title: '业务告警', path: '/monitor/alerts', icon: 'IconNotification', badgeKey: 'alerts', badgeKind: 'alert', done: true },
+      { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badgeKey: 'online', badgeKind: 'count', done: true },
+      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badgeKey: 'risk', badgeKind: 'alert', done: true },
       { title: '设备状态', path: '/monitor/devicestat', icon: 'IconDesktop', done: true }
     ]
   },

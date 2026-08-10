@@ -6,6 +6,7 @@ import { getToken } from '@/lib/api';
 // 已按设计稿落地的页面 → 真实组件；其余 NAV 叶子 → ComingSoon 占位
 const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
+  '/monitor/alerts': () => import('@/views/Alerts.vue'),
   '/monitor/online': () => import('@/views/Online.vue'),
   '/monitor/userstate': () => import('@/views/UserState.vue'),
   '/monitor/devicestat': () => import('@/views/DeviceStat.vue'),

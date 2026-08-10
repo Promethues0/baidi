@@ -66,7 +66,12 @@
           >
             <component :is="leaf.icon" class="bd-nav__icon" />
             <span class="bd-nav__t">{{ leaf.title }}</span>
-            <span v-if="leaf.badge" class="bd-nav__badge" :class="leaf.badgeKind">{{ leaf.badge }}</span>
+            <!-- 角标值来自真实接口（src/lib/badges.ts）：取不到就不渲染，不显示编造值 -->
+            <span
+              v-if="leaf.badgeKey && badgeCounts[leaf.badgeKey] !== undefined"
+              class="bd-nav__badge"
+              :class="leaf.badgeKind"
+            >{{ badgeCounts[leaf.badgeKey] }}</span>
           </button>
         </template>
 
@@ -82,14 +87,25 @@
 </template>
 
 <script setup lang="ts">
-import { ref } from 'vue';
+import { onMounted, onUnmounted, ref, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { NAV } from '@/nav';
 import { api, clearToken } from '@/lib/api';
+import { badgeCounts, refreshBadges } from '@/lib/badges';
 
 const route = useRoute();
 const router = useRouter();
+
+// 侧栏角标：进入控制台拉一次，之后每 60s 刷一次，换页时也刷
+// （处理完一条告警回到列表，角标要跟着降下来）。
+let badgeTimer: number | undefined;
+onMounted(() => {
+  void refreshBadges();
+  badgeTimer = window.setInterval(() => void refreshBadges(), 60_000);
+});
+onUnmounted(() => { if (badgeTimer) window.clearInterval(badgeTimer); });
+watch(() => route.path, () => void refreshBadges());
 function go(path: string) { if (path !== route.path) router.push(path); }
 function logout() { clearToken(); router.push('/login'); }
 

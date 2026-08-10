@@ -24,7 +24,7 @@
             <div class="bd-gw__main">
               <div class="bd-gw__id">{{ g.id }}<span v-if="g.sessions?.length" class="bd-gw__badge">会话 {{ g.sessions.length }}</span></div>
               <div class="bd-gw__meta"><span class="bd-mono">proxy {{ g.proxy }}</span> · <span class="bd-mono">spa {{ g.spa }}</span></div>
-              <div class="bd-gw__nums">已授权客户端 <b>{{ g.clients }}</b> · 活跃隧道 <b>{{ g.tunnels }}</b> · 运行 <b>{{ upt(g.uptime) }}</b></div>
+              <div class="bd-gw__nums">已授权客户端 <b>{{ g.clients }}</b> · 活跃隧道 <b>{{ g.tunnels }}</b> · 运行 <b>{{ upt(g.uptime) }}</b> · 版本 <b>{{ g.version || '—' }}</b></div>
             </div>
             <span class="bd-gw__seen">{{ seenAgo(g.lastSeen) }}</span>
             <icon-down class="bd-gw__chev" :class="{ up: expanded.has(g.id) }" />

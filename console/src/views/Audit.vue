@@ -96,6 +96,7 @@
             <a-option value="auth">登录认证</a-option>
             <a-option value="admin">管理操作</a-option>
             <a-option value="security">安全事件</a-option>
+            <a-option value="dataplane">数据面回执</a-option>
           </a-select>
         </div>
         <div class="bd-field">
@@ -194,12 +195,14 @@ const shownLogs = computed<AuditEntry[]>(() =>
 );
 
 function catMeta(c: AuditEntry['category']) {
+  // 未知分类兜底：后端新增分类时页面稳定降级（原样显示 key），而不是 undefined.color 崩掉整页
   return {
     access: { label: '访问决策', color: '#165DFF' },
     auth: { label: '登录认证', color: '#722ED1' },
     admin: { label: '管理操作', color: '#00B42A' },
-    security: { label: '安全事件', color: '#FF7D00' }
-  }[c];
+    security: { label: '安全事件', color: '#FF7D00' },
+    dataplane: { label: '数据面回执', color: '#0FC6C2' }
+  }[c] ?? { label: c, color: '#86909C' };
 }
 function verdictColor(v: AuditEntry['verdict']) {
   if (v === 'allow' || v === 'ok') return '#00B42A';

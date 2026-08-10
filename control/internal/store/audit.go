@@ -59,7 +59,7 @@ type AuditVerifyResult struct {
 
 type AuditEntry struct {
 	Time     string `json:"time"`
-	Category string `json:"category"` // access | auth | admin | security
+	Category string `json:"category"` // access | auth | admin | security | dataplane
 	User     string `json:"user"`
 	SrcIP    string `json:"srcIp"`
 	Event    string `json:"event"`

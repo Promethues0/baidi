@@ -56,9 +56,9 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 	}
 	category := r.URL.Query().Get("category")
 	switch category {
-	case "", "access", "auth", "admin", "security":
+	case "", "access", "auth", "admin", "security", "dataplane":
 	default:
-		httpx.Error(w, http.StatusBadRequest, "category 须为 access|auth|admin|security 或留空")
+		httpx.Error(w, http.StatusBadRequest, "category 须为 access|auth|admin|security|dataplane 或留空")
 		return
 	}
 	from := r.URL.Query().Get("from")
@@ -94,7 +94,7 @@ func (s *Server) handleAuditExport(w http.ResponseWriter, r *http.Request) {
 
 // exportScopeZh 拼导出范围的中文描述（供审计留痕）。
 func exportScopeZh(category, from, to string) string {
-	catZh := map[string]string{"access": "访问决策", "auth": "登录认证", "admin": "管理操作", "security": "安全事件"}
+	catZh := map[string]string{"access": "访问决策", "auth": "登录认证", "admin": "管理操作", "security": "安全事件", "dataplane": "数据面回执"}
 	scope := "全部类别"
 	if z, ok := catZh[category]; ok {
 		scope = "类别「" + z + "」"

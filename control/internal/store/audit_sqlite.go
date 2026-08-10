@@ -371,6 +371,7 @@ func (s *SQLiteStore) Audit(ctx context.Context) (AuditBundle, error) {
 	}
 	labels := []struct{ key, label string }{
 		{"access", "访问决策"}, {"auth", "登录认证"}, {"admin", "管理操作"}, {"security", "安全事件"},
+		{"dataplane", "数据面回执"},
 	}
 	for _, l := range labels {
 		out.Categories = append(out.Categories, KV{Name: l.label, Value: counts[l.key]})

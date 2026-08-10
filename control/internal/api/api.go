@@ -117,6 +117,7 @@ type GatewayInfo struct {
 	Clients  int    `json:"clients"` // 当前放行窗口内已授权源数
 	Tunnels  int    `json:"tunnels"` // 活跃隧道连接数
 	Uptime   int64  `json:"uptime"`  // 网关运行秒数
+	Version  string `json:"version"` // 网关上报的二进制版本（编译期注入）；旧网关不上报则为空，前端显示 "—"
 }
 
 // GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
@@ -788,6 +789,10 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// TunnelFP 网关隧道 TLS 证书的 SHA-256 指纹（hex）。网关自签证书每次重启都变，
 		// 随心跳上报即可；控制面转发给客户端做证书钉扎（见 handleClientProfile）。
 		TunnelFP string `json:"tunnelFp"`
+		// Version / Events 是新网关才上报的字段：旧网关缺省即零值，处理逻辑对空值必须无感
+		// （version 空串照存、events 空切片零循环），不得因缺字段报错。
+		Version string    `json:"version"` // 网关二进制版本（编译期注入）
+		Events  []gwEvent `json:"events"`  // 数据面回执：网关报告已实际执行的控制面指令
 	}
 	_ = json.NewDecoder(r.Body).Decode(&b)
 	c, _ := auth.FromContext(r.Context())
@@ -798,12 +803,38 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
-		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime,
+		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
 	}
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP
 	s.mu.Unlock()
+
+	// 数据面回执逐条落审计：category=dataplane，行为人=网关自身。措辞只转述网关报告的
+	// 既成事实（「网关 X 报告：…」），控制面不在此替网关下任何断言——审计失实是大忌。
+	// 上限与网关侧队列同界（64）：不放大一次异常心跳的日志量。
+	events := b.Events
+	if len(events) > 64 {
+		events = events[:64]
+	}
+	actor := GatewayCN(r.Context()) // 优先 mTLS 证书 CN（机器身份权威来源）
+	if actor == "" {
+		actor = id // 迁移期明文口回退注册 id
+	}
+	for _, ev := range events {
+		detail := strings.TrimSpace(ev.Detail)
+		if detail == "" {
+			detail = ev.Kind // 空 detail 至少留下事件种类，不落一条空话
+		}
+		s.auditAs(r, actor, "dataplane", "网关 "+id+" 报告："+detail, "ok")
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// gwEvent 网关随心跳捎带的一条数据面回执（与 gateway/internal/cplane 的 Event 同构）。
+type gwEvent struct {
+	TS     int64  `json:"ts"`     // 网关侧执行时刻（Unix 秒；仅参考，审计时间以控制面落库为准）
+	Kind   string `json:"kind"`   // revoke-applied | policy-applied
+	Detail string `json:"detail"` // 网关侧生成的事实描述
 }
 
 // handleGatewayPolicy 网关拉取当前资源授权策略（替代静态 resources.json）+ 强制下线撤销名单。

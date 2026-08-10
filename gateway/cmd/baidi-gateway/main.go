@@ -12,6 +12,7 @@ import (
 	"encoding/hex"
 	"encoding/pem"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"math/big"
@@ -30,6 +31,10 @@ import (
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/spa"
 )
+
+// version 网关版本号，编译期注入：go build -ldflags "-X main.version=v0.x.y"。
+// 随 mTLS 心跳上报控制面（deploy/build.sh 已接线），未注入时如实报 "dev"。
+var version = "dev"
 
 func main() {
 	spaAddr := flag.String("spa", env("BAIDI_GW_SPA", ":18201"), "SPA 敲门 UDP 监听地址")
@@ -79,7 +84,7 @@ func main() {
 		slog.Warn("⚠ 未配置 control 公钥（-jwt-pubkey）：无法校验 EdDSA 令牌，" +
 			"只能吃 HS256 存量令牌；请分发 control 的 <knock 私钥>.pub")
 	}
-	slog.Info("baidi-gateway 启动", "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
+	slog.Info("baidi-gateway 启动", "version", version, "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
 		"ttl", ttl.String(), "strictKnock", *strictKnock,
 		"公钥数", verifier.PublicKeyCount(), "acceptHS256", verifier.AcceptsLegacy())
 
@@ -129,6 +134,19 @@ func main() {
 			}
 			return al.ActiveCount(), proxy.Active(), int64(time.Since(started).Seconds()), out
 		}
+		// 机器身份只有 mTLS 客户端证书一条路：网关在代码层已无签发能力（阶段 4 删了 auth.Sign），
+		// 没有证书就无从证明自己是网关——早失败好过起来后静默调不通。
+		if *mtlsCert == "" || *mtlsKey == "" || *mtlsCA == "" {
+			log.Fatal("拒绝启动：配了 -control 就必须同时配 -mtls-cert/-mtls-key/-mtls-ca。" +
+				"用 admin 调 POST /api/v1/pki/gateway-certs 取证（响应含 certPem/keyPem/caPem）")
+		}
+		cp, cerr := cplane.NewMTLS(*control, *gwid, *proxyAddr, *spaAddr, *mtlsCert, *mtlsKey, *mtlsCA)
+		if cerr != nil {
+			log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
+		}
+		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
+		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
+		cp.SetVersion(version)   // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
 		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关
 		// 本地时钟快于控制面时会把 until 判过期而返回 false，若据此 continue 会连撤窗/断隧道
@@ -147,6 +165,11 @@ func main() {
 				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
 					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n,
 					"until", until.Format("15:04:05"))
+				// 数据面回执：三元组动作**已执行完毕**才入队（措辞是已发生的事实，
+				// 控制面原样落审计——「已下发」与「已生效」从此可区分）。
+				cp.QueueEvent("revoke-applied", fmt.Sprintf(
+					"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道",
+					rv.User, until.Format("15:04:05"), len(ips), n))
 				if *pf {
 					for _, ip := range ips {
 						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过
@@ -160,25 +183,22 @@ func main() {
 				}
 			}
 		}
-		// 机器身份只有 mTLS 客户端证书一条路：网关在代码层已无签发能力（阶段 4 删了 auth.Sign），
-		// 没有证书就无从证明自己是网关——早失败好过起来后静默调不通。
-		if *mtlsCert == "" || *mtlsKey == "" || *mtlsCA == "" {
-			log.Fatal("拒绝启动：配了 -control 就必须同时配 -mtls-cert/-mtls-key/-mtls-ca。" +
-				"用 admin 调 POST /api/v1/pki/gateway-certs 取证（响应含 certPem/keyPem/caPem）")
+		// 替换资源策略并在资源数变化时入队回执（策略每 15s 全量重拉，逐条 diff 噪音大；
+		// 资源数变化是「下发确已抵达数据面」最省的可观测信号）。
+		applyPolicy := func(rs []resource.Resource) {
+			before := reg.Count()
+			reg.Replace(rs)
+			if after := reg.Count(); after != before {
+				cp.QueueEvent("policy-applied", fmt.Sprintf("资源授权策略已生效：资源数 %d→%d", before, after))
+			}
 		}
-		cp, cerr := cplane.NewMTLS(*control, *gwid, *proxyAddr, *spaAddr, *mtlsCert, *mtlsKey, *mtlsCA)
-		if cerr != nil {
-			log.Fatalf("mTLS 控制面客户端初始化失败: %v", cerr)
-		}
-		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
-		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
 		if rs, rv, err := cp.Policy(); err != nil {
 			slog.Warn("首次拉取策略失败，暂用本地默认/静态策略", "err", err.Error())
 		} else {
-			reg.Replace(rs)
+			applyPolicy(rs)
 			applyRevoked(rv)
 			slog.Info("控制面策略已拉取", "control", *control, "count", reg.Count())
 		}
@@ -186,9 +206,9 @@ func main() {
 			t := time.NewTicker(*poll)
 			defer t.Stop()
 			for range t.C {
-				_ = cp.Register(report()) // 心跳 + 上报真实活性指标与活跃会话
+				_ = cp.Register(report()) // 心跳 + 上报真实活性指标与活跃会话 + 捎带版本与数据面回执
 				if rs, rv, err := cp.Policy(); err == nil {
-					reg.Replace(rs)
+					applyPolicy(rs)
 					applyRevoked(rv)
 				} else {
 					slog.Warn("轮询拉策略失败（保留上次策略）", "err", err.Error())

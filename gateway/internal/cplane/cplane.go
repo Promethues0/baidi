@@ -18,6 +18,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"baidi.dev/gateway/internal/resource"
@@ -32,11 +33,84 @@ type Client struct {
 	// tunnelFP 本网关隧道 TLS/TLCP 证书的 SHA-256 指纹（hex）。随注册心跳上报，
 	// 由控制面转发给客户端做证书钉扎——网关证书自签，客户端没有别的途径确认对端身份。
 	tunnelFP string
-	httpc    *http.Client
+	// version 网关二进制版本号（编译期 -ldflags 注入，缺省 "dev"）。随心跳上报，
+	// 补上「控制面连网关跑的是什么版本都不知道」的盲区。
+	version string
+	// events 数据面回执队列：网关把「控制面指令已实际生效」的事实攒在这里，
+	// 随下次心跳带给控制面落审计——否则「已下发」与「已生效」全系统不可区分。
+	events eventQueue
+	httpc  *http.Client
 }
 
 // SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
 func (c *Client) SetTunnelFP(fp string) { c.tunnelFP = fp }
+
+// SetVersion 设置随注册心跳上报的网关版本号。
+func (c *Client) SetVersion(v string) { c.version = v }
+
+// Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实。
+// 措辞必须是已发生的事（"已撤销/已生效"），控制面会原样落审计——谎报即审计失实。
+type Event struct {
+	TS     int64  `json:"ts"`     // 网关侧执行时刻（Unix 秒）
+	Kind   string `json:"kind"`   // revoke-applied | policy-applied
+	Detail string `json:"detail"` // 事实描述（中文，含关键参数）
+}
+
+// QueueEvent 把一条回执入队，随下次心跳带走；队列满时丢最旧（回执是尽力而为的
+// 观测通道，不是执行通道——安全动作本身已在网关本地完成，丢回执不影响防护）。
+func (c *Client) QueueEvent(kind, detail string) {
+	c.events.push(Event{TS: time.Now().Unix(), Kind: kind, Detail: detail})
+}
+
+// DroppedEvents 返回因队列溢出被丢弃的回执累计条数（观测/测试用）。
+func (c *Client) DroppedEvents() int { return c.events.droppedCount() }
+
+// maxQueuedEvents 回执队列上界：控制面不可达时队列不无限膨胀。
+// 64 条 ≈ 4 个轮询周期内的密集处置量，超出说明控制面已长时间失联，旧回执的价值递减。
+const maxQueuedEvents = 64
+
+// eventQueue 有界回执队列（零值可用）：满则丢最旧并计数。
+type eventQueue struct {
+	mu      sync.Mutex
+	buf     []Event
+	dropped int
+}
+
+func (q *eventQueue) push(e Event) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if len(q.buf) >= maxQueuedEvents {
+		drop := len(q.buf) - maxQueuedEvents + 1
+		q.buf = q.buf[drop:]
+		q.dropped += drop
+	}
+	q.buf = append(q.buf, e)
+}
+
+// snapshot 复制当前队列内容（不清空）：发送期间新入队的回执不会被误清。
+func (q *eventQueue) snapshot() []Event {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	out := make([]Event, len(q.buf))
+	copy(out, q.buf)
+	return out
+}
+
+// ack 发送成功后移除队首 n 条（即本次 snapshot 带走的那批）；发送失败不调用，回执留队重试。
+func (q *eventQueue) ack(n int) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	if n > len(q.buf) {
+		n = len(q.buf)
+	}
+	q.buf = q.buf[n:]
+}
+
+func (q *eventQueue) droppedCount() int {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return q.dropped
+}
 
 // NewMTLS 构造走 mTLS 客户端证书的控制面客户端。
 // certFile/keyFile 是控制面签发给本网关的证书与私钥，caFile 是内部 CA 公证书。
@@ -98,11 +172,16 @@ type Session struct {
 
 // Register 向控制面注册/心跳，同时上报真实活性指标与活跃会话：clients=放行窗口内已授权源数，
 // tunnels=活跃隧道连接数，uptimeSec=网关运行秒数，sessions=当前活跃会话（供监控中心在线用户）。
+// 心跳还捎带 version（编译期注入的网关版本）与 events（数据面回执，发送成功即从队列清除；
+// 失败留队随下次心跳重试）。旧控制面不认识这两个字段时按 JSON 语义直接忽略，不影响注册。
 func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Session) error {
+	evs := c.events.snapshot()
 	body, _ := json.Marshal(map[string]any{
 		"id": c.gwID, "proxy": c.proxy, "spa": c.spa,
 		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
 		"tunnelFp": c.tunnelFP, // 供控制面转发给客户端做隧道证书钉扎
+		"version":  c.version,
+		"events":   evs,
 	})
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {
@@ -112,6 +191,7 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	if resp.StatusCode != http.StatusOK {
 		return fmt.Errorf("control 注册返回 %d", resp.StatusCode)
 	}
+	c.events.ack(len(evs)) // 只清本次带走的那批：发送期间新入队的回执留待下次心跳
 	return nil
 }
 

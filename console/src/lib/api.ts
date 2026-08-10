@@ -101,7 +101,7 @@ export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[];
 
 /* ── 审计中心（store.AuditBundle）── */
 export interface DiskStat { usedPct: number; totalGB: number; retainDays: number }
-export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail' }
+export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail' }
 export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
 
 /* ── 网关与隐身（store.GatewayBundle）── */
@@ -212,7 +212,7 @@ export interface PostureResp { reports: PostureRow[] }
 export interface Resource { id: string; name: string; backend: string; allowRoles: string[]; allowUsers: string[]; addrRef?: string; svcRef?: string }
 export interface ResourcesResp { resources: Resource[] }
 export interface GwSess { ip: string; user: string; role: string; since: number }
-export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number; clients: number; tunnels: number; uptime: number; sessions?: GwSess[] }
+export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: number; clients: number; tunnels: number; uptime: number; version?: string; sessions?: GwSess[] }
 export interface GatewaysResp { gateways: GatewayReg[] }
 
 /* ── 监控中心 · 在线用户（store.OnlineSession）── */

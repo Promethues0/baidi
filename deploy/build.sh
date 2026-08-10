@@ -27,9 +27,12 @@ echo "==> 交叉编译 baidi-control（linux/amd64，纯 Go 无 cgo）"
 ( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-control" ./cmd/baidi-control )
 
-echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
+# 网关版本号（编译期注入 main.version，随 mTLS 心跳上报控制面）：
+# 优先 BAIDI_VERSION，缺省取 git 短哈希；两者都取不到时保留源码缺省 "dev"。
+BD_VERSION="${BAIDI_VERSION:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
+echo "==> 交叉编译数据面 baidi-gateway（版本 $BD_VERSION）+ baidi-gmca（linux/amd64）"
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
+    "$GO" build -trimpath -ldflags="-s -w -X main.version=$BD_VERSION" -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
 

@@ -30,6 +30,8 @@ const (
 	tokenTTL   = 8 * time.Hour
 	knockTTL   = 90 * time.Second
 	kickBanTTL = 5 * time.Minute
+	// pwResetTTL 首登强制改密受限令牌（Use=pwreset）的有效期：够完成一次改密，不够当会话用。
+	pwResetTTL = 15 * time.Minute
 	// seedInitialPassword 新建用户未指定初始口令时的 demo 默认口令。
 	seedInitialPassword = "baidi@123"
 )
@@ -403,6 +405,13 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.lockout.Success(normUser(b.Username)) // 成功登录清零该账号的失败计数（与 Fail 同键口径）
+	// 首登强制改密（管理员新建/重置口令后置位）：不发会话令牌，改签受限改密令牌。
+	// 有 passkey 的账号不走这里——secondFactor 已在上面把流程引去断言，
+	// 断言通过后由 handleWebauthnLoginFinish 做同样的判定（改密页必须在完整认证态之后）。
+	if cred.MustChangePw {
+		s.mustChangeLogin(w, r, cred)
+		return
+	}
 	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
 	// 令牌 Name=账号（数据面网关按 claims.Name 做放行/封禁匹配，必须是规范账号，不能放显示名）；
 	// 显示名单独经响应体 displayName 回给前端。
@@ -488,12 +497,14 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.PassHash = hash
+	// 初始口令是管理员定的（或 demo 默认），不是本人私密——首登必须换掉（FR-DEPLOY-09）。
+	u.MustChangePw = true
 	created, err := s.writer.CreateUser(r.Context(), u)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to create user")
 		return
 	}
-	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+")", "ok")
+	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+")，已置首登改密", "ok")
 	httpx.JSON(w, http.StatusCreated, created)
 }
 
@@ -559,16 +570,19 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
-	if err := s.writer.SetUserPassword(r.Context(), id, hash); err != nil {
+	// 管理员知道这把新口令 → 它只是过渡口令，置首登改密逼本人换掉。
+	if err := s.writer.SetUserPassword(r.Context(), id, hash, true); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
 		return
 	}
-	s.audit(r, "admin", "重置用户 "+id+" 的登录口令", "ok")
+	s.audit(r, "admin", "重置用户 "+id+" 的登录口令，已置首登改密", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
 // handleChangePassword 当前登录用户自助改密（校验旧口令）。
-// requireUser：拒 gateway 身份与 WebAuthn 中间票据(role=mfa)——半程认证态不得改口令。
+// requireUser：拒 gateway 身份与 WebAuthn 中间票据(role=mfa)——半程认证态不得改口令
+// （首登受限令牌 Use=pwreset 带的是 admin/user 角色，能过这道门，且中间件唯独放行本端点）。
+// 改密成功清 must_change_pw：这是走出首登受限态的唯一出口。
 func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 	c, ok := s.requireUser(w, r)
 	if !ok {
@@ -578,8 +592,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		Old string `json:"old"`
 		New string `json:"new"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.New) < 6 {
-		httpx.Error(w, http.StatusBadRequest, "新口令至少 6 位")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.New) < 8 {
+		httpx.Error(w, http.StatusBadRequest, "新口令至少 8 位")
+		return
+	}
+	if body.New == body.Old {
+		// 换汤不换药会让「首登强制改密」形同虚设：初始口令原样续用。
+		httpx.Error(w, http.StatusBadRequest, "新口令不得与旧口令相同")
 		return
 	}
 	cred, found, err := s.store.Credential(r.Context(), c.Sub) // Sub=规范账号
@@ -597,7 +616,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
 		return
 	}
-	if err := s.writer.SetUserPassword(r.Context(), cred.ID, hash); err != nil {
+	if err := s.writer.SetUserPassword(r.Context(), cred.ID, hash, false); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to set password")
 		return
 	}
@@ -647,10 +666,32 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.lockout.Success(normUser(b.Username)) // 成功登录清零该账号的失败计数
+	// 首登强制改密：口令对了也不发会话令牌，只给受限改密令牌。
+	if cred.MustChangePw {
+		s.mustChangeLogin(w, r, cred)
+		return
+	}
 	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
 	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
 	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name, "role": "admin"})
+}
+
+// mustChangeLogin 首登强制改密的登录收尾：口令（及二次因子）都已验过，但初始口令未改，
+// 不发 8h 会话令牌，改签 15min 受限令牌（Use=pwreset）。中间件只放行 POST /auth/password
+// 与 GET /auth/me，业务端点与 /knock-token 一律 403——受限态碰不到数据面。
+// 审计记的是事实：认证确已通过，只是令牌被降级。
+func (s *Server) mustChangeLogin(w http.ResponseWriter, r *http.Request, cred store.Credential) {
+	s.auditAs(r, cred.Account, "auth", "登录认证通过，但初始口令未修改，签发受限改密令牌", "ok")
+	tok := s.keys.Sign(auth.Claims{
+		Sub: cred.Account, Role: cred.Role, Name: cred.Account,
+		Jti: auth.RandJTI(), Use: auth.UsePwReset,
+	}, pwResetTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "mustChangePassword": true, "token": tok,
+		"displayName": cred.Name, "role": cred.Role,
+		"reason": "首次登录须修改初始口令",
+	})
 }
 
 // handleMe 返回当前令牌身份。

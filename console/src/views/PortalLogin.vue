@@ -133,6 +133,57 @@
           </a-button>
         </template>
 
+        <!-- 强制改密：初始口令须由本人换掉后才发正常会话 -->
+        <template v-else-if="step === 'changepw'">
+          <h2 class="bd-card__h">修改初始口令</h2>
+          <p class="bd-card__p">账号 <b>{{ form.username }}</b> 正在使用初始口令，须修改后才能进入门户</p>
+
+          <div v-if="pwMsg" class="bd-tip bd-tip--err">
+            <icon-close-circle-fill />
+            <span>{{ pwMsg }}</span>
+          </div>
+
+          <a-form :model="pwForm" layout="vertical" @submit.prevent>
+            <a-form-item field="pw" hide-label>
+              <a-input-password
+                v-model="pwForm.pw"
+                placeholder="新口令（至少 8 位，不得与初始口令相同）"
+                size="large"
+                allow-clear
+                @keyup.enter="submitChangePw"
+              >
+                <template #prefix><icon-lock /></template>
+              </a-input-password>
+            </a-form-item>
+            <a-form-item field="pw2" hide-label>
+              <a-input-password
+                v-model="pwForm.pw2"
+                placeholder="再次输入新口令"
+                size="large"
+                allow-clear
+                @keyup.enter="submitChangePw"
+              >
+                <template #prefix><icon-lock /></template>
+              </a-input-password>
+            </a-form-item>
+          </a-form>
+
+          <a-button
+            type="primary"
+            long
+            size="large"
+            :loading="loading"
+            class="bd-submit"
+            @click="submitChangePw"
+          >
+            修改并登录
+          </a-button>
+          <a-button type="text" long class="bd-back" @click="backToLogin">
+            <template #icon><icon-left /></template>
+            返回重新登录
+          </a-button>
+        </template>
+
         <!-- 步骤二（legacy）：未配置 WebAuthn 时的演示验证码 -->
         <template v-else>
           <h2 class="bd-card__h">二次认证</h2>
@@ -201,15 +252,27 @@ import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn'
 
 const router = useRouter();
 
-const step = ref<'login' | 'webauthn' | 'mfa'>('login');
+const step = ref<'login' | 'webauthn' | 'mfa' | 'changepw'>('login');
 const loading = ref(false);
 const errMsg = ref('');
 const mfaReason = ref('');
 const ticket = ref(''); // 「口令已验」一次性票据，断言两回合凭它绑定账号
+const pwToken = ref(''); // 首登强制改密的 15min 受限令牌（只够调 /auth/password，不入 localStorage）
+const pwMsg = ref('');
 
 const form = reactive({ username: '', password: '', mfaCode: '' });
+const pwForm = reactive({ pw: '', pw2: '' });
 
 function onSuccess(resp: PortalLoginResp) {
+  // 首登强制改密：服务端只发了受限令牌（业务端点一律 403），转入改密表单
+  if (resp.mustChangePassword && resp.token) {
+    pwToken.value = resp.token;
+    pwForm.pw = '';
+    pwForm.pw2 = '';
+    pwMsg.value = '';
+    step.value = 'changepw';
+    return;
+  }
   if (resp.token) setToken(resp.token); // 写 localStorage，使 /portal/apps 携带 Bearer
   sessionStorage.setItem(
     'baidi_portal',
@@ -335,12 +398,55 @@ async function submitMfa() {
   mfaReason.value = resp.reason || '验证码错误或已失效，请重新获取。';
 }
 
+/** 首登强制改密：受限令牌调 /auth/password（不入 localStorage），成功后用新口令自动重新登录。 */
+async function submitChangePw() {
+  pwMsg.value = '';
+  if (pwForm.pw.length < 8) {
+    pwMsg.value = '新口令至少 8 位。';
+    return;
+  }
+  if (pwForm.pw === form.password) {
+    pwMsg.value = '新口令不得与初始口令相同。';
+    return;
+  }
+  if (pwForm.pw !== pwForm.pw2) {
+    pwMsg.value = '两次输入的新口令不一致。';
+    return;
+  }
+  loading.value = true;
+  try {
+    const resp = await api<{ ok: boolean; reason?: string }>('/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwToken.value}` },
+      body: JSON.stringify({ old: form.password, new: pwForm.pw })
+    });
+    if (!resp.ok) {
+      pwMsg.value = resp.reason || '口令修改失败，请重试。';
+      return;
+    }
+    // 改密成功 → 用新口令自动重新登录换正常会话（有 passkey 的账号会再走一次断言）
+    Message.success('口令已修改，正在重新登录…');
+    form.password = pwForm.pw;
+    pwToken.value = '';
+    step.value = 'login';
+    await submitLogin();
+  } catch {
+    pwMsg.value = '口令修改失败（受限令牌可能已过期，请返回重新登录）。';
+  } finally {
+    loading.value = false;
+  }
+}
+
 function backToLogin() {
   step.value = 'login';
   errMsg.value = '';
   mfaReason.value = '';
   form.mfaCode = '';
   ticket.value = '';
+  pwToken.value = '';
+  pwForm.pw = '';
+  pwForm.pw2 = '';
+  pwMsg.value = '';
 }
 </script>
 

@@ -66,14 +66,14 @@ func TestCredentialLookupNormalizesAndMisses(t *testing.T) {
 	}
 }
 
-// 重置口令：新哈希落库，旧口令失效、新口令生效。
+// 重置口令：新哈希落库，旧口令失效、新口令生效；首登改密标志随 mustChange 参数同步写。
 func TestSetUserPassword(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
 	cred, _, _ := st.Credential(ctx, "li.fang")
 	newHash, _ := auth.HashPassword("N3w-Pass!")
-	if err := st.SetUserPassword(ctx, cred.ID, newHash); err != nil {
+	if err := st.SetUserPassword(ctx, cred.ID, newHash, true); err != nil {
 		t.Fatalf("SetUserPassword: %v", err)
 	}
 	after, _, _ := st.Credential(ctx, "li.fang")
@@ -82,6 +82,40 @@ func TestSetUserPassword(t *testing.T) {
 	}
 	if auth.VerifyPassword(after.PassHash, "baidi@123") {
 		t.Error("旧口令应失效")
+	}
+	if !after.MustChangePw {
+		t.Error("管理员重置（mustChange=true）后应置首登改密标志")
+	}
+	// 自助改密路径（mustChange=false）清标志
+	selfHash, _ := auth.HashPassword("Self-Pass-8")
+	if err := st.SetUserPassword(ctx, cred.ID, selfHash, false); err != nil {
+		t.Fatalf("SetUserPassword(clear): %v", err)
+	}
+	if cleared, _, _ := st.Credential(ctx, "li.fang"); cleared.MustChangePw {
+		t.Error("自助改密（mustChange=false）后应清首登改密标志")
+	}
+}
+
+// 种子账号默认不置首登改密（演示站 admin/baidi@123 流程不被打碎）。
+func TestSeededUsersNotMustChangeByDefault(t *testing.T) {
+	st := openTestStore(t)
+	ctx := context.Background()
+	for _, acct := range []string{"admin", "li.fang"} {
+		if cred, _, _ := st.Credential(ctx, acct); cred.MustChangePw {
+			t.Errorf("种子账号 %s 默认不应置首登改密", acct)
+		}
+	}
+}
+
+// BAIDI_SEED_MUST_CHANGE=1：首次建库时种子账号（含 admin）全部置首登改密（生产姿态）。
+func TestSeedMustChangeEnv(t *testing.T) {
+	t.Setenv("BAIDI_SEED_MUST_CHANGE", "1")
+	st := openTestStore(t)
+	ctx := context.Background()
+	for _, acct := range []string{"admin", "li.fang"} {
+		if cred, _, _ := st.Credential(ctx, acct); !cred.MustChangePw {
+			t.Errorf("BAIDI_SEED_MUST_CHANGE=1 时种子账号 %s 应置首登改密", acct)
+		}
 	}
 }
 

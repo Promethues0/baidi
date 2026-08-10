@@ -58,6 +58,15 @@ if ! grep -q '^BAIDI_IPSEC_PSK_KEY=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; the
   echo "==> 已登记 IPSec PSK 主密钥路径 → $BD_PREFIX/etc/keys/ipsec-psk.key（首次用到时由 control 自动生成 0600）"
 fi
 
+# 首登强制改密（config.env 置 BAIDI_SEED_MUST_CHANGE=1 时写入）：control 首次建库
+# 会把种子账号（含 admin）全部置「首登须改密」。仅首启建库生效——库已存在时写入
+# 无副作用；幂等追加，已有该项不重复写。
+if [ "${BAIDI_SEED_MUST_CHANGE:-0}" = "1" ] && ! grep -q '^BAIDI_SEED_MUST_CHANGE=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; then
+  echo "BAIDI_SEED_MUST_CHANGE=1" >> "$BD_PREFIX/etc/baidi.env"
+  chmod 0600 "$BD_PREFIX/etc/baidi.env"
+  echo "==> 已开启首登强制改密（仅首次建库时对种子账号生效）"
+fi
+
 # 自签 TLS（仅首次；生产请换正式证书）。SAN 区分 IP/域名；私钥严格 0600（umask 兜底）。
 if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
   san="DNS:baidi"

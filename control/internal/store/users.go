@@ -42,6 +42,10 @@ type DirUser struct {
 	Roles     []string `json:"roles"`
 	Role      string   `json:"role,omitempty"` // 权威鉴权角色 admin | user（≠展示用 Roles）
 	PassHash  string   `json:"-"`              // bcrypt 口令哈希；绝不序列化进 API 响应
+	// MustChangePw 首次登录须改密标志。管理员新建/重置口令置 1，自助改密成功清 0；
+	// 置位期间登录只拿到 15min 受限令牌（Use=pwreset），调不到任何业务端点。
+	// 不序列化：消费方是登录链路（Credential），目录 API 无人读它。
+	MustChangePw bool `json:"-"`
 }
 
 // Credential 登录校验所需的账号凭据（含口令哈希，仅内部使用）。
@@ -52,6 +56,8 @@ type Credential struct {
 	Role     string // admin | user
 	Status   string // active | locked | disabled | idle
 	PassHash string
+	// MustChangePw 首登强制改密标志：为真时登录链路不发会话令牌，改签受限改密令牌。
+	MustChangePw bool
 }
 
 func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {

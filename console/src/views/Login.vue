@@ -12,27 +12,45 @@
         <div class="bd-login__sub">ZTNA / SDP Control Center · 管理控制台</div>
       </div>
 
-      <a-input v-model="username" size="large" placeholder="管理员账号" class="bd-login__inp" @keyup.enter="submit">
-        <template #prefix><icon-user /></template>
-      </a-input>
-      <a-input-password v-model="password" size="large" placeholder="登录口令" class="bd-login__inp" @keyup.enter="submit">
-        <template #prefix><icon-lock /></template>
-      </a-input-password>
+      <!-- 强制改密：初始口令须换掉才发正常会话 -->
+      <template v-if="step === 'changepw'">
+        <div class="bd-login__pk">
+          <icon-lock />
+          <span>账号 {{ username }} 正在使用初始口令，须修改后才能进入管理台</span>
+        </div>
+        <a-input-password v-model="newPw" size="large" placeholder="新口令（至少 8 位，不得与初始口令相同）" class="bd-login__inp" @keyup.enter="submitChangePw">
+          <template #prefix><icon-lock /></template>
+        </a-input-password>
+        <a-input-password v-model="newPw2" size="large" placeholder="再次输入新口令" class="bd-login__inp" @keyup.enter="submitChangePw">
+          <template #prefix><icon-lock /></template>
+        </a-input-password>
+        <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
+        <a-button type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submitChangePw">修改并登录</a-button>
+      </template>
 
-      <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
+      <template v-else>
+        <a-input v-model="username" size="large" placeholder="管理员账号" class="bd-login__inp" @keyup.enter="submit">
+          <template #prefix><icon-user /></template>
+        </a-input>
+        <a-input-password v-model="password" size="large" placeholder="登录口令" class="bd-login__inp" @keyup.enter="submit">
+          <template #prefix><icon-lock /></template>
+        </a-input-password>
 
-      <!-- passkey 二次认证（口令已通过，等待认证器） -->
-      <div v-if="step === 'webauthn'" class="bd-login__pk">
-        <icon-fingerprint />
-        <span>{{ pkMsg || '请用 Touch ID / Windows Hello / 安全密钥完成二次认证' }}</span>
-      </div>
+        <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
 
-      <a-button
-        v-if="step === 'webauthn'"
-        type="primary" size="large" long :loading="loading" class="bd-login__btn"
-        @click="submitWebauthn"
-      >使用 passkey 验证</a-button>
-      <a-button v-else type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submit">登 录</a-button>
+        <!-- passkey 二次认证（口令已通过，等待认证器） -->
+        <div v-if="step === 'webauthn'" class="bd-login__pk">
+          <icon-fingerprint />
+          <span>{{ pkMsg || '请用 Touch ID / Windows Hello / 安全密钥完成二次认证' }}</span>
+        </div>
+
+        <a-button
+          v-if="step === 'webauthn'"
+          type="primary" size="large" long :loading="loading" class="bd-login__btn"
+          @click="submitWebauthn"
+        >使用 passkey 验证</a-button>
+        <a-button v-else type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submit">登 录</a-button>
+      </template>
 
       <div class="bd-login__hint">演示账号 <code>admin</code> · 口令 <code>baidi@123</code></div>
       <div class="bd-login__foot">终端用户请使用 <a @click="$router.push('/portal/login')">应用门户登录</a></div>
@@ -51,9 +69,26 @@ const username = ref('admin');
 const password = ref('');
 const loading = ref(false);
 const err = ref('');
-const step = ref<'login' | 'webauthn'>('login');
+const step = ref<'login' | 'webauthn' | 'changepw'>('login');
 const ticket = ref('');
 const pkMsg = ref('');
+const pwToken = ref(''); // 首登强制改密的 15min 受限令牌（只够调 /auth/password，不入 localStorage）
+const newPw = ref('');
+const newPw2 = ref('');
+
+/** 登录成功收尾：首登强制改密的受限令牌转入改密表单，正常会话令牌入库进管理台。 */
+function finishLogin(r: PortalLoginResp): void {
+  if (r.mustChangePassword && r.token) {
+    pwToken.value = r.token;
+    newPw.value = '';
+    newPw2.value = '';
+    err.value = '';
+    step.value = 'changepw';
+    return;
+  }
+  if (r.token) setToken(r.token);
+  router.push('/');
+}
 
 async function submit() {
   if (!username.value || !password.value) { err.value = '请输入账号与口令'; return; }
@@ -74,8 +109,7 @@ async function submit() {
     }
     if (r.needEnroll) { err.value = r.reason || '该账号须先注册 passkey'; return; }
     if (r.ok && r.token) {
-      setToken(r.token);
-      router.push('/');
+      finishLogin(r);
     } else {
       err.value = r.reason || '登录失败';
     }
@@ -101,8 +135,7 @@ async function submitWebauthn() {
       body: JSON.stringify({ ...assertion, ticket: ticket.value })
     });
     if (r.ok && r.token) {
-      setToken(r.token);
-      router.push('/');
+      finishLogin(r);
       return;
     }
     pkMsg.value = r.reason || 'passkey 验证失败，请重试';
@@ -114,6 +147,32 @@ async function submitWebauthn() {
     } else {
       pkMsg.value = webauthnErrMsg(e);
     }
+  } finally {
+    loading.value = false;
+  }
+}
+
+/** 首登强制改密：受限令牌调 /auth/password，成功后用新口令自动重新登录。 */
+async function submitChangePw() {
+  err.value = '';
+  if (newPw.value.length < 8) { err.value = '新口令至少 8 位'; return; }
+  if (newPw.value === password.value) { err.value = '新口令不得与初始口令相同'; return; }
+  if (newPw.value !== newPw2.value) { err.value = '两次输入的新口令不一致'; return; }
+  loading.value = true;
+  try {
+    const r = await api<{ ok: boolean; reason?: string }>('/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwToken.value}` },
+      body: JSON.stringify({ old: password.value, new: newPw.value })
+    });
+    if (!r.ok) { err.value = r.reason || '口令修改失败，请重试'; return; }
+    // 改密成功 → 用新口令自动重新登录换正常会话（有 passkey 的账号会再走一次断言）
+    password.value = newPw.value;
+    pwToken.value = '';
+    step.value = 'login';
+    await submit();
+  } catch {
+    err.value = '口令修改失败（受限令牌可能已过期，请刷新页面重新登录）';
   } finally {
     loading.value = false;
   }

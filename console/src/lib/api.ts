@@ -364,6 +364,7 @@ export interface PortalLoginResp {
   needMfa?: boolean;        // legacy 演示验证码路径（未配置 WebAuthn RP 时回落）
   needWebauthn?: boolean;   // 需 passkey 断言；配合 ticket 走 /webauthn/login/*
   needEnroll?: boolean;     // 风险账号尚未注册 passkey，须先录入
+  mustChangePassword?: boolean; // 首登强制改密：token 是 15min 受限令牌，只够调 /auth/password
   ticket?: string;          // 「口令已验」一次性票据（3min），断言两回合凭它绑定账号
   reason?: string;
   token?: string;

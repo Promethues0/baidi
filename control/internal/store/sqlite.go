@@ -25,7 +25,7 @@ type Writer interface {
 	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
-	SetUserPassword(ctx context.Context, id, hash string) error
+	SetUserPassword(ctx context.Context, id, hash string, mustChange bool) error
 	SaveResource(ctx context.Context, r Resource) error
 	DeleteResource(ctx context.Context, id string) error
 	// ★IPSec 的读写不在 Writer 里，收敛到 IpsecStore（见 ipsec_state.go）：
@@ -199,7 +199,7 @@ CREATE TABLE IF NOT EXISTS policy_overrides (
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY, name TEXT, account TEXT, org TEXT, org_key TEXT, device TEXT,
   ip TEXT, auth TEXT, last_login TEXT, online INTEGER, status TEXT, risk TEXT, roles TEXT, created_at TEXT,
-  pass_hash TEXT, role TEXT
+  pass_hash TEXT, role TEXT, must_change_pw INTEGER
 );
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
@@ -329,6 +329,8 @@ CREATE TABLE IF NOT EXISTS settings (
 		{"resources", "addr_ref", "TEXT"}, {"resources", "svc_ref", "TEXT"},
 		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
 		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
+		// 首登强制改密标志（回填见 backfillMustChangePw）。
+		{"users", "must_change_pw", "INTEGER"},
 		{"apps", "resource_id", "TEXT"}, // JIT：磁贴 → 受控资源的权威映射列（旧库补列）
 		// IPSec 组网：配置面补列。enabled 用 INTEGER 而不是复用 TEXT——
 		// 它要参与 `WHERE enabled=1`，存 '1'/'0' 字符串时 SQLite 的类型亲和会
@@ -361,6 +363,9 @@ CREATE TABLE IF NOT EXISTS settings (
 	// 已经踩过一次的坑（apps.resource_id）。凡是新增**业务语义列**，
 	// 回填必须与 ALTER 同一处出现，否则下一个加列的人不会想到还有这一步。
 	if err := s.backfillIpsecEnabled(); err != nil {
+		return err
+	}
+	if err := s.backfillMustChangePw(); err != nil {
 		return err
 	}
 	if err := s.backfillAuditChain(); err != nil {
@@ -423,6 +428,17 @@ func (s *SQLiteStore) backfillAppResourceID() error {
 	return nil
 }
 
+// backfillMustChangePw 回填 users.must_change_pw：既有行一律补 0。
+//
+// ★回填成 0 而不是 1 是明确决策：101.43.125.131 在线演示站靠 admin/baidi@123
+// 走通全部演示流程，把存量种子账号统统逼进改密页得不偿失。生产部署首启前置
+// BAIDI_SEED_MUST_CHANGE=1（见 seed 与 deploy/config.env.example），种子账号
+// 建库时即置 1——那条路径不经过这里。
+func (s *SQLiteStore) backfillMustChangePw() error {
+	_, err := s.db.Exec(`UPDATE users SET must_change_pw=0 WHERE must_change_pw IS NULL`)
+	return err
+}
+
 // addColumnIfMissing 幂等地为表补一列；列已存在（duplicate column name）视为成功。
 //
 // ★不带 DEFAULT 是有意的：新列在既有行上就是 NULL，而 NULL 正是「这一行还没被
@@ -474,9 +490,14 @@ func (s *SQLiteStore) seed() error {
 		if herr != nil {
 			return herr
 		}
+		// BAIDI_SEED_MUST_CHANGE=1：生产部署首启时把种子账号（含 admin）都置首登改密——
+		// 种子口令 baidi@123 是公开的，生产不该允许它长期可用。仅首次建库时生效
+		// （users 表非空不再进这个分支）；演示站不置，保住 admin/baidi@123 的演示流程。
+		seedMustChange := os.Getenv("BAIDI_SEED_MUST_CHANGE") == "1"
 		for _, u := range b.Users {
 			u.PassHash = hash
 			u.Role = roleFromDisplay(u.Roles)
+			u.MustChangePw = seedMustChange
 			if err := s.insertUser(u); err != nil {
 				return err
 			}
@@ -485,7 +506,7 @@ func (s *SQLiteStore) seed() error {
 		if err := s.insertUser(DirUser{
 			ID: "u-admin", Name: "安全管理员", Account: "admin", Org: "安全运营", OrgKey: "sec",
 			Device: "—", IP: "—", Auth: "口令+MFA", LastLogin: "—", Status: "active", Risk: "none",
-			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash,
+			Roles: []string{"系统管理员"}, Role: "admin", PassHash: hash, MustChangePw: seedMustChange,
 		}); err != nil {
 			return err
 		}
@@ -612,9 +633,9 @@ func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
 
 func (s *SQLiteStore) insertUser(u DirUser) error {
 	roles, _ := json.Marshal(u.Roles)
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role)
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw))
 	return err
 }
 
@@ -690,10 +711,12 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error
 func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credential, bool, error) {
 	key := strings.ToLower(strings.TrimSpace(account))
 	row := s.db.QueryRowContext(ctx,
-		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,'') FROM users WHERE lower(trim(account))=? LIMIT 1`, key)
+		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,''),COALESCE(must_change_pw,0) FROM users WHERE lower(trim(account))=? LIMIT 1`, key)
 	var c Credential
-	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash); err {
+	var mustChange int
+	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash, &mustChange); err {
 	case nil:
+		c.MustChangePw = mustChange == 1
 		if c.Role == "" {
 			c.Role = "user"
 		}
@@ -705,9 +728,11 @@ func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credentia
 	}
 }
 
-// SetUserPassword 重置某用户口令哈希（bcrypt）落库。
-func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string) error {
-	_, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=? WHERE id=?`, hash, id)
+// SetUserPassword 落库某用户的口令哈希（bcrypt），并同一条 UPDATE 里写首登改密标志：
+// 管理员重置传 mustChange=true（初始口令必须被本人换掉），自助改密传 false（清标志）。
+// 标志与口令同语句原子更新——分两条写，中间挤进一次登录就会拿错令牌形态。
+func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string, mustChange bool) error {
+	_, err := s.db.ExecContext(ctx, `UPDATE users SET pass_hash=?, must_change_pw=? WHERE id=?`, hash, b2i(mustChange), id)
 	return err
 }
 

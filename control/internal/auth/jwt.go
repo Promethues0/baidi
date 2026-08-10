@@ -16,6 +16,11 @@ import (
 // 见 gateway/internal/spa.checkKnock——这是"长效会话令牌可直接敲门"旁路的根治判据。
 const UseKnock = "knock"
 
+// UsePwReset 首登强制改密的受限令牌用途标记（Claims.Use）。
+// 口令验证通过但 must_change_pw=1 时签发（15min），中间件只放行改密与查身份两个端点；
+// 它由 sess 密钥签出且 use≠knock，故既调不到业务 API，也从密码学与语义两层都敲不开门。
+const UsePwReset = "pwreset"
+
 // Claims 令牌载荷。
 //
 // Use 字段是令牌的用途自证：只有 /knock-token 签发的短时效一次性敲门令牌填 UseKnock，

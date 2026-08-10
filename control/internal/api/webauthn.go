@@ -350,6 +350,13 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	s.lockout.Success(account) // 二次认证走完才算成功登录，此刻清零失败计数
+	// 首登强制改密：断言先走完（改密页必须在完整认证态之后），此处才降级令牌——
+	// 顺序不能反，否则改密端点会向仅过口令、未过 2FA 的半程态开放。
+	if wu.cred.MustChangePw {
+		s.auditAs(r, account, "auth", "passkey 二次认证通过", "ok")
+		s.mustChangeLogin(w, r, wu.cred)
+		return
+	}
 	s.auditAs(r, account, "auth", "passkey 二次认证通过，登录成功", "ok")
 	tok := s.keys.Sign(auth.Claims{Sub: wu.cred.Account, Role: wu.cred.Role, Name: wu.cred.Account, Jti: auth.RandJTI()}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{

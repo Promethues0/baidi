@@ -121,3 +121,35 @@ func TestRegisterFailureKeepsEvents(t *testing.T) {
 		t.Fatalf("发送失败后回执应留队重试，实际剩 %d 条", len(rest))
 	}
 }
+
+// 策略下发的线上契约：控制面的 camelCase `denyUsers` 必须原样落进 resource.Resource。
+//
+// ★这是"控制面算好、网关机械执行"那条链路唯一的字段名接缝。JSON 字段名对不上不是
+// 编译错误也不是运行期错误，而是**降权静默失效**：控制面日志显示已下发否决名单，
+// 网关这边解出来是空切片，被降权的终端照样打开高敏资源。
+func TestPolicyDecodesDenyUsers(t *testing.T) {
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/v1/gateways/policy" {
+			t.Errorf("路径不对：%s", r.URL.Path)
+		}
+		fmt.Fprint(w, `{"resources":[
+  {"id":"fin","name":"财务","backend":"10.20.3.21:443","allowRoles":["user"],"allowUsers":[],"denyUsers":["li.fang"]},
+  {"id":"oa","name":"OA","backend":"10.20.1.10:8080","allowRoles":["user"],"allowUsers":[]}
+],"revoked":[]}`)
+	})
+	rs, _, err := c.Policy()
+	if err != nil {
+		t.Fatalf("拉策略失败：%v", err)
+	}
+	byID := map[string][]string{}
+	for _, r := range rs {
+		byID[r.ID] = r.DenyUsers
+	}
+	if len(byID["fin"]) != 1 || byID["fin"][0] != "li.fang" {
+		t.Fatalf("高敏资源的 denyUsers 未解出：%v", byID["fin"])
+	}
+	// 旧控制面（不下发该字段）→ 空切片 → 行为与改造前一致，不得凭空拒人。
+	if len(byID["oa"]) != 0 {
+		t.Fatalf("未下发 denyUsers 的资源应解出空名单：%v", byID["oa"])
+	}
+}

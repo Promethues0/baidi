@@ -17,6 +17,16 @@ type Resource struct {
 	Backend    string   `json:"backend"`     // host:port，仅来自配置
 	AllowRoles []string `json:"allow_roles"` // 空=不限角色
 	AllowUsers []string `json:"allow_users"` // 空=不限用户
+	// DenyUsers 否决名单：命中即拒，优先于一切允许来源。
+	//
+	// 由控制面**算好后下发**（当前唯一来源是终端风险降权对高敏资源的收缩），
+	// 网关只做机械比对——不知道谁为什么被降权，也不做任何推导。这与「组织/用户组在
+	// 控制面展开成账号后才下发」是同一条纪律：判定权全在控制面。
+	//
+	// ★为什么需要"否决"这一维而不是让控制面收窄 AllowUsers：绝大多数资源没设 ACL
+	// （两维皆空 = 不限），没有允许名单可收窄；要用允许名单表达"除了这几个人"就得
+	// 枚举全体账号，漏一个就是静默放行。
+	DenyUsers []string `json:"deny_users"`
 }
 
 // Registry 资源注册表（并发安全）。
@@ -78,8 +88,15 @@ func (r *Registry) Count() int {
 }
 
 // Authorize 判断身份是否可访问该资源：
-// AllowRoles/AllowUsers 都空 = 不限（等价默认后端语义）；任一非空则须命中其一。
+// DenyUsers 命中即拒（先判，压过一切允许来源）；
+// 其后 AllowRoles/AllowUsers 都空 = 不限（等价默认后端语义），任一非空则须命中其一。
+//
+// ★否决必须排在最前。控制面下发时会把有效期内的 JIT 授予并进 AllowUsers，
+// 若先判允许，一张审批单就能让被降权的终端照样打开高敏资源——而那恰恰是最该收缩的时刻。
 func (r *Registry) Authorize(user, role string, res Resource) bool {
+	if len(res.DenyUsers) > 0 && contains(res.DenyUsers, user) {
+		return false
+	}
 	if len(res.AllowUsers) > 0 && contains(res.AllowUsers, user) {
 		return true
 	}

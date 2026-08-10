@@ -226,6 +226,9 @@ type resourceDTO struct {
 	Backend    string   `json:"backend"`
 	AllowRoles []string `json:"allowRoles"`
 	AllowUsers []string `json:"allowUsers"`
+	// DenyUsers 控制面算好的否决名单（终端风险降权对高敏资源的收缩）。
+	// 旧控制面不下发这个字段 → 空切片 → 行为与改造前逐字节一致（向后兼容）。
+	DenyUsers []string `json:"denyUsers"`
 }
 
 // Revoked 控制面下发的一条强制下线封禁（封禁期内拒绝敲门，并撤窗/切断该账号隧道）。
@@ -254,7 +257,8 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 	}
 	out := make([]resource.Resource, 0, len(r.Resources))
 	for _, d := range r.Resources {
-		out = append(out, resource.Resource{ID: d.ID, Backend: d.Backend, AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers})
+		out = append(out, resource.Resource{ID: d.ID, Backend: d.Backend,
+			AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers, DenyUsers: d.DenyUsers})
 	}
 	return out, r.Revoked, nil
 }

@@ -15,6 +15,7 @@ import (
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/lockout"
 	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
@@ -49,6 +50,8 @@ type Server struct {
 	// trustedProxies 审计源 IP 的信任边界（BAIDI_TRUSTED_PROXIES，CIDR 逗号分隔）：
 	// 只有直连对端落在这些网段内，X-Forwarded-For 才被采信。见 clientIP。
 	trustedProxies []netip.Prefix
+	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
+	lockout        *lockout.Guard
 	mu             sync.Mutex
 	gateways       map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess         map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -125,12 +128,19 @@ type GwSession struct {
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
 // rp 为已装配的 WebAuthn 依赖方，nil 表示未配置（登录回落 legacy 演示验证码路径）。
 func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloadsDir string, rp *webauthnx.RP, ca *pki.CA, gwPlaintextCompat bool) *Server {
-	return &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
+	s := &Server{store: st, writer: wr, keys: keys, env: env, downloadsDir: downloadsDir, rp: rp,
 		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
 		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}}
+	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
+	var ls lockout.Store
+	if v, ok := wr.(lockout.Store); ok {
+		ls = v
+	}
+	s.lockout = lockout.New(ls)
+	return s
 }
 
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单/安装包分发）。供 auth 中间件使用。
@@ -237,6 +247,11 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authsrc/sources/{id}", s.handleDeleteAuthSource)
 	mux.HandleFunc("PUT /api/v1/authsrc/sources/{id}/secret", s.handleSetAuthSourceSecret)
 	mux.HandleFunc("POST /api/v1/authsrc/sources/{id}/probe", s.handleProbeAuthSource)
+	// 登录防爆破：生效锁定清单 + 管理员解锁 + 阈值配置读写（admin，配置消费方=登录链路 Guard）
+	mux.HandleFunc("GET /api/v1/security/lockouts", s.handleLockouts)
+	mux.HandleFunc("POST /api/v1/security/lockouts/unlock", s.handleUnlockLockout)
+	mux.HandleFunc("GET /api/v1/security/lockout-config", s.handleLockoutConfig)
+	mux.HandleFunc("PUT /api/v1/security/lockout-config", s.handleSaveLockoutConfig)
 	// 安全中心：安全基线 + SPA
 	mux.HandleFunc("GET /api/v1/security", s.handleSecurity)
 	mux.HandleFunc("POST /api/v1/security/baselines", s.handleSaveBaseline)          // 保存基线（admin）
@@ -339,6 +354,10 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
 		return
 	}
+	// 防爆破进门锁：账号锁或 IP 锁命中直接 403（锁定期内正确口令也不放行）。
+	if s.loginGateLocked(w, r, b.Username) {
+		return
+	}
 	// 真实凭据校验：查目录账号 + bcrypt 口令哈希（不再是"任意用户名 + baidi@123"）
 	cred, found, err := s.store.Credential(r.Context(), b.Username)
 	if err != nil {
@@ -361,6 +380,8 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 				"ok": false, "reason": "认证服务暂时不可用，请稍后重试或联系管理员"})
 			return
 		case !hit:
+			// 本地与外部都没认出他 → 计一次失败（认证源故障走上面的分支，刻意不计）。
+			s.noteLoginFailure(r, b.Username)
 			s.auditAs(r, b.Username, "auth", "终端用户登录失败（账号或口令错误）", "fail")
 			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
 			return
@@ -381,6 +402,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, resp)
 		return
 	}
+	s.lockout.Success(normUser(b.Username)) // 成功登录清零该账号的失败计数（与 Fail 同键口径）
 	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
 	// 令牌 Name=账号（数据面网关按 claims.Name 做放行/封禁匹配，必须是规范账号，不能放显示名）；
 	// 显示名单独经响应体 displayName 回给前端。
@@ -593,6 +615,10 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
 		return
 	}
+	// 防爆破进门锁：管理台是权限最高面，同门户一样先查锁。
+	if s.loginGateLocked(w, r, b.Username) {
+		return
+	}
 	// 真实凭据校验 + 要求 admin 角色（普通账号口令对也拿不到管理台）
 	cred, found, err := s.store.Credential(r.Context(), b.Username)
 	if err != nil {
@@ -600,6 +626,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !found || !auth.VerifyPassword(cred.PassHash, b.Password) {
+		s.noteLoginFailure(r, b.Username) // 口令错误计一次（角色不符/账号被禁不计——那时口令是对的）
 		s.auditAs(r, b.Username, "auth", "管理员登录失败（用户名或密码错误）", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
 		return
@@ -619,6 +646,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, resp)
 		return
 	}
+	s.lockout.Success(normUser(b.Username)) // 成功登录清零该账号的失败计数
 	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
 	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
 	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)

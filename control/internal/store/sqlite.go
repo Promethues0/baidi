@@ -308,6 +308,18 @@ CREATE INDEX IF NOT EXISTS idx_authbind_user ON auth_source_bindings(user_id);
 CREATE TABLE IF NOT EXISTS gateway_certs (
   fingerprint TEXT PRIMARY KEY, gateway_id TEXT, issued_at TEXT, not_after TEXT,
   revoked INTEGER DEFAULT 0, revoked_at TEXT, revoke_reason TEXT
+);
+-- 登录防爆破锁定（FR-MON-17/18）：账号 / 源 IP 两个维度。滑动窗失败计数在内存，
+-- 锁定记录落这里——重启不丢锁定；到期行由 ActiveLockouts 读取路径懒清理。
+-- 新表无需回填（区别于补列迁移）：既有库此前根本没有锁定这回事。
+CREATE TABLE IF NOT EXISTS login_lockouts (
+  kind TEXT, key TEXT, until INTEGER, reason TEXT, created_at TEXT,
+  PRIMARY KEY(kind, key)
+);
+-- settings 运行时配置覆盖（键值）。首个消费者：登录防爆破配置
+-- （internal/lockout，BAIDI_LOCKOUT_* 环境变量的运行时覆盖）。
+CREATE TABLE IF NOT EXISTS settings (
+  k TEXT PRIMARY KEY, v TEXT, updated_at TEXT
 );`)
 	if err != nil {
 		return err

@@ -235,8 +235,30 @@ export interface UserStateItem {
   state: 'risk-high' | 'risk-low' | 'locked' | 'disabled' | 'idle';
   risk: 'none' | 'low' | 'high'; online: boolean;
   reasons: string[]; lastEvent: string; lastSeen: string;
+  /** 该账号当前有生效的登录防爆破锁定（login_lockouts）。与目录 status=locked 是两种锁：
+   *  爆破锁到期自动解除、解锁走 /security/lockouts/unlock；目录锁走 /users/{id}/status。
+   *  「就地解锁」按此字段选路（可能两种都要解）。 */
+  bruteLocked?: boolean;
 }
 export interface UserStateBundle { buckets: UserStateBucket[]; items: UserStateItem[] }
+
+/* ── 登录防爆破（login_lockouts + internal/lockout.Guard）── */
+export interface LoginLockout {
+  kind: 'account' | 'ip';
+  key: string;       // 规范化账号 / 源 IP
+  until: number;     // 锁定截止 Unix 秒
+  reason: string;    // 触发事实（如「10 分钟内连续 5 次登录失败」）
+  createdAt: string;
+}
+export interface LockoutsResp { lockouts: LoginLockout[] }
+/** BAIDI_LOCKOUT_* 的运行时覆盖（settings 落库、登录链路 Guard 即时消费）。 */
+export interface LockoutConfig {
+  threshold: number;      // 窗口内失败次数阈值
+  windowSec: number;      // 滑动窗口（秒）
+  durationSec: number;    // 锁定时长（秒）
+  ipEnabled: boolean;     // 源 IP 维度开关
+  accountEnabled: boolean; // 账号维度开关
+}
 
 /* ── IPSec VPN 组网（配置 store.IpsecSite ＋ 运行态 ipsec_sa_state）──
  *

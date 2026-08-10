@@ -308,6 +308,10 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, http.StatusUnauthorized, "认证票据无效或已过期，请重新登录")
 		return
 	}
+	// 防爆破锁：断言失败也计数，锁定可能在口令与断言两回合之间触发（含并行爆破），此处再拦一次。
+	if s.loginGateLocked(w, r, account) {
+		return
+	}
 	sess, err := s.consumeChallengeFromBody(r, body, "login")
 	if err != nil {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
@@ -331,6 +335,7 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 	r.Body = io.NopCloser(bytes.NewReader(body))
 	credID, newCount, err := s.rp.FinishLogin(wu.user, sess.data, r)
 	if err != nil {
+		s.noteLoginFailure(r, account) // WebAuthn 断言失败同口令错误一样计入防爆破
 		s.auditAs(r, account, "auth", "passkey 断言失败："+err.Error(), "fail")
 		httpx.Error(w, http.StatusUnauthorized, "断言校验失败")
 		return
@@ -344,6 +349,7 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		httpx.Error(w, http.StatusInternalServerError, "failed to update credential")
 		return
 	}
+	s.lockout.Success(account) // 二次认证走完才算成功登录，此刻清零失败计数
 	s.auditAs(r, account, "auth", "passkey 二次认证通过，登录成功", "ok")
 	tok := s.keys.Sign(auth.Claims{Sub: wu.cred.Account, Role: wu.cred.Role, Name: wu.cred.Account, Jti: auth.RandJTI()}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{

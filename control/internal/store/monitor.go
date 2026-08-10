@@ -63,6 +63,11 @@ type UserStateItem struct {
 	Reasons   []string `json:"reasons"` // 命中的风险 / 异常原因
 	LastEvent string   `json:"lastEvent"`
 	LastSeen  string   `json:"lastSeen"`
+	// BruteLocked 该账号当前有生效的登录防爆破锁定（login_lockouts）。只由 api 层
+	// 叠加（overlayBruteLocks），store 实现不填——它与目录 status=locked 是两种锁：
+	// 前者到期自动解除、解锁走 /security/lockouts/unlock；后者是管理员权威状态、
+	// 解锁走 /users/{id}/status。控制台的「就地解锁」按此字段选路。
+	BruteLocked bool `json:"bruteLocked,omitempty"`
 }
 
 // UserStateBundle 用户状态页：分桶聚合 + 受关注用户清单。

@@ -40,6 +40,20 @@
       </a-grid-item>
     </a-grid>
 
+    <!-- 爆破锁定 IP（login_lockouts · kind=ip）：同一源 IP 换账号爆破触发的锁，与账号锁分开列 -->
+    <div class="bd-section-title">爆破锁定 IP <em>{{ ipLocks.length }}</em></div>
+    <div v-if="!ipLocks.length" class="bd-card bd-empty">
+      <icon-check-circle-fill />当前没有被防爆破锁定的来源 IP
+    </div>
+    <a-card v-else class="bd-card" :bordered="false">
+      <div v-for="lk in ipLocks" :key="lk.key" class="bd-iplock">
+        <span class="bd-mono bd-iplock__ip">{{ lk.key }}</span>
+        <span class="bd-iplock__reason">{{ lk.reason }}</span>
+        <span class="bd-iplock__until">锁定至 {{ fmtUntil(lk.until) }}</span>
+        <a-button size="mini" @click="unlockIP(lk)">解锁</a-button>
+      </div>
+    </a-card>
+
     <!-- 受关注用户清单 -->
     <div class="bd-section-title">受关注用户 <em>{{ shown.length }}</em></div>
 
@@ -77,6 +91,8 @@
         <div class="bd-row__event">{{ u.lastEvent }}</div>
         <div class="bd-row__time bd-mono">{{ u.lastSeen }}</div>
         <div class="bd-row__acts">
+          <!-- 就地解锁：按锁的种类选路——爆破锁走 /security/lockouts/unlock，目录锁走 /users/{id}/status -->
+          <span v-if="u.state === 'locked' || u.bruteLocked" class="bd-link" @click="unlockUser(u)"><icon-unlock />就地解锁</span>
           <span class="bd-link" @click="goUsers"><icon-user />查看用户</span>
           <span class="bd-link bd-link--grey" @click="goAudit"><icon-file />查审计</span>
         </div>
@@ -88,7 +104,8 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { api, type UserStateBundle, type UserStateItem } from '@/lib/api';
+import { Message } from '@arco-design/web-vue';
+import { api, type UserStateBundle, type UserStateItem, type LoginLockout, type LockoutsResp } from '@/lib/api';
 
 const router = useRouter();
 
@@ -106,21 +123,73 @@ const MOCK: UserStateBundle = {
     { id: 'u3', user: '周婷', account: 'zhou.ting', org: '法务部', state: 'risk-low', risk: 'low', online: true, reasons: ['访问敏感资源频次上升'], lastEvent: '高敏资源访问偏离基线 · 建议观察', lastSeen: '2026-06-24 10:05' },
     { id: 'u4', user: '王芳', account: 'wang.fang', org: 'IT 运维', state: 'risk-low', risk: 'low', online: true, reasons: ['新地点登录', '夜间活跃'], lastEvent: '换城市登录 · 已完成短信确认', lastSeen: '2026-06-24 07:33' },
     { id: 'u5', user: '李伟', account: 'li.wei', org: '市场部', state: 'risk-low', risk: 'low', online: false, reasons: ['BYOD 终端未托管'], lastEvent: '个人设备接入 · 建议引导纳管', lastSeen: '2026-06-23 18:51' },
-    { id: 'u6', user: '陈强', account: 'chen.qiang', org: '运维堡垒', state: 'locked', risk: 'high', online: false, reasons: ['暴力破解触发自动锁定', '需管理员解锁'], lastEvent: '账号已临时锁定 · 等待人工核验后恢复', lastSeen: '2026-06-24 06:02' },
+    { id: 'u6', user: '陈强', account: 'chen.qiang', org: '运维堡垒', state: 'locked', risk: 'high', online: false, bruteLocked: true, reasons: ['暴力破解触发自动锁定', '需管理员解锁'], lastEvent: '账号已临时锁定 · 等待人工核验后恢复', lastSeen: '2026-06-24 06:02' },
     { id: 'u7', user: '外包-张', account: 'ext.zhang', org: '外包供应商', state: 'disabled', risk: 'none', online: false, reasons: ['合同到期', '账号已停用'], lastEvent: '到期自动停用 · 可按需重新启用', lastSeen: '2026-06-20 17:40' },
     { id: 'u8', user: '张敏', account: 'zhang.min', org: '行政部', state: 'idle', risk: 'none', online: false, reasons: ['30 天未活跃'], lastEvent: '长期未登录 · 建议挂起回收授权', lastSeen: '2026-05-22 14:12' },
     { id: 'u9', user: 'svc-bot-04', account: 'svc.bot.04', org: '服务账号', state: 'idle', risk: 'low', online: true, reasons: ['服务账号长期高频', '凭据未轮换'], lastEvent: '机器账号凭据超期 · 建议轮换密钥', lastSeen: '2026-06-24 10:11' }
   ]
 };
 
+/** 降级演示用的锁定清单（与 MOCK 里 chen.qiang 的 bruteLocked 呼应）。 */
+const MOCK_LOCKS: LoginLockout[] = [
+  { kind: 'ip', key: '203.0.113.77', until: Math.floor(Date.now() / 1000) + 540, reason: '10 分钟内连续 5 次登录失败', createdAt: '2026-06-24 06:02:11' },
+  { kind: 'account', key: 'chen.qiang', until: Math.floor(Date.now() / 1000) + 540, reason: '10 分钟内连续 5 次登录失败', createdAt: '2026-06-24 06:02:11' }
+];
+
 const bundle = ref<UserStateBundle>(MOCK);
+const lockouts = ref<LoginLockout[]>(MOCK_LOCKS);
 const live = ref(false);
 const loading = ref(false);
 const filter = ref<string>('');
 
-const shown = computed<UserStateItem[]>(() =>
-  filter.value ? bundle.value.items.filter((i) => i.state === filter.value) : bundle.value.items
-);
+const shown = computed<UserStateItem[]>(() => {
+  if (!filter.value) return bundle.value.items;
+  // locked 桶与后端计数口径一致：目录锁定 ∪ 爆破锁定
+  if (filter.value === 'locked') return bundle.value.items.filter((i) => i.state === 'locked' || i.bruteLocked);
+  return bundle.value.items.filter((i) => i.state === filter.value);
+});
+
+const ipLocks = computed(() => lockouts.value.filter((l) => l.kind === 'ip'));
+
+function fmtUntil(ts: number) {
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
+/** 就地解锁：按锁的种类选路，两种锁都有就都解（意图是让该用户能重新登录）。 */
+async function unlockUser(u: UserStateItem) {
+  try {
+    if (u.bruteLocked) {
+      await api('/security/lockouts/unlock', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ kind: 'account', key: u.account })
+      });
+    }
+    if (u.state === 'locked' && u.id) {
+      await api(`/users/${u.id}/status`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ status: 'active' })
+      });
+    }
+    Message.success(`已解锁 ${u.account}`);
+    await load();
+  } catch {
+    Message.error('解锁失败，请检查后端连接');
+  }
+}
+
+async function unlockIP(lk: LoginLockout) {
+  try {
+    await api('/security/lockouts/unlock', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ kind: 'ip', key: lk.key })
+    });
+    Message.success(`已解锁 IP ${lk.key}`);
+    await load();
+  } catch {
+    Message.error('解锁失败，请检查后端连接');
+  }
+}
 
 function toggle(key: string) { filter.value = filter.value === key ? '' : key; }
 function tagStyle(c: string) { return { color: c, background: c + '14' }; }
@@ -153,10 +222,16 @@ function goAudit() { router.push('/security/audit'); }
 async function load() {
   loading.value = true;
   try {
-    bundle.value = await api<UserStateBundle>('/userstate');
+    const [b, lo] = await Promise.all([
+      api<UserStateBundle>('/userstate'),
+      api<LockoutsResp>('/security/lockouts')
+    ]);
+    bundle.value = b;
+    lockouts.value = lo.lockouts;
     live.value = true;
   } catch {
     bundle.value = MOCK;
+    lockouts.value = MOCK_LOCKS;
     live.value = false;
   } finally {
     loading.value = false;
@@ -210,6 +285,13 @@ onMounted(load);
 .bd-row__time { font-size: 11.5px; color: var(--bd-t3); margin-top: 4px; }
 .bd-row__acts { display: flex; justify-content: flex-end; gap: 14px; margin-top: 10px; }
 .bd-row__acts .bd-link { display: inline-flex; align-items: center; gap: 4px; font-size: 12.5px; }
+
+/* 爆破锁定 IP 行 */
+.bd-iplock { display: flex; align-items: center; gap: 14px; padding: 8px 0; border-bottom: 1px solid var(--bd-fill-1); }
+.bd-iplock:last-child { border-bottom: none; }
+.bd-iplock__ip { font-size: 13px; font-weight: 600; color: var(--bd-t1); min-width: 130px; }
+.bd-iplock__reason { flex: 1; font-size: 12.5px; color: var(--bd-t2); }
+.bd-iplock__until { font-size: 12px; color: var(--bd-t3); font-variant-numeric: tabular-nums; }
 
 /* 空态 */
 .bd-empty { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--bd-t3); padding: 16px 12px; }

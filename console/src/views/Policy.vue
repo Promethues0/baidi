@@ -117,9 +117,34 @@
               <div class="bd-row__label">{{ r.label }}<span v-if="r.risk" class="bd-risk">高影响</span></div>
               <div class="bd-row__desc">{{ r.desc }}</div>
             </div>
-            <span v-if="r.threshold !== undefined" class="bd-thr">阈值 <b>{{ r.threshold }}</b> 次</span>
             <a-switch v-model="r.on" size="small" />
           </div>
+          <!-- 防暴力破解 · 真实接线（GET/PUT /security/lockout-config，消费方=控制面登录链路） -->
+          <template v-if="g.key === 'brute'">
+            <div class="bd-row">
+              <div class="bd-row__main">
+                <div class="bd-row__label">同 IP 连续登录错误锁定</div>
+                <div class="bd-row__desc">同一来源 IP 在窗口内密码错误达阈值后锁定该 IP（换用户名也拦）；可在「监控中心 · 用户状态」解锁</div>
+              </div>
+              <a-switch v-model="lockCfg.ipEnabled" size="small" @change="saveLockoutCfg" />
+            </div>
+            <div class="bd-row">
+              <div class="bd-row__main">
+                <div class="bd-row__label">同用户名连续登录错误锁定</div>
+                <div class="bd-row__desc">窗口内连续密码错误达阈值后锁定该账号（登录成功即清零计数）；锁定到期自动解除</div>
+              </div>
+              <a-switch v-model="lockCfg.accountEnabled" size="small" @change="saveLockoutCfg" />
+            </div>
+            <div class="bd-row">
+              <div class="bd-row__main">
+                <div class="bd-row__label">阈值与时长</div>
+                <div class="bd-row__desc">两个维度共用：滑动窗口内失败达阈值即锁定；保存后即时生效并落库（重启保留）</div>
+              </div>
+              <span class="bd-thr">阈值 <a-input-number v-model="lockCfg.threshold" :min="1" :max="100" size="mini" style="width: 76px" @change="saveLockoutCfg" /> 次</span>
+              <span class="bd-thr">窗口 <a-input-number v-model="windowMin" :min="1" :max="1440" size="mini" style="width: 76px" @change="saveLockoutCfg" /> 分钟</span>
+              <span class="bd-thr">锁定 <a-input-number v-model="durationMin" :min="1" :max="1440" size="mini" style="width: 76px" @change="saveLockoutCfg" /> 分钟</span>
+            </div>
+          </template>
         </div>
       </div>
     </div>
@@ -185,7 +210,7 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type PolicyBundle, type OrgNode } from '@/lib/api';
+import { api, type PolicyBundle, type OrgNode, type LockoutConfig } from '@/lib/api';
 
 type Src = 'inherited' | 'custom';
 type Val = string | number | boolean;
@@ -351,11 +376,11 @@ async function doSave() {
 
 /* ── 全局策略（复刻设计稿开关行）── */
 const gsec = ref('brute');
+// ★防暴力破解的两个「锁定」开关不在这里：它们已接到真实后端（见 lockCfg），
+// 不再是纯前端摆设。此处只剩尚无后端的演示行。
 const globalSecs = reactive([
   { key: 'brute', label: '防暴力破解', rows: [
-    { label: '图形校验码', desc: '登录时要求输入校验码（支持中文 / 英文）', on: true },
-    { label: '同 IP 连续登录错误锁定', desc: '同一 IP 密码错误达阈值后锁定该 IP 一段时间', on: true, threshold: 5 },
-    { label: '同用户名连续登录错误锁定', desc: '锁定的用户需管理员在「用户状态」处手动解封', on: true, threshold: 5 }
+    { label: '图形校验码', desc: '登录时要求输入校验码（支持中文 / 英文）', on: true }
   ] },
   { key: 'access', label: '接入加速与限制', rows: [
     { label: '弱网带宽优化', desc: '优化 TCP，抗丢包抗抖动，提升弱网访问体验', on: true },
@@ -367,7 +392,39 @@ const globalSecs = reactive([
     { label: '强制升级至最新客户端', desc: '检测到新版本则阻断登录直至更新；开启后自动关闭灰度', on: false, risk: true },
     { label: '开机自动启动客户端', desc: '默认开关，用户可在客户端侧个性化覆盖', on: true }
   ] }
-] as { key: string; label: string; rows: { label: string; desc: string; on: boolean; threshold?: number; risk?: boolean }[] }[]);
+] as { key: string; label: string; rows: { label: string; desc: string; on: boolean; risk?: boolean }[] }[]);
+
+/* ── 防暴力破解 · 真实接线（BAIDI_LOCKOUT_* 的运行时覆盖，settings 落库）──
+ * 开关与阈值直接读写 /security/lockout-config，控制面登录链路即时消费——不是摆设。 */
+const lockCfg = reactive<LockoutConfig>({ threshold: 5, windowSec: 600, durationSec: 900, ipEnabled: true, accountEnabled: true });
+const windowMin = computed({
+  get: () => Math.round(lockCfg.windowSec / 60),
+  set: (v: number) => { lockCfg.windowSec = Math.round(v) * 60; }
+});
+const durationMin = computed({
+  get: () => Math.round(lockCfg.durationSec / 60),
+  set: (v: number) => { lockCfg.durationSec = Math.round(v) * 60; }
+});
+
+async function loadLockoutCfg() {
+  try {
+    Object.assign(lockCfg, await api<LockoutConfig>('/security/lockout-config'));
+  } catch { /* 离线演示：留本地默认值，保存时会提示失败 */ }
+}
+async function saveLockoutCfg() {
+  // 输入框被清空的瞬间（undefined/NaN）不提交，等填回合法值
+  if (!lockCfg.threshold || !lockCfg.windowSec || !lockCfg.durationSec) return;
+  try {
+    await api('/security/lockout-config', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(lockCfg)
+    });
+    Message.success('防爆破配置已保存并即时生效');
+  } catch {
+    Message.error('保存失败，请检查后端连接');
+    await loadLockoutCfg(); // 回读生效值，避免界面停留在未生效的假状态
+  }
+}
 
 /* ── 拉取 ── */
 onMounted(async () => {
@@ -375,6 +432,7 @@ onMounted(async () => {
     const pb = await api<PolicyBundle>('/policies');
     tree.value = pb.tree; live.value = true;
   } catch { live.value = false; }
+  await loadLockoutCfg();
   await select(selected.value); // 回填初始节点的已存覆盖
 });
 </script>

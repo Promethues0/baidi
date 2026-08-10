@@ -141,6 +141,8 @@ func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load user state")
 		return
 	}
+	// 叠加登录防爆破锁定（执行源即 Guard/login_lockouts）：目录状态之外的另一种「已锁定」。
+	s.overlayBruteLocks(r, &b)
 	httpx.JSON(w, http.StatusOK, b)
 }
 

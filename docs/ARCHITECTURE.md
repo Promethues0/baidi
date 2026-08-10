@@ -330,6 +330,7 @@ sequenceDiagram
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
 | **管理员分级分权 / 三权分立（有真执行方 + 防自锁）** | [admins_sqlite.go](../control/internal/store/admins_sqlite.go)、[api/admins.go](../control/internal/api/admins.go)、[adminrbac_test.go](../control/internal/api/adminrbac_test.go)、[admins_sqlite_test.go](../control/internal/store/admins_sqlite_test.go) |
 | **消息通道 SMTP / Webhook（真发；STARTTLS 不降级；安全事件真通知）** | [internal/notify/](../control/internal/notify/)、[smtp_test.go](../control/internal/notify/smtp_test.go)（进程内 SMTP 服务端跑真协议）、[api/notify_test.go](../control/internal/api/notify_test.go)。★`kind=sms` 就是 webhook，不是短信网关实现 |
+| **业务告警实体与规则（八类触发源全部读真实信号 + 冷却去重 + 处置状态机）** | [internal/alerting/](../control/internal/alerting/)、[alerting_test.go](../control/internal/alerting/alerting_test.go)、[api/alerts_test.go](../control/internal/api/alerts_test.go)（真把心跳调旧 / 真连错口令锁账号 / 真篡改一行审计） |
 
 **按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
 
@@ -341,6 +342,17 @@ sequenceDiagram
 - 用户组成员按 **account** 存（而非 user id），正是为了在这一步能与令牌主体对齐。
 
 控制台「资源策略」页的编辑器直接吃组织树与用户组真实数据，并显示**展开后的生效账号数**——那份数字与下发网关的展开出自同一次计算，管理员看得见子树语义的实际影响。
+
+**业务告警（真，PRD ch5 FR-MON-21~25）**：此前白帝**没有告警实体**——审计中心的 `audit_log` 是只追加的流水，没有类别、没有 `pending/ignored/handled` 状态机、没有处置人，「谁值班时把这条异常处理掉了」这件事表达不了。现在 `alert_rules` + `alerts` 两张表落库，控制台「监控中心 → 业务告警」页可过滤与处置。
+
+- **八类触发源，每一条都读一份真实存在的信号**（出处写在 `store.alertKindSpecs` 的 `Signal` 字段里，页面上原样展示）：网关心跳超时（与在线判据 `gatewayOnlineWindow` 同源）、网关 CPU/内存/磁盘超阈值（`gateway_metrics`）、JIT 授予即将到期、JIT 授予已过期未回收（库里仍标 active 的行，**刻意不吃展示层的到期纠正**——那会把"该回收没回收"抹平）、应用未关联受控资源（与客户端剖面 `warnings` 同一条信号）、账号/IP 爆破锁定（取 `lockout.Guard` 正在执行的那份）、终端 posture 判 block、**审计防篡改链周期性自检失败**。
+- **审计链自检是这组里最该存在的一条**：防篡改链没人定期查，就等于没有——篡改发生到被发现之间的窗口，此前完全取决于有没有人手动点那个「校验」按钮。现在后台循环按 `BAIDI_ALERT_CHAIN_INTERVAL`（默认 15min）全链重算，失败即出 critical 告警。链断裂与"自检没跑成"是**两条不同措辞**的告警（运维的下一步动作不同）。
+- **判定是纯函数**（`alerting.Evaluate`，吃一份信号快照吐候选），因此每条规则都能用构造出来的快照两向断言。告警最容易犯的错不是存不下来，而是条件写反——而条件写反在集成环境里与"一切正常"无法区分。「空快照不产生任何候选」有单独用例钉住（空集合语义反转是本项目栽过的坑）。
+- **冷却期去重按 (规则, 对象)**：网关离线这类条件会持续成立，不冷却的话每轮评估刷一条，告警页当场不可用；对象键那一半同样必要——只按规则去重的话，三台网关同时离线只会留下一条。去重用单条 `INSERT … WHERE NOT EXISTS` 完成（先查后插在两轮评估重叠时会双双判"没有"）。冷却**只看时间不看状态**：按状态放宽会让人一点「已处理」就立刻冒出同一条。
+- **数据源未就绪要说得出原因**：`gateway_metrics` 表不存在 / 列对不上 / 表里还没有数据，三种情况分别如实回报，页面显示「等待数据面上报」+ 具体原因，而不是让一条永远不触发的规则看起来跟正常规则一模一样。指标三态（NULL = 采不到 ≠ 0）在评估侧原样保留：采不到的项不参与阈值比较。
+- **通知复用消息通道**：规则的 `channels` 留空 = 发给全部启用通道，点名则只发这几条（点名不存在的通道**保存时即拒**）。发送失败、通道已停用、通道已被删除**三种情况都落审计**——「配了通知却没人收到」必须有痕迹。
+- **权限**：读（列表/规则）= 任意管理员且角色现算（网关离线、链断裂对三权都是待办）；写（处置 / 规则 / 立即检测）= `PermSecurity`。审计链那条告警只呈现「链在第 N 条断裂」这一个事实，不含任何审计正文。
+- **控制台不给演示告警**：其余页面未连后端时降级为内置演示数据，这一页刻意不降级——编造的「未处理告警」会让人以为系统正在监控。侧栏三个角标（业务告警 / 在线用户 / 用户状态）同批改成真实计数，取不到就不显示；在线用户角标只在 `source=live` 时给数字，避免把种子演示会话画成"10 人在线"（那正是改造前写死的角标值）。
 
 ### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
 

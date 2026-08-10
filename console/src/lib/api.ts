@@ -118,7 +118,9 @@ export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[];
 
 /* ── 审计中心（store.AuditBundle）── */
 export interface DiskStat { usedPct: number; totalGB: number; retainDays: number }
-export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail' }
+/** 一条审计记录。★seq/mac 是防篡改链的序号与链式 MAC：列表、CSV 导出、
+ *  syslog/SIEM 外送三个出口同源（后端就是同一个 store.AuditEntry）。 */
+export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
 
 /* ── 网关与隐身（store.GatewayBundle）── */
@@ -216,6 +218,80 @@ export interface WebhookChannelConfig {
 
 export interface NotifyTestResp { ok: boolean; detail: string; elapsedMs?: number }
 export interface SaveNotifyChannelResp { ok: boolean; channel: NotifyChannel; warning?: string }
+
+/* ── 审计日志外送（store.AuditForwardTarget，PRD ch16 + ch21.6）──
+ *
+ * 两种出口都是真实现：syslog 走 **RFC 5424 over TCP**（可选 TLS，没有"跳过证书校验"
+ * 这一项，见后端注释）；http 是通用 JSON 出口。**刻意没有 UDP**——审计日志用 UDP
+ * 会静默丢包，而"丢了"这件事两端都看不见。
+ *
+ * 每条外送记录都带链的 seq/mac，SIEM 侧可据此独立验真——这是本功能的价值所在，
+ * 不是"日志复制"。
+ */
+export type AuditForwardKind = 'syslog' | 'http';
+
+export interface AuditForwardTarget {
+  id: string;
+  name: string;
+  kind: AuditForwardKind | string;
+  enabled: boolean;
+  /** 非敏感配置 JSON 字符串（凭据在独立加密表，不在这里）。 */
+  config: string;
+  hasSecret: boolean;
+  secretFingerprint?: string;
+  /** 建立该出口时的审计水位：此前的历史**不会补发**，页面要如实说出来。 */
+  startAuditId: number;
+  /** 上次发送结果。★只由真正发出那一次写入，保存配置不会碰它。 */
+  lastStatus?: 'ok' | 'fail' | '';
+  lastDetail?: string;
+  /** 上次尝试（无论成败）/ 上次**成功**。运维靠后者判断外送是不是已经断了。 */
+  lastAt?: number;
+  lastOkAt?: number;
+  /** 队列满时被丢弃的累计条数（落库、可见）：这些审计已落库但不会送达 SIEM。 */
+  dropped: number;
+  /** 当前积压条数（读时现算）。 */
+  queued: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface AuditForwardResp {
+  targets: AuditForwardTarget[];
+  supportedKinds: string[];
+  /** 每个出口的队列上界；没有它，页面上的积压数看不出离丢弃还有多远。 */
+  queueMax: number;
+  /** 后端下发的诚实标注（历史不补发 / seq+mac 可验真），界面原样展示。 */
+  note: string;
+}
+
+/** syslog 出口配置（与 control 的 syslogTargetDTO 对齐）。 */
+export interface SyslogTargetConfig {
+  host: string;
+  port?: number;
+  tls: boolean;
+  serverName?: string;
+  caCert?: string;
+  facility?: number;
+  appName?: string;
+  hostname?: string;
+  framing?: 'octet' | 'lf';
+  enterpriseId?: string;
+  timeoutSec?: number;
+}
+
+/** HTTP JSON 出口配置（与 control 的 httpTargetDTO 对齐）。 */
+export interface HttpTargetConfig {
+  url: string;
+  headers?: Record<string, string>;
+  /** 凭据要注入的头名；头值在加密表里，只写不读。 */
+  secretHeader?: string;
+  caCert?: string;
+  timeoutSec?: number;
+}
+
+export interface SaveAuditForwardResp { ok: boolean; target: AuditForwardTarget; warning?: string }
+export interface AuditForwardTestResp { ok: boolean; detail: string; elapsedMs?: number }
+export interface AuditForwardFlushResp { ok: boolean; reset: number; target: AuditForwardTarget }
 
 /* ── 认证源接入（store.AuthSrcBundle）── */
 export interface AuthSource { key: string; name: string; type: 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert'; status: string; users: number; primary: boolean }

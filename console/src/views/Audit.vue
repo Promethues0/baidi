@@ -8,7 +8,12 @@
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
         <button class="bd-btn" @click="openExport"><icon-download />导出 CSV</button>
-        <button class="bd-btn bd-btn--ghost" @click="cfg = true"><icon-settings />日志配置</button>
+        <!-- 这里原先是一个「日志配置」弹窗：四个类别留痕开关 + 保留天数 + 「合规出口（Syslog 转发）」，
+             全部是**显示层假配置**——后端既没有按类别开关留痕的能力，保留天数由
+             BAIDI_AUDIT_RETENTION_DAYS 决定，Syslog 那一格更是压根没有实现。
+             本轮把外送做成了真的（RFC 5424 over TCP/TLS + HTTP JSON，持久化队列 + 重试），
+             配置在系统管理页，这个按钮直接指过去；剩下那几个假开关删掉而不是搬家。 -->
+        <button class="bd-btn bd-btn--ghost" @click="gotoForward"><icon-export />日志外送</button>
       </div>
     </div>
 
@@ -117,28 +122,21 @@
       </div>
     </a-modal>
 
-    <!-- 日志配置 -->
-    <a-modal v-model:visible="cfg" :width="460" title="日志配置" @ok="cfg = false" ok-text="保存" cancel-text="取消">
-      <div class="bd-cfg">
-        <div class="bd-cfgrow"><span>访问决策日志留痕</span><a-switch v-model="cfgVals.access" size="small" /></div>
-        <div class="bd-cfgrow"><span>登录认证日志留痕</span><a-switch v-model="cfgVals.auth" size="small" /></div>
-        <div class="bd-cfgrow"><span>管理操作日志留痕</span><a-switch v-model="cfgVals.admin" size="small" /></div>
-        <div class="bd-cfgrow"><span>安全事件日志留痕</span><a-switch v-model="cfgVals.security" size="small" /></div>
-        <div class="bd-cfgrow"><span>日志保留天数</span><a-input-number v-model="cfgVals.retain" :min="7" :max="365" size="small" style="width: 110px" /></div>
-        <div class="bd-cfgrow"><span>合规出口（Syslog 转发）</span><a-switch v-model="cfgVals.syslog" size="small" /></div>
-      </div>
-    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted } from 'vue';
+import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, getToken, type AuditBundle, type AuditEntry, type KV } from '@/lib/api';
 
 const live = ref(false);
-const cfg = ref(false);
-const cfgVals = reactive({ access: true, auth: true, admin: true, security: true, retain: 90, syslog: false });
+const router = useRouter();
+
+/** 「日志外送」指到系统管理页的真配置区（syslog / SIEM 出口 + 队列积压 + 丢弃计数）。
+ *  这一页上不再放任何外送开关：本地一个假开关、真配置在另一页，是最容易骗到人的形态。 */
+function gotoForward() { void router.push({ path: '/system/manage', query: { tab: 'forward' } }); }
 
 /* ── mock fallback（结构同 store.AuditBundle）── */
 const MOCK: AuditBundle = {
@@ -313,9 +311,4 @@ onMounted(async () => {
 
 .bd-wfoot { display: flex; align-items: center; gap: 10px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
 .bd-btn[disabled] { cursor: not-allowed; }
-
-/* 日志配置 */
-.bd-cfg { display: flex; flex-direction: column; }
-.bd-cfgrow { display: flex; align-items: center; justify-content: space-between; padding: 11px 0; border-bottom: 1px solid var(--bd-fill-1); font-size: 13px; color: var(--bd-t1); }
-.bd-cfgrow:last-child { border-bottom: none; }
 </style>

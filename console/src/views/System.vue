@@ -14,6 +14,7 @@
     <div class="bd-tabs">
       <span class="bd-tab" :class="{ on: tab === 'admin' }" @click="tab = 'admin'">管理员与三权分立</span>
       <span class="bd-tab" :class="{ on: tab === 'notify' }" @click="tab = 'notify'">消息通道</span>
+      <span class="bd-tab" :class="{ on: tab === 'forward' }" @click="tab = 'forward'">日志外送</span>
       <span class="bd-tab" :class="{ on: tab === 'cluster' }" @click="tab = 'cluster'">集群</span>
     </div>
 
@@ -286,6 +287,174 @@
       </a-form>
     </a-modal>
 
+    <!-- ============ 日志外送（PRD ch16 + ch21.6）============ -->
+    <div v-show="tab === 'forward'">
+      <div class="bd-section-title">审计日志外送 · Syslog / SIEM</div>
+      <div class="bd-sep__note">
+        <icon-export />
+        <span>
+          每条审计落库时会同步入一个<b>持久化队列</b>，后台按批投递到下面每一条<b>已启用</b>的出口：
+          <b>发送成功才出队</b>，失败留在队列里退避重试（<b>一条都不丢</b>），队列满了才丢弃并计数。
+          外送的字段与审计列表、CSV 导出<b>同源</b>，且带防篡改链的 <i class="bd-mono">seq</i> 与
+          <i class="bd-mono">mac</i>——这是 SIEM 侧能<b>独立验真</b>的依据，也是这个功能真正的价值。
+        </span>
+      </div>
+      <div v-if="fwdNote" class="bd-sep__note">
+        <icon-info-circle /><span>{{ fwdNote }}</span>
+      </div>
+      <div v-if="fwdErr" class="bd-warn"><icon-exclamation-circle-fill />{{ fwdErr }}</div>
+      <div v-for="t in droppingTargets" :key="'drop-' + t.id" class="bd-warn">
+        <icon-exclamation-circle-fill />
+        出口「<b>{{ t.name }}</b>」队列已溢出，累计丢弃 <b>{{ t.dropped }}</b> 条待外送记录（上界 {{ fwdQueueMax }}）。
+        这些审计已落库，但<b>不会</b>送达 SIEM——请先修复对端再考虑补导 CSV。
+      </div>
+
+      <div class="bd-tablecard">
+        <div class="bd-toolbar">
+          <span class="bd-hint">
+            凭据（HTTP 出口的请求头 token）加密独立存放，<b>只写不读</b>；syslog 出口<b>没有</b>可设的凭据。
+          </span>
+          <div style="margin-left: auto; display: flex; gap: 10px">
+            <button class="bd-btn bd-btn--ghost" @click="reloadForward"><icon-refresh />刷新</button>
+            <button class="bd-btn" @click="openForward()"><icon-plus />新建出口</button>
+          </div>
+        </div>
+        <table class="bd-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>类型</th>
+              <th>目标</th>
+              <th>状态</th>
+              <th>队列</th>
+              <th>上次投递</th>
+              <th class="r">操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="t in fwdTargets" :key="t.id">
+              <td>
+                <b>{{ t.name }}</b>
+                <i class="bd-mono" style="display: block">{{ t.id }}</i>
+                <i class="bd-hint" style="display: block">自审计 #{{ t.startAuditId }} 起外送（更早的历史不补发）</i>
+              </td>
+              <td><span class="bd-tg" :style="tagStyle(fwdKindColor(t.kind))">{{ fwdKindText(t.kind) }}</span></td>
+              <td class="bd-mono bd-target">{{ fwdTarget(t) }}</td>
+              <td>
+                <span v-if="t.enabled" class="bd-tg" :style="tagStyle('#00B42A')">已启用</span>
+                <span v-else class="bd-tg" :style="tagStyle('#86909C')">已停用</span>
+              </td>
+              <td>
+                <span :style="{ color: t.queued > 0 ? '#FF7D00' : 'var(--bd-t2)' }">
+                  积压 <b>{{ t.queued }}</b> / {{ fwdQueueMax }}
+                </span>
+                <i v-if="t.dropped > 0" class="bd-mono" style="display: block; color: #F53F3F">
+                  已丢弃 {{ t.dropped }} 条
+                </i>
+              </td>
+              <td>
+                <span v-if="!t.lastStatus" class="bd-hint">从未投递</span>
+                <span v-else>
+                  <span class="bd-tg" :style="tagStyle(t.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                    {{ t.lastStatus === 'ok' ? '成功' : '失败' }}
+                  </span>
+                  <i class="bd-mono" style="display: block">{{ lastAtText(t.lastAt) }}</i>
+                  <!-- 上次**成功**单列一行：外送断了之后 lastAt 会一直被失败刷新，
+                       只看它会误以为"刚刚还通着" -->
+                  <i class="bd-mono" style="display: block">上次成功：{{ lastAtText(t.lastOkAt) }}</i>
+                  <i class="bd-lastdetail">{{ t.lastDetail }}</i>
+                </span>
+              </td>
+              <td class="r">
+                <span class="bd-link" @click="testForward(t)">测试</span>
+                <span class="bd-link" style="margin-left: 12px" @click="flushForward(t)">立即投递</span>
+                <span class="bd-link" style="margin-left: 12px" @click="openForward(t)">编辑</span>
+                <span v-if="t.kind === 'http'" class="bd-link" style="margin-left: 12px" @click="openFwdSecret(t)">设凭据</span>
+                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeForward(t)">删除</span>
+              </td>
+            </tr>
+            <tr v-if="!fwdTargets.length">
+              <td colspan="7" class="bd-empty">
+                还没有任何外送出口——审计目前只留在本机库里，外部 SIEM 拿不到、也无法独立验真。
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- 新建 / 编辑外送出口 -->
+    <a-modal v-model:visible="fwdOpen" :title="fwdForm.id ? '编辑外送出口' : '新建外送出口'"
+      :confirm-loading="saving" @ok="submitForward" @cancel="fwdOpen = false">
+      <a-form :model="fwdForm" layout="vertical">
+        <a-form-item label="名称"><a-input v-model="fwdForm.name" placeholder="如 SOC Syslog" /></a-form-item>
+        <a-form-item label="类型">
+          <a-select v-model="fwdForm.kind" :disabled="!!fwdForm.id">
+            <a-option v-for="k in fwdKinds" :key="k" :value="k">{{ fwdKindText(k) }}</a-option>
+          </a-select>
+        </a-form-item>
+        <a-form-item>
+          <a-checkbox v-model="fwdForm.enabled">启用（新产生的审计会入队并投递）</a-checkbox>
+        </a-form-item>
+
+        <template v-if="fwdForm.kind === 'syslog'">
+          <a-form-item label="服务器" help="只走 TCP。刻意不做 UDP——审计日志用 UDP 会静默丢包，而丢了这件事两端都看不见">
+            <a-input v-model="fwdForm.host" placeholder="siem.corp.example" style="flex: 2" />
+            <!-- 0 = 交给后端按是否 TLS 取默认。写死 6514 的话，取消勾选 TLS 之后端口
+                 还停在 6514，界面看起来完全正常、实际拨到了一个多半没人听的端口。 -->
+            <a-input-number v-model="fwdForm.port" placeholder="0=默认" :min="0" :max="65535"
+              style="margin-left: 8px; width: 120px" />
+          </a-form-item>
+          <a-form-item help="没有「跳过证书校验」这一项：外送内容是全量审计，那种开关一旦存在就会被永久打开。证书对不上请填下面两项">
+            <a-checkbox v-model="fwdForm.tls">启用 TLS（RFC 5425，默认端口 6514；不勾则明文 TCP，默认 514）</a-checkbox>
+          </a-form-item>
+          <a-form-item v-if="fwdForm.tls" label="服务端证书名（可选）" help="用 IP 连接但证书签的是主机名时填这里">
+            <a-input v-model="fwdForm.serverName" placeholder="siem.corp.example" />
+          </a-form-item>
+          <a-form-item v-if="fwdForm.tls" label="自定义 CA（可选，PEM）" help="填了就只信这一把——内网 SIEM 多是私有 CA 签的">
+            <a-textarea v-model="fwdForm.caCert" :auto-size="{ minRows: 2, maxRows: 5 }"
+              placeholder="-----BEGIN CERTIFICATE-----" />
+          </a-form-item>
+          <a-form-item label="帧方式" help="收集端切错帧会导致整段日志解析不出来。rsyslog imtcp 默认是 LF，RFC 6587 推荐八位组计数">
+            <a-select v-model="fwdForm.framing">
+              <a-option value="octet">八位组计数（RFC 6587 §3.4.1，推荐）</a-option>
+              <a-option value="lf">换行分隔（rsyslog imtcp 默认）</a-option>
+            </a-select>
+          </a-form-item>
+          <a-form-item label="企业号（可选）"
+            help="RFC 5424 要求自定义 SD-ID 形如 name@企业号。白帝没有 IANA 企业号，默认用 RFC 5612 保留给文档的 32473；有自己号段的填这里">
+            <a-input v-model="fwdForm.enterpriseId" placeholder="32473" />
+          </a-form-item>
+        </template>
+
+        <template v-else>
+          <a-form-item label="URL"><a-input v-model="fwdForm.url" placeholder="https://siem.corp.example/ingest/baidi" /></a-form-item>
+          <a-form-item label="凭据头名（可选）" help="填了就必须再用「设凭据」提交头值；头值加密存放，只写不读">
+            <a-input v-model="fwdForm.secretHeader" placeholder="Authorization" />
+          </a-form-item>
+          <a-form-item label="自定义 CA（可选，PEM）" help="https 且是私有 CA 签发时填；填了就只信这一把">
+            <a-textarea v-model="fwdForm.caCert" :auto-size="{ minRows: 2, maxRows: 5 }"
+              placeholder="-----BEGIN CERTIFICATE-----" />
+          </a-form-item>
+          <div class="bd-hint" style="margin-bottom: 12px; line-height: 1.7">
+            载荷是一批记录：<i class="bd-mono">{{ '{ source, kind, sentAt, count, chain, records[] }' }}</i>，
+            其中每条 record 的字段与 <i class="bd-mono">GET /api/v1/audit</i> 返回的条目<b>完全一致</b>（含 seq / mac）。
+          </div>
+        </template>
+      </a-form>
+    </a-modal>
+
+    <!-- 设置外送凭据 -->
+    <a-modal v-model:visible="fwdSecretOpen" title="设置外送凭据" :confirm-loading="saving"
+      @ok="submitFwdSecret" @cancel="fwdSecretOpen = false">
+      <a-form :model="fwdSecretForm" layout="vertical">
+        <a-form-item label="出口"><a-input v-model="fwdSecretForm.name" disabled /></a-form-item>
+        <a-form-item label="凭据" help="凭据头的取值（如 Bearer xxx）。提交后无法回显，只能覆盖。">
+          <a-input-password v-model="fwdSecretForm.secret" placeholder="提交后只写不读" />
+        </a-form-item>
+      </a-form>
+    </a-modal>
+
     <!-- ============ 集群（未部署的诚实空态）============ -->
     <div v-show="tab === 'cluster'">
       <div class="bd-card bd-empty bd-empty--lg">
@@ -352,14 +521,23 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo,
   type NotifyChannel, type NotifyChannelsResp, type NotifyTestResp, type SaveNotifyChannelResp,
-  type SmtpChannelConfig, type WebhookChannelConfig
+  type SmtpChannelConfig, type WebhookChannelConfig,
+  type AuditForwardTarget, type AuditForwardResp, type SaveAuditForwardResp,
+  type AuditForwardTestResp, type AuditForwardFlushResp,
+  type SyslogTargetConfig, type HttpTargetConfig
 } from '@/lib/api';
 
-const tab = ref<'admin' | 'notify' | 'cluster'>('admin');
+// 支持从审计中心深链过来（/system/manage?tab=forward）：那一页的「日志外送」
+// 入口指到这里，而不是在审计页上另放一份假的开关。
+const route = useRoute();
+const initialTab = (['admin', 'notify', 'forward', 'cluster'] as const)
+  .find((k) => k === route.query.tab) ?? 'admin';
+const tab = ref<'admin' | 'notify' | 'forward' | 'cluster'>(initialTab);
 const live = ref(false);
 const err = ref('');
 const kw = ref('');
@@ -434,7 +612,7 @@ async function load(toast = false) {
   }
 }
 function reload() { void load(true); }
-onMounted(() => { void load(); void loadNotify(); });
+onMounted(() => { void load(); void loadNotify(); void loadForward(); });
 
 /* ── 消息通道（PRD ch15.2）────────────────────────────────────────────
  * 全部来自 GET /api/v1/notify/channels（notify_channels 表）。这一页刻意**没有**
@@ -620,6 +798,180 @@ function opError(e: unknown, fallback: string) {
   if (msg.includes('409')) { Message.warning('操作被拒：系统必须保留至少一名超级管理员，或该角色仍有成员'); return; }
   if (msg.includes('403')) { Message.warning('当前角色无权执行该操作（分配管理员权限仅超级管理员持有）'); return; }
   Message.error(fallback);
+}
+
+/* ── 审计日志外送（PRD ch16 + ch21.6）────────────────────────────────
+ * 全部来自 GET /api/v1/audit/forward（audit_forward_targets 表 + 现算的队列积压）。
+ * 与消息通道一页同款：**没有**内置演示数据——编一条假的 SIEM 地址，
+ * 比空着更容易让人以为审计已经在往外送了。
+ */
+const fwdTargets = ref<AuditForwardTarget[]>([]);
+const fwdKinds = ref<string[]>(['syslog', 'http']);
+const fwdQueueMax = ref(0);
+const fwdNote = ref('');
+const fwdErr = ref('');
+/** 有过丢弃的出口：顶部单独拉一条红条，光靠表格里的小字没人会注意到。 */
+const droppingTargets = computed(() => fwdTargets.value.filter((t) => t.dropped > 0));
+
+async function loadForward(toast = false) {
+  try {
+    const b = await api<AuditForwardResp>('/audit/forward');
+    fwdTargets.value = b.targets ?? [];
+    fwdKinds.value = b.supportedKinds?.length ? b.supportedKinds : fwdKinds.value;
+    fwdQueueMax.value = b.queueMax ?? 0;
+    fwdNote.value = b.note ?? '';
+    fwdErr.value = '';
+    if (toast) Message.success('已刷新');
+  } catch (e) {
+    fwdTargets.value = [];
+    const msg = e instanceof Error ? e.message : String(e);
+    fwdErr.value = msg.includes('403')
+      ? '当前角色无权查看审计外送配置（该页归系统管理员一权）'
+      : '未连控制中心，审计外送配置不可用：' + msg;
+    if (toast) Message.error('刷新失败');
+  }
+}
+function reloadForward() { void loadForward(true); }
+
+function fwdKindText(k: string) {
+  return k === 'syslog' ? 'Syslog（RFC 5424 / TCP）' : k === 'http' ? 'HTTP JSON' : k;
+}
+function fwdKindColor(k: string) { return k === 'syslog' ? '#165DFF' : '#00B42A'; }
+/** 目标列显示的是配置里真实要拨过去的那个地址，不是出口名。 */
+function fwdTarget(t: AuditForwardTarget) {
+  if (t.kind === 'syslog') {
+    const cfg = parseCfg<SyslogTargetConfig>(t.config);
+    if (!cfg.host) return '—';
+    return `${cfg.tls ? 'tls' : 'tcp'}://${cfg.host}:${cfg.port || (cfg.tls ? 6514 : 514)}`;
+  }
+  return parseCfg<HttpTargetConfig>(t.config).url || '—';
+}
+
+const fwdOpen = ref(false);
+const fwdForm = reactive({
+  id: '', name: '', kind: 'syslog', enabled: true,
+  // syslog
+  host: '', port: 6514, tls: true, serverName: '', framing: 'octet', enterpriseId: '',
+  // http
+  url: '', secretHeader: '',
+  // 两类共用
+  caCert: ''
+});
+
+function openForward(t?: AuditForwardTarget) {
+  Object.assign(fwdForm, {
+    id: '', name: '', kind: fwdKinds.value[0] ?? 'syslog', enabled: true,
+    host: '', port: 0, tls: true, serverName: '', framing: 'octet', enterpriseId: '',
+    url: '', secretHeader: '', caCert: ''
+  });
+  if (t) {
+    fwdForm.id = t.id; fwdForm.name = t.name; fwdForm.kind = t.kind; fwdForm.enabled = t.enabled;
+    if (t.kind === 'syslog') {
+      const cfg = parseCfg<SyslogTargetConfig>(t.config);
+      fwdForm.host = cfg.host ?? '';
+      fwdForm.tls = cfg.tls ?? false;
+      fwdForm.port = cfg.port ?? 0;
+      fwdForm.serverName = cfg.serverName ?? '';
+      fwdForm.framing = cfg.framing ?? 'octet';
+      fwdForm.enterpriseId = cfg.enterpriseId ?? '';
+      fwdForm.caCert = cfg.caCert ?? '';
+    } else {
+      const cfg = parseCfg<HttpTargetConfig>(t.config);
+      fwdForm.url = cfg.url ?? '';
+      fwdForm.secretHeader = cfg.secretHeader ?? '';
+      fwdForm.caCert = cfg.caCert ?? '';
+    }
+  }
+  fwdOpen.value = true;
+}
+
+async function submitForward() {
+  if (!fwdForm.name.trim()) { Message.warning('名称不能为空'); return; }
+  const config: SyslogTargetConfig | HttpTargetConfig = fwdForm.kind === 'syslog'
+    ? {
+        host: fwdForm.host.trim(), port: Number(fwdForm.port) || 0, tls: fwdForm.tls,
+        serverName: fwdForm.serverName.trim() || undefined,
+        caCert: fwdForm.caCert.trim() || undefined,
+        framing: fwdForm.framing as SyslogTargetConfig['framing'],
+        enterpriseId: fwdForm.enterpriseId.trim() || undefined
+      }
+    : {
+        url: fwdForm.url.trim(),
+        secretHeader: fwdForm.secretHeader.trim() || undefined,
+        caCert: fwdForm.caCert.trim() || undefined
+      };
+  saving.value = true;
+  try {
+    const r = await api<SaveAuditForwardResp>('/audit/forward', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        id: fwdForm.id, name: fwdForm.name.trim(), kind: fwdForm.kind,
+        enabled: fwdForm.enabled, config
+      })
+    });
+    // 后端「保存即校验」：存下了但当前不可用时把原因原样显示，不能只说"已保存"。
+    if (r.warning) Message.warning(r.warning);
+    else Message.success('外送出口已落库（只外送此后新产生的审计，历史不补发）');
+    fwdOpen.value = false;
+    await loadForward();
+  } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }
+}
+
+const fwdSecretOpen = ref(false);
+const fwdSecretForm = reactive({ id: '', name: '', secret: '' });
+function openFwdSecret(t: AuditForwardTarget) {
+  fwdSecretForm.id = t.id; fwdSecretForm.name = `${t.name}（${fwdKindText(t.kind)}）`; fwdSecretForm.secret = '';
+  fwdSecretOpen.value = true;
+}
+async function submitFwdSecret() {
+  if (!fwdSecretForm.secret) { Message.warning('凭据不能为空'); return; }
+  saving.value = true;
+  try {
+    await api(`/audit/forward/${encodeURIComponent(fwdSecretForm.id)}/secret`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ secret: fwdSecretForm.secret })
+    });
+    Message.success('凭据已更新（只写不读，界面只保留指纹）');
+    fwdSecretOpen.value = false;
+    await loadForward();
+  } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }
+}
+
+/** 测试：后端真发一条标注为「连通性测试」的记录（seq=0，不冒充链上记录）。 */
+async function testForward(t: AuditForwardTarget) {
+  try {
+    const r = await api<AuditForwardTestResp>(`/audit/forward/${encodeURIComponent(t.id)}/test`, { method: 'POST' });
+    if (r.ok) Message.success(`「${t.name}」投递成功：${r.detail}`);
+    else Message.error(`「${t.name}」投递失败：${r.detail}`);
+  } catch (e) { opError(e, '测试失败'); } finally { await loadForward(); }
+}
+
+/** 立即投递：清零退避并当场跑一轮（SIEM 修好之后不必干等最长 15 分钟的退避）。 */
+async function flushForward(t: AuditForwardTarget) {
+  try {
+    const r = await api<AuditForwardFlushResp>(`/audit/forward/${encodeURIComponent(t.id)}/flush`, { method: 'POST' });
+    Message.success(`已触发投递（清零 ${r.reset} 条退避），当前积压 ${r.target?.queued ?? '—'}`);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    if (msg.includes('409')) { Message.warning('该出口已停用，启用后才会投递'); return; }
+    opError(e, '投递失败');
+  } finally { await loadForward(); }
+}
+
+function removeForward(t: AuditForwardTarget) {
+  Modal.warning({
+    title: '删除外送出口',
+    content: `删除「${t.name}」及其凭据，并丢弃队列里尚未送出的 ${t.queued} 条记录。`
+      + '删除后新产生的审计不再送往该目标（审计本身仍照常落库）。',
+    hideCancel: false,
+    onOk: async () => {
+      try {
+        await api(`/audit/forward/${encodeURIComponent(t.id)}`, { method: 'DELETE' });
+        Message.success('外送出口已删除');
+        await loadForward();
+      } catch (e) { opError(e, '删除失败'); }
+    }
+  });
 }
 
 const adminOpen = ref(false);

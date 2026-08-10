@@ -53,6 +53,10 @@ type Store interface {
 	// 在控制面靠它展开成账号，网关只收账号。两个判定点（网关策略下发 / 客户端剖面）
 	// 必须都从它取答案，见 subjects.go 顶部说明。
 	SubjectIndex(ctx context.Context) (SubjectIndex, error)
+	// 管理员分级分权（三权分立）。AdminRoleFor 是 api.requirePerm 的取数点：
+	// 每次请求现算，角色不进令牌——降权要立刻算数，不能等 8h 会话过期。
+	AdminRoles(ctx context.Context) ([]AdminRole, error)
+	AdminRoleFor(ctx context.Context, account string) (AdminRole, bool, error)
 	OrgUnits(ctx context.Context) ([]Org, error)
 	UserGroups(ctx context.Context) ([]UserGroup, error)
 	GroupMembers(ctx context.Context, groupID string) ([]string, error)

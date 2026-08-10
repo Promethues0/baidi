@@ -59,6 +59,11 @@ type DirUser struct {
 	// 只有 bcrypt 哈希，判不出强度，只能消费这个在设密码那一刻落下的标记。
 	// 不序列化：它是判定材料，不是目录展示字段（管理台另有专门口径展示）。
 	PwStrength string `json:"-"`
+	// AdminRole 管理员角色 key（admin_roles."key"，三权分立），非管理员为空。
+	// **刻意不序列化**：能从 POST /api/v1/users 的请求体里塞进来的话，
+	// 持 security 权的管理员就能凭"新建用户"给自己造一个超管——提权只需一次请求。
+	// 分派管理员角色的唯一入口是 /api/v1/admins（需 admins 权限）。
+	AdminRole string `json:"-"`
 }
 
 // Credential 登录校验所需的账号凭据（含口令哈希，仅内部使用）。

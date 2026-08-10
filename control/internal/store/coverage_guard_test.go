@@ -33,8 +33,6 @@ var seedExemptions = map[string]string{
 	"Gateway": "网关管理页节点数据吃种子",
 	// 监控中心在线会话列表来自种子，未接会话/令牌的真实运行态。
 	"OnlineSessions": "监控中心·在线会话列表吃种子",
-	// 系统管理页（节点/许可/版本等）整页来自种子。
-	"System": "系统管理页整页吃种子",
 }
 
 // TestSQLiteStoreCoversStoreInterface 双向断言：

@@ -66,6 +66,12 @@ type Writer interface {
 	SetGroupMembers(ctx context.Context, groupID string, accounts []string) error
 	SetUserOrg(ctx context.Context, userID, orgID string) error
 	SetUserGroups(ctx context.Context, account string, groupIDs []string) error
+	// 管理员分级分权：自定义角色增删 + 管理员角色分派/撤销。
+	// 三个写方法都自带「最后一名超管不可删/不可降权」的事务内防自锁守卫。
+	SaveAdminRole(ctx context.Context, r AdminRole) (AdminRole, error)
+	DeleteAdminRole(ctx context.Context, key string) error
+	SetAdminRole(ctx context.Context, account, roleKey string) error
+	RemoveAdmin(ctx context.Context, account string) error
 }
 
 // PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
@@ -122,6 +128,11 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 		return nil, err
 	}
 	if err := s.ensureCredentials(); err != nil {
+		return nil, err
+	}
+	// ★管理员角色回填同样必须排在 ensureCredentials 之后：它要给既有 role='admin' 的
+	// 账号（含这一步刚补建的 admin）分派超管角色，那批行在 migrate 阶段还不存在。
+	if err := s.backfillAdminRoles(context.Background()); err != nil {
 		return nil, err
 	}
 	// ★组织回填必须排在 seed/ensureCredentials 之后：它要按 users.org_key 把既有
@@ -370,7 +381,15 @@ CREATE TABLE IF NOT EXISTS user_groups (
 CREATE TABLE IF NOT EXISTS user_group_members (
   group_id TEXT, account TEXT, PRIMARY KEY(group_id, account)
 );
-CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(account);`)
+CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(account);
+-- ── 管理员分级分权 / 三权分立（PRD ch15.1）──
+-- scope_json 存的是**权限键数组**（store.Perm*），api.requirePerm 逐端点比对的就是它；
+-- power 只是"这一权叫什么"的预置标签。两者不同源会让页面文案与判定分家，
+-- 故内置角色的 scope_json 每次启动按 power 重算覆盖（见 backfillAdminRoles）。
+-- ★"key" 加引号：KEY 是 SQLite 关键字。
+CREATE TABLE IF NOT EXISTS admin_roles (
+  "key" TEXT PRIMARY KEY, name TEXT, power TEXT, builtin INTEGER, scope_json TEXT, created_at TEXT
+);`)
 	if err != nil {
 		return err
 	}
@@ -416,6 +435,11 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 		// 认证策略的真实适用范围（组织含子树 / 用户组）。回填见 backfillAuthPolicyScope。
 		{"auth_policies", "scope_orgs", "TEXT"},
 		{"auth_policies", "scope_groups", "TEXT"},
+		// 管理员角色归属（三权分立）。★回填见 backfillAdminRoles——它**不在这里调用**
+		// 而在 seed()/ensureCredentials() 之后（全新库跑 migrate 时 users 还是空表）。
+		// 不回填的后果是升级后既有管理员全部无角色 → requirePerm fail-closed 403，
+		// 而"给自己分配角色"本身也要管理员权限，等于把所有人锁在门外。
+		{"users", "admin_role", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -830,9 +854,9 @@ func (s *SQLiteStore) insertUser(u DirUser) error {
 	if u.PwStrength == "" {
 		u.PwStrength = auth.PwUnknown
 	}
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength)
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength,admin_role)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength, u.AdminRole)
 	return err
 }
 
@@ -998,7 +1022,47 @@ func (s *SQLiteStore) SetUserPassword(ctx context.Context, id, hash string, must
 }
 
 // SetUserStatus 改用户状态（禁用/启用/解锁）落库。
+// SetUserStatus 改账号状态。
+//
+// 防自锁：禁用/锁定最后一名可登录的超管一律拒绝（ErrLastRootAdmin）。「把最后一个 root
+// 禁用」与「把他降权」是同一种自锁，只是走了另一个端点——只堵改派那条路等于没堵。
 func (s *SQLiteStore) SetUserStatus(ctx context.Context, id, status string) error {
+	if status == "disabled" || status == "locked" {
+		tx, err := s.db.BeginTx(ctx, nil)
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		var account, role, adminRole string
+		switch err := tx.QueryRowContext(ctx,
+			`SELECT account, COALESCE(role,''), COALESCE(admin_role,'') FROM users WHERE id=?`, id).
+			Scan(&account, &role, &adminRole); err {
+		case nil:
+		case sql.ErrNoRows:
+			return nil // 目标不存在：与既有行为一致（UPDATE 影响 0 行也不报错）
+		default:
+			return err
+		}
+		if role == "admin" {
+			isRoot, err := s.isRootRole(ctx, tx, adminRole)
+			if err != nil && err != ErrAdminRoleNotFound {
+				return err
+			}
+			if isRoot {
+				others, err := s.rootAdminCount(ctx, tx, strings.ToLower(strings.TrimSpace(account)))
+				if err != nil {
+					return err
+				}
+				if others == 0 {
+					return ErrLastRootAdmin
+				}
+			}
+		}
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET status=? WHERE id=?`, status, id); err != nil {
+			return err
+		}
+		return tx.Commit()
+	}
 	_, err := s.db.ExecContext(ctx, `UPDATE users SET status=? WHERE id=?`, status, id)
 	return err
 }

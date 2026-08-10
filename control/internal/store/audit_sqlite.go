@@ -108,8 +108,11 @@ func auditChainTail(ctx context.Context, q rowQueryer) (seq int64, mac string, e
 	return seq, mac, nil
 }
 
-// RecordAudit 追加一条审计日志条目并接入防篡改链。
+// RecordAudit 追加一条审计日志条目并接入防篡改链，同时给启用中的外送出口入队。
 // 读链尾与插入在同一事务内（DSN _txlock=immediate 起手即写锁）：并发落库不会分叉出两条同 prev 的链。
+//
+// ★外送入队与审计插入同事务（见 enqueueAuditForward 的注释）：
+// 分两步写的话，进程在两步之间退出就会留下一条永远不会被外送的审计，两端都无痕。
 func (s *SQLiteStore) RecordAudit(ctx context.Context, e AuditEntry) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -120,12 +123,18 @@ func (s *SQLiteStore) RecordAudit(ctx context.Context, e AuditEntry) error {
 	if err != nil {
 		return err
 	}
-	mac := auditMAC(s.auditKey, prevMac, e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict)
-	if _, err := tx.ExecContext(ctx,
+	e.Seq = prevSeq + 1
+	e.MAC = auditMAC(s.auditKey, prevMac, e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict)
+	res, err := tx.ExecContext(ctx,
 		`INSERT INTO audit_log(ts,category,actor,src_ip,event,verdict,seq,mac) VALUES(?,?,?,?,?,?,?,?)`,
-		e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict, prevSeq+1, mac); err != nil {
+		e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict, e.Seq, e.MAC)
+	if err != nil {
 		return err
 	}
+	auditID, _ := res.LastInsertId()
+	// 入队用的是**刚算出来的 seq/mac**，与库里那一行逐字节相同——外送出去的
+	// 就是审计表里的那一条，不是"另算一份"。
+	s.enqueueAuditForward(ctx, tx, auditID, e)
 	return tx.Commit()
 }
 
@@ -264,8 +273,10 @@ func (s *SQLiteStore) PurgeExpiredAudit(ctx context.Context, days int) (int64, e
 // ExportAudit 按条件流式遍历审计行（id 升序 = 落库序），逐行回调，不整表进内存。
 // category 空 = 全部；from/to 为与 ts 同构的可比字符串（"2006-01-02 15:04:05"），空 = 不限。
 func (s *SQLiteStore) ExportAudit(ctx context.Context, category, from, to string, fn func(AuditEntry) error) error {
+	// seq/mac 与列表、外送同源：导出的 CSV 也要能被拿去独立验链，
+	// 否则"导出一份给审计方"交出去的只是一堆无法自证的文本。
 	q := `SELECT COALESCE(ts,''), COALESCE(category,''), COALESCE(actor,''), COALESCE(src_ip,''),
-		COALESCE(event,''), COALESCE(verdict,'') FROM audit_log`
+		COALESCE(event,''), COALESCE(verdict,''), COALESCE(seq,0), COALESCE(mac,'') FROM audit_log`
 	var conds []string
 	var args []any
 	if category != "" {
@@ -291,7 +302,7 @@ func (s *SQLiteStore) ExportAudit(ctx context.Context, category, from, to string
 	defer rows.Close()
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.Time, &e.Category, &e.User, &e.SrcIP, &e.Event, &e.Verdict); err != nil {
+		if err := rows.Scan(&e.Time, &e.Category, &e.User, &e.SrcIP, &e.Event, &e.Verdict, &e.Seq, &e.MAC); err != nil {
 			return err
 		}
 		if err := fn(e); err != nil {
@@ -333,13 +344,15 @@ func (s *SQLiteStore) Audit(ctx context.Context) (AuditBundle, error) {
 		out.Disk = ds.ToDiskStat()
 	}
 
-	rows, err := s.db.QueryContext(ctx, `SELECT ts,category,actor,src_ip,event,verdict FROM audit_log ORDER BY id DESC LIMIT 200`)
+	// 带上 seq/mac：列表、CSV 导出、外送三个出口同源（见 AuditEntry 的注释）。
+	rows, err := s.db.QueryContext(ctx, `SELECT ts,category,actor,src_ip,event,verdict,
+COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY id DESC LIMIT 200`)
 	if err != nil {
 		return out, err
 	}
 	for rows.Next() {
 		var e AuditEntry
-		if err := rows.Scan(&e.Time, &e.Category, &e.User, &e.SrcIP, &e.Event, &e.Verdict); err != nil {
+		if err := rows.Scan(&e.Time, &e.Category, &e.User, &e.SrcIP, &e.Event, &e.Verdict, &e.Seq, &e.MAC); err != nil {
 			rows.Close()
 			return out, err
 		}

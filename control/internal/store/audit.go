@@ -57,6 +57,12 @@ type AuditVerifyResult struct {
 	BrokenAt int64 `json:"brokenAt"`
 }
 
+// AuditEntry 一条审计记录。
+//
+// ★这个结构体是**三个出口的唯一口径**：`GET /api/v1/audit` 列表、CSV 导出、
+// 以及外送给 syslog/SIEM（internal/forward 的 Record 就是它的类型别名）。
+// 谁要给审计加字段，改这一处三处都跟上；各出口自建 DTO 的话，
+// 同一条审计在三个地方长得不一样，而"哪个是准的"没人说得清。
 type AuditEntry struct {
 	Time     string `json:"time"`
 	Category string `json:"category"` // access | auth | admin | security | dataplane
@@ -64,6 +70,15 @@ type AuditEntry struct {
 	SrcIP    string `json:"srcIp"`
 	Event    string `json:"event"`
 	Verdict  string `json:"verdict"` // allow | deny | mfa | ok | fail
+
+	// Seq / MAC 防篡改链的链内序号与链式 MAC，由 RecordAudit 落库时算出。
+	//
+	// ★带出去是外送功能的**核心价值**，不是附赠：外部 SIEM 拿着这两格才能独立
+	// 发现"控制面那边的第 N 条与我收到的第 N 条不是同一条"。链留在被审计方
+	// 自己的库里时，整库替换（连同 HMAC 密钥）之后 verify 依然全绿。
+	// 写入路径（Memory 种子、RecordAudit 的入参）不填它们，故 omitempty。
+	Seq int64  `json:"seq,omitempty"`
+	MAC string `json:"mac,omitempty"`
 }
 
 func (m *Memory) Audit(_ context.Context) (AuditBundle, error) {

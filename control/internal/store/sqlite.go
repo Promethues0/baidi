@@ -108,6 +108,9 @@ type SQLiteStore struct {
 	// （SetAuditRetentionDays）；0 = 未配置滚动清理。刻意不在 store 里重复读环境变量——
 	// 展示值必须来自数据面真正在用的那份，而不是又解析一遍可能不一致的副本。
 	auditRetainDays int
+	// fwdQueueMax 每个审计外送出口的队列上界，由 main 注入（SetAuditForwardQueueMax）。
+	// 与 auditRetainDays 同一条纪律：入队时判丢弃用的就是这一份，页面显示的也是它。
+	fwdQueueMax int
 }
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
@@ -463,7 +466,41 @@ CREATE TABLE IF NOT EXISTS gateway_metrics (
   PRIMARY KEY(gateway_id, ts)
 );
 -- 留存清理是 DELETE ... WHERE ts < ?，趋势查询是 ts 范围扫，两者都吃这条索引
-CREATE INDEX IF NOT EXISTS idx_gateway_metrics_ts ON gateway_metrics(ts);`)
+CREATE INDEX IF NOT EXISTS idx_gateway_metrics_ts ON gateway_metrics(ts);
+-- ── 审计日志外送（PRD ch16 + ch21.6）──
+-- 配置与凭据**物理分表**（与 notify_channel_secrets / auth_source_secrets 同一条推理）。
+-- last_status/last_detail/last_at/last_ok_at/dropped 只由**真正发出那一次**（或真的丢弃那一次）
+-- 写入，SaveAuditForwardTarget 的 upsert 分支刻意不碰它们。
+--
+-- ★start_audit_id 记的是建立该出口时 audit_log 的最大 id：页面据此如实说明
+-- 「历史不会补发」。这不是过滤条件（历史行压根不进队列），是给人看的水位。
+CREATE TABLE IF NOT EXISTS audit_forward_targets (
+  id TEXT PRIMARY KEY, name TEXT, kind TEXT, enabled INTEGER, config TEXT,
+  start_audit_id INTEGER,
+  last_status TEXT, last_detail TEXT, last_at INTEGER, last_ok_at INTEGER, dropped INTEGER,
+  created_at TEXT, updated_at TEXT
+);
+CREATE TABLE IF NOT EXISTS audit_forward_secrets (
+  target_id TEXT PRIMARY KEY, nonce BLOB, cipher BLOB, fingerprint TEXT, updated_at TEXT
+);
+-- audit_forward_queue 是持久化的待外送队列：审计落库的**同一个事务**里入队，
+-- 发送成功才删行，失败留队 + 退避重试（见 store/auditfwd_sqlite.go）。
+--
+-- ★为什么是独立队列表而不是在 audit_log 上加一列 forwarded：加列必须配一次性回填
+-- 把既有行标成已处理，漏了回填就会在**开启外送的那一刻**把 180 天历史整段重发。
+-- 独立队列让"不重发历史"结构性成立——历史行从来不进队列，不需要任何回填。
+-- ★新表无需回填（区别于补列迁移）：既有库此前根本没有外送这回事，空队列就是正确初态。
+--
+-- 载荷列（ts/category/actor/src_ip/event/verdict/seq/mac）是审计行的**副本**而不是外键：
+-- 队列项要能在审计留存轮转把原行清掉之后仍然发得出去，也免得 pump 每批都去 JOIN。
+CREATE TABLE IF NOT EXISTS audit_forward_queue (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, target_id TEXT, audit_id INTEGER,
+  ts TEXT, category TEXT, actor TEXT, src_ip TEXT, event TEXT, verdict TEXT,
+  seq INTEGER, mac TEXT,
+  attempts INTEGER, next_at INTEGER, last_error TEXT, created_at TEXT
+);
+-- pump 的取批查询就是 (target_id, next_at<=now) ORDER BY id，积压计数也吃它
+CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(target_id, next_at, id);`)
 	if err != nil {
 		return err
 	}

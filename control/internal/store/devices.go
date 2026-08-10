@@ -65,6 +65,41 @@ var ErrDeviceCap = errors.New("单账号终端设备数超限")
 // ErrDeviceNotFound 设备 id 不存在。
 var ErrDeviceNotFound = errors.New("设备不存在")
 
+// ErrApprovalNotFound 审批单 id 不存在。
+//
+// ★必须与「审批单存在但没有关联设备」区分开：后者是正常路径（auto 绑定 / 迁移遗留），
+// 前者是调用方给了一个不存在的 id。混成同一个"静默成功"的话，
+// DecideApproval("ap-不存在") 会回 200 并落一条「设备绑定审批 xxx：通过」的审计——
+// 审计里出现了一件没发生过的事。
+var ErrApprovalNotFound = errors.New("审批单不存在")
+
+// ErrApprovalDecided 审批单已处置（非 pending），不接受重复处置。
+//
+// ★这道闸挡的是**重放**：closeApprovalTx 对已处置的单子静默返回，而 DecideApproval
+// 后半段照常按 approval_id 改设备状态，于是一张已驳回的单子再"通过"一次，
+// 就能把 revoked 的设备悄悄改回 trusted，而审批行与时间线仍停在「驳回」——
+// 「这台终端当初怎么了」的唯一依据与设备的实际授信状态永久矛盾。
+var ErrApprovalDecided = errors.New("审批单已处置，不能重复处置")
+
+// DeviceNameMaxRunes 设备名长度上界（字符）。
+//
+// ★同一列的写入口径只能有一份：RenameDevice（管理员改名）与 EnrollDevice
+// （拿 posture 上报的 os 字段当默认名）都写 trusted_devices.name。此前只有前者限长，
+// 于是任何 role=user 的账号上报一次 32 KB 的 os，就能在设备台账、安全审计与
+// GET /api/v1/devices（刻意不加 LIMIT）里各塞进一份 32 KB 文本，每账号可重复 20 次。
+const DeviceNameMaxRunes = 64
+
+// ClampDeviceName 把设备名截到 DeviceNameMaxRunes（按字符，不切半个汉字）。
+// 用于**机器生成**的名字（posture 的 os 字段）：那条路径上没人能改错误提示，
+// 截断比拒绝整条上报更合适（拒绝会让终端从此报不上环境，反而丢掉合规判据）。
+func ClampDeviceName(s string) string {
+	r := []rune(s)
+	if len(r) <= DeviceNameMaxRunes {
+		return s
+	}
+	return string(r[:DeviceNameMaxRunes])
+}
+
 // DeviceBundle 终端管理页：准入设置 + 设备清单 + 绑定审批队列。
 type DeviceBundle struct {
 	Settings  DeviceTrustSetting `json:"settings"`

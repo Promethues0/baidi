@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -160,6 +161,10 @@ func (s *SQLiteStore) EnrollDevice(ctx context.Context, account, fingerprint, na
 	if key == "" || fingerprint == "" {
 		return Device{}, false, errors.New("account/fingerprint 必填")
 	}
+	// 名字来自终端自报的 os 字段（api.enrollReportingDevice），长度不可信：
+	// 与 RenameDevice 同一列、同一份上界，否则同一个字段两套口径（见 DeviceNameMaxRunes）。
+	name = ClampDeviceName(strings.TrimSpace(name))
+	platform = ClampDeviceName(strings.TrimSpace(platform))
 	now := time.Now().Unix()
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -268,7 +273,13 @@ func (s *SQLiteStore) SetDeviceStatus(ctx context.Context, id, status, by, reaso
 	if after.ApprovalID != "" {
 		dec := map[string]string{DeviceStatusTrusted: "approved", DeviceStatusRevoked: "rejected"}[status]
 		if dec != "" {
-			if err := appendApprovalDecisionTx(ctx, tx, after.ApprovalID, dec, pick(reason, "管理员在终端管理页直接处置")); err != nil {
+			title, kind := "审批通过，设备已置为授信", "notify"
+			if dec == "rejected" {
+				title, kind = "审批驳回，设备已置为吊销", "risk"
+			}
+			// 设备驱动：单子早已处置 / 已不存在都不该让这次设备操作失败。
+			if err := closeApprovalIfPendingTx(ctx, tx, after.ApprovalID, dec, kind, title,
+				pick(reason, "管理员在终端管理页直接处置")); err != nil {
 				return Device{}, Device{}, err
 			}
 		}
@@ -282,8 +293,10 @@ func (s *SQLiteStore) RenameDevice(ctx context.Context, id, name string) (Device
 	if name == "" {
 		return Device{}, errors.New("name 必填")
 	}
-	if len([]rune(name)) > 64 {
-		return Device{}, errors.New("name 过长（≤64 字）")
+	// 管理员手输的名字**拒绝**而不是截断（他看得到错误提示，截断只会让他以为存进去了）；
+	// 机器生成的那条路径走 ClampDeviceName，两者共用同一个上界。
+	if len([]rune(name)) > DeviceNameMaxRunes {
+		return Device{}, fmt.Errorf("name 过长（≤%d 字）", DeviceNameMaxRunes)
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
@@ -367,7 +380,7 @@ func (s *SQLiteStore) PurgeStaleDevices(ctx context.Context, staleDays int) ([]D
 		}
 		if d.ApprovalID != "" {
 			// 措辞必须与实际动作一致：这里发生的是"设备登记被删除"，不是"审批被驳回"。
-			if err := closeApprovalTx(ctx, tx, d.ApprovalID, "rejected", "risk", "关联终端登记已被清理",
+			if err := closeApprovalIfPendingTx(ctx, tx, d.ApprovalID, "rejected", "risk", "关联终端登记已被清理",
 				"该终端超过陈旧阈值未上报环境报告，其设备登记与环境报告已被管理员批量清理，本申请随之归档（未对该终端做出授信或吊销判定）"); err != nil {
 				return nil, err
 			}
@@ -378,9 +391,16 @@ func (s *SQLiteStore) PurgeStaleDevices(ctx context.Context, staleDays int) ([]D
 
 // DecideApproval 审批落库（通过/驳回 + 理由 + 决策时间 + 时间线），**同事务**同步设备状态。
 //
-// 返回被联动的设备（found=false 表示这张审批单没有关联设备——迁移前遗留的单子）。
-// 通过 → trusted；驳回 → revoked。审批与设备状态分两步写的话，「批了但设备还是
-// pending」会是一个无报错、只在用户连不上时才被发现的状态。
+// 返回被联动的设备（found=false 表示这张审批单存在、但没有关联设备——auto 绑定或
+// 迁移前遗留的单子）。通过 → trusted；驳回 → revoked。审批与设备状态分两步写的话，
+// 「批了但设备还是 pending」会是一个无报错、只在用户连不上时才被发现的状态。
+//
+// ★两类调用必须**提前返回**，绝不落到设备更新那一段（回 ErrApprovalNotFound /
+// ErrApprovalDecided，由 handler 映射成 404 / 409）：
+//   - id 不存在：否则回 200 + 一条「审批 xxx：通过」的审计，审计里出现没发生过的事；
+//   - 单子已处置：否则一张已驳回的单子再"通过"一次就能把 revoked 的设备悄悄改回
+//     trusted，而审批行与时间线仍是「驳回」——设备的实际授信状态与事后复盘的
+//     唯一依据永久矛盾，正是 closeApprovalTx 那段注释想避免的分歧。
 func (s *SQLiteStore) DecideApproval(ctx context.Context, id, decision, reason, by string) (Device, bool, error) {
 	if decision != "approved" && decision != "rejected" {
 		return Device{}, false, errors.New("decision 取值须为 approved|rejected")
@@ -417,6 +437,7 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, decision, reason, 
 }
 
 // appendApprovalDecisionTx 给一张审批单写决策 + 追加一条时间线事件（事务内）。
+// 单子不存在 / 已处置时回 ErrApprovalNotFound / ErrApprovalDecided，由调用方决定如何处理。
 func appendApprovalDecisionTx(ctx context.Context, tx *sql.Tx, id, decision, reason string) error {
 	title, kind := "审批通过，设备已置为授信", "notify"
 	if decision == "rejected" {
@@ -425,21 +446,37 @@ func appendApprovalDecisionTx(ctx context.Context, tx *sql.Tx, id, decision, rea
 	return closeApprovalTx(ctx, tx, id, decision, kind, title, pick(reason, "管理员已处置"))
 }
 
+// closeApprovalIfPendingTx 关审批单，但把「不存在 / 已处置」当正常路径吞掉（事务内）。
+//
+// 给**设备驱动**的调用方用（管理员在设备页直接改状态、陈旧清理批量删设备）：
+// 那些操作的主体是设备，审批单只是顺带收口——单子早就没了或早就处置过，
+// 不该让设备操作整个失败。审批驱动的 DecideApproval 则必须看见这两个错误。
+func closeApprovalIfPendingTx(ctx context.Context, tx *sql.Tx, id, decision, kind, title, detail string) error {
+	err := closeApprovalTx(ctx, tx, id, decision, kind, title, detail)
+	if errors.Is(err, ErrApprovalNotFound) || errors.Is(err, ErrApprovalDecided) {
+		return nil
+	}
+	return err
+}
+
 // closeApprovalTx 关闭一张待处置的审批单并追加一条时间线事件（事务内）。
 //
 // ★title/detail 由调用方给，不由 decision 反推：陈旧清理也要关掉审批单，但它做的是
 // **删除设备**而不是"置为吊销"。复用驳回那套措辞会在时间线上留下一句没发生过的话，
 // 而时间线正是事后复盘"这台设备当初怎么了"的唯一依据。
+//
+// ★「不存在」与「已处置」回**可区分的哨兵错误**而不是静默 nil：静默返回让调用方
+// 无从分辨"关掉了"与"什么都没发生"，而 DecideApproval 后半段的设备更新是无条件执行的。
 func closeApprovalTx(ctx context.Context, tx *sql.Tx, id, decision, kind, title, detail string) error {
 	var tl, status string
 	if err := tx.QueryRowContext(ctx, `SELECT timeline,status FROM approvals WHERE id=?`, id).Scan(&tl, &status); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
-			return nil // 设备没有关联审批单（auto 绑定 / 迁移回填）时是正常路径
+			return ErrApprovalNotFound
 		}
 		return err
 	}
 	if status != "pending" {
-		return nil // 已处置过，不重复追加时间线
+		return ErrApprovalDecided
 	}
 	var events []ApprovalEvent
 	_ = json.Unmarshal([]byte(tl), &events)

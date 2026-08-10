@@ -84,6 +84,14 @@ type Server struct {
 	// deviceObserved 授信终端「观察模式放行」审计的节流水位："账号|指纹" → 上次落审计的 Unix 秒。
 	// 与 grayObserved 同一条理由：敲门令牌是每 15s 一次的保活热路径，不节流会把审计冲垮。
 	deviceObserved map[string]int64
+	// deviceTrustModeSeen 最近一次**成功**读到的设备准入模式（observe|strict），空 = 从未读到过。
+	//
+	// ★存在的理由是方向性：设备闸对 DeviceByFingerprint 的读失败在 strict 下 fail-closed，
+	// 但准入设置本身读失败时若回落到默认值（observe），strict 就被一次数据库抖动
+	// **整体关掉**了——未登记 / pending / 完全不带指纹的客户端全部拿到敲门令牌，
+	// 而现场唯一的痕迹是一条 slog。宁可沿用上一次已知的模式（多半正是 strict），
+	// 也不能让一次读失败把闸降到全局最宽的那一档。
+	deviceTrustModeSeen string
 	// fwdDropReported / fwdDropReportAt 审计外送队列溢出转审计的节流水位：
 	// 出口 id → 已上报过的累计丢弃数 / 上次上报的 Unix 秒（见 reportForwardDrops）。
 	// 内存态、重启即失（最坏结果是重启后多记一条溢出告警，而那本来就该被看见）。
@@ -1388,7 +1396,19 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 	// 分两步写的话，「批了但设备还是 pending」会是一个无报错、只在用户连不上时
 	// 才被发现的状态——设备生命周期与审批单必须一起翻。
 	dev, linked, err := s.writer.DecideApproval(r.Context(), id, body.Decision, body.Reason, actorOf(r))
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrApprovalNotFound):
+		// ★不能回 200：那会落一条「设备绑定审批 xxx：通过」的审计，
+		// 而库里根本没有这张单子——审计里出现一件没发生过的事。
+		httpx.Error(w, http.StatusNotFound, "审批单不存在")
+		return
+	case errors.Is(err, store.ErrApprovalDecided):
+		// ★重放拦在这里：放过去的话，一张已驳回的单子再"通过"一次就能把 revoked
+		// 的设备改回 trusted，而审批行与时间线仍停在「驳回」。
+		httpx.Error(w, http.StatusConflict, "该审批单已处置，不能重复处置（设备授信状态未改动）")
+		return
+	default:
 		httpx.Error(w, http.StatusInternalServerError, "failed to decide approval")
 		return
 	}

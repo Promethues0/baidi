@@ -6,11 +6,14 @@
 package api
 
 import (
+	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 	"net/http"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -610,5 +613,138 @@ func TestDeviceEndpointsRequirePermissions(t *testing.T) {
 		if code, _ := doJSON(t, h, c.method, c.path, audTok, c.body); code != http.StatusForbidden {
 			t.Fatalf("审计管理员 %s %s 应 403, got %d", c.method, c.path, code)
 		}
+	}
+}
+
+// ── ⑧ 判据读失败的方向性 ──
+
+// flakyTrustSettingStore 让「准入设置」这一次读失败，其余读原样透传。
+type flakyTrustSettingStore struct {
+	store.Store
+	fail atomic.Bool
+}
+
+func (f *flakyTrustSettingStore) DeviceTrustSetting(ctx context.Context) (store.DeviceTrustSetting, error) {
+	if f.fail.Load() {
+		// 与 SQLiteStore 的失败形态一致：回默认值 + error（调用方若只看值就会被骗）。
+		return store.DefaultDeviceTrustSetting(), errors.New("database is locked")
+	}
+	return f.Store.DeviceTrustSetting(ctx)
+}
+
+// 准入设置读失败**不得**把 strict 静默降级成放行。
+//
+// ★这是敲门令牌签发路径上的方向性问题：同一个函数里 DeviceByFingerprint 读失败在
+// strict 下 fail-closed，而准入设置本身读失败若回落默认值（observe），整道闸就被一次
+// 数据库抖动关掉了——未登记 / pending / 缺指纹的客户端全部拿到令牌，现场只剩一条 slog。
+func TestKnockStrictSurvivesTrustSettingReadFailure(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "flaky.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	flaky := &flakyTrustSettingStore{Store: st}
+	s := New(flaky, st, testKeys, "test", t.TempDir(), nil, nil, true)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+
+	saveTrustSetting(t, h, store.DeviceTrustStrict, store.DeviceBindApproval, 30)
+	sess := userSession(t, h, "li.fang")
+	if code, _ := reportPosture(t, h, sess, "FP-FLAKY-1"); code != http.StatusOK {
+		t.Fatal("posture 上报应成功")
+	}
+	// 读得到设置时：strict + pending → 拒（同时把 strict 记成"上次已知"）。
+	if code, _ := knockWithDevice(t, h, sess, "FP-FLAKY-1"); code != http.StatusForbidden {
+		t.Fatalf("严格模式下 pending 设备应被拒, http %d", code)
+	}
+
+	// 设置读失败：仍须沿用上次已知的 strict。
+	flaky.fail.Store(true)
+	if code, out := knockWithDevice(t, h, sess, "FP-FLAKY-1"); code != http.StatusForbidden {
+		t.Fatalf("准入设置读失败不得把 strict 降级成放行, http %d: %v", code, out)
+	}
+	if code, _ := knockWithDevice(t, h, sess, "FP-NEVER-SEEN"); code != http.StatusForbidden {
+		t.Fatalf("准入设置读失败时未登记设备仍应被拒, http %d", code)
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", sess, nil); code != http.StatusForbidden {
+		t.Fatalf("准入设置读失败时缺指纹仍应被拒, http %d", code)
+	}
+
+	// 恢复后照常放行（缓存不会把闸永久卡死）。
+	flaky.fail.Store(false)
+	approveDevice(t, h, "li.fang", "FP-FLAKY-1")
+	if code, out := knockWithDevice(t, h, sess, "FP-FLAKY-1"); code != http.StatusOK {
+		t.Fatalf("批准后应放行, http %d: %v", code, out)
+	}
+}
+
+// 边界：本进程启动后**一次都没成功读到过**设置时，只能按内置默认（observe）处理。
+// 这一条把剩余边界写明——它只在库整体不可用的冷启动瞬间成立，且如实记 Error 日志。
+func TestKnockFallsBackToBuiltinDefaultWhenNeverRead(t *testing.T) {
+	st, err := store.OpenSQLite(filepath.Join(t.TempDir(), "flaky2.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	flaky := &flakyTrustSettingStore{Store: st}
+	s := New(flaky, st, testKeys, "test", t.TempDir(), nil, nil, true)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+	sess := userSession(t, h, "li.fang")
+
+	flaky.fail.Store(true)
+	if code, out := knockWithDevice(t, h, sess, "FP-COLD"); code != http.StatusOK {
+		t.Fatalf("从未读到过设置时按内置默认 observe 放行, http %d: %v", code, out)
+	}
+}
+
+// ── ⑨ 审批重放 ──
+
+// 已处置的审批单重放：必须 409，且**设备状态一字不改**、不落"通过"审计。
+func TestDecideApprovalReplayRejected(t *testing.T) {
+	h := newTestServer(t)
+	sess := userSession(t, h, "li.fang")
+	if code, _ := reportPosture(t, h, sess, "FP-REPLAY"); code != http.StatusOK {
+		t.Fatal("posture 上报应成功")
+	}
+	apID, _ := findDevice(t, h, "li.fang", "FP-REPLAY")["approvalId"].(string)
+	if apID == "" {
+		t.Fatal("审批绑定模式应生成审批单")
+	}
+	code, out := doJSON(t, h, "POST", "/api/v1/approvals/"+apID+"/decide", adminToken(),
+		map[string]any{"decision": "rejected", "reason": "不认识这台机器"})
+	if code != http.StatusOK {
+		t.Fatalf("驳回 http %d: %v", code, out)
+	}
+	if s := findDevice(t, h, "li.fang", "FP-REPLAY")["status"]; s != store.DeviceStatusRevoked {
+		t.Fatalf("驳回后设备应 revoked, got %v", s)
+	}
+
+	// 重放成"通过"：409，设备仍是 revoked。
+	code, out = doJSON(t, h, "POST", "/api/v1/approvals/"+apID+"/decide", adminToken(),
+		map[string]any{"decision": "approved", "reason": "再来一次"})
+	if code != http.StatusConflict {
+		t.Fatalf("重放已处置的审批单应 409, http %d: %v", code, out)
+	}
+	after := findDevice(t, h, "li.fang", "FP-REPLAY")
+	if after["status"] != store.DeviceStatusRevoked {
+		t.Fatalf("重放不得把已吊销的设备改回 %v", after["status"])
+	}
+	if after["revokeReason"] != "不认识这台机器" {
+		t.Fatalf("重放不得清掉吊销理由, got %v", after["revokeReason"])
+	}
+	if auditHasEvent(t, h, "审批 "+apID+"：通过") {
+		t.Fatal("审计里不得出现一次没发生过的「通过」")
+	}
+}
+
+// 不存在的审批 id：404，且不落任何"已处置"的审计。
+func TestDecideApprovalUnknownIDIsNotFound(t *testing.T) {
+	h := newTestServer(t)
+	code, out := doJSON(t, h, "POST", "/api/v1/approvals/ap-nonexistent/decide", adminToken(),
+		map[string]any{"decision": "approved"})
+	if code != http.StatusNotFound {
+		t.Fatalf("不存在的审批单应 404, http %d: %v", code, out)
+	}
+	if auditHasEvent(t, h, "ap-nonexistent") {
+		t.Fatal("审计里不得出现针对一张不存在的审批单的处置记录")
 	}
 }

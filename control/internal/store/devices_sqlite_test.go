@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -180,6 +181,65 @@ VALUES('ap-orphan','x','x','x','2026-01-01','x','pending','[]','','')`); err != 
 	}
 	if _, linked, err := s.DecideApproval(ctx, "ap-orphan", "approved", "", "admin"); err != nil || linked {
 		t.Fatalf("孤儿审批单应 linked=false: %v %v", linked, err)
+	}
+}
+
+// 审批重放：已处置的单子再判一次必须回 ErrApprovalDecided，且**设备一字不改**。
+//
+// ★放过去的后果不是"多写一行"：一张已驳回的单子再"通过"一次，就能把 revoked 的设备
+// 悄悄改回 trusted，而审批行与时间线仍停在「驳回」——设备的实际授信状态与事后复盘
+// 的唯一依据永久矛盾。不存在的 id 同理必须能被调用方分辨（否则 handler 会落一条
+// 「审批 xxx：通过」的审计，而那件事根本没发生）。
+func TestDecideApprovalRejectsReplayAndUnknownID(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	d, _, _ := s.EnrollDevice(ctx, "alice", "FP-AAA", "", "macOS", DeviceBindApproval)
+	rejected, _, err := s.DecideApproval(ctx, d.ApprovalID, "rejected", "不认识这台机器", "admin1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rejected.Status != DeviceStatusRevoked {
+		t.Fatalf("驳回后设备应 revoked: %+v", rejected)
+	}
+
+	// 重放：同一张单子改判「通过」。
+	if _, _, err := s.DecideApproval(ctx, d.ApprovalID, "approved", "再来一次", "admin2"); !errors.Is(err, ErrApprovalDecided) {
+		t.Fatalf("已处置的审批单重放应回 ErrApprovalDecided，实得 %v", err)
+	}
+	after, ok, _ := s.DeviceByFingerprint(ctx, "alice", "FP-AAA")
+	if !ok || after.Status != DeviceStatusRevoked || after.ApprovedBy == "admin2" || after.RevokeReason == "" {
+		t.Fatalf("重放不得改动设备（状态/批准人/吊销理由都应保持驳回那一刻的样子）: %+v", after)
+	}
+
+	// 不存在的审批 id：可分辨的哨兵错误，而不是"静默成功"。
+	if _, linked, err := s.DecideApproval(ctx, "ap-nonexistent", "approved", "", "admin2"); !errors.Is(err, ErrApprovalNotFound) || linked {
+		t.Fatalf("不存在的审批 id 应回 ErrApprovalNotFound，实得 linked=%v err=%v", linked, err)
+	}
+}
+
+// 设备名长度：同一列两个写入口必须一套口径。
+//
+// posture 上报的 os 字段完全由终端自报（handler 只限体积 32 KiB），拿它当设备名而不截断的话，
+// 任意 role=user 账号就能把一大坨文本塞进设备台账 + 一条安全审计 + 每次 GET /devices 的响应。
+func TestEnrollDeviceClampsSelfReportedName(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	long := strings.Repeat("超长设备名", 4000) // 远超 DeviceNameMaxRunes
+	d, created, err := s.EnrollDevice(ctx, "alice", "FP-LONG", long, "macOS", DeviceBindAuto)
+	if err != nil || !created {
+		t.Fatalf("登记失败: %v %v", created, err)
+	}
+	if n := len([]rune(d.Name)); n != DeviceNameMaxRunes {
+		t.Fatalf("设备名应被截到 %d 字，实得 %d", DeviceNameMaxRunes, n)
+	}
+	// 落库的那一份也必须是截断后的（返回值对了库里没对，等于没修）。
+	got, ok, _ := s.DeviceByFingerprint(ctx, "alice", "FP-LONG")
+	if !ok || len([]rune(got.Name)) != DeviceNameMaxRunes {
+		t.Fatalf("库里的设备名未被截断: %d 字", len([]rune(got.Name)))
+	}
+	// 管理员手输的那条路径仍然是**拒绝**（他看得见提示），口径上界与这里同一个常量。
+	if _, err := s.RenameDevice(ctx, d.ID, strings.Repeat("x", DeviceNameMaxRunes+1)); err == nil {
+		t.Fatal("RenameDevice 应拒绝超长名字")
 	}
 }
 

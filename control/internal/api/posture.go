@@ -49,6 +49,15 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "device 过长或检查项超限（≤32）")
 		return
 	}
+	// os / clientVersion 同样是终端**自报**、且此前完全不校验的字段：os 会成为设备台账里的
+	// 设备名（enrollReportingDevice → EnrollDevice），两者都会进 posture_reports 并被
+	// 设备页、合规页、审计正文反复渲染。请求体上限 32 KiB 意味着一次上报就能塞进一坨文本，
+	// 每账号还能重复 MaxDevicesPerAccount 次。入口限长是第一道，store 侧
+	// EnrollDevice 按 DeviceNameMaxRunes 截断是第二道（同一列只有一份口径）。
+	if len([]rune(b.OS)) > 128 || len([]rune(b.ClientVersion)) > 64 {
+		httpx.Error(w, http.StatusBadRequest, "os（≤128 字）或 clientVersion（≤64 字）过长")
+		return
+	}
 	// 管理侧删除接口经 URL 路径定位设备（DELETE /posture/{user}/{device}）：
 	// "."/".." 会被 mux 路径清洗成 301、斜杠会拆散路径段，落库后即成永远删不掉的记录，入口拒绝。
 	if b.Device == "." || b.Device == ".." || strings.ContainsAny(b.Device, "/\\") {

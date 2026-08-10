@@ -27,6 +27,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -108,15 +109,15 @@ type deviceAdmissionResult struct {
 // 而 revoked 是管理员显式说过"这台不许进"。若默认配置下连它都放行，「吊销」按钮
 // 就是个空动作——页面变红、审计有记录、设备照常接入，没有任何报错。
 //
-// 读失败（err != nil）按 observe 放行 + 记 Error 日志，strict 下则拒：
+// 设备状态读失败（err != nil）在 strict 下拒、observe 下放行：
 // 与准入模式本身的语义一致，运维选了 strict 就是选了"说不清楚就不放行"。
+//
+// ★**准入模式本身**读失败时沿用上一次成功读到的模式（deviceTrustMode），绝不回落默认值：
+// 默认是 observe，而这里是敲门令牌的签发路径——回落默认等于一次 settings 读失败就把
+// 整道闸静默关掉（strict 配了跟没配一样），且现场只剩一条 slog。这与同一函数里
+// DeviceByFingerprint 读失败在 strict 下拒是同一个方向。
 func (s *Server) deviceAdmissionGate(r *http.Request, account, fingerprint string) deviceAdmissionResult {
-	st, err := s.store.DeviceTrustSetting(r.Context())
-	if err != nil {
-		slog.Error("授信终端准入设置读取失败，本次按默认（观察）处理", "账号", account, "err", err.Error())
-		st = store.DefaultDeviceTrustSetting()
-	}
-	strict := st.Mode == store.DeviceTrustStrict
+	strict := s.deviceTrustMode(r.Context(), account) == store.DeviceTrustStrict
 	fingerprint = strings.TrimSpace(fingerprint)
 
 	if fingerprint == "" {
@@ -154,6 +155,33 @@ func (s *Server) deviceAdmissionGate(r *http.Request, account, fingerprint strin
 	}
 	s.auditDeviceObserved(r, account, fingerprint, what)
 	return deviceAdmissionResult{Allowed: true}
+}
+
+// deviceTrustMode 取当前生效的准入模式，并把每次**成功**读到的值记为"上次已知"。
+//
+// 读失败时的取值顺序：上次已知 → 内置默认（observe）。落到内置默认只可能发生在
+// 控制面启动后**一次都没读成功过**的情形（那时库多半整体不可用，敲门链路上游早已失败），
+// 此时按 observe 处理并记 Error；只要成功读到过一次，此后任何抖动都沿用那一次的答案。
+func (s *Server) deviceTrustMode(ctx context.Context, account string) string {
+	st, err := s.store.DeviceTrustSetting(ctx)
+	if err == nil {
+		s.mu.Lock()
+		s.deviceTrustModeSeen = st.Mode
+		s.mu.Unlock()
+		return st.Mode
+	}
+	s.mu.Lock()
+	seen := s.deviceTrustModeSeen
+	s.mu.Unlock()
+	if seen != "" {
+		slog.Error("授信终端准入设置读取失败，沿用上一次成功读到的准入模式（绝不因一次读失败把闸放宽）",
+			"账号", account, "沿用模式", seen, "err", err.Error())
+		return seen
+	}
+	fallback := store.DefaultDeviceTrustSetting().Mode
+	slog.Error("授信终端准入设置读取失败，且本进程启动后从未成功读到过，本次按内置默认处理",
+		"账号", account, "默认模式", fallback, "err", err.Error())
+	return fallback
 }
 
 // auditDeviceObserved 观察模式下的放行留痕（按 (账号,指纹) 节流）。

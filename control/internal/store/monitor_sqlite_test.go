@@ -7,13 +7,20 @@ import (
 )
 
 // userstate 覆盖：真实 users × posture 判定；种子目录含 zhao.min(locked)/ext.zhou(disabled)。
+//
+// ★档位口径与风险处置四档统一（block/degrade/gray），不再是另一套 risk-high/risk-low：
+// 页面上显示的那一档，就是网关策略与客户端剖面此刻正在执行的那一档。
 func TestUserStatesReal(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
 	now := time.Now().Unix()
-	// li.fang 一台设备 block（高风险）；目录外账号的报告忽略不进清单
+	// li.fang 一台设备 block；chen.jing 降权；wang.qiang 灰度观察；目录外账号的报告忽略不进清单
 	_ = s.SavePostureReport(ctx, PostureReport{User: "li.fang", Device: "DEV-A", Platform: "macOS",
-		Verdict: "block", Score: 25, Level: "high", Reasons: []string{"磁盘已加密"}, TS: now})
+		Verdict: DisposalBlock, Score: 25, Level: "high", Reasons: []string{"磁盘未加密"}, TS: now})
+	_ = s.SavePostureReport(ctx, PostureReport{User: "chen.jing", Device: "DEV-B", Platform: "macOS",
+		Verdict: DisposalDegrade, Score: 10, Level: "medium", Reasons: []string{"系统完整性保护未开启"}, TS: now})
+	_ = s.SavePostureReport(ctx, PostureReport{User: "wang.qiang", Device: "DEV-C", Platform: "macOS",
+		Verdict: DisposalGray, Score: 5, Level: "low", Reasons: []string{"防火墙未开启"}, TS: now})
 
 	b, err := s.UserStates(ctx)
 	if err != nil {
@@ -23,8 +30,14 @@ func TestUserStatesReal(t *testing.T) {
 	for _, it := range b.Items {
 		byAcc[it.Account] = it
 	}
-	if it := byAcc["li.fang"]; it.State != "risk-high" || it.Risk != "high" || len(it.Reasons) == 0 {
-		t.Fatalf("li.fang 应 risk-high: %+v", it)
+	if it := byAcc["li.fang"]; it.State != DisposalBlock || it.Risk != "high" || len(it.Reasons) == 0 {
+		t.Fatalf("li.fang 应 block: %+v", it)
+	}
+	if it := byAcc["chen.jing"]; it.State != DisposalDegrade {
+		t.Fatalf("chen.jing 应 degrade: %+v", it)
+	}
+	if it := byAcc["wang.qiang"]; it.State != DisposalGray {
+		t.Fatalf("wang.qiang 应 gray: %+v", it)
 	}
 	if it := byAcc["zhao.min"]; it.State != "locked" {
 		t.Fatalf("zhao.min 应 locked: %+v", it)
@@ -39,8 +52,12 @@ func TestUserStatesReal(t *testing.T) {
 	for _, bk := range b.Buckets {
 		byKey[bk.Key] = bk.Count
 	}
-	if byKey["risk-high"] != 1 || byKey["locked"] != 1 || byKey["disabled"] != 1 || byKey["idle"] != 0 {
+	if byKey[DisposalBlock] != 1 || byKey[DisposalDegrade] != 1 || byKey[DisposalGray] != 1 ||
+		byKey["locked"] != 1 || byKey["disabled"] != 1 {
 		t.Fatalf("分桶: %v", byKey)
+	}
+	if _, stale := byKey["risk-high"]; stale {
+		t.Fatal("risk-high 桶应已随口径统一被删除")
 	}
 }
 

@@ -8,6 +8,40 @@ import (
 // MaxPostureDevices 单账号最多留存的终端设备报告数（防用随机 device 无界撑大 posture_reports）。
 const MaxPostureDevices = 20
 
+// ── 风险处置四档：每一档的**可执行**语义 ──
+//
+// 四个常量不是标签，每一档都有确定的执行方（无执行方的档位就是 config-only，本项目已吃过亏）：
+//
+//	DisposalAllow   放行。不做任何收缩。
+//	DisposalGray    灰度观察。**访问权一字不改**，但控制面每轮下发策略时为该账号记一条
+//	                 observing 审计（api.handleGatewayPolicy → auditGrayObserved），
+//	                 用户状态页据此显示「灰度观察」。它是"看着"，不是"拦着"。
+//	DisposalDegrade 降权而非断连。该账号仍可访问 low/normal 敏感度的资源，但**高敏资源
+//	                 （Resource.Sensitivity=high）被摘除**：网关侧经 gwResource.DenyUsers
+//	                 否决、客户端剖面侧同步剔除路由（两处同构，见 api/subjects.go）。
+//	DisposalBlock   全断。拒发敲门令牌 + 并入撤销名单撤放行窗 + 断隧道（既有行为，未改）。
+//
+// ★排序是 allow < gray < degrade < block，gray **低于** degrade：灰度观察不改变任何
+// 访问权，而降权真的摘掉了高敏资源。这两档在有执行方之前谁前谁后无所谓，现在有了——
+// 若把 gray 排在 degrade 之上，一台同时命中「gray 基线」与「degrade 基线」的终端会被判成
+// gray，降权于是静默失效（页面上看不出任何异常，因为判定本身"成功"了）。
+const (
+	DisposalAllow   = "allow"
+	DisposalGray    = "gray"
+	DisposalDegrade = "degrade"
+	DisposalBlock   = "block"
+)
+
+// disposalRank 处置严厉度排序的**唯一定义处**。
+// 此前这张表在 risk.go、posture_sqlite.go、monitor_sqlite.go 各抄了一份，
+// 三份口径靠人肉保持一致；改一处漏两处的后果是"跨设备取最差"在不同页面给出不同答案。
+var disposalRank = map[string]int{
+	DisposalAllow: 0, DisposalGray: 1, DisposalDegrade: 2, DisposalBlock: 3,
+}
+
+// DisposalRank 处置严厉度排序值（block 最严）；未知处置视为 allow。
+func DisposalRank(d string) int { return disposalRank[d] }
+
 // ErrPostureDeviceCap 新设备写入超出单账号上限。上限判定与写入在同一条 SQL 里原子完成
 // （见 SQLiteStore.SavePostureReport），而非 handler 层 check-then-act——后者在并发突发下会越过上限。
 var ErrPostureDeviceCap = errors.New("单账号终端设备数超限")
@@ -59,6 +93,10 @@ func (m *Memory) PostureReportFor(_ context.Context, _, _ string) (PostureReport
 }
 
 func (m *Memory) PostureBlockedUsers(_ context.Context) ([]string, error) { return nil, nil }
+
+func (m *Memory) PostureUsersByDisposal(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
 
 func (m *Memory) PostureFreshest(_ context.Context, _ string) (PostureReport, bool, error) {
 	return PostureReport{}, false, nil

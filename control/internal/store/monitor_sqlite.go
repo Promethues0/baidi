@@ -8,8 +8,16 @@ import (
 )
 
 // UserStates 覆盖：真实 users 表 × posture 判定（脱种子）。
-// state 优先级 disabled > locked > risk-high > risk-low；状态正常且无 posture 异常的用户不进清单；
-// idle（空闲挂起）无真实来源，诚实为 0。
+//
+// state 优先级 disabled > locked > 风险处置档（block > degrade > gray）。
+// ★档位口径与风险引擎的处置四档统一：这一页显示的 block/degrade/gray 就是
+// `risk.Verdict.Disposal` 的原值，也正是网关策略与客户端剖面**当前正在执行**的那一档
+// （degrade 已摘掉高敏资源、gray 每轮下发都在记 observing 审计）。此前这里是另一套
+// 名字（risk-high/risk-low），和真正被执行的处置没有映射关系——管理员看得到"高风险"，
+// 却看不出这个人此刻到底被怎么处置了。
+//
+// 处置为 allow 的账号**不进清单**（哪怕评分非零）：既然没有任何收缩在执行，它就不是
+// "受关注用户"。评分与失败项仍可在安全中心「终端合规」页逐设备查看，信息没有丢。
 func (s *SQLiteStore) UserStates(ctx context.Context) (UserStateBundle, error) {
 	ub, err := s.Users(ctx)
 	if err != nil {
@@ -19,11 +27,11 @@ func (s *SQLiteStore) UserStates(ctx context.Context) (UserStateBundle, error) {
 	if err != nil {
 		return UserStateBundle{}, err
 	}
-	rank := map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 3}
 	worst := map[string]PostureReport{}
 	for _, r := range reports {
 		w, ok := worst[r.User]
-		if !ok || rank[r.Verdict] > rank[w.Verdict] || (rank[r.Verdict] == rank[w.Verdict] && r.TS > w.TS) {
+		rr, rw := DisposalRank(r.Verdict), DisposalRank(w.Verdict)
+		if !ok || rr > rw || (rr == rw && r.TS > w.TS) {
 			worst[r.User] = r
 		}
 	}
@@ -44,12 +52,14 @@ func (s *SQLiteStore) UserStates(ctx context.Context) (UserStateBundle, error) {
 			state, riskLv = "locked", "high"
 			reasons = append(reasons, "账号已锁定")
 			lastEvent = "账号锁定"
-		case hasRep && (rep.Verdict == "block" || rep.Level == "high"):
-			state, riskLv = "risk-high", "high"
-		case hasRep && (rep.Level == "medium" || rep.Score > 0):
-			state, riskLv = "risk-low", "low"
+		case hasRep && rep.Verdict == DisposalBlock:
+			state, riskLv = DisposalBlock, "high"
+		case hasRep && rep.Verdict == DisposalDegrade:
+			state, riskLv = DisposalDegrade, "high"
+		case hasRep && rep.Verdict == DisposalGray:
+			state, riskLv = DisposalGray, "low"
 		default:
-			continue // 状态正常且终端合规（或无报告）：不是"受关注用户"
+			continue // 状态正常且处置为 allow（或无报告）：没有任何收缩在执行，不是"受关注用户"
 		}
 		if hasRep {
 			reasons = append(reasons, rep.Reasons...)
@@ -72,14 +82,7 @@ func (s *SQLiteStore) UserStates(ctx context.Context) (UserStateBundle, error) {
 		}
 		return n
 	}
-	buckets := []UserStateBucket{
-		{Key: "risk-high", Label: "高风险用户", Count: count("risk-high"), Tone: "danger"},
-		{Key: "risk-low", Label: "关注用户", Count: count("risk-low"), Tone: "warning"},
-		{Key: "locked", Label: "锁定账号", Count: count("locked"), Tone: "danger"},
-		{Key: "disabled", Label: "禁用账号", Count: count("disabled"), Tone: "info"},
-		{Key: "idle", Label: "空闲挂起", Count: 0, Tone: "normal"},
-	}
-	return UserStateBundle{Buckets: buckets, Items: items}, nil
+	return UserStateBundle{Buckets: userStateBuckets(count), Items: items}, nil
 }
 
 // humanAgo 粗粒度"多久之前"。

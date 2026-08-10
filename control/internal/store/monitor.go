@@ -57,8 +57,16 @@ type UserStateItem struct {
 	User      string   `json:"user"`
 	Account   string   `json:"account"`
 	Org       string   `json:"org"`
-	State     string   `json:"state"` // risk-high | risk-low | locked | disabled | idle
-	Risk      string   `json:"risk"`  // none | low | high
+	// State 用户当前所处的档位。★口径与风险引擎的处置四档**统一**：
+	// block / degrade / gray 直接就是 risk.Verdict.Disposal 的取值，
+	// locked / disabled 是与风险正交的目录账号状态（优先级高于风险档）。
+	//
+	// 此前这里是另一套名字（risk-high / risk-low / idle），与四档没有任何对应关系：
+	// 同一个"被降权的用户"在安全中心叫 degrade、在用户状态页叫 risk-low，
+	// 管理员无法判断两处说的是不是同一件事，也无法从这页看出「谁正在被降权」。
+	// idle（空闲挂起）一并删除——它从来没有真实来源，真实实现恒为 0。
+	State string `json:"state"` // block | degrade | gray | locked | disabled
+	Risk  string `json:"risk"`  // none | low | high
 	Online    bool     `json:"online"`
 	Reasons   []string `json:"reasons"` // 命中的风险 / 异常原因
 	LastEvent string   `json:"lastEvent"`
@@ -79,16 +87,14 @@ type UserStateBundle struct {
 // UserStates 返回演示用的用户态势数据。
 func (m *Memory) UserStates(_ context.Context) (UserStateBundle, error) {
 	items := []UserStateItem{
-		{ID: "u-ext-zhao", User: "外包-赵磊", Account: "ext.zhao", Org: "外部协作 / 驻场", State: "risk-high", Risk: "high", Online: true, Reasons: []string{"未授信终端接入", "公网异地登录", "短时间多次访问高敏应用"}, LastEvent: "访问财务核算系统被拒绝", LastSeen: "2 分钟前"},
-		{ID: "u-ext-sun", User: "外包-孙伟", Account: "ext.sun", Org: "外部协作 / 远程", State: "risk-high", Risk: "high", Online: true, Reasons: []string{"未授信移动终端", "深圳异地接入", "口令认证强度不足"}, LastEvent: "触发自适应二次认证", LastSeen: "5 分钟前"},
-		{ID: "u-svc-bot-04", User: "svc-bot-04", Account: "svc.bot.04", Org: "系统账号 / 自动化", State: "risk-low", Risk: "low", Online: true, Reasons: []string{"长连接 13 小时", "无人值守 API 账号"}, LastEvent: "API 密钥访问 Git", LastSeen: "1 分钟前"},
-		{ID: "u-chen-jing", User: "陈静", Account: "chen.jing", Org: "市场中心 / 品牌组", State: "risk-low", Risk: "low", Online: true, Reasons: []string{"北京异地登录（常驻地杭州）"}, LastEvent: "登录认证成功", LastSeen: "8 分钟前"},
-		{ID: "u-wu-min", User: "吴敏", Account: "wu.min", Org: "财务中心 / 资金组", State: "risk-low", Risk: "low", Online: true, Reasons: []string{"近 24h 登录失败 3 次"}, LastEvent: "访问财务核算系统", LastSeen: "12 分钟前"},
+		{ID: "u-ext-zhao", User: "外包-赵磊", Account: "ext.zhao", Org: "外部协作 / 驻场", State: DisposalBlock, Risk: "high", Online: true, Reasons: []string{"磁盘未加密", "终端防护未在线"}, LastEvent: "终端环境不合规，接入已阻断", LastSeen: "2 分钟前"},
+		{ID: "u-ext-sun", User: "外包-孙伟", Account: "ext.sun", Org: "外部协作 / 远程", State: DisposalDegrade, Risk: "high", Online: true, Reasons: []string{"系统完整性保护未开启"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "5 分钟前"},
+		{ID: "u-svc-bot-04", User: "svc-bot-04", Account: "svc.bot.04", Org: "系统账号 / 自动化", State: DisposalDegrade, Risk: "high", Online: true, Reasons: []string{"客户端版本过低"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "1 分钟前"},
+		{ID: "u-chen-jing", User: "陈静", Account: "chen.jing", Org: "市场中心 / 品牌组", State: DisposalGray, Risk: "low", Online: true, Reasons: []string{"主机防火墙未开启"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "8 分钟前"},
+		{ID: "u-wu-min", User: "吴敏", Account: "wu.min", Org: "财务中心 / 资金组", State: DisposalGray, Risk: "low", Online: true, Reasons: []string{"操作系统版本落后"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "12 分钟前"},
 		{ID: "u-li-fang", User: "李芳", Account: "li.fang", Org: "研发中心 / 测试组", State: "locked", Risk: "high", Online: false, Reasons: []string{"连续 5 次口令错误，账号已锁定", "疑似暴力破解"}, LastEvent: "账号锁定（自动）", LastSeen: "31 分钟前"},
 		{ID: "u-zhang-wei", User: "张伟", Account: "zhang.wei", Org: "销售中心 / 华南", State: "disabled", Risk: "none", Online: false, Reasons: []string{"离职流程已触发，账号被禁用"}, LastEvent: "管理员禁用账号", LastSeen: "3 天前"},
 		{ID: "u-zhao-lei2", User: "赵雷", Account: "zhao.lei", Org: "人力中心", State: "disabled", Risk: "none", Online: false, Reasons: []string{"长期未登录，已临时停用"}, LastEvent: "策略自动停用", LastSeen: "21 天前"},
-		{ID: "u-sun-li", User: "孙丽", Account: "sun.li", Org: "市场中心 / 活动组", State: "idle", Risk: "none", Online: false, Reasons: []string{"会话空闲超 30 分钟，已挂起"}, LastEvent: "会话空闲挂起", LastSeen: "45 分钟前"},
-		{ID: "u-qian-jin", User: "钱进", Account: "qian.jin", Org: "财务中心 / 核算组", State: "idle", Risk: "none", Online: false, Reasons: []string{"会话空闲超 30 分钟，已挂起"}, LastEvent: "会话空闲挂起", LastSeen: "52 分钟前"},
 	}
 	count := func(states ...string) int {
 		n := 0
@@ -101,12 +107,17 @@ func (m *Memory) UserStates(_ context.Context) (UserStateBundle, error) {
 		}
 		return n
 	}
-	buckets := []UserStateBucket{
-		{Key: "risk-high", Label: "高风险用户", Count: count("risk-high"), Tone: "danger"},
-		{Key: "risk-low", Label: "关注用户", Count: count("risk-low"), Tone: "warning"},
+	return UserStateBundle{Buckets: userStateBuckets(count), Items: items}, nil
+}
+
+// userStateBuckets 分桶定义的**唯一出处**（种子与 SQLite 真实现共用）。
+// 两处各写一份的话，键名一改就会出现"演示态与真实态的桶对不上、前端筛选失灵"。
+func userStateBuckets(count func(states ...string) int) []UserStateBucket {
+	return []UserStateBucket{
+		{Key: DisposalBlock, Label: "已阻断", Count: count(DisposalBlock), Tone: "danger"},
+		{Key: DisposalDegrade, Label: "已降权", Count: count(DisposalDegrade), Tone: "warning"},
+		{Key: DisposalGray, Label: "灰度观察", Count: count(DisposalGray), Tone: "info"},
 		{Key: "locked", Label: "锁定账号", Count: count("locked"), Tone: "danger"},
-		{Key: "disabled", Label: "禁用账号", Count: count("disabled"), Tone: "info"},
-		{Key: "idle", Label: "空闲挂起", Count: count("idle"), Tone: "normal"},
+		{Key: "disabled", Label: "禁用账号", Count: count("disabled"), Tone: "normal"},
 	}
-	return UserStateBundle{Buckets: buckets, Items: items}, nil
 }

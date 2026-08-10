@@ -22,6 +22,10 @@ type Store interface {
 	PostureReportFor(ctx context.Context, user, device string) (PostureReport, bool, error)
 	PostureFreshest(ctx context.Context, account string) (PostureReport, bool, error)
 	PostureBlockedUsers(ctx context.Context) ([]string, error)
+	// PostureUsersByDisposal 任一设备最新判定落在指定处置档的账号。
+	// degrade（降权：摘除高敏资源）与 gray（灰度观察：记 observing 审计）的执行方从这里取名单，
+	// 见 api.handleGatewayPolicy 与 api.buildProfile。
+	PostureUsersByDisposal(ctx context.Context, disposal string) ([]string, error)
 	Resources(ctx context.Context) ([]Resource, error)
 	OnlineSessions(ctx context.Context) ([]OnlineSession, error)
 	UserStates(ctx context.Context) (UserStateBundle, error)

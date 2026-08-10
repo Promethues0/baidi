@@ -91,10 +91,10 @@ func (s *SQLiteStore) PostureVerdict(ctx context.Context, account string) (Postu
 	if err != nil || len(reports) == 0 {
 		return PostureReport{}, false, err
 	}
-	rank := map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 3}
 	worst := reports[0]
 	for _, r := range reports[1:] {
-		if rank[r.Verdict] > rank[worst.Verdict] || (rank[r.Verdict] == rank[worst.Verdict] && r.TS > worst.TS) {
+		rr, rw := DisposalRank(r.Verdict), DisposalRank(worst.Verdict)
+		if rr > rw || (rr == rw && r.TS > worst.TS) {
 			worst = r
 		}
 	}
@@ -115,9 +115,14 @@ func (s *SQLiteStore) PostureReportFor(ctx context.Context, user, device string)
 	return reports[0], true, nil
 }
 
-// PostureBlockedUsers 任一设备最新判定为 block 的账号（供网关策略并入撤销名单，堵 8h 会话令牌直连洞）。
-func (s *SQLiteStore) PostureBlockedUsers(ctx context.Context) ([]string, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT DISTINCT user FROM posture_reports WHERE verdict='block'`)
+// PostureUsersByDisposal 任一设备最新判定为指定处置档的账号（规范化账号，字典序）。
+//
+// 「任一设备」而非「全部设备」是与 PostureVerdict 的「跨设备取最差」同一条口径：
+// 一台不合规的终端就足以让该账号被收缩，否则用户拿一台干净机器上报一次就能洗掉判定。
+// 定序是为了让下发给网关的 denyUsers 与审计文案稳定可 diff（否则每轮顺序都在抖）。
+func (s *SQLiteStore) PostureUsersByDisposal(ctx context.Context, disposal string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT DISTINCT user FROM posture_reports WHERE verdict=? ORDER BY user`, disposal)
 	if err != nil {
 		return nil, err
 	}
@@ -131,6 +136,11 @@ func (s *SQLiteStore) PostureBlockedUsers(ctx context.Context) ([]string, error)
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+// PostureBlockedUsers 任一设备最新判定为 block 的账号（供网关策略并入撤销名单，堵 8h 会话令牌直连洞）。
+func (s *SQLiteStore) PostureBlockedUsers(ctx context.Context) ([]string, error) {
+	return s.PostureUsersByDisposal(ctx, DisposalBlock)
 }
 
 // PostureFreshest 某账号最新一条报告（按 ts）。strict 新鲜度判断用它——不能用 PostureVerdict

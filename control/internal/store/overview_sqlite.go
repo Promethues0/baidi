@@ -65,18 +65,19 @@ func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
 
 	// 3) posture 高危并入账号防线 TOP（风险引擎判定 block/high 的账号），终端防线由最差报告真实化。
 	if reports, err := s.PostureReports(ctx); err == nil && len(reports) > 0 {
-		rank := map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 3}
 		worstUser := map[string]PostureReport{}
 		for _, r := range reports {
 			w, ok := worstUser[r.User]
-			if !ok || rank[r.Verdict] > rank[w.Verdict] {
+			// 排序只认 DisposalRank 那一份表（原先这里抄了第四份，改一处漏三处时
+			// "跨设备取最差"在不同页面会给出不同答案）。
+			if !ok || DisposalRank(r.Verdict) > DisposalRank(w.Verdict) {
 				worstUser[r.User] = r
 			}
 		}
 		var epTop []string
 		epRisk := 0
 		for _, r := range worstUser {
-			if (r.Verdict == "block" || r.Level == "high") && len(epTop) < 3 {
+			if (r.Verdict == DisposalBlock || r.Level == "high") && len(epTop) < 3 {
 				epTop = append(epTop, r.User)
 			}
 			if r.Score > epRisk {

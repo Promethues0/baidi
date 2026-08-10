@@ -65,6 +65,9 @@ type Server struct {
 	gwTunnelFP map[string]string
 	kicked     map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
 	revoked    map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
+	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
+	grayObserved map[string]int64
 }
 
 // revokeInfo 一条强制下线封禁（内存态，与在线会话生命周期一致，重启即失）。
@@ -141,7 +144,8 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
-		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}}
+		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{},
+		grayObserved: map[string]int64{}}
 	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
 	var ls lockout.Store
 	if v, ok := wr.(lockout.Store); ok {
@@ -449,9 +453,12 @@ type PortalTile struct {
 	Name        string `json:"name"`
 	Mode        string `json:"mode"`
 	Addr        string `json:"addr"`
-	Sensitivity string `json:"sensitivity"` // normal | high
-	Accessible  bool   `json:"accessible"`  // false = 需申请
+	Sensitivity string `json:"sensitivity"` // low | normal | high，取自关联资源的 Sensitivity
+	Accessible  bool   `json:"accessible"`  // false = 需申请，或已被终端风险降权
 	ResourceID  string `json:"resourceId"`  // 关联受控资源（JIT 申请用；空=不接入自助申请）
+	// Degraded 该磁贴此刻因终端风险降权不可访问（而非缺授权）。申请审批在这种状态下无效，
+	// 门户据此把"申请访问"换成"请先修复终端环境"，免得用户提交必然被否的申请。
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 // handlePortalApps 返回当前用户可见的应用门户（复用 SQLite 中的已发布应用；高敏类需申请）。
@@ -468,6 +475,17 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load portal apps")
 		return
 	}
+	// 敏感度取自**受控资源**而非应用分类。此前这里写死 `a.Category == "finance"`，
+	// 于是"哪些要走审批"永远只有财务一类，管理员新建的高敏资源静默变成人人可点。
+	resources, err := s.store.Resources(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
+		return
+	}
+	sensOf := make(map[string]string, len(resources))
+	for _, res := range resources {
+		sensOf[res.ID] = res.Sensitivity
+	}
 	// 调用方的有效授予集合（resource_id）：把「需申请」磁贴翻回可访问。best-effort，读失败按未授予处理。
 	granted := map[string]bool{}
 	if gs, err := s.store.ActiveGrantsFor(r.Context(), normUser(c.Name)); err == nil {
@@ -475,19 +493,29 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 			granted[g.ResourceID] = true
 		}
 	}
+	// 终端风险降权：高敏磁贴一律标不可访问，且**JIT 授予也翻不回来**——与网关侧
+	// DenyUsers 先于允许集合判定同构，否则门户显示"可访问"而隧道那边照拒。
+	degraded, _ := s.degradeStateOf(r.Context(), normUser(c.Name))
 	tiles := []PortalTile{}
 	for _, a := range b.Apps {
 		if a.Status != "running" {
 			continue
 		}
-		sens, acc := "normal", true
-		if a.Category == "finance" {
-			sens, acc = "high", false // 高敏应用默认需走自助申请审批
+		sens, acc, deg := store.SensitivityNormal, true, false
+		if a.ResourceID != "" {
+			sens = store.NormalizeSensitivity(sensOf[a.ResourceID])
+		}
+		if sens == store.SensitivityHigh {
+			acc = false // 高敏资源默认需走自助申请审批
 			if a.ResourceID != "" && granted[a.ResourceID] {
 				acc = true // 持有效 JIT 授予 → 临时可访问
 			}
+			if degraded {
+				acc, deg = false, true // 降权否决恒胜于 JIT 授予
+			}
 		}
-		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr, Sensitivity: sens, Accessible: acc, ResourceID: a.ResourceID})
+		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
+			Sensitivity: sens, Accessible: acc, ResourceID: a.ResourceID, Degraded: deg})
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
 }
@@ -956,7 +984,16 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	// ★数据面刻意不知道组织树：判定权留在控制面，且展开每次现算（不缓存），
 	// 把人移出组织后下一轮轮询就失效。展开实现只有 store.SubjectIndex 一份，
 	// 客户端剖面 buildProfile 用的是同一份——两处同构是硬要求，见 subjects.go。
-	gwRes := expandForGateway(rs, s.subjectIndex(r.Context()))
+	//
+	// 终端风险降权（disposal=degrade）同轮现算：这批账号进高敏资源的 DenyUsers，
+	// 网关据此**只**拒他们访问高敏资源，普通资源照旧——这就是「优先降权而非终止会话」
+	// 的执行方（PRD 1.5）。恢复合规后下一轮名单里就没有他，无需任何人工操作。
+	degraded := s.degradedUsers(r.Context())
+	gwRes := expandForGateway(rs, s.subjectIndex(r.Context()), degraded)
+
+	// 灰度观察（disposal=gray）：访问权一字不改，但每轮下发都留痕，
+	// 让「谁正在被观察」这件事在审计里可查、在用户状态页可见。
+	s.auditGrayObserved(r)
 
 	// JIT 即时访问：把有效授予（active 且未到期）临时并入对应资源的 AllowUsers——网关零改动即经
 	// proxy.Authorize 命中放行。★必须在 seen 排除集（revoked+禁用/锁定+posture-block）完全构建之后：
@@ -1080,6 +1117,15 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "id/backend 必填")
 		return
 	}
+	// 敏感度：空 = 未标注，收敛成 normal；给了值就必须是三档之一。
+	// ★不静默丢弃拼错的值（如 "High"/"敏感"）：静默收敛成 normal 会让管理员以为
+	// 自己标了高敏，而降权对这个资源根本不生效——又一处"配置齐全却不生效"。
+	if res.Sensitivity == "" {
+		res.Sensitivity = store.SensitivityNormal
+	} else if !store.ValidSensitivity(res.Sensitivity) {
+		httpx.Error(w, http.StatusBadRequest, "sensitivity 取值须为 low|normal|high")
+		return
+	}
 	// 对象库引用须指向真实对象（backend 仍是权威拨号目标，refs 仅供编辑器回填 + 反查）。
 	if res.AddrRef != "" {
 		if ok, err := s.objectExists(r.Context(), "addr", res.AddrRef); err != nil {
@@ -1113,7 +1159,7 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save resource")
 		return
 	}
-	s.audit(r, "admin", "保存受控资源「"+res.ID+"」("+res.Backend+"，授权 "+
+	s.audit(r, "admin", "保存受控资源「"+res.ID+"」("+res.Backend+"，敏感度 "+res.Sensitivity+"，授权 "+
 		strconv.Itoa(len(res.AllowRoles))+" 角色/"+strconv.Itoa(len(res.AllowUsers))+" 账号/"+
 		strconv.Itoa(len(res.AllowGroups))+" 用户组/"+strconv.Itoa(len(res.AllowOrgs))+" 组织)", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "resource": res})

@@ -230,7 +230,7 @@ CREATE TABLE IF NOT EXISTS users (
 );
 CREATE TABLE IF NOT EXISTS resources (
   id TEXT PRIMARY KEY, name TEXT, backend TEXT, allow_roles TEXT, allow_users TEXT,
-  allow_groups TEXT, allow_orgs TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
+  allow_groups TEXT, allow_orgs TEXT, sensitivity TEXT, addr_ref TEXT, svc_ref TEXT, updated_at TEXT
 );
 -- ipsec_sites 只放**配置**（管理员权威）。status/rx_bytes/tx_bytes/last_up 四列已冻结：
 -- 它们是运行态与配置混表时代的遗物，代码不再读写，运行态一律去 ipsec_sa_state。
@@ -380,6 +380,8 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 		// 授权主体扩展：用户组 / 组织（含子树）。回填见 backfillResourceSubjects。
 		{"resources", "allow_groups", "TEXT"},
 		{"resources", "allow_orgs", "TEXT"},
+		// 资源敏感度（风险降权 disposal=degrade 的唯一判据）。回填见 backfillResourceSensitivity。
+		{"resources", "sensitivity", "TEXT"},
 		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
 		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
 		// 首登强制改密标志（回填见 backfillMustChangePw）。
@@ -429,6 +431,12 @@ CREATE INDEX IF NOT EXISTS idx_group_members_account ON user_group_members(accou
 		return err
 	}
 	if err := s.backfillResourceSubjects(); err != nil {
+		return err
+	}
+	// ★必须排在 backfillAppResourceID 之后：它按「应用 category=finance → 该应用关联的资源」
+	// 认定高敏，而那条关联正是 apps.resource_id。顺序反了的话既有库里刚被补上的桥接还没生效，
+	// 全部资源会被回填成 normal——降权于是对财务系统静默失效。
+	if err := s.backfillResourceSensitivity(); err != nil {
 		return err
 	}
 	if err := s.backfillMustChangePw(); err != nil {
@@ -514,6 +522,40 @@ func (s *SQLiteStore) backfillResourceSubjects() error {
 	_, err := s.db.Exec(`UPDATE resources SET allow_orgs='[]' WHERE allow_orgs IS NULL`)
 	return err
 }
+
+// backfillResourceSensitivity 回填 resources.sensitivity。
+//
+// 两步，缺一不可：
+//  1. 既有行一律补 normal —— 留 NULL 的话读侧只能靠 COALESCE 兜底，而"这一行到底评估过没有"
+//     在库里看不出来；也让 `WHERE sensitivity='high'` 这类查询有确定语义。
+//  2. **把改造前唯一的高敏来源迁进来**：`apps.category='finance'` 曾是全库判定高敏的唯一依据
+//     （门户磁贴的"需申请"、剖面 app.sensitivity 都由它派生）。不迁的话，升级后财务系统
+//     从"高敏"变成"普通"，降权对它不再生效、门户磁贴也从"需申请"变回"直接可点"——
+//     这是一次**安全性下降**，且没有任何报错，纯靠对比升级前后的页面才看得出来。
+//
+// 只动仍为空的行：管理员后来手工评估过的值一律不覆盖（与 backfillAppResourceID 同纪律）。
+func (s *SQLiteStore) backfillResourceSensitivity() error {
+	if _, err := s.db.Exec(
+		`UPDATE resources SET sensitivity=? WHERE COALESCE(sensitivity,'')=''`, SensitivityNormal); err != nil {
+		return err
+	}
+	// 第 2 步**只跑一次**（sensBackfillMarker）。不加这道闸的话，管理员把财务资源重新评估成
+	// normal/low 之后，下次进程重启迁移又会把它抬回 high——"改了、重启就变回去"是最难自证的
+	// 一类缺陷：管理员看到的是自己的操作没保存，而日志里保存明明成功了。
+	ctx := context.Background()
+	if _, done, err := s.Setting(ctx, sensBackfillMarker); err != nil || done {
+		return err
+	}
+	if _, err := s.db.Exec(`UPDATE resources SET sensitivity=? WHERE sensitivity=? AND id IN (
+  SELECT resource_id FROM apps WHERE category='finance' AND COALESCE(resource_id,'')<>''
+)`, SensitivityHigh, SensitivityNormal); err != nil {
+		return err
+	}
+	return s.SetSetting(ctx, sensBackfillMarker, nowStr())
+}
+
+// sensBackfillMarker settings 表里的一次性标记：finance→high 的语义迁移只做一次。
+const sensBackfillMarker = "resource.sensitivity.backfill.v1"
 
 // backfillMustChangePw 回填 users.must_change_pw：既有行一律补 0。
 //
@@ -725,7 +767,7 @@ func (s *SQLiteStore) seed() error {
 // Resources 从库读受控资源清单（覆盖 Memory 种子）。
 func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users,
-COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
+COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(sensitivity,''),COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -734,13 +776,16 @@ COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(addr_ref,''),COALESCE
 	for rows.Next() {
 		var r Resource
 		var roles, users, groups, orgs string
-		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &groups, &orgs, &r.AddrRef, &r.SvcRef); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &groups, &orgs, &r.Sensitivity, &r.AddrRef, &r.SvcRef); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(roles), &r.AllowRoles)
 		_ = json.Unmarshal([]byte(users), &r.AllowUsers)
 		_ = json.Unmarshal([]byte(groups), &r.AllowGroups)
 		_ = json.Unmarshal([]byte(orgs), &r.AllowOrgs)
+		// 回填保证库里不该有空值，这里仍收敛一次：读侧永远拿到三档之一，
+		// 免得每个消费方各自判空（判漏一处就是"未标注的资源被当成高敏/低敏"）。
+		r.Sensitivity = NormalizeSensitivity(r.Sensitivity)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -752,13 +797,15 @@ func (s *SQLiteStore) SaveResource(ctx context.Context, r Resource) error {
 	users, _ := json.Marshal(nonNil(r.AllowUsers))
 	groups, _ := json.Marshal(nonNil(r.AllowGroups))
 	orgs, _ := json.Marshal(nonNil(r.AllowOrgs))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,allow_groups,allow_orgs,addr_ref,svc_ref,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,allow_groups,allow_orgs,sensitivity,addr_ref,svc_ref,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, backend=excluded.backend,
   allow_roles=excluded.allow_roles, allow_users=excluded.allow_users,
   allow_groups=excluded.allow_groups, allow_orgs=excluded.allow_orgs,
+  sensitivity=excluded.sensitivity,
   addr_ref=excluded.addr_ref, svc_ref=excluded.svc_ref, updated_at=excluded.updated_at`,
-		r.ID, r.Name, r.Backend, string(roles), string(users), string(groups), string(orgs), r.AddrRef, r.SvcRef, nowStr())
+		r.ID, r.Name, r.Backend, string(roles), string(users), string(groups), string(orgs),
+		NormalizeSensitivity(r.Sensitivity), r.AddrRef, r.SvcRef, nowStr())
 	return err
 }
 

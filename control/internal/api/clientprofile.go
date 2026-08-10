@@ -30,6 +30,7 @@ import (
 	"crypto/sha256"
 	"encoding/binary"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -109,8 +110,11 @@ type ProfileGateway struct {
 type ProfileApp struct {
 	ID          string `json:"id"`
 	Name        string `json:"name"`
-	Mode        string `json:"mode"`        // tunnel | web | global
-	Sensitivity string `json:"sensitivity"` // normal | high
+	Mode string `json:"mode"` // tunnel | web | global
+	// Sensitivity 资源敏感度（low | normal | high），取自 store.Resource.Sensitivity。
+	// ★不再由 `app.Category == "finance"` 派生：那条硬编码只认财务一个分类，
+	// 管理员新建的任何高敏资源都会被当成普通资源，风险降权对它形同虚设。
+	Sensitivity string `json:"sensitivity"`
 	ResourceID  string `json:"resourceId"`
 	Backend     string `json:"backend"` // 业务真实 host:port（透明访问用）
 	VIP         string `json:"vip"`     // 控制面分配的虚拟 IP
@@ -118,8 +122,16 @@ type ProfileApp struct {
 	// URL 是「点开即用」的地址。web 模式给 http(s)://，其余给 host:port 供用户自行连接
 	// （SSH/数据库等）。客户端 Apps 页直接用它，不再是弹 toast 的假动作。
 	URL string `json:"url"`
-	// Accessible 当前是否可直接访问。false = 高敏资源且无有效 JIT 授予，需先申请审批。
+	// Accessible 当前是否可直接访问。false 有两种成因，客户端提示语不同：
+	//   - 无权限：需走 JIT 自助申请审批；
+	//   - Degraded=true：终端不合规被降权，申请审批也没用，得先修好终端。
 	Accessible bool `json:"accessible"`
+	// Degraded 该资源此刻**因终端风险降权**而不可访问（而非因为没授权）。
+	//
+	// ★把两种"不可访问"分开，是因为用户的下一步动作完全不同：区分不了的话，
+	// 一个被降权的用户会一遍遍提交必然无效的访问申请（降权否决优先于 JIT 授予），
+	// 而审批人那边看到的是一张看不出问题的正常申请单。
+	Degraded bool `json:"degraded,omitempty"`
 }
 
 // handleClientProfile 下发接入剖面（GET /api/v1/client/profile，需登录）。
@@ -163,6 +175,10 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		}
 	}
 
+	// 终端风险降权：本人是否处于 degrade 档。判据与网关下发那份同源
+	// （都是"跨设备取最差"的 posture 判定），只是这里只关心调用者自己。
+	degraded, degradeReason := s.degradeStateOf(ctx, user)
+
 	// ── VIP 分配必须确定性 ──
 	// 同一用户重复拉剖面、以及不同终端拉同一资源，都必须得到同一个 VIP：否则客户端每次
 	// 重连 VIP 都变，用户存的书签、SSH 配置全部失效。故按资源 id 字典序稳定分配，
@@ -195,6 +211,8 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 	// 同一个域名可能被多个资源用不同端口引用，「这条 A 记录归谁的 VIP」必须一次性裁决，
 	// 边遍历边定会依赖 apps 的迭代顺序，而那个顺序是不稳定的。
 	var domainBackends []domainBackend
+	// 被降权摘掉的应用名，用于组装那条"让用户知道为什么"的告警。
+	var degradedApps []string
 
 	for _, a := range apps.Apps {
 		if a.Status != "running" {
@@ -203,8 +221,9 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		// global 模式（如 *.cnki.net 全网资源）没有确定的内网落点，不参与隧道路由。
 		// 这类应用靠系统默认出口直连，剖面里给出但不写 resmap/route。
 		if a.Mode == "global" {
+			// 没有受控资源就没有敏感度可言（也不经隧道、不受降权约束）：如实标 normal。
 			out = append(out, ProfileApp{
-				ID: a.ID, Name: a.Name, Mode: a.Mode, Sensitivity: "normal",
+				ID: a.ID, Name: a.Name, Mode: a.Mode, Sensitivity: store.SensitivityNormal,
 				Backend: a.Addr, URL: a.Addr, Accessible: true,
 			})
 			continue
@@ -217,16 +236,18 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 			continue
 		}
 		// ── 可访问性判定：必须与网关侧完全同构 ──
-		// 网关的权威闸是 resource.Authorize(静态 ACL)，而控制面在下发网关策略时
-		// 会把**组织/用户组展开出的账号**与**有效期内的 JIT 授予**一并并入 AllowUsers
-		// （见 handleGatewayPolicy → expandForGateway）。所以这里的判定也必须是
-		// 「静态 ACL ∪ 组织/组展开 ∪ 有效 JIT 授予」——少算任何一项的后果都是
-		// 「策略/审批明明生效了，剖面里却没有该资源的 VIP 与路由」，且毫无报错。
+		// 网关的权威闸是 resource.Authorize(静态 ACL + DenyUsers)，而控制面在下发网关策略时
+		// 会把**组织/用户组展开出的账号**与**有效期内的 JIT 授予**一并并入 AllowUsers、
+		// 把**被降权账号**写进高敏资源的 DenyUsers（见 handleGatewayPolicy → expandForGateway）。
+		// 所以这里的判定也必须是「(静态 ACL ∪ 组织/组展开 ∪ 有效 JIT 授予) ∧ ¬降权否决」
+		// ——少算任何一项的后果都是「策略/审批明明生效了，剖面里却没有该资源的 VIP 与路由」，
+		// 多算则是「剖面排了路由、网关那边照拒」，两个方向都毫无报错。判定只有 accessibleFor 一处。
 		hasGrant := granted[res.ID]
-		accessible := authorizeRes(user, role, res, subjects) || hasGrant
-		sens := "normal"
-		if a.Category == "finance" {
-			sens = "high"
+		accessible := accessibleFor(user, role, res, subjects, hasGrant, degraded)
+		sens := res.Sensitivity
+		degradeHit := degraded && res.HighSensitivity()
+		if degradeHit {
+			degradedApps = append(degradedApps, a.Name)
 		}
 
 		host, portStr, err := net.SplitHostPort(res.Backend)
@@ -289,7 +310,7 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		out = append(out, ProfileApp{
 			ID: a.ID, Name: a.Name, Mode: a.Mode, Sensitivity: sens,
 			ResourceID: res.ID, Backend: res.Backend, VIP: vip, Port: port,
-			URL: appURL(a.Mode, urlHost, port), Accessible: accessible,
+			URL: appURL(a.Mode, urlHost, port), Accessible: accessible, Degraded: degradeHit,
 		})
 	}
 
@@ -319,6 +340,12 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 	if gwWarn != "" {
 		warnings = append(warnings, gwWarn)
 	}
+	// ★降权告警**排在最前**：客户端「应用」页只 toast 第一条 warning，而"我为什么打不开
+	// 财务系统"是此刻用户最需要的答案，优先级高于任何配置缺口提示。
+	// 降权而用户不知情，就会退化成「明明有权限却打不开」——本项目反复警告的那种迷惑失败形态。
+	if w := degradeWarning(degradedApps, degradeReason); w != "" {
+		warnings = append([]string{w}, warnings...)
+	}
 	return ClientProfile{
 		GeneratedAt: time.Now().Format(time.RFC3339),
 		User:        user,
@@ -331,6 +358,44 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		DNS:         dnsPlan,
 		Warnings:    warnings,
 	}
+}
+
+// degradeStateOf 判断某账号此刻是否处于风险降权档，并给出可读原因。
+//
+// 判据是「跨设备取最差」的 posture 判定（store.PostureVerdict），与下发网关的降权名单
+// （store.PostureUsersByDisposal，"任一设备命中"）是同一条口径的两种取法：
+// 最差判定为 degrade ⟺ 有设备判 degrade 且没有设备判 block。block 用户走的是撤销名单
+// 那条全断路径，不需要（也不该）在这里再被算成降权——那会让"已被阻断"显示成"已降权"。
+//
+// 读失败按「未降权」处理，理由见 (*Server).degradedUsers 的说明：降权是收缩动作，
+// 读不到时宁可短暂不收缩，也不能凭空把用户的高敏资源关掉。
+func (s *Server) degradeStateOf(ctx context.Context, user string) (bool, string) {
+	rep, ok, err := s.store.PostureVerdict(ctx, user)
+	if err != nil {
+		slog.Error("终端降权判定读取失败，本次剖面按「未降权」下发", "账号", user, "err", err.Error())
+		return false, ""
+	}
+	if !ok || rep.Verdict != store.DisposalDegrade {
+		return false, ""
+	}
+	return true, strings.Join(rep.Reasons, "、")
+}
+
+// degradeWarning 组装下发给终端的降权告警文案。
+// 只在**确实有资源被摘掉**时才出现：一个降级用户如果本来就没有任何高敏资源的权限，
+// 告诉他"高敏资源已暂停"只会制造困惑（他从来也没有过）。
+func degradeWarning(apps []string, reason string) string {
+	if len(apps) == 0 {
+		return ""
+	}
+	names := strings.Join(apps, "、")
+	if len(apps) > 3 {
+		names = strings.Join(apps[:3], "、") + fmt.Sprintf(" 等 %d 项", len(apps))
+	}
+	if reason == "" {
+		reason = "终端环境检查未通过"
+	}
+	return fmt.Sprintf("因终端合规降级：%s 等高敏资源已暂停访问（普通资源不受影响，隧道未断开），原因：%s。修复终端问题并重新上报后自动恢复", names, reason)
 }
 
 // assignVIPs 给每个资源 id 分配一个 VIP 主机号。

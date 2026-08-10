@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -98,6 +99,57 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		"ok": true, "verdict": v.Disposal, "score": v.Score, "level": v.Level,
 		"reasons": v.Reasons, "unknowns": v.Unknowns,
 	})
+}
+
+// grayObserveInterval 同一账号两条 observing 审计之间的最小间隔。
+//
+// ★为什么要节流：策略下发是网关每 30s 一次的轮询，且网关可能有多台。不节流的话
+// 一个灰度账号一天会产出近 3000 条内容完全相同的审计——审计表被冲刷成噪声之后，
+// 真正的处置事件（block 转入/转出、强制下线）就淹没在里面翻不出来了，
+// 这与「提高审计粒度」的初衷正好相反。5 分钟足以让「正在被观察」这件事在时间线上连续可见。
+const grayObserveInterval = 5 * time.Minute
+
+// auditGrayObserved 为当前处于灰度观察档（disposal=gray）的账号落 observing 审计。
+//
+// 灰度观察的**全部执行内容**就是这条审计 + 用户状态页的档位显示：访问权一字不改
+// （既不进 DenyUsers、也不进撤销名单）。这是刻意的——gray 的定位是"先看着"，
+// 一旦它开始改变访问权，管理员就再也没有一个"只观察不影响业务"的档位可用了。
+//
+// 措辞只陈述已发生的事实：「终端风险灰度观察中」+ 命中的基线项，
+// 不写"已收缩""已限制"之类根本没发生的动作。
+func (s *Server) auditGrayObserved(r *http.Request) {
+	accounts, err := s.store.PostureUsersByDisposal(r.Context(), store.DisposalGray)
+	if err != nil {
+		slog.Error("灰度观察名单读取失败，本轮不记 observing 审计", "err", err.Error())
+		return
+	}
+	now := time.Now().Unix()
+	gap := int64(grayObserveInterval.Seconds())
+	for _, acc := range accounts {
+		key := normUser(acc)
+		// 「任一设备 gray」不等于「这个人此刻处于 gray 档」：另一台设备判 degrade/block 时
+		// 他真正被执行的是那一档。按最差判定过滤，免得审计里写着"正在观察"、
+		// 而这个人其实已经被降权甚至阻断了——审计只记已发生的事实。
+		worst, ok, verr := s.store.PostureVerdict(r.Context(), key)
+		if verr != nil || !ok || worst.Verdict != store.DisposalGray {
+			continue
+		}
+		s.mu.Lock()
+		last, seen := s.grayObserved[key]
+		due := !seen || now-last >= gap
+		if due {
+			s.grayObserved[key] = now
+		}
+		s.mu.Unlock()
+		if !due {
+			continue
+		}
+		reasons := ""
+		if len(worst.Reasons) > 0 {
+			reasons = "（" + strings.Join(worst.Reasons, "、") + "）"
+		}
+		s.auditAs(r, acc, "security", "终端风险灰度观察中："+acc+reasons+"，访问权未变更", "observing")
+	}
 }
 
 // handlePostureList 最新终端报告清单（admin，安全中心「终端合规」）。

@@ -10,7 +10,13 @@ import (
 
 // ── 安全中心 · 基线 CRUD（风险引擎的规则源）──
 
-var validDisposal = map[string]bool{"allow": true, "degrade": true, "block": true, "gray": true}
+// 四档处置全部可选，因为四档**都有执行方**（语义见 store.DisposalAllow 一组常量）：
+// gray 记 observing 审计、degrade 摘除高敏资源、block 全断。
+// 若将来加档位，先落实执行方再往这里加 —— 只能选不能执行的档位就是 config-only。
+var validDisposal = map[string]bool{
+	store.DisposalAllow: true, store.DisposalGray: true,
+	store.DisposalDegrade: true, store.DisposalBlock: true,
+}
 var validSeverity = map[string]bool{"high": true, "medium": true, "low": true}
 var validCheckPlatform = map[string]bool{"Windows": true, "macOS": true, "Linux": true, "All": true}
 var validBaselineType = map[string]bool{"onboarding": true, "app-protect": true}

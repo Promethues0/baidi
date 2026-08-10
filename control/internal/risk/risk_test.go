@@ -114,8 +114,29 @@ func TestScoreCapAndLevels(t *testing.T) {
 	}
 }
 
+// 处置严厉度排序：block > degrade > gray > allow。
+//
+// ★gray 排在 degrade **之下**（此前是反的）。四档都有执行方之后这个顺序有了实际后果：
+// 一台同时命中「gray 基线」与「degrade 基线」的终端，若 gray 更严就会被判成 gray，
+// 高敏资源的收缩于是静默失效——而 gray 的语义恰恰是"什么都不改，只观察"。
 func TestDisposalRank(t *testing.T) {
-	if !(DisposalRank("block") > DisposalRank("gray") && DisposalRank("gray") > DisposalRank("degrade") && DisposalRank("degrade") > DisposalRank("allow")) {
-		t.Fatal("disposal 排序应为 block > gray > degrade > allow")
+	if !(DisposalRank("block") > DisposalRank("degrade") &&
+		DisposalRank("degrade") > DisposalRank("gray") &&
+		DisposalRank("gray") > DisposalRank("allow")) {
+		t.Fatal("disposal 排序应为 block > degrade > gray > allow")
+	}
+}
+
+// 同一终端命中两条基线（gray + degrade）时必须取 degrade：
+// 取 gray 就等于"命中了降权基线却什么都没降"，且页面上完全看不出来。
+func TestEvaluate_DegradeWinsOverGray(t *testing.T) {
+	grayCheck := store.BaselineCheck{Key: "firewall_on", Label: "防火墙已开启", Platform: "All", Severity: "low"}
+	degCheck := store.BaselineCheck{Key: "sys_integrity", Label: "系统完整性保护", Platform: "All", Severity: "medium"}
+	v := Evaluate("macOS", nil, []store.BaselinePolicy{
+		bl("gray-bl", "gray", "enabled", nil, grayCheck),
+		bl("deg-bl", "degrade", "enabled", nil, degCheck),
+	}, Options{})
+	if v.Disposal != store.DisposalDegrade {
+		t.Fatalf("gray + degrade 同时命中应取 degrade，got %s", v.Disposal)
 	}
 }

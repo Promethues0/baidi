@@ -6,9 +6,17 @@ import "baidi.dev/control/internal/store"
 
 // Verdict 一次评估的可解释结论。
 type Verdict struct {
-	Score    int      // 0-100，失败检查按严重度加权累计
-	Level    string   // low | medium | high（违反 block 基线强制 high）
-	Disposal string   // allow | degrade | gray | block（violated 基线取最严）
+	Score int    // 0-100，失败检查按严重度加权累计
+	Level string // low | medium | high（违反 block 基线强制 high）
+	// Disposal 处置档：allow | gray | degrade | block（violated 基线取最严）。
+	//
+	// ★四档**都有执行方**，语义定义在 store 包（见 store.DisposalAllow 一组常量的注释）：
+	//   gray    → 访问权不变，控制面每轮策略下发记一条 observing 审计；
+	//   degrade → 降权不断连：高敏资源（Resource.Sensitivity=high）从网关允许集合与
+	//             客户端剖面里同时摘除，普通资源照常可访问；
+	//   block   → 全断：拒发敲门令牌 + 撤放行窗 + 断隧道。
+	// 加新档位前先想清楚谁执行它——只落库不执行的档位就是 config-only。
+	Disposal string
 	Reasons  []string // 失败检查的 label（缺失上报的附「（未上报）」）
 	Unknowns []string // 不可判定检查的 label（observe 下不计分不抬处置，但必须让人看见）
 }
@@ -23,10 +31,12 @@ type Options struct {
 }
 
 var severityWeight = map[string]int{"high": 25, "medium": 10, "low": 5}
-var disposalRank = map[string]int{"allow": 0, "degrade": 1, "gray": 2, "block": 3}
 
 // DisposalRank 处置严厉度排序值（block 最严）；未知处置视为 allow。
-func DisposalRank(d string) int { return disposalRank[d] }
+//
+// 排序表只在 store 里定义一份（store.DisposalRank）——它同时被"跨设备取最差"
+// （store.PostureVerdict）与用户状态页用到，三份抄写各改各的迟早分叉。
+func DisposalRank(d string) int { return store.DisposalRank(d) }
 
 // Evaluate 用启用且平台适用的基线评估上报的检查结果。
 // 缺失某基线要求的 key 视为该检查失败（缺失即不合规，防选择性上报）；
@@ -36,7 +46,7 @@ func Evaluate(platform string, checks []store.PostureCheckResult, baselines []st
 	for _, c := range checks {
 		reported[c.Key] = c
 	}
-	v := Verdict{Level: "low", Disposal: "allow", Reasons: []string{}, Unknowns: []string{}}
+	v := Verdict{Level: "low", Disposal: store.DisposalAllow, Reasons: []string{}, Unknowns: []string{}}
 	for _, b := range baselines {
 		if b.Status != "enabled" || !platformApplies(platform, b.Platforms) {
 			continue
@@ -82,7 +92,7 @@ func Evaluate(platform string, checks []store.PostureCheckResult, baselines []st
 		v.Score = 100
 	}
 	switch {
-	case v.Disposal == "block" || v.Score >= 60:
+	case v.Disposal == store.DisposalBlock || v.Score >= 60:
 		v.Level = "high"
 	case v.Score >= 30:
 		v.Level = "medium"

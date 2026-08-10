@@ -180,19 +180,150 @@ func TestBackfilledAdminKeepsFullPower(t *testing.T) {
 }
 
 // 未分配角色的 admin 令牌 fail-closed：不是"查不到就当有权"。
+// **读端点同样现算**：requireAdmin 也要过 AdminRoleFor，否则读面停在令牌快照上。
 func TestAdminWithoutRoleIsDeniedNotAllowed(t *testing.T) {
 	h := newTestServer(t)
 	// 目录里根本不存在这个账号 → AdminRoleFor 找不到角色
 	ghost := adminTokenFor("ghost.admin")
-	for _, p := range []string{"/api/v1/audit", "/api/v1/diag"} {
+	for _, p := range []string{
+		"/api/v1/audit", "/api/v1/diag", // requirePerm 端点
+		"/api/v1/system", "/api/v1/users", "/api/v1/online", "/api/v1/orgs", // 只挂 requireAdmin 的读端点
+	} {
 		if code, out := doJSON(t, h, "GET", p, ghost, nil); code != http.StatusForbidden {
 			t.Errorf("无角色的 admin 令牌访问 %s 应 403，得到 %d %v", p, code, out)
 		}
 	}
-	// 但只需 requireAdmin 的读端点仍照常（本轮不改这些的门槛）
-	if code, _ := doJSON(t, h, "GET", "/api/v1/system", ghost, nil); code != http.StatusOK {
-		t.Errorf("GET /system 仍是 requireAdmin，应 200，得到 %d", code)
+}
+
+// 撤销管理员身份后，**读端点也立刻失效**——不是等 8h 令牌自然过期。
+//
+// 这条钉住的是"角色现算不进令牌"这条性质在读面的兑现：被撤销的人手里那张令牌
+// 仍然合法（role=admin 是签发那一刻的事实），但目录里他已经不是管理员了，
+// 用户目录 / 在线会话（账号 + 源 IP + 网关）/ 管理员清单一律不该再读得到。
+func TestRemovedAdminLosesReadEndpointsImmediately(t *testing.T) {
+	h := newTestServer(t)
+	tok := makeAdmin(t, h, "revoke.me", "system")
+
+	reads := []string{"/api/v1/users", "/api/v1/online", "/api/v1/system", "/api/v1/userstate", "/api/v1/groups"}
+	for _, p := range reads {
+		if code, out := doJSON(t, h, "GET", p, tok, nil); code != http.StatusOK {
+			t.Fatalf("撤销前 %s 应 200，得到 %d %v", p, code, out)
+		}
 	}
+	if code, out := doJSON(t, h, "DELETE", "/api/v1/admins/revoke.me", adminToken(), nil); code != http.StatusOK {
+		t.Fatalf("撤销管理员 http %d: %v", code, out)
+	}
+	// 同一张（尚未过期的）令牌，撤销后一条都读不到
+	for _, p := range reads {
+		if code, out := doJSON(t, h, "GET", p, tok, nil); code != http.StatusForbidden {
+			t.Errorf("撤销后 %s 应 403（令牌未过期但目录里已不是管理员），得到 %d %v", p, code, out)
+		}
+	}
+}
+
+// 安全管理员不得重置管理员账号的口令：那是一次请求打穿三权分立的最短路径
+// （重置成自己知道的口令 → 用目标账号登录 → 拿到目标的全部权限）。
+func TestSecurityAdminCannotResetAdminPassword(t *testing.T) {
+	h := newTestServer(t)
+	secTok := makeAdmin(t, h, "sec5.admin", "security")
+	makeAdmin(t, h, "aud5.admin", "audit")
+	audID := userIDOf(t, h, "aud5.admin")
+
+	// 普通用户的口令仍归安全管理员管（这条是"没把闸修成一刀切"的证据）
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/u2/password", secTok,
+		map[string]any{"password": "Normal@2026x"}); code != http.StatusOK {
+		t.Fatalf("安全管理员重置普通用户口令应放行，得到 %d %v", code, out)
+	}
+	// 超管账号
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/u-admin/password", secTok,
+		map[string]any{"password": "Attacker@2026x"}); code != http.StatusForbidden {
+		t.Errorf("安全管理员重置超管口令应 403，得到 %d %v", code, out)
+	}
+	// 另一权的管理员账号
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/"+audID+"/password", secTok,
+		map[string]any{"password": "Attacker@2026x"}); code != http.StatusForbidden {
+		t.Errorf("安全管理员重置审计管理员口令应 403，得到 %d %v", code, out)
+	}
+	// 拒绝必须是真拒绝：超管的原口令仍然有效，新口令登不进去
+	if code, out := doJSON(t, h, "POST", "/api/v1/auth/login", "",
+		map[string]any{"username": "admin", "password": "Attacker@2026x"}); code == http.StatusOK && out["ok"] == true {
+		t.Fatal("被拒的重置竟然生效了：攻击者口令能登录超管")
+	}
+	if code, out := doJSON(t, h, "POST", "/api/v1/auth/login", "",
+		map[string]any{"username": "admin", "password": seedInitialPassword}); code != http.StatusOK || out["ok"] != true {
+		t.Fatalf("超管原口令应仍可登录，得到 %d %v", code, out)
+	}
+	// 持 admins 权的超管照常可以重置管理员口令（应急重置不能被这道闸堵死）
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/"+audID+"/password", adminToken(),
+		map[string]any{"password": "Reset@2026x"}); code != http.StatusOK {
+		t.Errorf("超管重置管理员口令应放行，得到 %d %v", code, out)
+	}
+}
+
+// 安全管理员不得禁用/锁定另外两权的管理员：
+// store.SetUserStatus 的防自锁只保护「最后一名可登录超管」，管不到 audit/system。
+func TestSecurityAdminCannotDisableOtherPowerAdmins(t *testing.T) {
+	h := newTestServer(t)
+	secTok := makeAdmin(t, h, "sec6.admin", "security")
+	makeAdmin(t, h, "aud6.admin", "audit")
+	makeAdmin(t, h, "sys6.admin", "system")
+	audID, sysID := userIDOf(t, h, "aud6.admin"), userIDOf(t, h, "sys6.admin")
+
+	// 普通用户照常
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/u2/status", secTok,
+		map[string]any{"status": "disabled"}); code != http.StatusOK {
+		t.Fatalf("安全管理员禁用普通用户应放行，得到 %d %v", code, out)
+	}
+	for _, id := range []string{audID, sysID, "u-admin"} {
+		for _, st := range []string{"disabled", "locked"} {
+			if code, out := doJSON(t, h, "POST", "/api/v1/users/"+id+"/status", secTok,
+				map[string]any{"status": st}); code != http.StatusForbidden {
+				t.Errorf("安全管理员把管理员 %s 置「%s」应 403，得到 %d %v", id, st, code, out)
+			}
+		}
+	}
+	// 拒绝之后审计管理员仍读得到审计（"定策略的人关不掉看自己痕迹的人"）
+	if code, out := doJSON(t, h, "GET", "/api/v1/audit", adminTokenFor("aud6.admin"), nil); code != http.StatusOK {
+		t.Errorf("审计管理员应仍可读审计，得到 %d %v", code, out)
+	}
+	// 超管仍可禁用管理员（正常的人事变动不能被这道闸堵死）
+	if code, out := doJSON(t, h, "POST", "/api/v1/users/"+audID+"/status", adminToken(),
+		map[string]any{"status": "disabled"}); code != http.StatusOK {
+		t.Errorf("超管禁用管理员应放行，得到 %d %v", code, out)
+	}
+}
+
+// 访问者目录与对象库是管理配置，不对普通登录用户开放（这两条此前一道闸都没有：
+// 门户里的任何账号都能拉走全量账号清单与内网地址对象）。
+func TestDirectoryAndObjectsRequireAdmin(t *testing.T) {
+	h := newTestServer(t)
+	tok := userToken("li.fang")
+	for _, p := range []string{"/api/v1/users", "/api/v1/objects"} {
+		if code, out := doJSON(t, h, "GET", p, tok, nil); code != http.StatusForbidden {
+			t.Errorf("普通用户读 %s 应 403，得到 %d %v", p, code, out)
+		}
+		if code, out := doJSON(t, h, "GET", p, adminToken(), nil); code != http.StatusOK {
+			t.Errorf("管理员读 %s 应 200，得到 %d %v", p, code, out)
+		}
+	}
+}
+
+// userIDOf 按账号查目录用户 id。
+func userIDOf(t *testing.T, h http.Handler, account string) string {
+	t.Helper()
+	code, out := doJSON(t, h, "GET", "/api/v1/users", adminToken(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("GET /users http %d: %v", code, out)
+	}
+	users, _ := out["users"].([]any)
+	for _, u := range users {
+		m := mapOf(t, u)
+		if m["account"] == account {
+			return m["id"].(string)
+		}
+	}
+	t.Fatalf("目录里找不到账号 %s", account)
+	return ""
 }
 
 // 防自锁在 REST 层的表现：最后一名超管降权/撤销/禁用都回 409，不是 500 也不是静默成功。

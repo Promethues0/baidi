@@ -172,14 +172,18 @@ func (s *Server) IsOpen(_, path string) bool {
 	return false
 }
 
-// requireAdmin 校验上下文中的角色为 admin，否则 403。
+// requireAdmin 校验调用方此刻仍是管理员，否则 403。
+//
+// ★令牌里的 role 只是入场券，**不是判据**：它是签发那一刻（最长 8h 前）的快照。
+// 只信它的话，被 RemoveAdmin 撤销身份、被禁用的人拿旧令牌照样读得到整个用户目录、
+// 在线会话（账号 + 源 IP + 网关）、资源策略与全部管理员账号——写面因 requirePerm
+// 现算而立刻 403，读面却停在快照上，"降权立刻算数"只兑现了一半，且这一半在
+// 日志里完全看不出异常（每一次都是一个合法管理员令牌的正常读取）。
+// 真正的判据与 requirePerm 同一处取数（store.AdminRoleFor：users.role 仍为 admin
+// 且角色未悬空），两面同真同假；读不到一律 fail-closed。
 func (s *Server) requireAdmin(w http.ResponseWriter, r *http.Request) bool {
-	c, ok := auth.FromContext(r.Context())
-	if !ok || c.Role != "admin" {
-		httpx.Error(w, http.StatusForbidden, "需要管理员权限")
-		return false
-	}
-	return true
+	_, ok := s.currentAdminRole(w, r)
+	return ok
 }
 
 // requireGateway 校验调用方是数据面网关。
@@ -591,6 +595,17 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "status must be active|disabled|locked|idle")
 		return
 	}
+	// 目录回查提到写之前：既是为了在动手前判「目标是不是管理员」（安全管理员不得
+	// 禁用/锁定另外两权的管理员，见 guardAdminTarget），也让回查失败变成
+	// fail-closed 的 500 而不是"状态已改、数据面封禁没挂上"的半成品。
+	target, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	if !s.guardAdminTarget(w, r, target, "置「"+statusZh[body.Status]+"」") {
+		return
+	}
 	if err := s.writer.SetUserStatus(r.Context(), id, body.Status); err != nil {
 		// 防自锁：禁用/锁定最后一名超管回 409（与降权、撤销同一道闸，只是走了另一个端点）。
 		s.audit(r, "admin", "用户 "+id+" 置「"+statusZh[body.Status]+"」未生效："+err.Error(), "fail")
@@ -602,13 +617,8 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 	// 新令牌来源由登录/knock-token 的账号状态门永久把守，限时封禁只负责掐掉存量在线。
 	zh := statusZh[body.Status]
 	detail := ""
-	if u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id }); err != nil {
-		// 状态已落库但目录回查失败：数据面封禁没挂上，留痕告警。
-		// 兜底：登录/knock-token 的账号状态门 fail-closed，该账号拿不到新令牌。
-		if accountBlocked(body.Status) {
-			s.audit(r, "security", "用户 "+id+" 置「"+zh+"」后目录回查失败，数据面即时封禁未生效（存量隧道待自然过期）", "fail")
-		}
-	} else if found {
+	if found {
+		u := target
 		key := normUser(u.Account)
 		s.mu.Lock()
 		switch body.Status {
@@ -647,6 +657,12 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 	u, found, uerr := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
 	if uerr != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	// ★重置管理员的口令 = 拿到那名管理员的全部权限：新口令是操作者自己定的，
+	// 他随即就能用目标账号登录（种子 admin 无 passkey 时连二次认证都不需要）。
+	// 这条路比 handleCreateUser 的提权路更短，那边已收口，这边必须同样收口。
+	if !s.guardAdminTarget(w, r, u, "重置登录口令") {
 		return
 	}
 	acct := ""
@@ -1366,7 +1382,16 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, b)
 }
 
+// handleUsers 访问者目录（身份源 + 组织树 + 用户清单）。
+//
+// ★这里此前**一道闸都没有**：任何登录用户（含门户普通账号）都能拉走全量账号、
+// 组织归属与在线态，而它同时也是"哪个账号是管理员"的枚举入口。加 requireAdmin
+// 之后它与 /online、/userstate 同门槛，并随 requireAdmin 一起吃「角色现算」——
+// 被撤销管理员身份的人拿旧令牌也读不到。
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.Users(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load users")

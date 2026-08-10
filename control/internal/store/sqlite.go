@@ -903,9 +903,12 @@ func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
 	if err != nil {
 		return UserDirBundle{}, err
 	}
+	// ★u.role（权威鉴权角色 admin|user）必须选出来：DirUser.Role 此前恒为空串，
+	// 而"目标账号是不是管理员"正是 api.guardAdminTarget 的判据——读不到就等于
+	// 把所有管理员都当成普通用户，那道闸会静默失效（不报错、不留痕）。
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id,u.name,u.account,u.org,u.org_key,u.device,u.ip,u.auth,u.last_login,u.online,u.status,u.risk,u.roles,
-       COALESCE(u.org_id,''), COALESCE(o.name,'')
+       COALESCE(u.org_id,''), COALESCE(o.name,''), COALESCE(u.role,'user')
 FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 	if err != nil {
 		return UserDirBundle{}, err
@@ -917,7 +920,7 @@ FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 		var online int
 		var roles, orgName string
 		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin,
-			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName); err != nil {
+			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName, &u.Role); err != nil {
 			return UserDirBundle{}, err
 		}
 		u.Online = online == 1

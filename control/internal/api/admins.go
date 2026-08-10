@@ -28,24 +28,71 @@ import (
 //   - **越权尝试落审计**：category=security、verdict=deny，措辞只记事实
 //     （谁、以什么角色、访问什么、缺哪个权限键）。
 func (s *Server) requirePerm(w http.ResponseWriter, r *http.Request, perm string) bool {
-	if !s.requireAdmin(w, r) {
+	role, ok := s.currentAdminRole(w, r)
+	if !ok {
 		return false
 	}
 	c, _ := auth.FromContext(r.Context())
-	role, ok, err := s.store.AdminRoleFor(r.Context(), c.Sub)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load admin role")
-		return false
-	}
-	if !ok {
-		s.audit(r, "security", "拒绝越权："+c.Sub+" 未分配管理员角色，访问 "+r.Method+" "+r.URL.Path, "deny")
-		httpx.Error(w, http.StatusForbidden, "当前账号未分配管理员角色，请联系超级管理员")
-		return false
-	}
 	if !role.Allows(perm) {
 		s.audit(r, "security", "拒绝越权："+c.Sub+"（角色「"+role.Name+"」）访问 "+
 			r.Method+" "+r.URL.Path+" 需要权限 "+perm, "deny")
 		httpx.Error(w, http.StatusForbidden, "角色「"+role.Name+"」无权执行该操作（需要权限："+perm+"）")
+		return false
+	}
+	return true
+}
+
+// currentAdminRole 解析调用方**此刻**生效的管理员角色，并在不通过时写好应答与审计。
+//
+// 令牌里的 role=admin 只是入场券；判据是 store.AdminRoleFor 现算的
+// 「users.role 仍为 admin 且 admin_role 指向一个存在的角色」。requireAdmin 与
+// requirePerm 都从这里取答案——两者若各查各的，读面与写面迟早在"这人还算不算管理员"
+// 这件事上给出两个答案（历史形态：撤销管理员后写面 403、读面照读到令牌过期）。
+func (s *Server) currentAdminRole(w http.ResponseWriter, r *http.Request) (store.AdminRole, bool) {
+	c, ok := auth.FromContext(r.Context())
+	if !ok || c.Role != "admin" {
+		httpx.Error(w, http.StatusForbidden, "需要管理员权限")
+		return store.AdminRole{}, false
+	}
+	role, found, err := s.store.AdminRoleFor(r.Context(), c.Sub)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load admin role")
+		return store.AdminRole{}, false
+	}
+	if !found {
+		s.audit(r, "security", "拒绝越权："+c.Sub+" 当前不是管理员或未分配管理员角色，访问 "+
+			r.Method+" "+r.URL.Path, "deny")
+		httpx.Error(w, http.StatusForbidden, "当前账号不是管理员或未分配管理员角色，请联系超级管理员")
+		return store.AdminRole{}, false
+	}
+	return role, true
+}
+
+// guardAdminTarget 目标账号是管理员时，把本次操作的门槛从 PermSecurity 抬到 PermAdmins。
+//
+// ★这道闸补的是三权分立上最短的一条旁路：重置口令与置账号状态都只查 PermSecurity，
+// 于是安全管理员可以
+//   - 把超管的口令重置成自己知道的值，再登进去拿一张 root 令牌（一次请求即打穿分权）；
+//   - 把审计管理员/系统管理员禁用掉——"定策略的人可以关掉看自己痕迹的人"，
+//     而 store.SetUserStatus 的防自锁只保护「最后一名可登录超管」，管不到另外两权。
+//
+// 判据是**目标账号在目录里的 role**（users.role='admin'），不是它有没有角色：
+// 角色悬空的管理员同样不该被安全管理员改口令/改状态。
+// 目标不在目录里（found=false，Role 为空）按普通账号放行——与下游"影响 0 行也不报错"一致。
+func (s *Server) guardAdminTarget(w http.ResponseWriter, r *http.Request, target store.DirUser, action string) bool {
+	if target.Role != "admin" {
+		return true
+	}
+	role, ok := s.currentAdminRole(w, r)
+	if !ok {
+		return false
+	}
+	if !role.Allows(store.PermAdmins) {
+		c, _ := auth.FromContext(r.Context())
+		s.audit(r, "security", "拒绝越权："+c.Sub+"（角色「"+role.Name+"」）对管理员账号「"+
+			target.Account+"」"+action+"，需要权限 "+store.PermAdmins, "deny")
+		httpx.Error(w, http.StatusForbidden,
+			"目标是管理员账号，"+action+"需要「管理员与角色管理」权限（"+store.PermAdmins+"）")
 		return false
 	}
 	return true

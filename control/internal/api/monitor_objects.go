@@ -154,7 +154,13 @@ func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
 
 // ── 对象库 ──
 
+// handleObjects 对象库清单（地址 / 服务 / 时间对象）。
+// 与紧随其后的 handleObjectsUsage 同门槛：对象库是管理配置（内网网段、端口、时段），
+// 此前这一条漏了闸，任何登录用户都能拉走一份内网地址清单。
 func (s *Server) handleObjects(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.Objects(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load objects")

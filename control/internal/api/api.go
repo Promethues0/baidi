@@ -1449,7 +1449,15 @@ func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"exists": true, "override": po})
 }
 
+// handleAuthSrc 认证源页顶部聚合（源清单 + 归属账号计数）。
+//
+// ★权限必须与 GET /api/v1/authsrc/sources 同档（requireAdmin，角色现算）：
+// 两个端点读的是同一批库行，聚合这份还多带账号计数。低一档就等于给同一份数据
+// 开了条侧门——"外部目录接了哪些源、各接进来多少人"是攻击者做社工的现成情报。
 func (s *Server) handleAuthSrc(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.AuthSrc(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load authsrc")

@@ -347,6 +347,83 @@ func (s *SQLiteStore) backfillExternalUserOrg(ctx context.Context) error {
 	return s.SetSetting(ctx, extUserOrgBackfillMarker, nowStr())
 }
 
+// AuthSrc 认证源页顶部聚合：**只由 auth_sources 真实行构建**，与
+// GET /api/v1/authsrc/sources 同一份数据（此前它整段来自 Memory 演示种子，
+// 与同一页下半截的真实配置各说各话）。
+//
+// ★这里刻意不复用 AuthSources()：那条路径会顺带去 auth_source_secrets 取
+// 凭据指纹，而本聚合是给"看一眼有哪些源"用的只读视图，没有任何回显凭据的
+// 理由——少一条碰凭据表的调用点，就少一处将来被人 SELECT * 的机会。
+func (s *SQLiteStore) AuthSrc(ctx context.Context) (AuthSrcBundle, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,name,kind,enabled,priority FROM auth_sources ORDER BY (kind='local') DESC, priority, id`)
+	if err != nil {
+		return AuthSrcBundle{}, err
+	}
+	defer rows.Close()
+	out := AuthSrcBundle{Sources: []AuthSource{}}
+	for rows.Next() {
+		var a AuthSource
+		var enabled int
+		if err := rows.Scan(&a.Key, &a.Name, &a.Type, &enabled, &a.Priority); err != nil {
+			return AuthSrcBundle{}, err
+		}
+		a.Enabled = enabled != 0
+		out.Sources = append(out.Sources, a)
+	}
+	if err := rows.Err(); err != nil {
+		return AuthSrcBundle{}, err
+	}
+	bound, local, err := s.authSourceAccountCounts(ctx)
+	if err != nil {
+		return AuthSrcBundle{}, err
+	}
+	for i := range out.Sources {
+		if out.Sources[i].Type == "local" {
+			out.Sources[i].BoundAccounts = local
+			continue
+		}
+		out.Sources[i].BoundAccounts = bound[out.Sources[i].Key]
+	}
+	return out, nil
+}
+
+// authSourceAccountCounts 返回「外部源 id → 已绑定账号数」与「本地账号数」。
+//
+// 本地口径取"没有任何外部绑定的 users 行"而不是"pass_hash 非空"：外部账号的
+// pass_hash 恒空没错，但存量本地行里也可能有空口令（待改密的新建号），
+// 按口令判会把它们从本地目录里抹掉——按绑定关系判才是这两类账号的真实分界。
+func (s *SQLiteStore) authSourceAccountCounts(ctx context.Context) (map[string]int, int, error) {
+	bound := map[string]int{}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT source_id, COUNT(*) FROM auth_source_bindings GROUP BY source_id`)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id string
+		var n int
+		if err := rows.Scan(&id, &n); err != nil {
+			return nil, 0, err
+		}
+		bound[id] = n
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, err
+	}
+	// ★子查询必须滤掉 NULL/空 user_id：SQL 里 `x NOT IN (…, NULL)` 恒为 NULL（假），
+	// 只要绑定表出现一条 user_id 为空的行，本地账号数就会**静默变成 0**。
+	var local int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM users WHERE id NOT IN
+		   (SELECT user_id FROM auth_source_bindings WHERE COALESCE(user_id,'')<>'')`).
+		Scan(&local); err != nil {
+		return nil, 0, err
+	}
+	return bound, local, nil
+}
+
 // seedLocalAuthSource 确保「本地目录」这条认证源恒存在。
 //
 // ★这是迁移期的回填，不是普通播种：既有库升级上来时 auth_sources 表是空的，

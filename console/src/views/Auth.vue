@@ -21,9 +21,13 @@
     <div v-show="tab === 'source'">
       <div class="bd-srctoolbar">
         <div class="bd-srctoolbar__sub">
-          已接入 <b>{{ recs.length }}</b> 个身份源
-          <!-- ★刻意不显示"纳管用户数"：那个数拿不到（LDAP 要全量遍历目录才能数），
-               原实现里的 1160 是编的。显示一个 0 会让人以为是真统计出来的。 -->
+          已接入 <b>{{ recs.length }}</b> 个身份源<!--
+            ★聚合拿不到时整条不渲染，而不是显示 0：「0 个绑定账号」与「我没拿到计数」
+               是两回事，后者不该长成前者的样子。
+          --><template v-if="sources.length"> · 外部目录已绑定 <b>{{ totalBoundExternal }}</b> 个账号</template>
+          <!-- ★"已绑定账号"= auth_source_bindings 里的真实条数（外部用户登录过一次即建绑定），
+               **不是**目录纳管用户数：后者要全量遍历 LDAP 才数得出来，白帝没有那个能力，
+               原实现里的「AD 域 1160 用户」是凭空写的。 -->
           <span class="bd-srchint">登录按「本地目录 → 外部源（按优先级）」依次询问</span>
         </div>
         <button class="bd-btn" @click="openSrcCreate"><icon-plus />接入认证源</button>
@@ -58,6 +62,10 @@
           </div>
 
           <div class="bd-srccard__foot">
+            <div class="bd-srccard__kv">
+              <span>{{ s.kind === 'local' ? '本地账号' : '已绑定账号' }}</span>
+              <b>{{ boundText(s.id) }}</b>
+            </div>
             <div class="bd-srccard__kv">
               <span>凭据</span>
               <b v-if="s.kind === 'local'">—</b>
@@ -581,23 +589,24 @@ import {
   type LdapConfig, type OidcConfig
 } from '@/lib/api';
 
-type SrcType = AuthSource['type'];
+/** 目录/源类型的图标与配色键。★页面本地定义，刻意不再从 API 类型推导：
+ *  这套映射要覆盖「认证策略」里存量策略引用的历史目录名（radius/oauth/sms/cert），
+ *  而那几类后端从未实现、也不会出现在真实的认证源列表里。 */
+type SrcType = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
 type CondField = RuleCond['field'];
 type Action = AdaptiveRule['action'];
 
 const tab = ref<'source' | 'policy' | 'rule'>('source');
 const live = ref(false);
 
-/* ── 内置 mock（结构同后端 AuthSrcBundle）── */
-const MOCK_SOURCES: AuthSource[] = [
-  { key: 'local', name: '本地账号库', type: 'local', status: 'online', users: 312, primary: true },
-  { key: 'ad', name: '总部 AD 域', type: 'ad', status: 'online', users: 1846, primary: false },
-  { key: 'ldap', name: 'OpenLDAP 目录', type: 'ldap', status: 'online', users: 524, primary: false },
-  { key: 'radius', name: 'RADIUS 接入', type: 'radius', status: 'warning', users: 96, primary: false },
-  { key: 'oauth', name: '企业微信 OAuth', type: 'oauth', status: 'online', users: 738, primary: false },
-  { key: 'sms', name: '短信验证码', type: 'sms', status: 'online', users: 0, primary: false },
-  { key: 'cert', name: 'USB-Key 证书', type: 'cert', status: 'warning', users: 64, primary: false }
-];
+/* ★这里曾经有一份 MOCK_SOURCES：7 条编造的认证源（「总部 AD 域 1846 用户」
+ * 「OpenLDAP 目录 524 用户」…），与后端那份同样编造的种子互相印证，看起来毫无破绽。
+ * 已整体删除——认证源列表现在只来自 GET /api/v1/authsrc/sources 与 /authsrc 聚合，
+ * 两者读的都是 auth_sources 真实行。拉不到就是空列表，不回落演示数据。
+ *
+ * 下面的 MOCK_RULES 保留，但它服务的是「自适应认证规则」页签那个**明确标注为
+ * 交互沙盘**的编排器（改动不落库、不参与登录判定，页面上有醒目提示）。
+ * 真正在登录链路生效的自适应认证是「认证策略」页签（authpolicy 实时求值）。 */
 const MOCK_RULES: AdaptiveRule[] = [
   {
     id: 'r1', name: '弱口令 + 异地登录 → 阻断', enabled: true, logic: 'AND', action: 'block', priority: 1,
@@ -628,7 +637,9 @@ const MOCK_RULES: AdaptiveRule[] = [
   }
 ];
 
-const sources = ref<AuthSource[]>(MOCK_SOURCES);
+/** 认证源聚合（GET /api/v1/authsrc）：与下面的 recs 同一批库行，多带一个真实账号计数。 */
+const sources = ref<AuthSource[]>([]);
+/** 沙盘规则（本地推演，见上）。 */
 const rules = ref<AdaptiveRule[]>(MOCK_RULES);
 
 /* ══════════ 认证源：真落库的那一套 ══════════
@@ -791,7 +802,22 @@ function removeSource(r: AuthSourceRec) {
   });
 }
 
-const totalUsers = computed(() => sources.value.reduce((s, x) => s + x.users, 0));
+/** 源 id → 归属该源的账号数（外部源 = 已绑定条数；本地目录 = 无外部绑定的账号数）。
+ *  ★这不是"目录纳管用户数"：后者要遍历整个 LDAP 才数得出来，白帝没有那个能力，
+ *  原实现里的 1160 就是凭空写的。拿不到聚合时返回 undefined，卡片显示 — 而不是 0。 */
+const boundBySource = computed<Record<string, number>>(() => {
+  const m: Record<string, number> = {};
+  for (const s of sources.value) m[s.key] = s.boundAccounts;
+  return m;
+});
+function boundText(id: string): string {
+  const n = boundBySource.value[id];
+  return n === undefined ? '—' : `${n}`;
+}
+/** 外部源已绑定账号合计（本地目录不计入：那是本地账号，不是"从外部目录接进来的人"）。 */
+const totalBoundExternal = computed(() =>
+  sources.value.filter((s) => s.type !== 'local').reduce((n, s) => n + s.boundAccounts, 0)
+);
 
 /* ── 认证源映射 ── */
 const TYPE_LABEL: Record<SrcType, string> = {
@@ -804,19 +830,14 @@ const TYPE_ICON: Record<SrcType, string> = {
   local: 'icon-user', ad: 'icon-storage', ldap: 'icon-mind-mapping', radius: 'icon-wifi',
   oauth: 'icon-link', sms: 'icon-message', cert: 'icon-lock'
 };
-function typeLabel(t: SrcType) { return TYPE_LABEL[t]; }
-function typeColor(t: SrcType) { return TYPE_COLOR[t]; }
 function srcIcon(t: SrcType) { return TYPE_ICON[t]; }
 function srcIconStyle(t: SrcType) {
   const c = TYPE_COLOR[t];
   return { color: c, background: c + '14' };
 }
-function statusColor(status: string) {
-  return status === 'online' ? 'var(--bd-success)' : status === 'warning' ? 'var(--bd-warning)' : 'var(--bd-danger)';
-}
-function statusLabel(status: string) {
-  return status === 'online' ? '在线' : status === 'warning' ? '告警' : '离线';
-}
+// ★statusColor/statusLabel（在线/告警/离线）随 AuthSource.status 一起删除：
+// 那个状态恒为 online，是在替一台可能早已宕掉的目录打包票。认证源可达性只有
+// 「测试连接」（probe）那一刻才知道，结果就地渲染在卡片上。
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 /* ── 规则：动作 ── */
@@ -1124,14 +1145,16 @@ const evalResult = computed<{ rule: AdaptiveRule | null; action: Action | null }
 /* ── 拉取 ── */
 onMounted(async () => {
   try {
+    // 聚合只用来取真实账号计数（源清单本身以 loadSources 那份为准，两者同源同库）。
     const b = await api<AuthSrcBundle>('/authsrc');
-    sources.value = b.sources;
-    rules.value = b.rules;
+    sources.value = b.sources ?? [];
     live.value = true;
-  } catch { live.value = false; }
+  } catch {
+    // 拿不到就清空计数：卡片上显示 —，而不是继续挂着上一次的数字或回落演示值。
+    sources.value = [];
+    live.value = false;
+  }
   await loadPolicies();
-  // 认证源是真数据，与上面那个降级 bundle 分开加载：
-  // 后者拿不到时会回落到 MOCK（供规则两个 tab 演示），前者拿不到就留空。
   await loadSources();
 });
 </script>

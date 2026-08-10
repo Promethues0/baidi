@@ -310,17 +310,35 @@ export interface SaveAuditForwardResp { ok: boolean; target: AuditForwardTarget;
 export interface AuditForwardTestResp { ok: boolean; detail: string; elapsedMs?: number }
 export interface AuditForwardFlushResp { ok: boolean; reset: number; target: AuditForwardTarget }
 
-/* ── 认证源接入（store.AuthSrcBundle）── */
-export interface AuthSource { key: string; name: string; type: 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert'; status: string; users: number; primary: boolean }
+/* ── 认证源接入 · 聚合视图（GET /api/v1/authsrc → store.AuthSrcBundle）──
+ *
+ * 与下面的 AuthSourceRec 同源（都读 auth_sources），差别只在这份多带一个
+ * **账号计数**、不带凭据元信息。原来的 status / users / primary 三个字段已删除：
+ * status 恒 online 是替一台可能早已宕掉的目录打包票；users（「AD 域 1160 用户」）
+ * 纯属编造——目录规模要遍历整个 LDAP 才数得出来，白帝没有那个能力。
+ */
+export interface AuthSource {
+  key: string;
+  name: string;
+  type: AuthSrcKind | string;
+  enabled: boolean;
+  priority: number;
+  /** 本系统内归属该源的账号数：外部源 = 已绑定条数，本地目录 = 无外部绑定的账号数。
+   *  **不是目录纳管用户数**。 */
+  boundAccounts: number;
+}
+export interface AuthSrcBundle { sources: AuthSource[] }
+
+/** 自适应规则沙盘（Auth.vue 的「自适应认证规则」页签本地推演用）。
+ *  ★后端**没有**这套规则：真实生效的自适应认证是认证策略（AuthPolicy 的
+ *  enhance/exempt，登录链路真求值）。这两个接口只描述前端沙盘的形状。 */
 export interface RuleCond { field: 'weakPwd' | 'geoAnomaly' | 'offHours' | 'riskScore' | 'untrustedDevice' | 'newDevice'; op: 'is' | 'gt' | 'in'; value: string }
 export interface AdaptiveRule { id: string; name: string; enabled: boolean; logic: 'AND' | 'OR'; conditions: RuleCond[]; action: 'allow' | 'mfa' | 'stepup' | 'block'; priority: number }
-export interface AuthSrcBundle { sources: AuthSource[]; rules: AdaptiveRule[] }
 
-/* ── 认证源接入 · 真实落库的那一套（GET /api/v1/authsrc/sources）──
+/* ── 认证源接入 · 单条配置（GET /api/v1/authsrc/sources）──
  *
- * ★与上面的 AuthSource 是**两回事**：那个是历史内存种子的形状（带编造的 users 数），
- * 这个是真落库的配置。用户数这类拿不到的字段刻意不在这里——
- * 显示一个 0 会让人以为是真的统计出来的。
+ * 与上面的 AuthSource 同一批库行的两个投影：这一份带凭据元信息（只写不读的
+ * 存在性 + 指纹），编辑抽屉用；上一份带账号计数，卡片汇总用。
  */
 export type AuthSrcKind = 'local' | 'ldap' | 'ad' | 'oidc';
 

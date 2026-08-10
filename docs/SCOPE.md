@@ -12,23 +12,25 @@
 | 5 | 监控中心 | ✅ | `MonitorDashboard` 安全监控大屏 |
 | 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups` |
 | 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver` |
-| 8 | 应用管理（资源发布） | ✅ | `ResourceObjects/Approval/Portal/Library` |
+| 8 | 应用管理（资源发布） | ➖ | 隧道应用发布/资源鉴权/JIT 审批已真实现；**七层 Web 代理（8.3.3）、DLP/水印/免认证/XFF 未做**（网关是 L4 隧道，无执行载体） |
 | 9 | 终端管理 | ✅ | `IdentityDevices` + `IdentityCompliance`（终端合规基线 = 设备 posture，属身份/设备信任，**保留**） |
 | 10 | 策略管理（全局/用户策略） | ✅ | `Policy` 统一策略 + `PolicySimulator` + `LoginFlowSim` |
 | **11** | **UEM 统一终端数据安全** | ❌ | **整章不做**：移动/PC 数据安全、沙箱工作空间、外发审批等 DLP 移出范围 |
 | **12** | **安全中心** | ➖ | **砍管理模块**（安全基线管理 / 虚拟网络域 / 可信应用 / 终端基线管理页）；**SPA 服务隐身保留**为安全代理网关内建能力（隐身价值主张底座，烛龙 console 本就不暴露专页，天然对齐） |
 | **13** | 深信服设备联动与第三方设备管理 | ➖ | 深信服专有联动（EDR/AC 私有协议）不做；**保留开放 API/标准化第三方联动**（见 ch21） |
-| 14 | 主动防御（欺骗防御 / 恶意识别） | ✅ | `DefensePolicy` + `DefenseCorrelate` + `IdentityIPRep` |
+| 14 | 主动防御（欺骗防御 / 恶意识别） | ➖ | **仅处置末端真实**（强制下线/账号冻结/JIT 撤销真落数据面）；安全雷达/蜜罐诱捕/恶意识别未实现，规划页未建 |
 | 15 | 系统管理 | ✅ | `SystemCerts/License/RBAC/Logging/Notify/Time/HA/Backup/Report/Diag` |
-| 16 | 审计中心（日志） | ✅ | `AuditEvents` + `AuditChain`（HMAC-SM3 审计链） |
+| 16 | 审计中心（日志） | ➖ | 写操作实时落库已真（45+ 审计点）；HMAC-SM3 防篡改链/留存轮转/Syslog 外送在建 |
 | 17 | IPSec VPN 组网 | ✅ | `GatewayIpsec` 站点编排（复用烛龙 IPSEC 引擎） |
-| 18 | 地址转换（NAT） | ✅ | 网关数据面能力，console 无专页 |
+| 18 | 地址转换（NAT） | ❌ | SNAT/DNAT/端口映射未实现（仅 IPSec 内建 NAT-T 穿越，属第 17 章能力，不是本章的 NAT） |
 | 19 | 典型部署场景 | ✅ | 文档级，后续补 |
 | 20 | 非功能性需求（NFR） | ✅ | 安全/性能/可靠/信创/合规，贯穿 |
 | 21 | 集成、开放能力与数据模型 | ✅ | 认证源 / SSO / 开放平台 API/SDK / 日志外送 |
 | 22 | 需求优先级与路线图 | ✅ | 白帝自有路线图（后续补 `docs/charter`） |
 
 ## Console IA（6 中心 + 系统管理，40 页全保留）
+
+> ⚠️ 下面是**规划 IA**（自烛龙沿袭的目标形态），不是现状。实际落地的导航见 `console/src/nav.ts`：4 组 16 页，页名与此处的 `MonitorDashboard/IdentityUsers` 等规划名不一一对应。以代码为准。
 
 ```
 概览     安全监控大屏 · 运行总览

@@ -326,12 +326,15 @@ sequenceDiagram
 
 ### ⚠️ 内存种子（结构真实、数据是演示值，无落库/无真实采集）
 
+`SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。当前恰好 5 个 Store 方法仍走种子（其余全部已被 SQLite 覆盖）：
+
 | 页面 | store 方法 | 说明 |
 |---|---|---|
 | 网关与隐身 · 区域拓扑 | `Memory.Gateway` | "华东/华南出口"是硬编码拓扑；**真实网关清单**在 `GET /api/v1/gateways`（mTLS 注册来源） |
-| 认证源接入 | `Memory.AuthSrc` | LDAP/OAuth 接入未实现，只有配置界面 |
-| 系统管理 · 集群信息 | `Memory.System` | 管理员分组/集群节点是演示值 |
+| 认证源接入 · 顶部卡片 | `Memory.AuthSrc` | 卡片上的源列表与「1160 用户」等数字是种子。**注意：LDAP/OIDC 接入本身已是真实现**（见下文认证源一节），真实配置走 `GET /api/v1/authsrc/sources`——同一页两个数据源，别混 |
+| 系统管理 · 三权分立/集群 | `Memory.System` | 管理员分组/管理员账号/集群节点全部是演示值，无对应库表 |
 | 策略管理 · 组织树 | `Memory.PolicyBundle` | 组织树是种子；但**策略覆盖**（`SavePolicyOverride`）真落库 |
+| 在线用户 · 无网关回退 | `Memory.OnlineSessions` | 有网关 mTLS 上报时走真实会话（`source=live`），无网关时回退种子（`source=demo`，页面有标注） |
 | 大屏 `/screen` | 前端 `MOCK_*` 常量 | 纯展示 |
 
 ### ✅ IPSec 站点组网（真，但边界很硬）

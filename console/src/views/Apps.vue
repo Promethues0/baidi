@@ -83,57 +83,24 @@
               <a-option v-for="c in categories.filter(x => x.key !== 'all')" :key="c.key" :value="c.key">{{ c.label }}</a-option>
             </a-select>
           </div>
-          <template v-if="wz.mode === 'tunnel'">
-            <div class="bd-fld"><label>内网地址</label><a-input v-model="wz.f.addr" placeholder="10.30.5.8:22" class="bd-mono" /></div>
-            <div class="bd-fld"><label>传输协议</label>
-              <a-radio-group v-model="wz.f.proto" type="button"><a-radio value="tcp">TCP</a-radio><a-radio value="udp">UDP</a-radio></a-radio-group>
-            </div>
-            <div class="bd-fld bd-fld--row"><div><label>多后端负载均衡</label><span class="bd-fld__d">多个后端地址由网关自动分担</span></div><a-switch v-model="wz.f.lb" /></div>
-          </template>
-          <template v-else-if="wz.mode === 'web'">
-            <div class="bd-fld"><label>内网 URL</label><a-input v-model="wz.f.addr" placeholder="http://10.20.1.10:8080" class="bd-mono" /></div>
-            <div class="bd-fld"><label>对外访问域名</label><a-input v-model="wz.f.domain" placeholder="oa.acme.com" class="bd-mono" /></div>
-            <div class="bd-fld"><label>SSL 证书</label><a-select v-model="wz.f.cert" placeholder="选择证书"><a-option value="wild">*.acme.com（通配）</a-option><a-option value="self">自签证书</a-option></a-select></div>
-          </template>
-          <template v-else>
-            <div class="bd-fld"><label>泛域名</label><a-input v-model="wz.f.addr" placeholder="*.cnki.net" class="bd-mono" /></div>
-            <div class="bd-fld"><label>公网监听端口</label><a-input-number v-model="wz.f.port" :min="1" :max="65535" :default-value="443" /></div>
-          </template>
-        </div>
-
-        <!-- Step 3: 高级与安全（能力联动校验） -->
-        <div v-else-if="wz.step === 2" class="bd-wz__body">
-          <div v-if="wz.mode === 'tunnel'" class="bd-wz__note"><icon-info-circle />DLP / 水印 / 隧道转 Web 仅对 WEB 应用生效，当前为隧道应用已自动隐藏。</div>
-          <template v-else>
-            <div class="bd-fld bd-fld--row"><div><label>数据防泄漏（DLP + 水印）</label><span class="bd-fld__d">页面叠加含用户/时间的水印，支持截屏溯源</span></div><a-switch v-model="wz.f.dlp" /></div>
-            <div v-if="wz.f.dlp" class="bd-wz__sub">水印预览：<span class="bd-wm">{{ wz.f.name || 'OA 协同办公' }} · zhang.wei · 2026-06-22</span></div>
-            <div class="bd-sec2">浏览器安全管控</div>
-            <div class="bd-chk-grid">
-              <a-checkbox v-model="wz.f.noCopy">禁止复制</a-checkbox>
-              <a-checkbox v-model="wz.f.noPrint">禁止打印</a-checkbox>
-              <a-checkbox v-model="wz.f.noDownload">禁止下载</a-checkbox>
-              <a-checkbox v-model="wz.f.noRight">禁用右键</a-checkbox>
-              <a-checkbox v-model="wz.f.noDebug">禁用调试</a-checkbox>
-            </div>
-            <div class="bd-fld bd-fld--row" style="margin-top: 12px"><div><label>透传真实客户端 IP（XFF）</label><span class="bd-fld__d">为后端 WAF / 审计保留来源 IP</span></div><a-switch v-model="wz.f.xff" /></div>
-          </template>
-        </div>
-
-        <!-- Step 4: 授权与发布 -->
-        <div v-else class="bd-wz__body">
-          <div class="bd-fld"><label>授权范围</label>
-            <a-select v-model="wz.f.scope" multiple placeholder="选择可访问的用户 / 组" allow-clear>
-              <a-option value="dev">研发部</a-option><a-option value="sales">销售部</a-option><a-option value="cs">客服中心</a-option><a-option value="all">全体员工</a-option>
+          <div v-if="wz.mode === 'tunnel'" class="bd-fld"><label>内网地址</label><a-input v-model="wz.f.addr" placeholder="10.30.5.8:22" class="bd-mono" /></div>
+          <div v-else-if="wz.mode === 'web'" class="bd-fld"><label>内网 URL</label><a-input v-model="wz.f.addr" placeholder="http://10.20.1.10:8080" class="bd-mono" /></div>
+          <div v-else class="bd-fld"><label>泛域名</label><a-input v-model="wz.f.addr" placeholder="*.cnki.net" class="bd-mono" /></div>
+          <div class="bd-fld"><label>关联受控资源</label>
+            <a-select v-model="wz.f.resourceId" placeholder="选择资源（决定客户端路由与 JIT 申请）" allow-clear>
+              <a-option v-for="r in resources" :key="r.id" :value="r.id">{{ r.name }}（{{ r.backend }}）</a-option>
             </a-select>
+            <span v-if="!wz.f.resourceId" class="bd-fld__d">不关联资源的应用无法经隧道访问、也无法被 JIT 申请——客户端剖面会对此显式告警。</span>
           </div>
-          <div class="bd-fld bd-fld--row"><div><label>有效期</label><span class="bd-fld__d">到期前 3 天提醒，可走自助续期</span></div>
-            <a-radio-group v-model="wz.f.ttl" type="button" size="small"><a-radio value="forever">永久</a-radio><a-radio value="90d">90 天</a-radio><a-radio value="custom">自定义</a-radio></a-radio-group>
-          </div>
-          <div class="bd-fld bd-fld--row"><div><label>启用权限自助申请</label><span class="bd-fld__d">未授权用户可在应用门户提交申请，走审批流</span></div><a-switch v-model="wz.f.selfApply" /></div>
+        </div>
+
+        <!-- Step 3: 确认发布 -->
+        <div v-else class="bd-wz__body">
           <div class="bd-wz__summary">
             <b>发布摘要</b>
-            <div>{{ modeMeta(wz.mode || 'web').label }} · {{ wz.f.name || '未命名' }} · {{ wz.f.addr || '—' }} · 授权 {{ wz.f.scope.length || 0 }} 个范围</div>
+            <div>{{ modeMeta(wz.mode || 'web').label }} · {{ wz.f.name || '未命名' }} · {{ wz.f.addr || '—' }} · {{ wz.f.resourceId ? `关联资源 ${wz.f.resourceId}` : '未关联资源' }}</div>
           </div>
+          <div class="bd-wz__note"><icon-info-circle />访问授权在「安全防护 → 资源策略」按资源配置（角色/用户白名单），时限授予走「JIT 即时访问」审批流。</div>
         </div>
 
         <div class="bd-wz__foot">
@@ -141,7 +108,7 @@
           <div style="flex: 1" />
           <button class="bd-btn bd-btn--ghost" @click="wz.open = false">取消</button>
           <button class="bd-btn" :disabled="!canNext" :style="{ opacity: canNext ? 1 : 0.5 }" @click="next">
-            {{ wz.step < 3 ? '下一步' : '保存并继续授权' }}
+            {{ wz.step < 2 ? '下一步' : '发布应用' }}
           </button>
         </div>
       </div>
@@ -152,7 +119,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AppBundle, type App, type AppCategory } from '@/lib/api';
+import { api, type AppBundle, type App, type AppCategory, type Resource, type ResourcesResp } from '@/lib/api';
 
 const live = ref(false);
 const categories = ref<AppCategory[]>([{ key: 'all', label: '全部应用', count: 0 }]);
@@ -168,32 +135,39 @@ const MODES = [
 function modeMeta(m: string) { return MODES.find((x) => x.key === m) ?? MODES[1]; }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
-const STEPS = ['发布模式', '基础配置', '高级与安全', '授权与发布'];
+// 向导只收集会真正提交后端的字段——收集了却静默丢弃的控件比没有更糟（见 CLAUDE.md 静默失效缺陷族）。
+// DLP / 水印 / 浏览器管控 / XFF / 负载均衡等依赖七层代理，网关当前是 L4 隧道，暂无执行方，故不提供入口。
+const STEPS = ['发布模式', '基础配置', '确认发布'];
 const wz = reactive({
   open: false, step: 0, mode: '' as '' | 'tunnel' | 'web' | 'global',
-  f: { name: '', cat: '', addr: '', proto: 'tcp', lb: false, domain: '', cert: '', port: 443, dlp: true, noCopy: true, noPrint: false, noDownload: true, noRight: false, noDebug: false, xff: true, scope: [] as string[], ttl: 'forever', selfApply: true }
+  f: { name: '', cat: '', addr: '', resourceId: '' }
 });
-function openWizard() { wz.open = true; wz.step = 0; wz.mode = ''; }
+function openWizard() { wz.open = true; wz.step = 0; wz.mode = ''; wz.f.name = ''; wz.f.cat = ''; wz.f.addr = ''; wz.f.resourceId = ''; }
 const canNext = computed(() => {
   if (wz.step === 0) return !!wz.mode;
   if (wz.step === 1) return !!wz.f.name && !!wz.f.addr;
   return true;
 });
 const publishing = ref(false);
+const resources = ref<Resource[]>([]);
 async function load() {
   try {
     const b = await api<AppBundle>('/apps');
     categories.value = b.categories; apps.value = b.apps; live.value = true;
   } catch { live.value = false; }
+  try {
+    const r = await api<ResourcesResp>('/resources');
+    resources.value = r.resources ?? [];
+  } catch { resources.value = []; }
 }
 async function next() {
   if (!canNext.value) return;
-  if (wz.step < 3) { wz.step++; return; }
+  if (wz.step < 2) { wz.step++; return; }
   publishing.value = true;
   try {
     await api('/apps', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat || 'office' })
+      body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat || 'office', resourceId: wz.f.resourceId })
     });
     wz.open = false;
     Message.success(`应用「${wz.f.name}」已发布并落库`);

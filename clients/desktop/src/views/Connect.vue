@@ -130,7 +130,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted, onBeforeUnmount } from 'vue';
+import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, fetchProfile, type PortalLoginResp } from '@/lib/api';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError } from '@/lib/store';
@@ -316,6 +316,20 @@ const trustText = computed(() => {
   if (v.verdict === 'block') return '接入受限';
   if (hasFail.value || v.verdict !== 'allow') return '存在风险';
   return hasUndet.value ? '部分项无法判定' : '终端可信';
+});
+
+/**
+ * 控制面判定档位一变就重拉剖面。
+ *
+ * ★没有这条的话，「因终端合规降级：xx 已暂停访问」这句话要等到用户下次点接入
+ * （或切到「应用」页）才会出现——而降权恰恰发生在**已经接入之后**：用户看到的是
+ * 环境检测那枚"存在风险"的小标签，以及一个打不开的财务系统，两者之间没有任何连线。
+ * 剖面在这一刻重拉，接入信息卡里就会立刻多出那条写明原因与影响面的告警。
+ * 只在档位真的变化时拉，不跟着 60s 心跳空转。
+ */
+watch(() => postureVerdict.value?.verdict, (now, before) => {
+  if (!authedNow.value || !now || now === before) return;
+  void loadProfile();
 });
 
 /* 重开 app 时若隧道仍在跑，恢复已接入态 */

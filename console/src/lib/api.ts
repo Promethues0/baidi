@@ -268,6 +268,12 @@ export interface Resource {
   allowGroups?: string[];
   /** 授权组织 id（store.Resource.AllowOrgs）。★含子树：授权某组织即涵盖其全部后代组织的用户。 */
   allowOrgs?: string[];
+  /**
+   * 资源敏感度（store.Resource.Sensitivity）。**风险降权的唯一判据**：
+   * 终端被判 degrade 的用户，high 资源会从网关允许集合与客户端剖面里同时摘除，
+   * low/normal 照常可访问（降权而非全断）。空 = 未标注，后端按 normal 处理。
+   */
+  sensitivity?: 'low' | 'normal' | 'high';
   addrRef?: string; svcRef?: string;
 }
 /**
@@ -300,7 +306,13 @@ export interface OnlineResp { sessions: OnlineSession[]; generatedAt: string; so
 export interface UserStateBucket { key: string; label: string; count: number; tone: 'danger' | 'warning' | 'info' | 'normal' }
 export interface UserStateItem {
   id: string; user: string; account: string; org: string;
-  state: 'risk-high' | 'risk-low' | 'locked' | 'disabled' | 'idle';
+  /**
+   * 档位。★与风险引擎的处置四档**同一套名字**：block/degrade/gray 就是控制面此刻
+   * 正在执行的那一档（degrade 已摘掉高敏资源、gray 每轮下发都在记 observing 审计），
+   * locked/disabled 是与风险正交的目录账号状态。
+   * 旧的 risk-high/risk-low/idle 已删除——同一个概念在两处两套名字，管理员无从对照。
+   */
+  state: 'block' | 'degrade' | 'gray' | 'locked' | 'disabled';
   risk: 'none' | 'low' | 'high'; online: boolean;
   reasons: string[]; lastEvent: string; lastSeen: string;
   /** 该账号当前有生效的登录防爆破锁定（login_lockouts）。与目录 status=locked 是两种锁：
@@ -447,7 +459,14 @@ export interface WebauthnCredential {
   name: string; createdAt: string; lastUsedAt: string;
 }
 export interface WebauthnCredentialsResp { credentials: WebauthnCredential[]; enabled: boolean }
-export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean; resourceId: string }
+export interface PortalTile {
+  id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
+  sensitivity: 'low' | 'normal' | 'high';
+  accessible: boolean; resourceId: string;
+  /** 因终端风险降权而不可访问（而非缺授权）。降权否决压过 JIT 授予，此时提交申请必然无效，
+   *  用户该做的是修复终端环境——两种"不可访问"的下一步动作完全不同，必须分开提示。 */
+  degraded?: boolean;
+}
 export interface PortalAppsResp { apps: PortalTile[] }
 
 /* ── JIT 即时访问申请 / 时限授予（store.AccessRequest / store.JitGrant）── */

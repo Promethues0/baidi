@@ -57,7 +57,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
+          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>敏感度</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="r in resources" :key="r.id">
@@ -67,6 +67,13 @@
               <span class="bd-mono">{{ r.backend }}</span>
               <a-tooltip v-if="r.addrRef || r.svcRef" :content="refLabel(r)">
                 <span class="bd-srctag"><icon-link />源自对象库</span>
+              </a-tooltip>
+            </td>
+            <td>
+              <!-- 高敏是**可执行**的标记：终端被判降权的用户会从这一行的允许集合里被摘掉
+                   （网关 denyUsers + 客户端剖面同步），不是一枚纯展示的标签。 -->
+              <a-tooltip :content="sensTip(r.sensitivity)">
+                <span class="bd-rtag" :style="tagStyle(sensColor(r.sensitivity))">{{ sensLabel(r.sensitivity) }}</span>
               </a-tooltip>
             </td>
             <td>
@@ -102,7 +109,7 @@
               <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="del(r)">删除</span>
             </td>
           </tr>
-          <tr v-if="!resources.length"><td colspan="7" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
+          <tr v-if="!resources.length"><td colspan="8" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
         </tbody>
       </table>
     </div>
@@ -117,6 +124,14 @@
         <div class="bd-uform__f"><label>后端 host:port<i class="req">*</i></label>
           <a-input v-model="form.backend" placeholder="如 10.20.1.10:8080（仅源自此处，绝不取客户端值＝防 SSRF）" />
           <div class="bd-uform__hint">backend 为权威拨号目标，选择对象仅自动回填、可手动覆盖（防 SSRF：数据面只认此值）</div>
+        </div>
+        <div class="bd-uform__f"><label>敏感度</label>
+          <a-select v-model="form.sensitivity">
+            <a-option value="low">low · 低敏（已评估，不敏感）</a-option>
+            <a-option value="normal">normal · 普通（默认）</a-option>
+            <a-option value="high">high · 高敏（终端降权时暂停访问）</a-option>
+          </a-select>
+          <div class="bd-uform__hint">★这是**风险降权的唯一判据**：终端被判 degrade 的用户，high 资源会从网关允许集合与客户端剖面里同时摘除（普通资源与隧道不受影响），并在客户端显式告知原因。门户侧 high 资源默认走自助申请审批。</div>
         </div>
         <div class="bd-uform__f"><label>引用地址对象（可选）</label>
           <a-select v-model="form.addrRef" allow-clear placeholder="不引用（手填 backend host）" @change="onRefChange">
@@ -257,6 +272,15 @@ function expandAccounts(orgIds: string[], groupIds: string[]) {
   return [...set].sort();
 }
 function effectiveOf(r: Resource) { return expandAccounts(r.allowOrgs || [], r.allowGroups || []); }
+
+/* ── 敏感度（风险降权的判据）── */
+function sensLabel(s?: string) { return s === 'high' ? '高敏' : s === 'low' ? '低敏' : '普通'; }
+function sensColor(s?: string) { return s === 'high' ? '#F53F3F' : s === 'low' ? '#00B42A' : '#86909C'; }
+function sensTip(s?: string) {
+  return s === 'high'
+    ? '终端被判降权（degrade）的用户会被暂停访问本资源；门户侧默认走自助申请审批'
+    : '不受终端降权影响：降权只摘除高敏资源，普通/低敏资源与隧道照常';
+}
 function effectiveTip(r: Resource) {
   const list = effectiveOf(r);
   return list.length ? `组织/用户组展开后：${list.join('、')}` : '所选组织/用户组当前没有任何成员，该维度不会放行任何人';
@@ -265,8 +289,8 @@ function effectiveTip(r: Resource) {
 const formOpen = ref(false);
 const editing = ref(false);
 const saving = ref(false);
-const form = reactive<{ id: string; name: string; backend: string; allowRoles: string[]; allowGroups: string[]; allowOrgs: string[]; addrRef: string; svcRef: string }>(
-  { id: '', name: '', backend: '', allowRoles: [], allowGroups: [], allowOrgs: [], addrRef: '', svcRef: '' });
+const form = reactive<{ id: string; name: string; backend: string; sensitivity: 'low' | 'normal' | 'high'; allowRoles: string[]; allowGroups: string[]; allowOrgs: string[]; addrRef: string; svcRef: string }>(
+  { id: '', name: '', backend: '', sensitivity: 'normal', allowRoles: [], allowGroups: [], allowOrgs: [], addrRef: '', svcRef: '' });
 const usersText = ref('');
 const formEffective = computed(() => expandAccounts(form.allowOrgs, form.allowGroups));
 
@@ -285,13 +309,15 @@ function onRefChange() {
 
 function openCreate() {
   editing.value = false;
-  form.id = ''; form.name = ''; form.backend = ''; form.allowRoles = []; form.allowGroups = []; form.allowOrgs = [];
+  form.id = ''; form.name = ''; form.backend = ''; form.sensitivity = 'normal';
+  form.allowRoles = []; form.allowGroups = []; form.allowOrgs = [];
   form.addrRef = ''; form.svcRef = ''; usersText.value = '';
   formOpen.value = true;
 }
 function openEdit(r: Resource) {
   editing.value = true;
   form.id = r.id; form.name = r.name; form.backend = r.backend;
+  form.sensitivity = r.sensitivity || 'normal';
   form.allowRoles = [...(r.allowRoles || [])];
   form.allowGroups = [...(r.allowGroups || [])]; form.allowOrgs = [...(r.allowOrgs || [])];
   form.addrRef = r.addrRef || ''; form.svcRef = r.svcRef || '';
@@ -307,7 +333,7 @@ async function save() {
     await api('/resources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        id: form.id, name: form.name, backend: form.backend,
+        id: form.id, name: form.name, backend: form.backend, sensitivity: form.sensitivity,
         allowRoles: form.allowRoles, allowUsers, allowGroups: form.allowGroups, allowOrgs: form.allowOrgs,
         addrRef: form.addrRef || undefined, svcRef: form.svcRef || undefined
       })

@@ -36,5 +36,12 @@ export async function ping(): Promise<boolean> {
 
 /* 与门户端点同构（移动端以 user 身份登录、拉取可访问应用） */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
-export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
+export interface PortalTile {
+  id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
+  sensitivity: 'low' | 'normal' | 'high';
+  accessible: boolean;
+  /** 因终端风险降权而不可访问（而非缺授权）。此时提交访问申请无效——降权否决压过 JIT 授予，
+   *  用户该做的是修复终端环境。两种"不可访问"的下一步动作完全不同，提示语必须区分。 */
+  degraded?: boolean;
+}
 export interface PortalAppsResp { apps: PortalTile[] }

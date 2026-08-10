@@ -35,7 +35,14 @@ export async function ping(): Promise<boolean> {
 
 /* 与门户端点同构（客户端以 user 身份登录、拉取可访问应用） */
 export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
-export interface PortalTile { id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string; sensitivity: 'normal' | 'high'; accessible: boolean }
+export interface PortalTile {
+  id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
+  sensitivity: 'low' | 'normal' | 'high';
+  accessible: boolean;
+  /** 因终端风险降权而不可访问（而非缺授权）。此时提交访问申请无效——降权否决压过 JIT 授予，
+   *  用户该做的是修复终端环境。两种"不可访问"的下一步动作完全不同，提示语必须区分。 */
+  degraded?: boolean;
+}
 export interface PortalAppsResp { apps: PortalTile[] }
 
 /* ── 接入剖面（GET /api/v1/client/profile）──
@@ -52,13 +59,16 @@ export interface ProfileGateway {
 }
 export interface ProfileApp {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global';
-  sensitivity: 'normal' | 'high';
+  sensitivity: 'low' | 'normal' | 'high';
   resourceId: string;
   backend: string;   // 业务真实 host:port
   vip: string;       // 控制面分配的虚拟 IP（稳定，可安全收藏）
   port: number;
   url: string;       // 「点开即用」地址：web 给 http(s)://，其余给 host:port
   accessible: boolean;
+  /** 该资源此刻因终端风险降权被暂停访问（高敏资源 + 本机判定 degrade）。
+   *  降权只摘高敏资源，隧道与普通资源照常——具体原因见剖面 warnings 第一条。 */
+  degraded?: boolean;
 }
 /**
  * 客户端分离式 DNS（split-DNS）配置。

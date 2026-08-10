@@ -49,8 +49,13 @@
                 <span class="bd-tile__icon" :class="'m-' + app.mode">
                   <component :is="modeMeta[app.mode].icon" />
                 </span>
+                <!-- 「被降权」与「没授权」必须分开说：前者申请也没用，得先修终端。 -->
                 <span
-                  v-if="!app.accessible"
+                  v-if="app.degraded"
+                  class="bd-tile__gold bd-tile__gold--deg"
+                ><icon-exclamation-circle-fill />终端降级 · 暂停访问</span>
+                <span
+                  v-else-if="!app.accessible"
                   class="bd-tile__gold"
                 ><icon-lock />高敏 · 需申请</span>
               </div>
@@ -64,6 +69,12 @@
                 class="bd-tile__btn"
                 @click="openApp(app)"
               ><icon-link />访问</button>
+              <button
+                v-else-if="app.degraded"
+                class="bd-tile__btn bd-tile__btn--ghost"
+                disabled
+                title="终端环境不合规，已暂停高敏资源访问。修复后重新上报即自动恢复（申请审批在此状态下无效）"
+              ><icon-exclamation-circle-fill />请先修复终端</button>
               <button
                 v-else
                 class="bd-tile__btn bd-tile__btn--ghost"
@@ -269,6 +280,8 @@ onMounted(() => {
   display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
   color: var(--bd-warning); background: var(--bd-tag-gold-bg); padding: 3px 8px; border-radius: 6px; white-space: nowrap;
 }
+/* 终端降级：红而非金——它与"高敏需申请"是两回事，申请审批在这个状态下无效 */
+.bd-tile__gold--deg { color: var(--bd-danger); background: var(--bd-tag-red-bg, rgba(245, 63, 63, .08)); }
 .bd-tile__name { font-size: 16px; font-weight: 600; color: var(--bd-t1); line-height: 1.3; }
 .bd-tile__addr { font-size: 12px; color: var(--bd-t3); margin-top: 6px; word-break: break-all; }
 .bd-tile__meta { margin-top: 12px; }

@@ -64,6 +64,10 @@ type Server struct {
 	// notices 安全事件通知的异步派发器（有界队列 + 单 worker，见 internal/notify）。
 	// 消费方在主流程上（爆破锁定 / 终端判 block），故入队非阻塞、满则丢并计数——
 	// 通知是观测通道，发不出去不改变任何已经做出的安全处置。
+	//
+	// ★业务告警走的是**同一批通道、另一条路径**（api/alerts.go 的 notifyAlert 同步发）：
+	// 告警评估跑在后台循环里没人等，同步换来"这一条发出去没有"当场可知；
+	// 而这里的消费方在登录主流程上，必须异步。两条路径共用 sendVia 与通道配置。
 	notices  *notify.Dispatcher
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
@@ -324,6 +328,16 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/webauthn/credentials/{id}", s.handleWebauthnDeleteCredential)
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
+
+	// 监控中心 · 业务告警：告警实体（列表/过滤/处置）+ 规则 CRUD + 立即检测。
+	// 读=任意管理员（角色现算），写=PermSecurity，理由见 alerts.go 顶部。
+	mux.HandleFunc("GET /api/v1/alerts", s.handleAlerts)
+	mux.HandleFunc("POST /api/v1/alerts/{id}/ignore", s.handleIgnoreAlert)
+	mux.HandleFunc("POST /api/v1/alerts/{id}/handle", s.handleHandleAlert)
+	mux.HandleFunc("GET /api/v1/alerts/rules", s.handleAlertRules)
+	mux.HandleFunc("POST /api/v1/alerts/rules", s.handleSaveAlertRule)
+	mux.HandleFunc("DELETE /api/v1/alerts/rules/{id}", s.handleDeleteAlertRule)
+	mux.HandleFunc("POST /api/v1/alerts/evaluate", s.handleEvaluateAlerts)
 
 	// 监控中心：在线用户（实时会话）+ 强制下线 + 用户状态
 	mux.HandleFunc("GET /api/v1/online", s.handleOnline)

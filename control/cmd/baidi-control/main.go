@@ -134,6 +134,13 @@ func main() {
 			"可用 JWT role=gateway 调用；全部网关切到 mTLS 后请立即关回")
 	}
 
+	// 业务告警周期评估（PRD ch5 FR-MON-21~25）：网关离线 / JIT 授予到期 /
+	// 应用未关联资源 / 爆破锁定 / 终端判 block / 审计链自检，逐条读真实信号。
+	// ★审计链那一条尤其要有人定期跑——防篡改链没人查，等于只是个说法。
+	alertCtx, stopAlerts := context.WithCancel(context.Background())
+	defer stopAlerts()
+	srv.StartAlertLoop(alertCtx, cfg.AlertInterval, cfg.AlertChainInterval)
+
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,
 		httpx.CORS(cfg.AllowOrigin),
@@ -185,6 +192,7 @@ func main() {
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
 	<-stop
 	slog.Info("shutting down")
+	stopAlerts() // 先停告警评估循环：关服期间没必要再起新一轮全链重算
 
 	ctx, cancel := context.WithTimeout(context.Background(), cfg.ShutdownTimeout)
 	defer cancel()

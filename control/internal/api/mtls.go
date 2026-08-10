@@ -63,7 +63,9 @@ func (s *Server) MTLSHandler() http.Handler {
 	mux.HandleFunc("GET /api/v1/gateways/ipsec", ipsecCNOnly(s.handleGatewayIpsecSites))
 	mux.HandleFunc("GET /api/v1/gateways/ipsec/{id}/psk", ipsecCNOnly(s.handleGatewayIpsecPSK))
 	mux.HandleFunc("POST /api/v1/gateways/ipsec/status", ipsecCNOnly(s.handleGatewayIpsecStatus))
-	return withCertCN(mux)
+	// 与明文口的 httpx.BodyLimit(1<<20) 同口径：mTLS 监听在 main.go 里不走那条
+	// 中间件链，缺了这层则各 handler 的 MaxBytesReader 成为唯一防线（register 就漏过）。
+	return withCertCN(httpx.BodyLimit(1 << 20)(mux))
 }
 
 // ipsecCNOnly 只放行 CN 以 ipsec- 开头的客户端证书。

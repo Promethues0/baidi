@@ -132,3 +132,22 @@ func TestGatewayRegisterWithoutEventsStillWorks(t *testing.T) {
 		t.Fatalf("旧网关 version 应为空串（前端降级显示 —），实际：%+v", resp.Gateways)
 	}
 }
+
+// 解码前限体：多 GB 心跳（events/sessions 数组无界）不能先整包进内存再截断——
+// 64 条截断只限制审计放大，拦不住解码期内存耗尽。超过 1 MiB 应明确 413，
+// 而不是静默注册出一台零统计的网关。
+func TestGatewayRegisterBodyTooLargeRejected(t *testing.T) {
+	h, st := gwReceiptServer(t)
+	// 1 MiB + 余量的合法 JSON：超限点在读取期就触发，与字段内容无关
+	body := `{"id":"gw-1","version":"` + strings.Repeat("x", 1<<20+1024) + `"}`
+	if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), body); w.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("超限心跳应 413，返回 %d", w.Code)
+	}
+	if audits := dataplaneAudits(t, st); len(audits) != 0 {
+		t.Fatalf("被拒的心跳不应落任何 dataplane 审计，实际 %d 条", len(audits))
+	}
+	// 正常尺寸照常成功（回归护栏）
+	if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), `{"id":"gw-1"}`); w.Code != http.StatusOK {
+		t.Fatalf("正常心跳应 200，返回 %d：%s", w.Code, w.Body.String())
+	}
+}

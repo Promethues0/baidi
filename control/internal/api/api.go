@@ -4,6 +4,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -53,10 +54,10 @@ type Server struct {
 	// 只有直连对端落在这些网段内，X-Forwarded-For 才被采信。见 clientIP。
 	trustedProxies []netip.Prefix
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
-	lockout        *lockout.Guard
-	mu             sync.Mutex
-	gateways       map[string]GatewayInfo // 已注册（在线）网关，按 id
-	gwSess         map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	lockout  *lockout.Guard
+	mu       sync.Mutex
+	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
+	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
 	// gwTunnelFP 各网关隧道 TLS 证书的 SHA-256 指纹，按网关 id。网关证书是启动期自签的，
 	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
 	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
@@ -794,7 +795,17 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		Version string    `json:"version"` // 网关二进制版本（编译期注入）
 		Events  []gwEvent `json:"events"`  // 数据面回执：网关报告已实际执行的控制面指令
 	}
-	_ = json.NewDecoder(r.Body).Decode(&b)
+	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
+	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
+	// 上限与 ipsec/status 同口径（1 MiB），正常心跳远够；超限明确回 413 而不是
+	// 静默注册出一台零统计的网关。其余解码错误维持既往宽容（缺字段零值照常心跳）。
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&b); err != nil {
+		var mbe *http.MaxBytesError
+		if errors.As(err, &mbe) {
+			httpx.Error(w, http.StatusRequestEntityTooLarge, "注册心跳请求体过大（上限 1 MiB）")
+			return
+		}
+	}
 	c, _ := auth.FromContext(r.Context())
 	id := b.ID
 	if id == "" {

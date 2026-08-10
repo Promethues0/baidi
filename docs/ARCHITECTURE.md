@@ -324,6 +324,7 @@ sequenceDiagram
 | WebAuthn / passkey 二次认证 | [ceremony_test.go](../control/internal/webauthnx/ceremony_test.go)（需可注册域名，裸 IP 不可用） |
 | 真实在线用户 / 网关活性 | 网关 mTLS 注册上报，[monitor_objects.go](../control/internal/api/monitor_objects.go) |
 | 审计落库 | [audit_sqlite.go](../control/internal/store/audit_sqlite.go) |
+| **网关设备状态采集（CPU/内存/磁盘/负载/吞吐，随心跳上报 + 时序落库 + 降采样）** | [internal/sysstat/](../gateway/internal/sysstat/)、[sysstat_test.go](../gateway/internal/sysstat/sysstat_test.go)（本机真采一次断言值域）、[metrics_sqlite_test.go](../control/internal/store/metrics_sqlite_test.go)、[api/metrics_test.go](../control/internal/api/metrics_test.go) |
 | 组织树 / 用户组落库（含环形父子拒绝、删除守卫、种子部门回填） | [orgs_sqlite.go](../control/internal/store/orgs_sqlite.go)、[orgs_sqlite_test.go](../control/internal/store/orgs_sqlite_test.go)、[orgs_test.go](../control/internal/api/orgs_test.go) |
 | **按组织 / 用户组授权（含子树继承、移出即失效、两处判定同构）** | [subjects.go](../control/internal/store/subjects.go)、[subjects_sqlite_test.go](../control/internal/store/subjects_sqlite_test.go)、[subjects_test.go](../control/internal/api/subjects_test.go) |
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
@@ -523,6 +524,28 @@ sequenceDiagram
 - **未与任何真实企业邮件网关实机互通验证过**。验证全部来自进程内 SMTP 服务端与 `httptest`。
 - **对 webhook URL 不做出网限制**。系统管理员可以把它指向内网任意 http(s) 地址（一个 SSRF 面）。这是接受的边界：该端点归 `PermSystem` 一权，而持有该权的人本来就能改网关证书与组网配置；真要收紧应当在部署侧用出网策略做，而不是在这里维护一张永远不全的黑名单。
 - **通知投递没有重试**。发失败就是失败（落审计 + last_*），不排队重发——重发在对端长时间不可用时会把队列变成放大器，而"这条没发出去"本身已经有据可查。
+
+### ⚠️ 网关设备状态采集（真采真存，但 macOS 上采不到 CPU）
+
+`gateway/internal/sysstat/`（纯标准库采集）→ 心跳 `metrics` 字段 → `gateway_metrics` 表 → 监控中心「设备状态」页（PRD ch5 FR-MON-01/02）。本轮之前全仓没有任何 CPU/内存/磁盘/负载/吞吐的采集、存储或展示，而第 5 章的「CPU>80% 告警」压在它上面。
+
+**能声称**：
+
+- **真采集，纯标准库**：Linux 读 `/proc/{stat,meminfo,loadavg,net/dev}` + `statfs`；darwin 走 `sysctl`（`vm.loadavg` / `vm.pages` / `vm.page_free_count` / `vm.page_pageable_external_count`）+ 路由套接字 `NET_RT_IFLIST` 取接口计数 + `statfs`。刻意不引 gopsutil：数据面是被保护方，依赖面越小越好。**解析函数全部无 build tag**（`parse.go`），Linux 的 `/proc` 文本格式在 mac 上也能编译 + 单测——只活在 `//go:build linux` 里的分支在开发机上连语法都验不到，这与 posture 采集器把三平台解析抽到 `Env` trait 后面是同一个理由。
+- **三态贯穿全链路**：采不到 → 报文里字段缺席 → 落库 NULL → 聚合 `AVG` 跳过 → 前端渲染「—」并说明原因。中间任何一层写 `COALESCE(x,0)` 或 `v ?? 0`，「CPU 0%」就会伪装成一台空闲的机器，而「CPU>80%」告警会对一台失明的网关**永久沉默**。与终端 posture 的 unknown 是同一条纪律。
+- **双向兼容有测试**：旧网关不带 `metrics` 字段 → 照常注册、**不落任何采样点**（不补零点）；新网关带 `metrics:{}`（一项都没采到）→ 落一条全 NULL 的点。两者在页面上分开呈现：前者列进「在线但未上报指标（升级网关）」，后者进图表但各项显示「—」。
+- **有留存上限**：`BAIDI_METRICS_RETENTION_HOURS`（默认 72），启动清一次 + 每小时清一次。**没有「关闭清理」这一档**——这是全系统唯一的高频写入口（每网关 15s 一条），留个能关掉清理的开关等于留个把库撑爆的按钮。主键 `(gateway_id, ts)` + `INSERT OR REPLACE` 顺带把写入速率钉在「每网关每秒最多一行」。
+- **降采样在 SQL 里做**：`range=hour|day|week` → 桶宽 60s / 900s / 3600s，一台网关一屏 60~168 个点，不把 72 小时的 17280 个原始点整包打给浏览器。**空桶不返回**，掉线段在图上是断线不是零线。**当前值取最新一条原始采样**而不是最后一个桶的均值（桶均值会把刚冲到 95% 的机器摊平成 60%）。
+- **上报值经过合理性校验**：百分比越界、负数、NaN 一律降级成「不可判定」而不是原样入库——一张失陷的网关证书报 `cpu=1e9` 就能把整张趋势图压平、让真实尖峰肉眼不可见。
+
+**不能声称**：
+
+- **macOS 宿主机上 CPU 使用率恒为「不可判定」**。darwin 没有 `kern.cp_time` 这类 sysctl，CPU 时间片的权威来源是 mach 的 `host_statistics()`，取它必须 cgo。这里**如实报不可判定**，没有拿系统负载凑一个数（负载是运行队列长度，8 核机上 load=4 可能是 50% 也可能是 100%，用它冒充使用率就是在编造一个会被告警消费的假值）。生产网关跑 Linux，这一项在生产路径上有值。
+- **Windows 网关五项全部不可判定**。取磁盘要 `GetDiskFreeSpaceEx`、取 CPU 要 PDH，标准库都没有现成封装。返回「不可判定」而不是 0 —— 一串 0 会在页面上画出一条完美的、完全虚构的平线。
+- **首次心跳必然报不出 CPU 与吞吐**：两者是差分指标，需要连续两个采样点。这一轮报的是不可判定，不是 0。
+- **网络吞吐的口径是「全机非回环接口之和」**，不是隧道流量。darwin 的接口计数器是 32 位的，跑满 4 GiB 回绕一次——回绕由「计数器回退即报不可判定」兜住，不会变成一个 4 GB/s 的假尖峰，但那一轮确实缺一个点。
+- **控制台「设备状态」页没有降级演示数据**（与其余页刻意不同）：连不上控制面就显示连不上，一条线都不画。编造的曲线与真实采集在这一页上无法区分，代价比别处大。
+- **时序落在 SQLite 里，不是时序库**。72 小时 × 每 15s 一条 × N 台网关的量级它扛得住，再长应当导出到专门的时序存储。
 
 ### ⚠️ 声明式但未实现的能力
 

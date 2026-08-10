@@ -21,7 +21,8 @@ export const NAV: NavGroup[] = [
     children: [
       { title: '安全概览', path: '/monitor/overview', icon: 'IconDashboard', done: true },
       { title: '在线用户', path: '/monitor/online', icon: 'IconUser', badge: '10', badgeKind: 'count', done: true },
-      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '2', badgeKind: 'alert', done: true }
+      { title: '用户状态', path: '/monitor/userstate', icon: 'IconExclamationCircle', badge: '2', badgeKind: 'alert', done: true },
+      { title: '设备状态', path: '/monitor/devicestat', icon: 'IconDesktop', done: true }
     ]
   },
   {

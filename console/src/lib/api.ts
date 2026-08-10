@@ -609,3 +609,99 @@ export interface DiagBundle {
   score: number; pass: number; warn: number; fail: number; skip?: number;
   checks: DiagCheck[];
 }
+
+/* ── 监控中心 · 设备状态（GET /monitor/device-stat，PRD ch5 FR-MON-01/02）── */
+
+/**
+ * 一个指标值：number = 网关真采到的实测值；**null = 不可判定**（这台机器采不到）。
+ *
+ * ★不要在任何地方写 `v ?? 0` 把它折平——「CPU 0%」看起来像一台空闲的机器，
+ * 而实际是根本没采到，两者的下一步动作完全不同。渲染成「—」，并说明原因。
+ */
+export type MetricValue = number | null;
+
+/** 一条原始采样点（当前值取的就是这个，不是桶均值）。 */
+export interface DeviceMetricPoint {
+  gatewayId: string;
+  ts: number;
+  cpu: MetricValue; mem: MetricValue; disk: MetricValue;
+  load: MetricValue; rxBps: MetricValue; txBps: MetricValue;
+}
+
+/** 一个降采样时间桶。★空桶不会出现在数组里——掉线段靠相邻 ts 的跨度识别并断线。 */
+export interface DeviceMetricBucket {
+  ts: number;   // 桶起点
+  n: number;    // 桶内原始采样点数
+  cpu: MetricValue; mem: MetricValue; disk: MetricValue;
+  load: MetricValue; rxBps: MetricValue; txBps: MetricValue;
+}
+
+export interface DeviceMetricSeries {
+  gatewayId: string;
+  latest: DeviceMetricPoint | null;
+  points: DeviceMetricBucket[];
+}
+
+export type DeviceStatRange = 'hour' | 'day' | 'week';
+
+export interface DeviceStatResp {
+  range: DeviceStatRange;
+  rangeLabel: string;
+  since: number;
+  until: number;
+  bucketSec: number;
+  retentionHours: number;
+  truncated: boolean;      // 时间窗被留存期截断（周档常见）
+  onlineGateways: number;
+  silentGateways: string[]; // 在线、但一条指标都没上报过（多半是旧版本网关）
+  gateways: DeviceMetricSeries[];
+  generatedAt: string;
+}
+
+/* ── 业务告警（store.Alert / AlertRule，PRD ch5 FR-MON-21~25）──
+   与审计中心的区别：审计是只追加的流水，这里是**待办实体**——有状态机、有处置人。 */
+export type AlertStatus = 'pending' | 'ignored' | 'handled';
+export type AlertCategory = 'device' | 'authz' | 'security';
+export type AlertSeverity = 'info' | 'warning' | 'critical';
+export interface Alert {
+  id: string; ruleId: string; kind: string;
+  category: AlertCategory; severity: AlertSeverity;
+  title: string; detail: string;
+  /** 告警对象的稳定标识（gw:xxx / grant:xxx / posture:account…），去重键的一半 */
+  objectKey: string;
+  status: AlertStatus; triggeredAt: number; handledAt?: number; handledBy?: string;
+}
+export interface AlertCounts { pending: number; ignored: number; handled: number }
+export interface AlertsResp {
+  alerts: Alert[];
+  /** 全局计数，**不受列表过滤影响**（角标与页头统计吃它） */
+  counts: AlertCounts;
+  categories: Record<string, string>;
+}
+export interface AlertRule {
+  id: string; name: string; kind: string;
+  threshold: Record<string, number>;
+  enabled: boolean;
+  /** 点名的通知通道（留空 = 发给全部启用中的通道） */
+  channels: string[];
+  cooldownSec: number;
+  createdAt?: string; updatedAt?: string;
+}
+/** 规则种类元信息：阈值表单按它渲染，前端不写第二份阈值清单 */
+export interface AlertKindSpec {
+  kind: string; name: string; category: AlertCategory; severity: AlertSeverity;
+  /** 该规则读的是哪份真实信号（原样展示给排障的人看） */
+  signal: string;
+  thresholds: Record<string, number>;
+  thresholdZh: Record<string, string>;
+}
+/** 数据源就绪状态：未就绪时要如实说明「等待数据面上报」，而不是让规则看起来在工作 */
+export interface AlertDataSource { kind: string; ready: boolean; reason?: string }
+export interface AlertNotifyOption { id: string; name: string; kind: string; enabled: boolean }
+export interface AlertRulesResp {
+  rules: AlertRule[];
+  kinds: AlertKindSpec[];
+  sources: AlertDataSource[];
+  notify: { wired: boolean; channels: AlertNotifyOption[]; note?: string; reason?: string };
+  cooldown: { default: number; min: number; max: number };
+}

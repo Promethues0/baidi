@@ -8,6 +8,7 @@ const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/monitor/overview': () => import('@/views/Overview.vue'),
   '/monitor/online': () => import('@/views/Online.vue'),
   '/monitor/userstate': () => import('@/views/UserState.vue'),
+  '/monitor/devicestat': () => import('@/views/DeviceStat.vue'),
   '/business/policy': () => import('@/views/Policy.vue'),
   '/business/objects': () => import('@/views/Objects.vue'),
   '/security/ipsec': () => import('@/views/Ipsec.vue'),

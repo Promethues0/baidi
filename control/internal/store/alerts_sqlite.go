@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
 )
@@ -207,13 +208,26 @@ func (s *SQLiteStore) AlertCounts(ctx context.Context) (AlertCounts, error) {
 	return c, rows.Err()
 }
 
-// RaiseAlert 产生一条告警，并按 (rule_id, object_key) 做冷却期去重。
+// RaiseAlert 产生一条告警，按 (rule_id, object_key) 去重：
 //
-// 返回 created=false 表示冷却期内已有同规则同对象的告警，本次不产生新行（不是错误）。
+//	① 该对象上**还挂着一条未处置（pending）的告警** → 不产生新行；
+//	② 否则看时间冷却：冷却期内已报过 → 不产生新行。
+//
+// 返回 created=false 表示本次被去重掉了（不是错误）。
+//
+// ★①（未处置即压制）是**留存上界**的来源。有一类规则的条件是**永久成立**的——
+// 最典型的是 grant_stale：过期的 JIT 授予行在库里永远标着 active（全系统没有回收动作，
+// 那正是这条规则要报的事实），于是每条陈旧授予每个冷却周期都能产出一行新告警
+// + 一次通知 + 一两条审计，48 行/天/对象、只增不减。没有 ① 的话，"冷却"只降频、
+// 不终止。有了 ① 之后待办量收敛成"每个真实对象至多一条"，而管理员点掉之后
+// 条件若仍成立，会在冷却期后如常再报一条（不会被永久静默）。
+//
+// ★② 仍然**只看时间不看状态**：按状态放宽（比如"处置过就立刻能再报"）会让人一点
+// 「已处理」就当场冒出同一条。①② 方向相反、各管一段，合起来才既有上界又不失灵。
 //
 // ★去重必须在一条语句里完成（INSERT … SELECT … WHERE NOT EXISTS）：
 // 先 SELECT 再 INSERT 的写法在两个评估循环重叠时会双双判"没有"，
-// 于是同一秒里插进两条一模一样的告警——冷却在并发下形同虚设。
+// 于是同一秒里插进两条一模一样的告警——去重在并发下形同虚设。
 func (s *SQLiteStore) RaiseAlert(ctx context.Context, a Alert, cooldownSec int) (Alert, bool, error) {
 	if a.Status == "" {
 		a.Status = AlertPending
@@ -225,10 +239,10 @@ func (s *SQLiteStore) RaiseAlert(ctx context.Context, a Alert, cooldownSec int) 
 	res, err := s.db.ExecContext(ctx, `INSERT INTO alerts(id,rule_id,kind,category,severity,title,detail,object_key,status,triggered_at,handled_at,handled_by)
 SELECT ?,?,?,?,?,?,?,?,?,?,0,''
 WHERE NOT EXISTS (
-  SELECT 1 FROM alerts WHERE rule_id=? AND object_key=? AND triggered_at>?
+  SELECT 1 FROM alerts WHERE rule_id=? AND object_key=? AND (status=? OR triggered_at>?)
 )`,
 		a.ID, a.RuleID, a.Kind, a.Category, a.Severity, a.Title, a.Detail, a.ObjectKey, a.Status, a.TriggeredAt,
-		a.RuleID, a.ObjectKey, since)
+		a.RuleID, a.ObjectKey, AlertPending, since)
 	if err != nil {
 		return Alert{}, false, err
 	}
@@ -283,6 +297,30 @@ func (s *SQLiteStore) SetAlertStatus(ctx context.Context, id, status, by string,
 		return Alert{}, err
 	}
 	return a, nil
+}
+
+// PurgeExpiredAlerts 清理 days 天前**已处置**的告警（days<=0 不清理），返回删除行数。
+//
+// ★为什么需要留存轮转：告警是只追加的，而多条规则的触发条件是**长期成立**的
+// （网关持续离线、应用长期未关联资源、过期授予没有回收动作）。即便有"未处置即压制"
+// 这道上界，管理员每处置一条，条件仍成立的对象就会在冷却期后再产生一条——
+// 处置过的行按天累积，且此前全仓没有任何 DELETE FROM alerts。
+//
+// ★为什么**只清已处置的**（pending 一律留着）：pending 是一条待办。按时间删掉待办
+// 等于让"没人管的问题"自己消失，而角标与列表会同时变干净——这恰恰是本项目最忌讳的
+// 那种"看起来正常"。pending 的行数已由 RaiseAlert 的未处置压制钳住（每对象至多一条），
+// 不需要靠留存期去兜底。
+func (s *SQLiteStore) PurgeExpiredAlerts(ctx context.Context, days int) (int64, error) {
+	if days <= 0 {
+		return 0, nil
+	}
+	cutoff := time.Now().AddDate(0, 0, -days).Unix()
+	res, err := s.db.ExecContext(ctx,
+		`DELETE FROM alerts WHERE status<>? AND triggered_at<?`, AlertPending, cutoff)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 // StaleGrants 已过期但行仍标 active 的 JIT 授予（before = 判定时刻的 Unix 秒上界）。

@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -77,15 +78,82 @@ func TestRaiseAlertCooldownDedup(t *testing.T) {
 	if !raise(t, s, ctx, "r2", "gw:a", now+30, 600) {
 		t.Fatal("不同规则同对象应各自成条")
 	}
-	if !raise(t, s, ctx, "r1", "gw:a", now+601, 600) {
-		t.Fatal("冷却期过后应能再次产生")
+	// ★冷却期过了也**不再**产生：那条 gw:a 的告警还挂在 pending。
+	// 这就是留存上界的来源——条件永久成立的规则（过期 JIT 授予全系统没有回收动作）
+	// 否则会按 48 行/天/对象无限增长，通知与审计跟着一起涨。
+	if raise(t, s, ctx, "r1", "gw:a", now+601, 600) {
+		t.Fatal("同一对象上还挂着未处置的告警时，冷却期过了也不该再产生一条")
 	}
 	counts, err := s.AlertCounts(ctx)
 	if err != nil {
 		t.Fatalf("counts: %v", err)
 	}
-	if counts.Pending != 4 {
-		t.Fatalf("应有 4 条未处理告警，得到 %+v", counts)
+	if counts.Pending != 3 {
+		t.Fatalf("应有 3 条未处理告警（每个对象至多一条），得到 %+v", counts)
+	}
+
+	// 处置掉之后、且冷却期已过：条件仍成立就要如常再报（压制不等于永久静默）。
+	list, _ := s.Alerts(ctx, AlertQuery{})
+	var target string
+	for _, a := range list {
+		if a.RuleID == "r1" && a.ObjectKey == "gw:a" {
+			target = a.ID
+		}
+	}
+	if _, err := s.SetAlertStatus(ctx, target, AlertHandled, "admin", now+602); err != nil {
+		t.Fatalf("handle: %v", err)
+	}
+	if !raise(t, s, ctx, "r1", "gw:a", now+1300, 600) {
+		t.Fatal("处置完 + 冷却期已过，条件仍成立时必须能再报——否则问题被永久静默")
+	}
+}
+
+// 已处置告警的留存轮转：超期的清掉，pending 一律留着。
+//
+// ★pending 不清是刻意的：按时间删掉一条待办，等于让"没人管的问题"自己消失，
+// 而列表与角标会同时变干净——这正是最难发现的那种失效。pending 的行数由
+// RaiseAlert 的未处置压制钳住（每对象至多一条），不需要靠留存期兜底。
+func TestPurgeExpiredAlerts(t *testing.T) {
+	s, ctx := openAlertStore(t)
+	old := time.Now().AddDate(0, 0, -120).Unix()
+	fresh := time.Now().Unix()
+
+	raise(t, s, ctx, "r1", "gw:old-handled", old, 600)
+	raise(t, s, ctx, "r1", "gw:old-pending", old, 600)
+	raise(t, s, ctx, "r1", "gw:fresh-handled", fresh, 600)
+	list, _ := s.Alerts(ctx, AlertQuery{})
+	for _, a := range list {
+		if strings.HasSuffix(a.ObjectKey, "handled") {
+			if _, err := s.SetAlertStatus(ctx, a.ID, AlertHandled, "admin", a.TriggeredAt+1); err != nil {
+				t.Fatalf("handle %s: %v", a.ObjectKey, err)
+			}
+		}
+	}
+
+	n, err := s.PurgeExpiredAlerts(ctx, 90)
+	if err != nil {
+		t.Fatalf("purge: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("应只清掉 1 条（超期且已处置），实得 %d", n)
+	}
+	left := map[string]string{}
+	after, _ := s.Alerts(ctx, AlertQuery{})
+	for _, a := range after {
+		left[a.ObjectKey] = a.Status
+	}
+	if _, ok := left["gw:old-handled"]; ok {
+		t.Fatal("超期的已处置告警应被清掉")
+	}
+	if left["gw:old-pending"] != AlertPending {
+		t.Fatal("★未处置的告警不得因为超期被清掉——那是把没人管的待办悄悄删了")
+	}
+	if left["gw:fresh-handled"] != AlertHandled {
+		t.Fatal("留存期内的已处置告警应保留")
+	}
+	// days<=0 = 不清理（与 PurgeExpiredAudit 同口径）。
+	if n, err := s.PurgeExpiredAlerts(ctx, 0); err != nil || n != 0 {
+		t.Fatalf("days<=0 应不清理，实得 %d %v", n, err)
 	}
 }
 

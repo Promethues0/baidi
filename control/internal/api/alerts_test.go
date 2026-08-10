@@ -2,6 +2,7 @@ package api
 
 import (
 	"database/sql"
+	"fmt"
 	"net/http"
 	"path/filepath"
 	"testing"
@@ -452,5 +453,90 @@ func TestAlertRuleRejectsUnknownChannel(t *testing.T) {
 	n, _ := out["notify"].(map[string]any)
 	if n["wired"] != false || n["reason"] == "" {
 		t.Fatalf("无可用通道时应如实说明不会外发，得到 %v", n)
+	}
+}
+
+// 条件**永久成立**的规则不得无界增长：只要那条告警还挂着未处置，冷却期过了也不再产生新行。
+//
+// ★grant_stale 是最典型的一条：过期的 JIT 授予在库里永远标着 active（全系统没有回收
+// 动作，那正是这条规则要报的事实）。只按时间冷却的话，每条陈旧授予每 30 分钟产出
+// 一行新告警 + 一次通知 + 一两条审计，48 行/天/对象、只增不减，而 alerts 表此前
+// 没有任何清理。处置之后条件仍成立则如常再报——压制不是永久静默。
+func TestAlertPendingSuppressesUnboundedRegrowth(t *testing.T) {
+	e := newAlertEnv(t)
+	now := time.Now().Unix()
+	if _, err := e.db.Exec(`INSERT INTO jit_grants(id,usr,resource_id,resource_name,request_id,reason,granted_by,granted_at,expires_at,status,revoked_at,revoke_reason)
+VALUES('g-rot','li.fang','res-fin','财务系统','req-1','对账','admin',?,?,'active',0,'')`,
+		now-7200, now-3600); err != nil {
+		t.Fatalf("insert grant: %v", err)
+	}
+	if n := e.evaluate(t); n != 1 {
+		t.Fatalf("过期未回收的授予应产生 1 条告警，得到 %d 条", n)
+	}
+
+	// 把冷却期"走完"（直接把这条告警的触发时刻推到很久以前），再评估若干轮。
+	for i := 0; i < 3; i++ {
+		if _, err := e.db.Exec(`UPDATE alerts SET triggered_at=? WHERE kind=?`,
+			time.Now().Add(-24*time.Hour).Unix(), store.AlertKindGrantStale); err != nil {
+			t.Fatalf("推老触发时刻: %v", err)
+		}
+		if n := e.evaluate(t); n != 0 {
+			t.Fatalf("第 %d 轮：该对象上还挂着未处置的告警，不该再产生新行（实得 %d 条）", i+1, n)
+		}
+	}
+	if got := e.pendingKind(t, store.AlertKindGrantStale); got != 1 {
+		t.Fatalf("陈旧授予应始终只有 1 条待办，实得 %d 条", got)
+	}
+
+	// 处置掉它：条件仍成立（授予还在库里标 active），冷却期已过 → 必须能再报。
+	a := byKind(e.list(t, "?status=pending"), store.AlertKindGrantStale)
+	if code, out := doJSON(t, e.h, "POST", "/api/v1/alerts/"+a["id"].(string)+"/handle", adminToken(), nil); code != http.StatusOK {
+		t.Fatalf("处置 http %d: %v", code, out)
+	}
+	if _, err := e.db.Exec(`UPDATE alerts SET triggered_at=? WHERE kind=?`,
+		time.Now().Add(-24*time.Hour).Unix(), store.AlertKindGrantStale); err != nil {
+		t.Fatalf("推老触发时刻: %v", err)
+	}
+	if n := e.evaluate(t); n != 1 {
+		t.Fatalf("处置完且冷却期已过、条件仍成立时必须再报一条，实得 %d 条", n)
+	}
+}
+
+// 单轮通知有预算：告警**全部落库**，但同步外发不超过 alertNotifyBudget 条，
+// 且差额如实落审计。
+//
+// ★没有预算的话，一轮产出上百条候选时（升级后首轮评估、一次性接入几十台网关），
+// notifyAlert 是同步发送 × 每通道 SMTP 默认 15s 超时，POST /alerts/evaluate 这个
+// handler 会挂住几十分钟。
+func TestAlertNotifyBudgetPerRound(t *testing.T) {
+	e := newAlertEnv(t)
+	// 一条真的 webhook 通道：数它到底收到几次。
+	url, got := hookServer(t, http.StatusOK)
+	code, out := doJSON(t, e.h, "POST", "/api/v1/notify/channels", adminToken(), map[string]any{
+		"name": "SOC webhook", "kind": "webhook", "enabled": true,
+		"config": map[string]any{"url": url, "timeoutSec": 5},
+	})
+	if code != http.StatusOK {
+		t.Fatalf("建通道 http %d: %v", code, out)
+	}
+	// 造 alertNotifyBudget+5 个未关联受控资源的应用（每个各成一条 app_unlinked 告警）。
+	want := alertNotifyBudget + 5
+	for i := 0; i < want; i++ {
+		code, out := doJSON(t, e.h, "POST", "/api/v1/apps", adminToken(), map[string]any{
+			"name": fmt.Sprintf("临时门户%02d", i), "mode": "web",
+			"addr": fmt.Sprintf("10.9.9.%d:80", i+1), "category": "office",
+		})
+		if code != http.StatusCreated {
+			t.Fatalf("建应用 %d http %d: %v", i, code, out)
+		}
+	}
+	if n := e.evaluate(t); n != want {
+		t.Fatalf("应产生 %d 条告警（一条都不能少落库），实得 %d 条", want, n)
+	}
+	if n := len(got()); n != alertNotifyBudget {
+		t.Fatalf("单轮外发应止于预算 %d 条，实得 %d 条", alertNotifyBudget, n)
+	}
+	if !auditHasEvent(t, e.h, "超过单轮通知预算") {
+		t.Fatal("超预算未逐条外发这件事必须落审计（措辞只说已发生的事实）")
 	}
 }

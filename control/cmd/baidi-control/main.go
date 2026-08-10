@@ -66,6 +66,29 @@ func main() {
 			}
 		}()
 	}
+	// 业务告警留存轮转：启动清一次 + 每 24h 清一次**已处置**的超期行。
+	//
+	// ★没有它这张表就只增不减：多条规则的触发条件是长期成立的（网关持续离线、
+	// 应用长期未关联资源、过期 JIT 授予全系统没有回收动作），处置一条、条件仍在，
+	// 冷却期后又是一条。pending 刻意不清——按时间删待办等于让没人管的问题自己消失。
+	{
+		purgeAlerts := func() {
+			n, perr := st.PurgeExpiredAlerts(context.Background(), cfg.AlertRetentionDays)
+			if perr != nil {
+				slog.Error("业务告警留存轮转失败", "err", perr)
+			} else if n > 0 {
+				slog.Info("业务告警留存轮转完成", "deleted", n, "retentionDays", cfg.AlertRetentionDays)
+			}
+		}
+		purgeAlerts()
+		go func() {
+			t := time.NewTicker(24 * time.Hour)
+			defer t.Stop()
+			for range t.C {
+				purgeAlerts()
+			}
+		}()
+	}
 	// 审计外送的队列上界注入：入队时判丢弃用的就是这一份，外送页显示的也是它
 	// （与 SetAuditRetentionDays 同一条纪律——展示值必须来自真正在用的那份）。
 	st.SetAuditForwardQueueMax(cfg.AuditForwardQueueMax)

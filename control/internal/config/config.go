@@ -42,6 +42,11 @@ type Config struct {
 	// AlertChainInterval 审计防篡改链自检间隔（全链重算比其余信号贵，单独节流）。
 	// ★这条循环就是「防篡改链有人定期查」的执行方——链没人查，防篡改只是个说法。
 	AlertChainInterval time.Duration
+	// AlertRetentionDays 业务告警的留存天数（只轮转**已处置**的行，pending 一律留着）。
+	// ★恒为正：告警是只追加的，而多条规则的条件长期成立（网关持续离线、应用长期未关联
+	// 资源、过期授予没有回收动作），没有轮转就是一张只增不减的表。非法/缺省值落回
+	// DefaultAlertRetentionDays，**没有"关闭清理"这一档**（同 MetricsRetentionHours）。
+	AlertRetentionDays int
 	// AuditForwardInterval 审计外送投递循环的间隔；<=0 关闭投递（队列只增不减，启动时告警）。
 	// ★这条循环是外送功能唯一的执行方——没有它，配置齐全但 SIEM 永远收不到东西。
 	AuditForwardInterval time.Duration
@@ -54,6 +59,21 @@ type Config struct {
 	// gateway_metrics 是每网关 15s 一条的写入热点，留一个能关掉清理的开关，
 	// 等于留一个把库撑爆的按钮，而且撑爆前毫无征兆（与审计留存的 0=不清理刻意不同）。
 	MetricsRetentionHours int
+}
+
+// DefaultAlertRetentionDays 已处置告警默认留存 90 天。
+// 够覆盖一个季度的复盘（"上季度这类告警出过几次、谁处理的"），再长就该导出。
+const DefaultAlertRetentionDays = 90
+
+// MinAlertRetentionDays 留存下限：低于 7 天的话"上周那条是谁处理的"就查不到了。
+const MinAlertRetentionDays = 7
+
+// clampAlertRetention 把告警留存夹到合法区间（非正数不代表"关掉清理"）。
+func clampAlertRetention(d int) int {
+	if d < MinAlertRetentionDays {
+		return DefaultAlertRetentionDays
+	}
+	return d
 }
 
 // DefaultMetricsRetentionHours 设备状态时序默认留存 72 小时。
@@ -96,6 +116,8 @@ func Load() Config {
 		// 业务告警：默认每分钟评估一轮，审计链自检每 15 分钟一次。
 		AlertInterval:      envDuration("BAIDI_ALERT_INTERVAL", time.Minute),
 		AlertChainInterval: envDuration("BAIDI_ALERT_CHAIN_INTERVAL", 15*time.Minute),
+		// 告警留存：启动时 + 每 24h 清一次**已处置**的超期行（见 store.PurgeExpiredAlerts）。
+		AlertRetentionDays: clampAlertRetention(envInt("BAIDI_ALERT_RETENTION_DAYS", DefaultAlertRetentionDays)),
 		// 审计外送：默认每 5s 投递一轮（够快到"刚发生的事很快就在 SIEM 里"，
 		// 又不至于把一个空队列查成热点）。上界的唯一定义在 store，别在这里另抄一份。
 		AuditForwardInterval: envDuration("BAIDI_AUDIT_FORWARD_INTERVAL", 5*time.Second),

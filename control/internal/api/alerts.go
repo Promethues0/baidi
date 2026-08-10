@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
@@ -37,6 +38,15 @@ const (
 	// alertMetricsFresh 网关资源指标样本的新鲜度上限。
 	alertMetricsFresh = 10 * time.Minute
 )
+
+// alertNotifyBudget 单轮评估最多同步发出多少条告警通知。
+//
+// ★通知是**同步**发的（理由见 notifyAlert），而单轮新产生的告警条数没有天然上界：
+// 升级后首轮评估、或一次性接入几十台网关时，一轮就可能产出上百条候选。
+// 每条 × 每个启用通道 × SMTP 默认 15s 超时 = 「立即检测」这个 handler 挂住几十分钟。
+// 超出预算的那些告警**照常落库**（页面上一条不少），只是不再逐条外发，
+// 并统一落一条审计说明差额——"少发几封邮件"远好过"评估循环被自己卡死"。
+const alertNotifyBudget = 20
 
 // alertErr 本文件的静态错误文案。
 type alertErr string
@@ -205,7 +215,19 @@ func (s *Server) EvaluateAlerts(ctx context.Context, withChain bool) ([]store.Al
 			continue // 冷却期内已有同规则同对象的告警
 		}
 		created = append(created, saved)
-		s.notifyAlert(ctx, ruleOf(rules, saved.RuleID), saved)
+		if len(created) <= alertNotifyBudget {
+			s.notifyAlert(ctx, ruleOf(rules, saved.RuleID), saved)
+		}
+	}
+	// 超预算的部分只落一条汇总审计，措辞只说已发生的事实：告警**都已落库**，
+	// 只是没有逐条外发。不写"已通知"，也不假装它们被丢弃了。
+	if over := len(created) - alertNotifyBudget; over > 0 {
+		slog.Warn("单轮新增告警超过通知预算，超出部分未逐条外发（告警已全部落库）",
+			"新增", len(created), "预算", alertNotifyBudget, "未外发", over)
+		s.auditBG(ctx, "security", fmt.Sprintf(
+			"本轮业务告警评估新增 %d 条，超过单轮通知预算 %d：其中 %d 条已落库但未逐条外发"+
+				"（同步发送会把评估循环拖住几十分钟，页面与 API 里这些告警一条不少）",
+			len(created), alertNotifyBudget, over), "fail")
 	}
 	return created, nil
 }

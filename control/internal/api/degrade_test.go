@@ -381,7 +381,7 @@ func TestDegradeAndBlockOnDifferentDevicesResolvesToBlock(t *testing.T) {
 }
 
 // 同理，一台 gray、一台 degrade 的账号执行的是 degrade，不该再记 observing 审计
-//（审计只记已发生的事实：他被降权了，不是"只在观察"）。
+// （审计只记已发生的事实：他被降权了，不是"只在观察"）。
 func TestGrayNotAuditedWhenWorseDispositionApplies(t *testing.T) {
 	f := newIsoFixture(t)
 	degradeFixture(f)

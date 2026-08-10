@@ -108,8 +108,8 @@ type ProfileGateway struct {
 
 // ProfileApp 一个应用在客户端侧的完整落点。
 type ProfileApp struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
 	Mode string `json:"mode"` // tunnel | web | global
 	// Sensitivity 资源敏感度（low | normal | high），取自 store.Resource.Sensitivity。
 	// ★不再由 `app.Category == "finance"` 派生：那条硬编码只认财务一个分类，

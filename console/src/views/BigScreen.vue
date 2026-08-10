@@ -362,8 +362,14 @@ async function load() {
       api<AuditBundle>('/audit').catch(() => null)
     ]);
     ov.value = o;
-    if (on?.sessions?.length) sessions.value = on.sessions.filter((s) => s.status === 'online');
-    if (au?.logs?.length) audit.value = au.logs;
+    // ★接口成功返回空数组时也必须覆盖演示常量。
+    // 用 `?.length` 当赋值条件会让「后端说没有」与「后端没答上来」走同一条分支：
+    // 前者是真实读数（无网关上报＝确实没有在线会话），却被留在页面上的 MOCK_SESS
+    // 顶替成三条编造的高风险会话，还继续喂给威胁面板与热力图，而右上角徽标同时
+    // 显示「实时」——正是本项目最忌讳的「假数据冒充真数据」。判据改为「这一路请求
+    // 是否成功」（on/au 非 null，失败时已被 .catch 转成 null）。
+    if (on) sessions.value = on.sessions?.filter((s) => s.status === 'online') ?? [];
+    if (au) audit.value = au.logs ?? [];
     live.value = true;
   } catch {
     live.value = false;

@@ -24,7 +24,7 @@ type AuthSrcBundle struct {
 // 可达与否只有点「测试连接」（POST …/probe）那一刻才知道。存一个恒为 online
 // 的状态列，等于让页面替一台可能早已宕掉的 AD 打包票。
 type AuthSource struct {
-	Key      string `json:"key"`     // = auth_sources.id
+	Key      string `json:"key"` // = auth_sources.id
 	Name     string `json:"name"`
 	Type     string `json:"type"`    // local | ldap | ad | oidc（与 AuthSourceRec.Kind 同口径）
 	Enabled  bool   `json:"enabled"` // 管理意图：是否参与登录

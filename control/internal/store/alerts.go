@@ -281,9 +281,9 @@ type AlertRule struct {
 	// Threshold 阈值（threshold_json）。键集合由 kind 决定，见 NormalizeThresholds。
 	Threshold map[string]float64 `json:"threshold"`
 	Enabled   bool               `json:"enabled"`
-	// Channels 通知通道（channels_json）。★通知通道尚未接线：api 侧的 Notifier
-	// 只有空实现，因此保存时非空一律拒绝（而不是存下来假装会发）。通道能力接入后
-	// 由 Notifier.Channels() 报出可用通道，这里才开始接受取值。
+	// Channels 通知通道（channels_json）。留空=发往全部启用中的通道；点名则只发这几条。
+	// 保存时校验通道是否存在（点名不存在的通道即拒），发送经 internal/notify 真实投递，
+	// 失败/通道停用/通道已删三种情况都落审计——不存在「假的已发送」。
 	Channels []string `json:"channels"`
 	// CooldownSec 冷却期。不是塞进 threshold_json 而是独立成列：它对所有 kind 都生效，
 	// 且是告警页可用性的硬约束，混进各 kind 自己的阈值里迟早被某个 kind 漏掉。

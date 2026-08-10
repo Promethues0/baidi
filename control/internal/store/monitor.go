@@ -32,7 +32,6 @@ type OnlineSession struct {
 // 一台网关都没起。无网关上报时正确的答案是空态，不是好看的假数据。
 // 会话现在**只有一个来源**：网关注册心跳里的 sessions（见 api.handleOnline）。
 
-
 // ── 监控中心 · 用户状态（风险 / 异常态势）──
 
 // UserStateBucket 状态分桶聚合（聚合头的计数卡）。
@@ -45,10 +44,10 @@ type UserStateBucket struct {
 
 // UserStateItem 一名受关注用户的当前态势。
 type UserStateItem struct {
-	ID        string   `json:"id"`
-	User      string   `json:"user"`
-	Account   string   `json:"account"`
-	Org       string   `json:"org"`
+	ID      string `json:"id"`
+	User    string `json:"user"`
+	Account string `json:"account"`
+	Org     string `json:"org"`
 	// State 用户当前所处的档位。★口径与风险引擎的处置四档**统一**：
 	// block / degrade / gray 直接就是 risk.Verdict.Disposal 的取值，
 	// locked / disabled 是与风险正交的目录账号状态（优先级高于风险档）。
@@ -57,8 +56,8 @@ type UserStateItem struct {
 	// 同一个"被降权的用户"在安全中心叫 degrade、在用户状态页叫 risk-low，
 	// 管理员无法判断两处说的是不是同一件事，也无法从这页看出「谁正在被降权」。
 	// idle（空闲挂起）一并删除——它从来没有真实来源，真实实现恒为 0。
-	State string `json:"state"` // block | degrade | gray | locked | disabled
-	Risk  string `json:"risk"`  // none | low | high
+	State     string   `json:"state"` // block | degrade | gray | locked | disabled
+	Risk      string   `json:"risk"`  // none | low | high
 	Online    bool     `json:"online"`
 	Reasons   []string `json:"reasons"` // 命中的风险 / 异常原因
 	LastEvent string   `json:"lastEvent"`

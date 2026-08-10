@@ -290,7 +290,7 @@ const externalOrgUnitID = "ext"
 // extUserOrgBackfillMarker 一次性标记：把外部账号的 org_id 从 org_key 补齐只做一次。
 //
 // ★做成一次性而不是每次启动都补：管理员完全可能显式把某个账号的组织归属清空
-// （org_id=''），每次启动都按陈旧的 org_key 补回去，等于管理员的操作被静默撤销。
+// （org_id=”），每次启动都按陈旧的 org_key 补回去，等于管理员的操作被静默撤销。
 const extUserOrgBackfillMarker = "org.extuser.orgid.v1"
 
 // ensureExternalOrgUnit 确保「外部目录」这个组织单元存在，返回它的 id 与名称。

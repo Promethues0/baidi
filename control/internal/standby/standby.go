@@ -19,6 +19,7 @@ package standby
 
 import (
 	"fmt"
+	"strings"
 	"time"
 )
 
@@ -150,6 +151,34 @@ func Boundaries() []string {
 	}
 }
 
+// evaluateNeverSeen 台账为空时的两种结论，**必须分开**。
+//
+// standby_nodes 的行只在备机成功连上主机 mTLS 口那一刻才建立（拉备份或回报状态）。
+// 于是「运维签好了 standby- 证书、备机也在跑，但 BAIDI_MTLS_ADDR 只听回环 / 被防火墙挡了」
+// 与「根本没配备机」在页面与 /diag 上此前完全同形：都是 skip「未配置备机（单机形态）」，
+// 不扣健康分、不告警。而前者恰恰就是"切换那天手上没有备份"的形态。
+//
+// 主机侧其实有可交叉核对的事实——已签发的备机证书（CN standby-*）。有证书却没有任何
+// 台账行，就是「配了但一次都没连上来」，判 warn 并把该说的话说出来。
+func evaluateNeverSeen(v ClusterView, issuedCNs []string) ClusterView {
+	if len(issuedCNs) == 0 {
+		v.Status = "skip"
+		v.Summary = "未配置备机（当前为单机形态）"
+		v.Note = singleNote
+		v.RPO = "—（没有备机就没有 RPO 可言：控制面数据只有一份）"
+		return v
+	}
+	v.Status = "warn"
+	v.Summary = fmt.Sprintf("已签发 %d 张备机证书（%s），但没有任何一台备机连上过主机",
+		len(issuedCNs), strings.Join(issuedCNs, "、"))
+	v.Note = "备机台账为空 = 主机一次都没被备机拉过备份、也没收到过回报。" +
+		"这与「未配置备机」不是一回事：材料都备齐了，同步却从未发生，" +
+		"盘上没有任何一份可用于切换的备份。常见成因：BAIDI_MTLS_ADDR 只监听回环、" +
+		"备机到主机 mTLS 端口被防火墙挡住、备机进程未启动、证书未分发到备机。"
+	v.RPO = "—（从未同步过，没有 RPO 可言）"
+	return v
+}
+
 // Unsupported 后端不支持温备状态记录（纯内存演示栈）时的诚实回答。
 // 与「未配置备机」区分开：前者是"这个后端记不下来"，后者是"确实没配"，
 // 混成一句话会让人在演示栈上以为自己已经确认过没有备机。
@@ -182,8 +211,11 @@ func Unknown(reason string) ClusterView {
 // Evaluate 按主机侧登记算出集群视图。纯函数：吃快照吐结论，条件写反在集成环境里
 // 与"一切正常"无法区分，只有纯函数测得住（同 alerting.Evaluate 的理由）。
 //
+// issuedCNs 是主机上**已签发过的备机证书 CN**（非吊销）。它只在 nodes 为空时起作用，
+// 用来把「配了备机但它一次都没连上来」与「根本没配备机」区分开——见 evaluateNeverSeen。
+//
 // staleAfter <= 0 时取 DefaultStaleAfter。
-func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration) ClusterView {
+func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs ...string) ClusterView {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
 	}
@@ -192,11 +224,7 @@ func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration) ClusterView
 		Nodes: []NodeView{}, Boundaries: Boundaries(), PromoteCmd: PromoteCommand,
 	}
 	if len(nodes) == 0 {
-		v.Status = "skip"
-		v.Summary = "未配置备机（当前为单机形态）"
-		v.Note = singleNote
-		v.RPO = "—（没有备机就没有 RPO 可言：控制面数据只有一份）"
-		return v
+		return evaluateNeverSeen(v, issuedCNs)
 	}
 
 	v.Mode, v.Deployed = ModeWarm, true

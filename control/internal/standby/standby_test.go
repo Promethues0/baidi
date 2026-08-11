@@ -272,3 +272,34 @@ func corrupt(b []byte) []byte {
 	c[len(c)-1] ^= 0xff
 	return c
 }
+
+// ★「配了备机但它一次都没连上来」不得与「根本没配备机」同形。
+//
+// standby_nodes 的行只在备机成功连上主机 mTLS 口时才建立。运维签好了证书、备机也在跑，
+// 但 mTLS 口只听回环 / 被防火墙挡住 —— 台账永远空，此前页面与 /diag 都回
+// skip「未配置备机（单机形态）」，不扣分不告警，而这恰恰是"切换那天手上没有备份"的形态。
+func TestNeverConnectedStandbyIsNotSilentSkip(t *testing.T) {
+	now := time.Now()
+	// 没签过任何备机证书：确实是单机形态，skip 是对的（不该因为"没有备机"被扣健康分）
+	v := Evaluate(nil, now, 0)
+	if v.Status != "skip" || v.Deployed {
+		t.Fatalf("无备机证书时应 skip 单机形态，得 %+v", v)
+	}
+
+	// 签过证书却没有任何台账行：warn，且必须说清是"从未同步"而不是"未配置"
+	v2 := Evaluate(nil, now, 0, "standby-1", "standby-2")
+	if v2.Status != "warn" {
+		t.Fatalf("★签过备机证书却零台账必须 warn，得 %q", v2.Status)
+	}
+	if strings.Contains(v2.Summary, "未配置备机") {
+		t.Fatalf("★不得与「未配置备机」同形，得 %q", v2.Summary)
+	}
+	for _, want := range []string{"standby-1", "standby-2"} {
+		if !strings.Contains(v2.Summary, want) {
+			t.Fatalf("摘要应点名是哪几张证书，缺 %q：%q", want, v2.Summary)
+		}
+	}
+	if strings.Contains(v2.RPO, "分钟") {
+		t.Fatalf("从未同步过就没有 RPO 可言，不该给出一个数字：%q", v2.RPO)
+	}
+}

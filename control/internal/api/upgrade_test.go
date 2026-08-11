@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"database/sql"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -12,6 +13,9 @@ import (
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/upgrade"
+
+	// 直接用 SQL 读归档里那份库：不经任何白帝代码，避免"自己验自己"。
+	_ "modernc.org/sqlite"
 )
 
 func userTokenFor(account string) string {
@@ -274,5 +278,103 @@ func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 			t.Errorf("备份里缺 %s（恢复出来的系统会以一种没人看得出的方式坏掉）；实际：%v",
 				want, keysOf(files))
 		}
+	}
+}
+
+// ★备份导出要 PermSystem ∩ PermAdmins（实际只有 root）。
+//
+// 这份备份就是温备端点吐出来的那一份：CA 私钥 + 三把签名私钥 + 审计链密钥 + 整个库，
+// 口令还由导出者自己指定。单 PermSystem 时三权分立有一条直路可绕：系统管理员导出备份
+// → 解出 BAIDI_JWT_KEY → 自签一张 Name=某 root 的会话令牌 → 角色按账号现算，直接全权
+// （含他本不该有的 PermAudit）。「能拿走全部信任材料」等价于「能造任意管理员」。
+func TestBackupRequiresSystemAndAdminsPerm(t *testing.T) {
+	h := newTestServer(t)
+	sysTok := makeAdmin(t, h, "sys.backup", "system")
+	body := map[string]any{"passphrase": "correct-horse-battery"}
+
+	code, out := doJSON(t, h, "POST", "/api/v1/upgrade/backup", sysTok, body)
+	if code != http.StatusForbidden {
+		t.Fatalf("★只有 system 权的管理员不得导出备份（等于能自签任意管理员），得 %d %v", code, out)
+	}
+	// 对照：超管可以（否则上面的 403 可能只是把所有人都挡住了）
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/upgrade/backup",
+		strings.NewReader(`{"passphrase":"correct-horse-battery"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken())
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("超管应能导出备份，得 %d %s", rec.Code, rec.Body.String())
+	}
+	// 头部只读端点仍是单 system 权（它只解析上传文件的明文头，不产出任何材料）
+	if code, _ := doJSON(t, h, "POST", "/api/v1/upgrade/backup/inspect", sysTok, nil); code == http.StatusForbidden {
+		t.Fatal("备份头部预览不该被两权闸误伤")
+	}
+}
+
+// ★备份里必须有**刚刚提交**的那条数据，而不是"上一次 checkpoint 为止"的库。
+//
+// 库跑在 WAL 模式（store/sqlite.go 的 DSN），提交只落 baidi.db-wal，主库文件要等
+// 攒够约 4MB WAL 才被 checkpoint 写回；连接池长期留着空闲连接，也不会发生
+// 「关连接顺带 checkpoint」。退回旧实现（直接 os.ReadFile 主库文件、且不带 -wal）
+// 这条用例会红得非常彻底——归档里那个 baidi.db 连表都可能没有。
+//
+// 而它的现网形态是完全静默的：备份解得开、含 baidi.db，备机 VerifyBackup 通过、
+// standby_nodes 推进、页面显示「同步新鲜 · RPO = 10 分钟」，真实 RPO 是
+// 「距上次 checkpoint 多久」——没有上界，只在切换那天暴露。
+func TestBackupCapturesCommittedWALWrites(t *testing.T) {
+	st := openTestSQLite(t)
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, true)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+
+	// 一条刚刚提交、几乎必定还躺在 WAL 里的写入
+	const marker = "wal-canary-resource"
+	if code, out := doJSON(t, h, "POST", "/api/v1/resources", adminToken(), map[string]any{
+		"id": marker, "name": "WAL 金丝雀", "backend": "127.0.0.1:9",
+	}); code != http.StatusCreated && code != http.StatusOK {
+		t.Fatalf("前置条件：建资源应成功，得 %d %v", code, out)
+	}
+
+	rec := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/api/v1/upgrade/backup",
+		strings.NewReader(`{"passphrase":"correct-horse-battery"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken())
+	req.Header.Set("Content-Type", "application/json")
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("备份应成功，得 %d %s", rec.Code, rec.Body.String())
+	}
+	_, files, err := upgrade.OpenBackup(rec.Body.Bytes(), "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("备份应能解开：%v", err)
+	}
+	db := files["baidi.db"]
+	if len(db) == 0 {
+		t.Fatalf("备份里必须含数据库，归档内容：%v", keysOf(files))
+	}
+	// 归档里的库**不该**带 -wal 边车（VACUUM INTO 出来的快照本身就是完整的）；
+	// 恢复脚本会 rm -f baidi.db-wal，靠边车补数据的话那一步就把数据删了。
+	for _, n := range keysOf(files) {
+		if strings.HasSuffix(n, "-wal") || strings.HasSuffix(n, "-shm") {
+			t.Fatalf("归档不该带 WAL 边车（恢复脚本会删掉它）：%s", n)
+		}
+	}
+
+	// 把归档里那份库落盘、直接用 SQL 查——不经任何白帝代码，避免"自己验自己"
+	p := filepath.Join(t.TempDir(), "restored.db")
+	if err := os.WriteFile(p, db, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	conn, err := sql.Open("sqlite", "file:"+p+"?_pragma=busy_timeout(5000)")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	var n int
+	if err := conn.QueryRow(`SELECT count(*) FROM resources WHERE id = ?`, marker).Scan(&n); err != nil {
+		t.Fatalf("★归档里的库读不出 resources 表（多半是拷了尚未 checkpoint 的主库文件）：%v", err)
+	}
+	if n != 1 {
+		t.Fatalf("★刚提交的那条数据不在备份里（真实 RPO = 距上次 checkpoint 多久，无上界）")
 	}
 }

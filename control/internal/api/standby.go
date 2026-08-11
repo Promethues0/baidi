@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -57,7 +58,8 @@ func (s *Server) handleStandbyBackup(w http.ResponseWriter, r *http.Request) {
 			"温备同步未启用：主机未配置 BAIDI_STANDBY_PASSPHRASE（备份必须加密，没有口令就不产出）")
 		return
 	}
-	sources, err := s.backupSources()
+	sources, cleanup, err := s.backupSources(r.Context())
+	defer cleanup()
 	if err != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -176,7 +178,7 @@ func (s *Server) clusterView(ctx context.Context) standby.ClusterView {
 	if err != nil {
 		return standby.Unknown("备机台账 standby_nodes 读取失败：" + err.Error())
 	}
-	v := standby.Evaluate(nodes, time.Now(), s.standbyStale)
+	v := standby.Evaluate(nodes, time.Now(), s.standbyStale, s.issuedStandbyCNs(ctx)...)
 	// 配了备机却没配口令 = 同步端点一律 503，备机会持续失败。这件事在节点状态上
 	// 要过几轮才看得出来（先是"最近一次失败"，再是"落后"），在这里当场说清楚。
 	if v.Deployed && s.standbyPass == "" {
@@ -184,6 +186,29 @@ func (s *Server) clusterView(ctx context.Context) standby.ClusterView {
 		v.Note += "　⚠ 主机未配置 BAIDI_STANDBY_PASSPHRASE：同步端点一律回 503，备机拉不到任何东西。"
 	}
 	return v
+}
+
+// issuedStandbyCNs 列出**已签发且未吊销**的备机证书 CN（去重、有序）。
+//
+// 它是 clusterView 唯一的交叉核对材料：备机台账为空时，有没有签过备机证书决定了
+// 这是「根本没配」还是「配了但一次都没连上来」——后者是切换那天才发现没有备份的形态。
+// 读不到就当没有（这里只影响措辞的精细度，不影响任何安全判定）。
+func (s *Server) issuedStandbyCNs(ctx context.Context) []string {
+	certs, err := s.store.GatewayCerts(ctx)
+	if err != nil {
+		return nil
+	}
+	seen := map[string]bool{}
+	var out []string
+	for _, c := range certs {
+		if c.Revoked || !strings.HasPrefix(c.GatewayID, standby.CNPrefix) || seen[c.GatewayID] {
+			continue
+		}
+		seen[c.GatewayID] = true
+		out = append(out, c.GatewayID)
+	}
+	sort.Strings(out) // 页面文案要稳定，不能随查询顺序抖
+	return out
 }
 
 // trimTo 截断备机自报的字符串字段（它们直接进库并显示在页面上）。

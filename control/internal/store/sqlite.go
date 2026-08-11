@@ -156,6 +156,34 @@ func (s *SQLiteStore) DBPath() string { return s.path }
 // 「审计链校验」的那天才发现。问 store 要，不自己重推。
 func (s *SQLiteStore) AuditKeyPath() string { return s.auditKeyPath }
 
+// SnapshotTo 产出一份**事务一致**的数据库快照到 path（该文件必须尚不存在）。
+//
+// ★配置备份/温备同步**必须**走它，绝不能直接读 DBPath() 那个文件。
+//
+// 库开在 WAL 模式（见 OpenSQLite 的 DSN），提交只落 `baidi.db-wal`，主库文件要等到
+// checkpoint（默认攒够约 4MB WAL）才被写回；连接池里长期有空闲连接，也就不会发生
+// 「关最后一个连接顺带 checkpoint」。于是直接整读主库文件拿到的是「上一次 checkpoint
+// 为止」的内容——今天上午改的策略、建的账号可能一条都不在里面。而这份备份解得开、
+// 也含 baidi.db，所有校验都通过，页面照常显示「同步新鲜 · RPO = 10 分钟」，
+// 真实 RPO 是「距上次 checkpoint 多久」，**没有上界**。只在切换那天暴露。
+// 第二个后果同样致命：读文件时若正赶上 checkpoint 回写页，拷贝可能内部不一致
+// （恢复时报 database disk image is malformed），两处"校验"也发现不了。
+//
+// `VACUUM INTO` 在一个读事务里把整库写成一个新文件：内容一致、不含 -wal 边车、
+// 顺带整理碎片。不用「先 wal_checkpoint(TRUNCATE) 再拷文件」是因为那两步之间
+// 仍有写入窗口——一致性靠时间差碰运气不算一致性。
+func (s *SQLiteStore) SnapshotTo(ctx context.Context, path string) error {
+	if _, err := os.Stat(path); err == nil {
+		return fmt.Errorf("快照目标已存在：%s", path)
+	}
+	// 路径进 SQL 只能走字面量（VACUUM INTO 不接受占位参数），故必须自己转义单引号。
+	quoted := "'" + strings.ReplaceAll(path, "'", "''") + "'"
+	if _, err := s.db.ExecContext(ctx, "VACUUM INTO "+quoted); err != nil {
+		return fmt.Errorf("生成数据库一致性快照失败: %w", err)
+	}
+	return nil
+}
+
 func OpenSQLite(path string) (*SQLiteStore, error) {
 	// _txlock=immediate：事务起手即取写锁，让「检查后写」类守卫（如对象删除前的引用复核）原子化，杜绝 TOCTOU。
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate", path)

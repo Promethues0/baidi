@@ -2,6 +2,7 @@ package api
 
 import (
 	"bytes"
+	"context"
 	"crypto/ed25519"
 	"encoding/base64"
 	"encoding/json"
@@ -26,12 +27,13 @@ import (
 //	PUT  /api/v1/upgrade/rules           改升级校验规则（PermSystem）
 //	POST /api/v1/upgrade/check           上传包描述+签名，即时回校验结论（PermSystem）
 //	PUT  /api/v1/upgrade/gray            保存某平台灰度计划（PermSystem）
-//	POST /api/v1/upgrade/backup          导出加密配置备份（PermSystem）
+//	POST /api/v1/upgrade/backup          导出加密配置备份（PermSystem ∩ PermAdmins，见 handleBackup）
 //	POST /api/v1/upgrade/backup/inspect  只读备份头部，不解密（PermSystem）
 //	GET  /api/v1/client/update           终端检查更新（登录用户；灰度判定在这里发生）
 //
-// ★权限归 PermSystem：升级与备份是系统管理员职责。备份尤其不能给 security——
-// 一份备份含 CA 私钥与全部凭据，能导出备份等于能带走整套系统的信任材料。
+// ★权限归 PermSystem：升级是系统管理员职责。**备份导出例外，要两权**
+// （PermSystem ∩ PermAdmins，理由见 handleBackup）——一份备份含 CA 私钥与全部凭据，
+// 能导出备份等于能带走整套系统的信任材料，进而能自签任意管理员令牌。
 
 // upgradeBundle 升级管理页一次取全。
 type upgradeBundle struct {
@@ -286,8 +288,19 @@ func (s *Server) groupsOf(r *http.Request, account string) []string {
 
 // ── 配置备份与恢复（FR-UPG-09/10）──
 
+// handleBackup 导出加密配置备份。
+//
+// ★权限是 `PermSystem ∩ PermAdmins`（实际只有 root），不是单 PermSystem。
+//
+// 这份备份**就是**温备端点吐出来的那一份（同一个 backupSources）：CA 私钥 + 三把
+// 签名私钥 + 审计链密钥 + 认证源凭据 + IPSec PSK + 整个库。口令还由导出者自己指定，
+// 也就是他随手就能解开。于是单 PermSystem 时三权分立可以被一条直路绕开：
+// 系统管理员导出备份 → 解出 BAIDI_JWT_KEY → 自签一张 Name=某 root 的会话令牌 →
+// requireAdmin/currentAdminRole 按账号现算角色，直接拿到全权（含他本不该有的 PermAudit）。
+// 「能拿走全部信任材料」等价于「能造任意管理员」，所以它必须要 admins 权。
+// 与审计外送出口增删（PermSystem ∩ PermAudit）是同一条不变量的另一面。
 func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePerm(w, r, store.PermSystem) {
+	if !s.requirePerms(w, r, store.PermSystem, store.PermAdmins) {
 		return
 	}
 	var body struct {
@@ -304,7 +317,8 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sources, err := s.backupSources()
+	sources, cleanup, err := s.backupSources(r.Context())
+	defer cleanup()
 	if err != nil {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
@@ -360,7 +374,8 @@ func (s *Server) handleBackupInspect(w http.ResponseWriter, r *http.Request) {
 // 在进程运行中就地覆盖会让一半请求读到旧库、一半读到新库，且失败后没有回头路。
 // 恢复由停机后的部署脚本执行（解开归档覆盖回目录再启动），控制台只负责导出与预览。
 // 这条边界写在 upgradeBoundaries 里直接呈现给管理员。
-func (s *Server) backupSources() ([]upgrade.BackupSource, error) {
+// 第二个返回值是清理函数（删掉临时的数据库快照），调用方必须 defer 掉它。
+func (s *Server) backupSources(ctx context.Context) ([]upgrade.BackupSource, func(), error) {
 	var out []upgrade.BackupSource
 	add := func(name, path string) {
 		if path == "" {
@@ -370,19 +385,44 @@ func (s *Server) backupSources() ([]upgrade.BackupSource, error) {
 			out = append(out, upgrade.BackupSource{Name: name, Path: path})
 		}
 	}
+	cleanup := func() {}
 	// ★库路径问真正在用的那个 store，不自己重读 BAIDI_DB 推导：
 	// 两处推导一旦不一致，备份会静默不含数据库，而管理员以为自己有完整备份——
 	// 这类错误只在真正需要恢复的那天才暴露。
 	type dbPather interface{ DBPath() string }
 	p, ok := s.store.(dbPather)
 	if !ok || p.DBPath() == "" {
-		return nil, errors.New("当前后端没有可备份的持久化材料（纯内存演示栈）")
+		return nil, cleanup, errors.New("当前后端没有可备份的持久化材料（纯内存演示栈）")
 	}
 	if _, err := os.Stat(p.DBPath()); err != nil {
 		// 找不到库文件就**直接失败**，绝不产出一份不含数据库的「成功」备份。
-		return nil, fmt.Errorf("数据库文件不可读（%s）：%v", p.DBPath(), err)
+		return nil, cleanup, fmt.Errorf("数据库文件不可读（%s）：%v", p.DBPath(), err)
 	}
-	add("baidi.db", p.DBPath())
+	// ★进归档的必须是**一致性快照**，不是活库文件本身。
+	//
+	// 库跑在 WAL 模式下，提交先落 baidi.db-wal，主库文件只在 checkpoint 时才被写回；
+	// 直接整读主库文件（且不带 -wal）拿到的是「上一次 checkpoint 为止」的内容——
+	// 今天改的策略、建的账号可能一条都不在里面，而备份解得开、也含 baidi.db，
+	// 备机校验通过、页面显示「同步新鲜 · RPO = 10 分钟」，真实 RPO 无上界。
+	// 这类错误只在真正切换的那天暴露，所以判据必须结构性成立，不能靠"记得先 checkpoint"。
+	type snapshotter interface {
+		SnapshotTo(context.Context, string) error
+	}
+	sn, ok := s.store.(snapshotter)
+	if !ok {
+		return nil, cleanup, errors.New("当前存储后端不支持一致性快照，拒绝产出可能缺数据的备份")
+	}
+	dir, err := os.MkdirTemp("", "baidi-backup-")
+	if err != nil {
+		return nil, cleanup, fmt.Errorf("创建快照临时目录失败：%v", err)
+	}
+	cleanup = func() { _ = os.RemoveAll(dir) }
+	snap := filepath.Join(dir, "baidi.db")
+	if err := sn.SnapshotTo(ctx, snap); err != nil {
+		cleanup()
+		return nil, func() {}, err
+	}
+	add("baidi.db", snap)
 	add("pki", os.Getenv("BAIDI_PKI_DIR"))
 	// 三把签名私钥都要进备份。**web 那把此前漏了**：恢复后 control 会重新生成一把，
 	// 而各网关 L7 监听装的还是旧的 web.pub —— 七层 Web 代理整体失效，
@@ -400,7 +440,7 @@ func (s *Server) backupSources() ([]upgrade.BackupSource, error) {
 	if k, ok := s.store.(auditKeyPather); ok {
 		add("audit-hmac.key", k.AuditKeyPath())
 	}
-	return out, nil
+	return out, cleanup, nil
 }
 
 // upgradeReady 后端是否支持升级配置持久化。

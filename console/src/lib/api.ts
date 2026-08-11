@@ -859,3 +859,35 @@ export interface AlertRulesResp {
   notify: { wired: boolean; channels: AlertNotifyOption[]; note?: string; reason?: string };
   cooldown: { default: number; min: number; max: number };
 }
+
+/* ── 地址转换 NAT（PRD 第 18 章，store.NATPolicy / GatewayIface）────────────── */
+
+/** 转换类型：snat=内网出站统一出口（代理上网）；dnat=公网 IP:端口 → 内网真实地址（资源发布）。 */
+export type NATType = 'snat' | 'dnat';
+export type NATProto = 'tcp' | 'udp' | 'icmp' | 'all';
+/** 网卡类型。空串=尚未定性，不能出现在任何 NAT 策略里。 */
+export type IfaceType = 'lan' | 'wan' | '';
+
+export interface NATPolicy {
+  id: string; name: string; type: NATType;
+  /** NAT 是网关设备本地能力，每条策略必须绑定到具体网关。 */
+  gatewayId: string;
+  srcIface: string; srcAddr: string;
+  dstIface: string; dstAddr: string;
+  protocol: NATProto;
+  /** 以下三项仅 DNAT 有效，SNAT 保存时会被后端清零。 */
+  dstPort: number; translatedAddr: string; translatedPort: number;
+  enabled: boolean; createdAt?: string; updatedAt?: string;
+}
+
+/** 网关实测枚举上报的网卡；type 由管理员定（网关无可靠依据自动判断）。 */
+export interface GatewayIface {
+  gatewayId: string; name: string; type: IfaceType; addrs: string[]; up: boolean; updatedAt?: string;
+}
+
+export interface NATBundle {
+  policies: NATPolicy[];
+  ifaces: GatewayIface[];
+  /** 后端下发的风险提示（SPA 互斥 / 回程路由 / 带宽）。PRD 把它列为强需求，前端不得自行编写。 */
+  warnings: string[];
+}

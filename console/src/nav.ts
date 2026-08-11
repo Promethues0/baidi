@@ -55,6 +55,7 @@ export const NAV: NavGroup[] = [
     children: [
       { title: '网关与隐身', path: '/security/gateway', icon: 'IconStorage', done: true },
       { title: 'IPSec 组网', path: '/security/ipsec', icon: 'IconLink', done: true },
+      { title: '地址转换', path: '/security/nat', icon: 'IconSwap', done: true },
       { title: '资源策略', path: '/security/resources', icon: 'IconRelation', done: true },
       { title: '安全中心', path: '/security/center', icon: 'IconSafe', done: true },
       { title: '审计中心', path: '/security/audit', icon: 'IconFile', done: true }

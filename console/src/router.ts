@@ -13,6 +13,7 @@ const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/business/policy': () => import('@/views/Policy.vue'),
   '/business/objects': () => import('@/views/Objects.vue'),
   '/security/ipsec': () => import('@/views/Ipsec.vue'),
+  '/security/nat': () => import('@/views/Nat.vue'),
   '/business/apps': () => import('@/views/Apps.vue'),
   '/business/users': () => import('@/views/Users.vue'),
   '/business/devices': () => import('@/views/Devices.vue'),

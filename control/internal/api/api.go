@@ -1038,6 +1038,19 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	if id == "" {
 		id = c.Sub
 	}
+	// ★mTLS 在场时，证书 CN 是**权威身份**，压过网关自报的 b.ID。
+	// 签发时 CN 就等于 gwID（pki.go），两者本该一致；不一致有两种成因，都很难自查：
+	//   - 运维把 -gwid 写成了与证书 CN 不同的值：网卡台账记在自报 id 下，
+	//     而 NAT 策略按 CN 下发（handleGatewayPolicy 用 gatewayIDFrom），
+	//     结果管理员照着页面上的网卡配好策略，网关永远收不到，全程无报错；
+	//   - 冒名：一张合法网关证书自报成别人的 id，就能覆写那台网关的网卡台账。
+	// 故以 CN 为准并留一条响亮日志。明文兼容路径没有 CN，维持既有行为（自报 id）。
+	if cn := mtlsCN(r); cn != "" && cn != id {
+		slog.Warn("网关自报 id 与证书 CN 不符，按证书 CN 记账",
+			"declared", id, "cn", cn,
+			"提示", "多半是 -gwid 与签发证书时的 gwID 写岔了；不改的话地址转换策略会下发不到这台网关")
+		id = cn
+	}
 	s.mu.Lock()
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
@@ -1191,15 +1204,31 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"resources": gwRes, "revoked": revoked, "nat": natOut})
 }
 
-// gatewayIDFrom 取本次请求的网关身份。mTLS 侧是客户端证书 CN，明文兼容侧退回
-// 令牌主体——两条路都拿不到就返回空串，NATForGateway 会因此下发空集（fail-closed：
+// gatewayIDFrom 取本次请求的网关身份，**以已认证的那个为准**：
+// mTLS 侧是客户端证书 CN（签发时就等于 gwID，见 pki.go），明文兼容侧是令牌主体。
+// 两条路都拿不到返回空串，NATForGateway 会据此下发空集（fail-closed：
 // 认不出是哪台网关时，宁可不下发规则，也不能把别人的 NAT 规则灌进这台机器）。
+//
+// ★注册心跳里那个 b.ID 是网关**自报**的，不作为权威身份：mTLS 在场时
+// handleGatewayRegister 会用 CN 覆盖它（见那里的注释），两个出口因此一致。
+//
+// 明文兼容路径（gwPlaintextCompat，过渡逃生舱）没有 CN，只能退回令牌主体。
+// 那条路上令牌主体与网关自报 id 未必相同，NAT 分发要求两者一致——生产部署
+// 走的是 mTLS，`/api/v1/gateways/*` 本就只挂 mTLS 监听，故不为此增加特例。
 func gatewayIDFrom(r *http.Request) string {
-	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
-		return r.TLS.PeerCertificates[0].Subject.CommonName
+	if cn := mtlsCN(r); cn != "" {
+		return cn
 	}
 	if c, ok := auth.FromContext(r.Context()); ok {
 		return c.Sub
+	}
+	return ""
+}
+
+// mtlsCN 取客户端证书的 CN；非 mTLS 请求回空串。
+func mtlsCN(r *http.Request) string {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		return r.TLS.PeerCertificates[0].Subject.CommonName
 	}
 	return ""
 }

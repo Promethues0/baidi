@@ -255,3 +255,12 @@ func unTarGz(b []byte) (map[string][]byte, error) {
 		out[h.Name] = body
 	}
 }
+
+// CheckPassphrase 单独暴露口令强度校验，供调用方在做任何工作之前先拦住弱口令。
+func CheckPassphrase(p string) error {
+	if len([]rune(p)) < minPassphrase {
+		return fmt.Errorf("%w: 至少 %d 个字符（备份里装着 CA 私钥、IPSec PSK、认证源凭据与审计密钥）",
+			ErrBackupPassphrase, minPassphrase)
+	}
+	return nil
+}

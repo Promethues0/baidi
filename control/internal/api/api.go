@@ -3,6 +3,7 @@ package api
 
 import (
 	"context"
+	"crypto/ed25519"
 	"encoding/json"
 	"errors"
 	"io"
@@ -72,7 +73,13 @@ type Server struct {
 	// nat 地址转换策略与网关网卡台账（PRD 第 18 章）。独立接口、按需断言：
 	// 纯 Memory 后端（未连库的降级演示栈）拿不到它，端点如实回 503 而不是空列表——
 	// 空列表会让「没配 NAT 策略」与「这个后端根本不支持 NAT」长得一模一样。
-	nat      store.NATStore
+	nat store.NATStore
+	// upg 升级配置持久化（灰度计划 + 校验规则）。同 nat：纯内存后端拿不到，端点如实回 503。
+	upg store.UpgradeStore
+	// upgradeKeys 升级包发布公钥（BAIDI_UPGRADE_PUBKEY，base64，逗号分隔可多把供轮换）。
+	// 空 = 无法验签，VerifySignature 会**拒绝**而不是跳过（见那里的注释）。
+	upgradeKeys []ed25519.PublicKey
+
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -194,6 +201,10 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	if v, ok := wr.(store.NATStore); ok {
 		s.nat = v
 	}
+	if v, ok := wr.(store.UpgradeStore); ok {
+		s.upg = v
+	}
+	s.upgradeKeys = parseUpgradeKeys(os.Getenv("BAIDI_UPGRADE_PUBKEY"))
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
@@ -402,6 +413,14 @@ func (s *Server) Routes() http.Handler {
 	// ★数据面侧的三个 ipsec 端点只挂 mTLS 监听（见 MTLSHandler），明文口没有它们——
 	// PSK 原文在 :8090 上不存在任何形态的出口。
 	// 地址转换（PRD 第 18 章）。读=任意管理员现算角色，写=PermSystem（见 nat.go 文件头）。
+	// 产品升级管理（PRD 第 4 章）。读=任意管理员现算角色，写=PermSystem（见 upgrade.go 文件头）。
+	mux.HandleFunc("GET /api/v1/upgrade", s.handleUpgrade)
+	mux.HandleFunc("PUT /api/v1/upgrade/rules", s.handleSaveUpgradeRules)
+	mux.HandleFunc("POST /api/v1/upgrade/check", s.handleUpgradeCheck)
+	mux.HandleFunc("PUT /api/v1/upgrade/gray", s.handleSaveGrayPlan)
+	mux.HandleFunc("POST /api/v1/upgrade/backup", s.handleBackup)
+	mux.HandleFunc("POST /api/v1/upgrade/backup/inspect", s.handleBackupInspect)
+	mux.HandleFunc("GET /api/v1/client/update", s.handleClientUpdate) // 终端检查更新（灰度判定在服务端）
 	mux.HandleFunc("GET /api/v1/nat", s.handleNAT)
 	mux.HandleFunc("POST /api/v1/nat/policies", s.handleSaveNATPolicy)
 	mux.HandleFunc("DELETE /api/v1/nat/policies/{id}", s.handleDeleteNATPolicy)

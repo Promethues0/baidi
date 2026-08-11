@@ -136,6 +136,13 @@ type SQLiteStore struct {
 }
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
+// DBPath 返回本 store 实际打开的数据库文件路径。
+//
+// ★配置备份必须问它、而不是自己重新读 BAIDI_DB 推导：两处推导逻辑一旦不一致
+// （运维改用别的方式指定路径、或进程 cwd 变了），备份会**静默不含数据库**，
+// 而管理员以为自己有一份完整备份——这类错误只在真正需要恢复的那天才暴露。
+func (s *SQLiteStore) DBPath() string { return s.path }
+
 func OpenSQLite(path string) (*SQLiteStore, error) {
 	// _txlock=immediate：事务起手即取写锁，让「检查后写」类守卫（如对象删除前的引用复核）原子化，杜绝 TOCTOU。
 	dsn := fmt.Sprintf("file:%s?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=foreign_keys(1)&_txlock=immediate", path)

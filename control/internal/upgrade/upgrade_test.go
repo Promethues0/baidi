@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -349,5 +350,143 @@ func TestBackupRejectsPathTraversal(t *testing.T) {
 
 	if _, err := unTarGz(raw.Bytes()); err == nil || !errors.Is(err, ErrBackupFormat) {
 		t.Fatalf("路径穿越必须被拒，实际 %v", err)
+	}
+}
+
+// ── 客户端灰度升级（FR-UPG-19）──
+
+func grayPlan() GrayPlan {
+	return GrayPlan{Platform: "macos", Version: "0.5.0", Stable: "0.4.0", Percent: 10}
+}
+
+// 分桶必须**稳定**：同一账号在比例不变时永远落在同一侧。
+// 用随机数的话，同一个人每次检查更新都会在两个版本之间来回横跳，
+// 而这在服务端日志上看不出任何异常。
+func TestGrayBucketIsStable(t *testing.T) {
+	p := grayPlan()
+	first := Decide(p, "zhang.wei", nil)
+	for i := 0; i < 50; i++ {
+		if got := Decide(p, "zhang.wei", nil); got.Version != first.Version || got.InGray != first.InGray {
+			t.Fatalf("第 %d 次判定与首次不一致：%+v vs %+v", i, got, first)
+		}
+	}
+	// 大小写与空白不该改变分桶（同一个人）
+	if got := Decide(p, "  Zhang.Wei ", nil); got.Version != first.Version {
+		t.Errorf("账号大小写/空白不该改变分桶：%+v vs %+v", got, first)
+	}
+}
+
+// 平台参与分桶：不加平台盐的话，同一批「运气不好」的账号会在所有平台上
+// 同时被排除，灰度样本永远覆盖不到他们。
+func TestGrayBucketSaltedByPlatform(t *testing.T) {
+	same := 0
+	const n = 200
+	for i := 0; i < n; i++ {
+		a := fmt.Sprintf("user%03d", i)
+		if bucket("macos", a) == bucket("windows", a) {
+			same++
+		}
+	}
+	// 完全相同说明平台没进哈希；允许少量巧合（1/100 概率）
+	if same > n/10 {
+		t.Fatalf("%d/%d 个账号在两个平台上分到同一个桶——平台没有参与分桶", same, n)
+	}
+}
+
+func TestGrayPercentBoundaries(t *testing.T) {
+	accounts := make([]string, 1000)
+	for i := range accounts {
+		accounts[i] = fmt.Sprintf("user%04d", i)
+	}
+	p := grayPlan()
+
+	p.Percent = 0
+	if n := Coverage(p, accounts, nil); n != 0 {
+		t.Errorf("0%% 不该命中任何人，实际 %d", n)
+	}
+	p.Percent = 100
+	if n := Coverage(p, accounts, nil); n != len(accounts) {
+		t.Errorf("100%% 应命中全部，实际 %d/%d", n, len(accounts))
+	}
+	// 10% 的实际命中数应接近 100（分桶均匀性的粗检）
+	p.Percent = 10
+	n := Coverage(p, accounts, nil)
+	if n < 70 || n > 130 {
+		t.Errorf("10%% 灰度在 1000 人上命中 %d，偏离过大（分桶不均匀）", n)
+	}
+
+	// 扩大比例只应**增加**命中，绝不能把已经在灰度里的人踢回旧版本——
+	// 那会表现为「用户升到新版后又被降回去」。
+	prev := map[string]bool{}
+	for pct := 10; pct <= 100; pct += 10 {
+		p.Percent = pct
+		cur := map[string]bool{}
+		for _, a := range accounts {
+			if Decide(p, a, nil).InGray {
+				cur[a] = true
+			}
+		}
+		for a := range prev {
+			if !cur[a] {
+				t.Fatalf("比例从 %d%% 提到 %d%% 后，账号 %s 反而退出了灰度（用户会被降回旧版本）", pct-10, pct, a)
+			}
+		}
+		prev = cur
+	}
+}
+
+// 定向名单与用户组无视比例——内测/回归账号必须稳定拿到新版本。
+func TestGrayTargetedOverridesPercent(t *testing.T) {
+	p := grayPlan()
+	p.Percent = 0
+	p.Accounts = []string{"QA.Liu"}
+	p.Groups = []string{"g-beta"}
+
+	if d := Decide(p, "qa.liu", nil); !d.InGray || d.Version != "0.5.0" {
+		t.Errorf("定向名单应无视 0%% 比例：%+v", d)
+	}
+	if d := Decide(p, "someone", []string{"g-beta"}); !d.InGray {
+		t.Errorf("所属用户组在范围内应命中：%+v", d)
+	}
+	if d := Decide(p, "someone", []string{"g-other"}); d.InGray {
+		t.Errorf("不相关用户组不该命中：%+v", d)
+	}
+}
+
+func TestGrayNoPlanFallsBackToStable(t *testing.T) {
+	p := GrayPlan{Platform: "macos", Stable: "0.4.0"}
+	d := Decide(p, "zhang.wei", nil)
+	if d.InGray || d.Version != "0.4.0" {
+		t.Fatalf("无灰度计划时所有人拿稳定版：%+v", d)
+	}
+}
+
+func TestGrayPlanValidation(t *testing.T) {
+	ok := grayPlan()
+	if err := ok.Validate(); err != nil {
+		t.Fatalf("合法计划应通过：%v", err)
+	}
+	bad := []struct {
+		name string
+		mut  func(*GrayPlan)
+	}{
+		{"比例越界", func(p *GrayPlan) { p.Percent = 101 }},
+		{"负比例", func(p *GrayPlan) { p.Percent = -1 }},
+		{"平台为空", func(p *GrayPlan) { p.Platform = " " }},
+		{"版本号非法", func(p *GrayPlan) { p.Version = "不是版本" }},
+		// 灰度版本低于稳定版：那不是灰度，是把一部分用户降级，
+		// 而页面上显示的是「正在推新版本」。
+		{"灰度版本低于稳定版", func(p *GrayPlan) { p.Version = "0.3.0" }},
+		{"灰度版本等于稳定版", func(p *GrayPlan) { p.Version = "0.4.0" }},
+		{"有范围没版本", func(p *GrayPlan) { p.Version = ""; p.Percent = 50 }},
+	}
+	for _, c := range bad {
+		t.Run(c.name, func(t *testing.T) {
+			p := grayPlan()
+			c.mut(&p)
+			if err := p.Validate(); err == nil {
+				t.Fatalf("%s 应被拒", c.name)
+			}
+		})
 	}
 }

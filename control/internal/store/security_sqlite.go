@@ -70,16 +70,16 @@ func (s *SQLiteStore) DeleteBaseline(ctx context.Context, id string) error {
 	return err
 }
 
-// Security 覆盖：baselines 走库（可编辑、被风险引擎消费），Spa 概览沿用种子。
+// Security 安全中心页：只有基线一段，且整段走库（可编辑、被风险引擎消费）。
+//
+// ★不再以 s.Memory.Security(ctx) 打底：那样写的时候，"顺手继承"的 Spa 段
+// （已隐身 / 敲门正常 / G3）在页面上与真实的基线并排显示，看不出哪个是库里的事实。
+// 现在整个 bundle 逐字段构造，SecurityBundle 加了新段落而这里忘了填，是编译期
+// 就能看见的零值，不是一份看起来很像真的种子。
 func (s *SQLiteStore) Security(ctx context.Context) (SecurityBundle, error) {
-	b, err := s.Memory.Security(ctx)
-	if err != nil {
-		return SecurityBundle{}, err
-	}
 	bls, err := s.Baselines(ctx)
 	if err != nil {
 		return SecurityBundle{}, err
 	}
-	b.Baselines = bls
-	return b, nil
+	return SecurityBundle{Baselines: bls}, nil
 }

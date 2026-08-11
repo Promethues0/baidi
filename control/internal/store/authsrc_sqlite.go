@@ -388,6 +388,28 @@ func (s *SQLiteStore) AuthSrc(ctx context.Context) (AuthSrcBundle, error) {
 	return out, nil
 }
 
+// userDirectories 访问者目录页顶部的身份源分栏：**与认证源页同一份数据**（AuthSrc），
+// 刻意不另起一套查询。
+//
+// 这一层只做投影（丢掉 enabled/priority 这两个目录页不展示的字段），所以：
+//   - 「本地目录」永远在（seedLocalAuthSource 保证 auth_sources 里有 local 这一行），
+//     计数 = 没有任何外部绑定的 users 行数；
+//   - 外部目录**有几条配置就显示几条**，一条没配就只有本地目录——不会再凭空出现
+//     一个「总部 AD 域」；
+//   - 计数是库内可验证的事实（auth_source_bindings 条数），**不是**目录侧的纳管用户数：
+//     后者要遍历整个 LDAP 目录才数得出来，白帝没有也不该有那个能力。
+func (s *SQLiteStore) userDirectories(ctx context.Context) ([]Directory, error) {
+	b, err := s.AuthSrc(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Directory, 0, len(b.Sources))
+	for _, src := range b.Sources {
+		out = append(out, Directory{Key: src.Key, Name: src.Name, Type: src.Type, Users: src.BoundAccounts})
+	}
+	return out, nil
+}
+
 // authSourceAccountCounts 返回「外部源 id → 已绑定账号数」与「本地账号数」。
 //
 // 本地口径取"没有任何外部绑定的 users 行"而不是"pass_hash 非空"：外部账号的

@@ -1573,17 +1573,14 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load overview")
 		return
 	}
-	// 在线会话数只有 api 层掌握（网关上报的真实敲门会话）；有真实会话时覆盖种子，
-	// 并把在线设备数按真实会话对齐（无真实会话则保留种子，诚实降级）。
+	// 在线会话数只有 api 层掌握（网关上报的真实敲门会话），store 层恒为 0。
+	//
+	// ★这里原来还顺手把「在线设备数」按会话数对齐：会话是按账号计的、一个账号可以
+	// 同时开几条，拿它当设备数只是让那个来自种子的 186/240 看起来像被更新过。
+	// 设备口径已改成 trusted_devices 台账（store.DeviceStat），与会话不是一回事，
+	// 不再互相顶替。
 	if n := s.onlineSessionCount(); n >= 0 {
 		ov.Sessions = n
-		if n > ov.Devices.Total {
-			ov.Devices.Total = n
-		}
-		ov.Devices.Online = n
-		if ov.Devices.Total > 0 {
-			ov.Devices.Rate = float64(n) / float64(ov.Devices.Total)
-		}
 	}
 	httpx.JSON(w, http.StatusOK, ov)
 }

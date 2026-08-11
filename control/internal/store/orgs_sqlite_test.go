@@ -489,10 +489,6 @@ func TestPolicyBundleTreeFromDB(t *testing.T) {
 	if got, ok := keys[n.ID]; !ok || !got.HasCustom {
 		t.Errorf("新建部门与它的策略覆盖应出现在树上，得到 %+v", got)
 	}
-	// List 维持既有行为（仍是演示清单）
-	if len(pb2.List) == 0 {
-		t.Error("策略清单 List 应维持既有行为")
-	}
 }
 
 // buildOrgTree 的两处兜底：父指针悬空的节点提升为根、脏数据成环时不无限递归。

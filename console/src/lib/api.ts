@@ -45,10 +45,13 @@ async function errText(res: Response): Promise<string> {
 
 /* ── 与 baidi-control internal/store.Overview 同构 ── */
 export interface KV { name: string; value: number }
-export interface DefenseLine { key: string; name: string; risk: number; trend: 'up' | 'down' | 'flat'; top: string[] }
+/** 三道防线之一。刻意没有 trend：趋势要有历史快照才算得出来，后端一张历史态势表都没有。 */
+export interface DefenseLine { key: string; name: string; risk: number; top: string[] }
 export interface Overview {
   generatedAt: string;
-  devices: { online: number; total: number; rate: number };
+  /** 授信终端台账统计（trusted_devices 真实计数）。"设备此刻是否在线"控制面无从得知，
+   *  故口径是台账：登记总数 / 已授信 / 待审批 / 已吊销，rate = 已授信占比（纳管率）。 */
+  devices: { total: number; trusted: number; pending: number; revoked: number; rate: number };
   users: { total: number; disabled: number; locked: number };
   threats: { rejected: number; failed: number; secondary: number };
   sessions: number;
@@ -57,7 +60,7 @@ export interface Overview {
   defense: DefenseLine[];
 }
 
-/* ── 与 store.PolicyBundle 同构（策略继承树 + 用户策略清单） ── */
+/* ── 与 store.PolicyBundle 同构（策略继承树） ── */
 export interface OrgNode {
   key: string;
   title: string;
@@ -65,18 +68,10 @@ export interface OrgNode {
   members: number;
   children?: OrgNode[];
 }
-export interface UserPolicy {
-  id: string;
-  name: string;
-  scope: string;
-  status: 'custom' | 'inherited';
-  inheritedFrom: string;
-  members: number;
-  updated: string;
-}
+/** 只有 tree。后端原来还下发一份 list（5 条编造的策略清单），控制台从来没渲染过它，
+ *  已随 store.PolicyBundle 一并删除——"哪个节点自己定了策略"由 OrgNode.hasCustom 表达。 */
 export interface PolicyBundle {
   tree: OrgNode[];
-  list: UserPolicy[];
 }
 
 /* ── 应用管理（store.AppBundle）── */
@@ -98,7 +93,11 @@ export interface App {
 export interface AppBundle { categories: AppCategory[]; apps: App[] }
 
 /* ── 访问者目录（store.UserDirBundle）── */
-export interface Directory { key: string; name: string; type: 'local' | 'ad' | 'ldap'; users: number; online: number; lastSync: string }
+/** 身份源分栏。**与认证源页同一份 auth_sources 数据**：本地目录的 users = 没有任何外部
+ *  绑定的账号数，外部目录的 users = 该源的绑定条数（登录过一次才有）。
+ *  刻意没有 online / lastSync：users.online 只在建号那一刻写过、登录登出都不更新；
+ *  白帝也不做目录周期同步（外部账号是首次登录时按 subject 绑定建号的）。 */
+export interface Directory { key: string; name: string; type: 'local' | 'ldap' | 'ad' | 'oidc'; users: number }
 /** 组织树节点（展示用）：members 是**子树**合计人数，不是直属数。 */
 export interface OrgUnit { key: string; title: string; members: number; children?: OrgUnit[] }
 /** 组织单元（持久化实体，store.Org）。members 为直属成员数。 */
@@ -184,10 +183,6 @@ export interface GatewayBundle {
   /** 控制面签发的敲门令牌有效期（秒）。 */
   knockTokenTtlSec: number;
 }
-
-/** SPA 隐身概览（安全中心页 store.SecurityBundle 仍在用；该处 generation/hidden/knockOk
- *  三项目前仍是种子，见后端 store/security.go 的注释）。 */
-export interface SpaStatus { generation: string; authMode: string; protectedPorts: string[]; hidden: boolean; knockOk: boolean }
 
 /* ── 系统管理 · 三权分立（store.SystemBundle）──
  *
@@ -496,7 +491,10 @@ export interface AuthPolicyResp {
 /* ── 安全中心（store.SecurityBundle）── */
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
 export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
-export interface SecurityBundle { baselines: BaselinePolicy[]; spa: SpaStatus }
+/** 只有 baselines。原来还有一段 spa（G3 / 已隐身 / 敲门正常）是纯种子——控制面既不实测
+ *  端口可见性、也不代数据面宣布敲门是否正常，整段连同安全中心页那张卡片已删除。
+ *  真实出处是「网关与隐身」页：那里每一项都来自网关 mTLS 注册心跳。 */
+export interface SecurityBundle { baselines: BaselinePolicy[] }
 
 /* ── 终端 posture（安全中心 · 终端合规） ── */
 /** unknown = 终端探不到该项（权限不足/命令缺失），既非合规也非不合规。

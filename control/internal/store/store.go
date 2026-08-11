@@ -89,21 +89,39 @@ type Store interface {
 }
 
 // Overview 态势总览（对应 PRD 第 5 章监控中心的一屏聚合）。
+//
+// ★整个结构体**没有一个字段来自种子**（见 overview_sqlite.go）：每一项都能指到
+// 一张表或一份上报上。改这里加字段时，先回答"这个数从哪张表数出来"——答不上来
+// 就别加，页面上多一个说不清出处的数字比少一块面板贵得多。
 type Overview struct {
-	GeneratedAt string        `json:"generatedAt"`
-	Devices     DeviceStat    `json:"devices"`
-	Users       UserStat      `json:"users"`
-	Threats     ThreatStat    `json:"threats"`
+	GeneratedAt string     `json:"generatedAt"`
+	Devices     DeviceStat `json:"devices"`
+	Users       UserStat   `json:"users"`
+	Threats     ThreatStat `json:"threats"`
+	// Sessions 当前活跃接入会话数。**store 层恒为 0**：会话的权威事实在网关上报里
+	// （api.Server.gwSess），库里没有这回事。由 api.handleOverview 在有在线网关时注入；
+	// 没有任何网关上报就是 0——那是"控制面确实不知道有谁接入"的如实表达，
+	// 不是"平时都有 186 个人在线"。
 	Sessions    int           `json:"sessions"`
 	AuditByKind []KV          `json:"auditByKind"`
 	Verdicts    []KV          `json:"verdicts"`
 	Defense     []DefenseLine `json:"defense"`
 }
 
+// DeviceStat 授信终端台账统计（trusted_devices 真实计数）。
+//
+// ★原来是 {Online:186, Total:240, Rate:0.775} 三个凭空数字，页面上写作
+// 「在线设备 186 / 240 · 在线率 78%」。"设备此刻是否在线"这件事控制面无从得知：
+// 它手上只有设备**台账**（谁登记过、批没批、有没有被吊销），而"在线"只有网关上报的
+// 会话知道——那份数据按账号计，没有设备维度，两者接不上。
+// 于是口径换成台账本身，每个数都能在 trusted_devices 里数出来。
 type DeviceStat struct {
-	Online int     `json:"online"`
-	Total  int     `json:"total"`
-	Rate   float64 `json:"rate"`
+	Total   int `json:"total"`   // 登记在册的终端总数
+	Trusted int `json:"trusted"` // 已授信（敲门闸放行的那一档）
+	Pending int `json:"pending"` // 待审批绑定
+	Revoked int `json:"revoked"` // 已吊销（两种准入模式下都拒）
+	// Rate 纳管率 = Trusted/Total；Total=0（一台都没登记）时为 0。
+	Rate float64 `json:"rate"`
 }
 
 type UserStat struct {
@@ -125,10 +143,13 @@ type KV struct {
 }
 
 // DefenseLine 三道防线之一（设备/账号/终端）的风险态势。
+//
+// ★刻意没有 Trend（up | down | flat）字段：趋势要有历史快照才算得出来，而白帝
+// 一张历史态势表都没有，种子里那三个箭头（down/up/flat）是纯画上去的。
+// 一个永远指着"下降"的绿箭头，比没有箭头更容易让人以为风险在收敛。
 type DefenseLine struct {
-	Key   string   `json:"key"`   // device | account | endpoint
-	Name  string   `json:"name"`  // 设备防线 / 账号防线 / 终端防线
-	Risk  int      `json:"risk"`  // 0-100 风险分
-	Trend string   `json:"trend"` // up | down | flat
-	Top   []string `json:"top"`   // TOP 风险实体
+	Key  string   `json:"key"`  // device | account | endpoint
+	Name string   `json:"name"` // 设备防线 / 账号防线 / 终端防线
+	Risk int      `json:"risk"` // 0-100 风险分（由真实计数粗算，单调可解释，见 riskScore）
+	Top  []string `json:"top"`  // TOP 风险实体（真实账号 / 设备，没有就是空）
 }

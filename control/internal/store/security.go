@@ -2,25 +2,20 @@ package store
 
 import "context"
 
-// SecurityBundle 安全中心页：安全基线策略 + SPA 服务隐身概览（白帝仅承载基线 + SPA 内建）。
+// SecurityBundle 安全中心页：安全基线策略（可编辑、被风险引擎消费的那一份）。
+//
+// ★原来还有一个 Spa SpaStatus 字段，已整体删除，连同它在安全中心页的那张卡片。
+// 它是「方法实现了、字段仍来自种子」的第二例：SQLiteStore.Security 以
+// s.Memory.Security(ctx) 打底、只把 Baselines 换成库里的真实行，Spa 那一段
+// （generation=G3 / 已隐身 / 敲门正常 / 三个被保护端口）原样继承种子——
+// 控制面**没有任何**判定这三件事的能力：它不从外部实测端口可见性，也不代
+// 数据面宣布敲门是否正常。而"已隐身 · 绿点"恰恰是最不该由一份常量来打包票的读数。
+//
+// 这块内容真实存在的出处是「网关与隐身」页（api/gatewaypage.go）：那里的敲门口 /
+// 隧道口 / 在线判据全部来自网关 mTLS 注册心跳，没上报就如实缺席。同一件事只留
+// 一个出口，删掉的这份不是"少了个视图"，而是少了一份与真实来源打架的假读数。
 type SecurityBundle struct {
 	Baselines []BaselinePolicy `json:"baselines"`
-	Spa       SpaStatus        `json:"spa"`
-}
-
-// SpaStatus SPA 服务隐身概览。
-//
-// ★类型原本住在 store/gateway.go 里，那个文件连同它的「华东/华南出口」种子拓扑
-// 已整体删除（网关与隐身页改由 api 层按 mTLS 注册心跳的真实网关构建，见
-// api/gatewaypage.go）。这里只剩安全中心页在用，且这一份**仍是种子**：
-// generation/hidden/knockOk 三项在控制面没有真实来源（控制面不从外部实测端口
-// 可见性），下一波脱壳时应按同样口径处理。
-type SpaStatus struct {
-	Generation     string   `json:"generation"` // G2 | G3 | G4
-	AuthMode       string   `json:"authMode"`
-	ProtectedPorts []string `json:"protectedPorts"`
-	Hidden         bool     `json:"hidden"`
-	KnockOK        bool     `json:"knockOk"`
 }
 
 // BaselinePolicy 安全基线策略（应用防护 / 上线准入），含分平台条件与处置。
@@ -62,13 +57,6 @@ func (m *Memory) Security(_ context.Context) (SecurityBundle, error) {
 					{Key: "edr_online", Label: "EDR 终端防护在线", Platform: "All", Expect: "EDR 进程存活", Severity: "low"},
 					{Key: "client_version", Label: "客户端为最新版本", Platform: "All", Expect: "≥ v0.1.0", Severity: "low"},
 				}},
-		},
-		Spa: SpaStatus{
-			Generation:     "G3",
-			AuthMode:       "先认证后连接（SPA 敲门 + 双向证书）",
-			ProtectedPorts: []string{"443 用户接入", "112 设备通信", "4434 控制信道"},
-			Hidden:         true,
-			KnockOK:        true,
 		},
 	}, nil
 }

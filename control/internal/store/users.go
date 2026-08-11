@@ -12,13 +12,25 @@ type UserDirBundle struct {
 	Users  []DirUser   `json:"users"`
 }
 
+// Directory 访问者目录页顶部的身份源分栏。
+//
+// ★这是 AuthSource 的投影，**同一份 auth_sources 真实行**（见 SQLiteStore.userDirectories）。
+// 它曾经是本项目最后一处「方法实现了、字段仍来自种子」的残留：Users() 以
+// s.Memory.Users(ctx) 打底、只覆盖组织树/用户组/用户清单，Directories 原样继承种子的
+// 「本地目录 124 / 总部 AD 域 1160」——库里明明只有 8 个用户，页面顶部却挂着两个凭空数字，
+// 而且没有配置过任何认证源的部署也会显示一个并不存在的 AD 域。
+//
+// ★刻意没有 Online 与 LastSync 两个字段：
+//   - Online：users.online 那一列只在建号时写过一次，登录/登出都不更新，按它数出来的
+//     「在线 88」是一个冻结在建库那一刻的数字。真实在线只有网关上报的会话知道
+//     （api 层 gwSess，见在线用户页），而那份数据没有"属于哪个目录"这一维。
+//   - LastSync：白帝**不做目录周期同步**——外部账号是首次登录时按 subject 绑定建号的
+//     （BindExternalUser）。显示「上次同步 5 分钟前」等于宣称一个不存在的同步任务在跑。
 type Directory struct {
-	Key      string `json:"key"`
-	Name     string `json:"name"`
-	Type     string `json:"type"` // local | ad | ldap
-	Users    int    `json:"users"`
-	Online   int    `json:"online"`
-	LastSync string `json:"lastSync"` // 外部目录上次同步（local 为空）
+	Key   string `json:"key"`  // = auth_sources.id
+	Name  string `json:"name"` // = auth_sources.name
+	Type  string `json:"type"` // local | ldap | ad | oidc（= auth_sources.kind）
+	Users int    `json:"users"`
 }
 
 type OrgUnit struct {
@@ -90,17 +102,20 @@ func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {
 		{ID: "u6", Name: "陈静", Account: "chen.jing", Org: "研发部", OrgKey: "dev", Device: "Ubuntu 22", IP: "10.8.2.55", Auth: "密码", LastLogin: "2026-05-20 16:00", Online: false, Status: "idle", Risk: "none", Roles: []string{"研发"}},
 		{ID: "u7", Name: "刘洋", Account: "liu.yang", Org: "客服中心", OrgKey: "cs", Device: "Windows 11", IP: "10.8.7.21", Auth: "密码+短信", LastLogin: "2026-06-22 20:01", Online: true, Status: "active", Risk: "none", Roles: []string{"客服", "组长"}},
 	}
+	// ★这里**不给 Directories**：身份源只有 auth_sources 真实行说了算
+	// （SQLiteStore.userDirectories）。种子里那两条「本地目录 124 / 总部 AD 域 1160」
+	// 曾经原样漏进真实部署的页面顶部，理由见 Directory 的注释。
+	//
+	// ★组织树只留结构（key/标题/父子），**不带 Members 计数**：这棵树的唯一消费方是
+	// backfillOrgUnits（把它建成真实 org_units 行），成员数由 buildOrgTree 按 users 实算。
+	// 在这里写一个 210，只会在某天有人拿种子树直接渲染时变成第二个"看起来是真的"的数字。
 	return UserDirBundle{
-		Directories: []Directory{
-			{Key: "local", Name: "本地目录", Type: "local", Users: 124, Online: 88},
-			{Key: "ad-hq", Name: "总部 AD 域", Type: "ad", Users: 1160, Online: 1096, LastSync: "5 分钟前"},
-		},
 		OrgTree: []OrgUnit{
-			{Key: "root", Title: "ACME 集团", Members: 1284, Children: []OrgUnit{
-				{Key: "dev", Title: "研发部", Members: 210},
-				{Key: "sales", Title: "销售部", Members: 86},
-				{Key: "cs", Title: "客服中心", Members: 64},
-				{Key: "ext", Title: "外包人员", Members: 48},
+			{Key: "root", Title: "ACME 集团", Children: []OrgUnit{
+				{Key: "dev", Title: "研发部"},
+				{Key: "sales", Title: "销售部"},
+				{Key: "cs", Title: "客服中心"},
+				{Key: "ext", Title: "外包人员"},
 			}},
 		},
 		Users: users,

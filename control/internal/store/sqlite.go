@@ -1053,18 +1053,25 @@ func b2i(b bool) int {
 	return 0
 }
 
-// Users 覆盖：身份源走种子；**组织树与用户组走库**（org_units / user_groups），
-// 用户清单从库读取并带上组织归属与所属组。
+// Users 访问者目录页：身份源 + 组织树 + 用户组 + 用户清单，**四段全部来自库**。
+//
+// ★不再以 s.Memory.Users(ctx) 打底：那种"打底再局部覆盖"的写法让 Directories
+// 一字未改地继承了种子的「本地目录 124 / 总部 AD 域 1160」，而同一个响应里的
+// 用户清单是真实的 8 行——同一张页面上两个数字，一个真一个假，看不出区别。
+// 现在整个 bundle 逐字段构造，缺哪段就是编译错误，不会再有字段"悄悄躺着"。
+// 同类残留的防扩散守卫见 memory_fallback_guard_test.go。
 //
 // ★展示用的 org / org_key 两列是组织表出现之前的遗物。org_id 一旦有值就以
 // org_units 为准覆盖它们——否则改了部门名，用户列表里还挂着旧名字，
 // 而两个数字都"看起来是真的"。org_key 同步成 org_id，让前端按组织过滤
 // 与组织树的节点 key 天然对齐。
 func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
-	b, err := s.Memory.Users(ctx)
+	var b UserDirBundle
+	dirs, err := s.userDirectories(ctx)
 	if err != nil {
 		return UserDirBundle{}, err
 	}
+	b.Directories = dirs
 	orgs, err := s.OrgUnits(ctx)
 	if err != nil {
 		return UserDirBundle{}, err
@@ -1090,7 +1097,7 @@ FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 		return UserDirBundle{}, err
 	}
 	defer rows.Close()
-	var us []DirUser
+	us := []DirUser{}
 	for rows.Next() {
 		var u DirUser
 		var online int

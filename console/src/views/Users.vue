@@ -20,12 +20,17 @@
       </span>
     </div>
 
-    <!-- AD 同步状态卡 -->
+    <!-- 外部目录说明卡。★这里原来是一张"上次同步 5 分钟前 · 共 1160 用户、在线 1096"
+         的同步状态卡，连同「立即同步 / 同步日志」两个点不动的链接——白帝**不做目录
+         周期同步**，那张卡片描述的是一个不存在的同步任务。改成如实说明账号是怎么来的。 -->
     <div v-if="curDir && curDir.type !== 'local'" class="bd-sync">
-      <icon-sync class="bd-sync__ic" />
-      <span><b>{{ curDir.name }}</b> 上次同步 {{ curDir.lastSync }} · 共 {{ curDir.users }} 用户、在线 {{ curDir.online }}</span>
+      <icon-info-circle class="bd-sync__ic" />
+      <span>
+        <b>{{ curDir.name }}</b> 已绑定 {{ curDir.users }} 个账号 ——
+        白帝不做目录周期同步，外部账号在**首次登录**时按目录返回的 subject 绑定建号
+      </span>
       <div style="flex: 1" />
-      <span class="bd-link">立即同步</span><span class="bd-link bd-link--grey" style="margin-left: 14px">同步日志</span>
+      <router-link class="bd-link" to="/business/auth">认证源配置</router-link>
     </div>
 
     <!-- 聚合计数 -->
@@ -332,7 +337,7 @@ import { Message, Modal } from '@arco-design/web-vue';
 import { api, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers } from '@/lib/api';
 
 const live = ref(false);
-const directories = ref<Directory[]>([{ key: 'local', name: '本地目录', type: 'local', users: 0, online: 0, lastSync: '' }]);
+const directories = ref<Directory[]>([{ key: 'local', name: '本地目录', type: 'local', users: 0 }]);
 const orgTree = ref<OrgUnit[]>([]);
 const orgs = ref<Org[]>([]);
 const groups = ref<GroupWithMembers[]>([]);

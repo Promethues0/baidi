@@ -20,10 +20,10 @@
     <a-grid :cols="{ xs: 1, sm: 2, lg: 4 }" :col-gap="16" :row-gap="16">
       <a-grid-item>
         <a-card class="bd-kpi" :bordered="false">
-          <div class="bd-kpi__label">在线设备</div>
-          <div class="bd-kpi__value">{{ ov.devices.online }}<span class="bd-kpi__unit"> / {{ ov.devices.total }}</span></div>
+          <div class="bd-kpi__label">授信终端</div>
+          <div class="bd-kpi__value">{{ ov.devices.trusted }}<span class="bd-kpi__unit"> / {{ ov.devices.total }}</span></div>
           <a-progress :percent="ov.devices.rate" :show-text="false" size="small" :color="brand" />
-          <div class="bd-kpi__foot">在线率 {{ (ov.devices.rate * 100).toFixed(0) }}%</div>
+          <div class="bd-kpi__foot">纳管率 {{ (ov.devices.rate * 100).toFixed(0) }}% · 待审批 {{ ov.devices.pending }} · 已吊销 {{ ov.devices.revoked }}</div>
         </a-card>
       </a-grid-item>
       <a-grid-item>
@@ -61,7 +61,6 @@
           <div class="bd-line__risk">
             <span class="bd-line__score" :style="{ color: riskHex(d.risk) }">{{ d.risk }}</span>
             <span class="bd-line__unit">风险分</span>
-            <component :is="trendIcon(d.trend)" class="bd-line__trend" :style="{ color: trendHex(d.trend) }" />
           </div>
           <a-progress :percent="d.risk / 100" :show-text="false" size="mini" :color="riskHex(d.risk)" />
           <div class="bd-line__top">
@@ -69,6 +68,7 @@
             <div v-for="(e, i) in d.top" :key="e" class="bd-line__top-row">
               <span class="bd-line__rank">{{ i + 1 }}</span><span class="bd-line__ent">{{ e }}</span>
             </div>
+            <div v-if="!d.top.length" class="bd-line__none">暂无风险实体</div>
           </div>
         </a-card>
       </a-grid-item>
@@ -106,7 +106,7 @@ const brand = '#165DFF';
 
 const MOCK: Overview = {
   generatedAt: '',
-  devices: { online: 186, total: 240, rate: 0.775 },
+  devices: { total: 240, trusted: 186, pending: 8, revoked: 3, rate: 0.775 },
   users: { total: 312, disabled: 7, locked: 4 },
   threats: { rejected: 173, failed: 62, secondary: 53 },
   sessions: 186,
@@ -119,9 +119,9 @@ const MOCK: Overview = {
     { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
   ],
   defense: [
-    { key: 'device', name: '设备防线', risk: 28, trend: 'down', top: ['203.0.113.7', '198.51.100.22', '203.0.113.91'] },
-    { key: 'account', name: '账号防线', risk: 41, trend: 'up', top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
-    { key: 'endpoint', name: '终端防线', risk: 19, trend: 'flat', top: ['WIN-诊室-12', 'MAC-研发-08', '未授信-Android-3'] }
+    { key: 'device', name: '设备防线', risk: 28, top: ['ext.zhou · 未授信-Android-3', 'li.fang · ThinkPad-08'] },
+    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
+    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] }
   ]
 };
 
@@ -138,8 +138,6 @@ function pct(v: number, max: number) { return `${Math.round((v / max) * 100)}%`;
 function riskColor(r: number) { return r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
 function riskHex(r: number) { return r >= 40 ? '#F53F3F' : r >= 25 ? '#FF7D00' : '#00B42A'; }
 function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
-function trendIcon(t: string) { return t === 'up' ? 'IconArrowRise' : t === 'down' ? 'IconArrowFall' : 'IconMinus'; }
-function trendHex(t: string) { return t === 'up' ? '#F53F3F' : t === 'down' ? '#00B42A' : '#86909C'; }
 function verdictColor(name: string) {
   return name === '拒绝' ? '#F53F3F' : name === '二次鉴权' ? '#FF7D00' : name === '降权' ? '#FF9A2E' : '#165DFF';
 }
@@ -174,7 +172,7 @@ onMounted(load);
 .bd-line__risk { display: flex; align-items: baseline; gap: 6px; margin: 10px 0 8px; }
 .bd-line__score { font-size: 28px; font-weight: 700; }
 .bd-line__unit { font-size: 12px; color: var(--color-text-3); }
-.bd-line__trend { margin-left: auto; font-size: 18px; }
+.bd-line__none { font-size: 12px; color: var(--color-text-3); padding: 3px 0; }
 .bd-line__top { margin-top: 14px; }
 .bd-line__top-h { font-size: 12px; color: var(--color-text-3); margin-bottom: 8px; }
 .bd-line__top-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }

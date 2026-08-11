@@ -680,15 +680,13 @@ func (s *SQLiteStore) policyOverrideNodes(ctx context.Context) (map[string]bool,
 	return out, rows.Err()
 }
 
-// PolicyBundle 覆盖：**组织继承树改由 org_units 真实数据构建**（此前整棵树是
+// PolicyBundle 策略继承树：**整棵树由 org_units 真实数据构建**（此前整棵树是
 // Memory 里硬编码的四个部门，节点 key 与库里任何东西都对不上——按节点保存的
 // 策略覆盖因此永远落在一批虚构 key 上）。
-// List（策略清单）维持既有行为，仍是 Memory 演示数据。
+//
+// ★不再以 s.Memory.PolicyBundle(ctx) 打底：那条路径顺手继承了 List 那 5 条
+// 编造的策略清单（详见 store/policy.go 顶部）。Memory 版本已删除，这里逐字段构造。
 func (s *SQLiteStore) PolicyBundle(ctx context.Context) (PolicyBundle, error) {
-	b, err := s.Memory.PolicyBundle(ctx)
-	if err != nil {
-		return PolicyBundle{}, err
-	}
 	orgs, err := s.OrgUnits(ctx)
 	if err != nil {
 		return PolicyBundle{}, err
@@ -697,6 +695,5 @@ func (s *SQLiteStore) PolicyBundle(ctx context.Context) (PolicyBundle, error) {
 	if err != nil {
 		return PolicyBundle{}, err
 	}
-	b.Tree = toPolicyTree(buildOrgTree(orgs), custom)
-	return b, nil
+	return PolicyBundle{Tree: toPolicyTree(buildOrgTree(orgs), custom)}, nil
 }

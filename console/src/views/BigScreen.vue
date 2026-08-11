@@ -33,8 +33,8 @@
           <div class="panel__h"><i class="panel__bar" />核心指标</div>
           <div class="kpis">
             <div class="kpi">
-              <div class="kpi__v">{{ nDevOnline }}<small>/{{ ov.devices.total }}</small></div>
-              <div class="kpi__l">在线设备 · {{ (ov.devices.rate * 100).toFixed(0) }}%</div>
+              <div class="kpi__v">{{ nDevTrusted }}<small>/{{ ov.devices.total }}</small></div>
+              <div class="kpi__l">授信终端 · 纳管率 {{ (ov.devices.rate * 100).toFixed(0) }}%</div>
             </div>
             <div class="kpi">
               <div class="kpi__v">{{ nSessions }}</div>
@@ -143,7 +143,6 @@
               </svg>
               <div class="gauge__c">
                 <b :style="{ color: riskHex(d.risk) }">{{ gaugeShown[i] }}</b>
-                <component :is="trendIcon(d.trend)" class="gauge__tr" :style="{ color: trendHex(d.trend) }" />
               </div>
               <div class="gauge__n">{{ d.name }}</div>
               <div class="gauge__tag" :style="{ color: riskHex(d.risk), borderColor: riskHex(d.risk) }">{{ riskLabel(d.risk) }}</div>
@@ -197,7 +196,7 @@ const router = useRouter();
 /* ── 降级演示数据 ── */
 const MOCK_OV: Overview = {
   generatedAt: '',
-  devices: { online: 186, total: 240, rate: 0.775 },
+  devices: { total: 240, trusted: 186, pending: 8, revoked: 3, rate: 0.775 },
   users: { total: 312, disabled: 7, locked: 4 },
   threats: { rejected: 173, failed: 62, secondary: 53 },
   sessions: 186,
@@ -210,9 +209,9 @@ const MOCK_OV: Overview = {
     { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
   ],
   defense: [
-    { key: 'device', name: '设备防线', risk: 28, trend: 'down', top: ['203.0.113.7', '198.51.100.22', '203.0.113.91'] },
-    { key: 'account', name: '账号防线', risk: 41, trend: 'up', top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
-    { key: 'endpoint', name: '终端防线', risk: 19, trend: 'flat', top: ['WIN-诊室-12', 'MAC-研发-08', '未授信-Android-3'] }
+    { key: 'device', name: '设备防线', risk: 28, top: ['ext.zhou · 未授信-Android-3', 'li.fang · ThinkPad-08'] },
+    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
+    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] }
   ]
 };
 const MOCK_SESS: OnlineSession[] = [
@@ -272,7 +271,7 @@ const threatTotal = computed(() => ov.value.threats.rejected + ov.value.threats.
 const verdictTotal = computed(() => ov.value.verdicts.reduce((s, b) => s + b.value, 0));
 const auditMax = computed(() => Math.max(...ov.value.auditByKind.map((b) => b.value), 1));
 
-const nDevOnline = useCountUp(() => ov.value.devices.online);
+const nDevTrusted = useCountUp(() => ov.value.devices.trusted);
 const nSessions = useCountUp(() => ov.value.sessions);
 const nUsers = useCountUp(() => ov.value.users.total);
 const nThreat = useCountUp(() => threatTotal.value);
@@ -310,9 +309,6 @@ const gaugeLen = (gaugeR * Math.PI * 270) / 180;
 function gaugeOffset(risk: number) { return gaugeLen * (1 - Math.min(risk, 100) / 100); }
 function riskHex(r: number) { return r >= 40 ? '#ff4d4f' : r >= 25 ? '#ffa940' : '#36e29b'; }
 function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
-function trendIcon(t: string) { return t === 'up' ? 'IconArrowRise' : t === 'down' ? 'IconArrowFall' : 'IconMinus'; }
-function trendHex(t: string) { return t === 'up' ? '#ff4d4f' : t === 'down' ? '#36e29b' : '#7e93c4'; }
-
 /* 雷达光点：三道防线 TOP 实体 + 高风险会话 */
 interface Blip { x: number; y: number; r: number; color: string; label: string; lx: number; ly: number; dur: number }
 const blips = computed<Blip[]>(() => {
@@ -578,7 +574,6 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .gauge__val { fill: none; stroke-width: 9; stroke-linecap: round; transition: stroke-dashoffset .8s cubic-bezier(.2, .8, .2, 1); filter: drop-shadow(0 0 5px currentColor); }
 .gauge__c { position: absolute; top: 44px; left: 0; right: 0; text-align: center; }
 .gauge__c b { font-size: 30px; font-weight: 800; }
-.gauge__tr { font-size: 14px; margin-left: 2px; vertical-align: middle; }
 .gauge__n { font-size: 13px; font-weight: 600; color: var(--c-t1); margin-top: 2px; }
 .gauge__tag { font-size: 11px; font-weight: 600; padding: 1px 8px; border: 1px solid; border-radius: 20px; margin-top: 4px; }
 

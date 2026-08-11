@@ -14,7 +14,6 @@
     <div class="bd-tabs">
       <span class="bd-tab" :class="{ on: tab === 'baseline' }" @click="tab = 'baseline'">安全基线</span>
       <span class="bd-tab" :class="{ on: tab === 'posture' }" @click="tab = 'posture'; loadPosture()">终端合规</span>
-      <span class="bd-tab" :class="{ on: tab === 'spa' }" @click="tab = 'spa'">SPA 服务隐身</span>
     </div>
 
     <!-- ============ 安全基线（两栏）============ -->
@@ -197,85 +196,18 @@
       </table>
     </div>
 
-    <!-- ============ SPA 服务隐身 ============ -->
-    <div v-show="tab === 'spa'">
-      <div class="bd-spa">
-        <!-- 状态总览卡 -->
-        <div class="bd-card bd-spacard">
-          <div class="bd-section-title">服务隐身状态</div>
-          <div class="bd-spa__top">
-            <div class="bd-gen">
-              <span class="bd-gen__badge">{{ spa.generation }}</span>
-              <span class="bd-gen__cap">单包授权代次</span>
-            </div>
-            <div class="bd-spa__meta">
-              <div class="bd-kv"><span>认证模式</span><b>{{ spa.authMode }}</b></div>
-              <div class="bd-kv"><span>服务隐身</span>
-                <b>
-                  <span class="bd-st"><span class="d" :style="{ background: spa.hidden ? 'var(--bd-success)' : 'var(--bd-danger)' }" />{{ spa.hidden ? '已隐身（端口默认丢弃）' : '未隐身' }}</span>
-                </b>
-              </div>
-              <div class="bd-kv"><span>SPA 敲门校验</span>
-                <b>
-                  <span class="bd-tg" :style="tagStyle(spa.knockOk ? '#00B42A' : '#F53F3F')">
-                    {{ spa.knockOk ? '正常' : '异常' }}
-                  </span>
-                </b>
-              </div>
-            </div>
-          </div>
-
-          <div class="bd-spa__ports">
-            <div class="bd-spa__portshead">受保护端口（默认对外不可见，仅 SPA 敲门后短暂放行）</div>
-            <div class="bd-spa__portslist">
-              <span v-for="p in spa.protectedPorts" :key="p" class="bd-tg bd-port"><icon-lock />{{ p }}</span>
-            </div>
-          </div>
-        </div>
-
-        <!-- 隐身效果对比 -->
-        <div class="bd-section-title" style="margin-top: 22px">隐身效果 · 未装专属客户端 vs 已装客户端</div>
-        <div class="bd-cmp">
-          <div class="bd-card bd-cmp__c bd-cmp__c--bad">
-            <div class="bd-cmp__h">
-              <icon-close-circle-fill class="bd-cmp__ic bad" />未装专属客户端
-            </div>
-            <ul class="bd-cmp__list">
-              <li><icon-info-circle />端口扫描全程超时，<b>无任何端口可探测</b></li>
-              <li><icon-info-circle />未通过 SPA 敲门，网关<b>静默丢弃</b>所有报文</li>
-              <li><icon-info-circle />无法建立 TCP 连接，<b>无法接入</b>任何业务</li>
-              <li><icon-info-circle />在攻击者视角下，网关与业务<b>等同于不存在</b></li>
-            </ul>
-            <div class="bd-cmp__foot bad">攻击面 = 0 · 先认证后连接</div>
-          </div>
-
-          <div class="bd-card bd-cmp__c bd-cmp__c--good">
-            <div class="bd-cmp__h">
-              <icon-check-circle-fill class="bd-cmp__ic good" />已装专属客户端
-            </div>
-            <ul class="bd-cmp__list">
-              <li><icon-check-circle-fill class="li-ok" />客户端发送 <b>{{ spa.generation }} 单包授权</b>完成身份敲门</li>
-              <li><icon-check-circle-fill class="li-ok" />网关校验通过后<b>按需短暂放行</b>受保护端口</li>
-              <li><icon-check-circle-fill class="li-ok" />仅放行<b>本人已授权应用</b>，其余仍不可见</li>
-              <li><icon-check-circle-fill class="li-ok" />会话结束端口<b>立即重新隐身</b></li>
-            </ul>
-            <div class="bd-cmp__foot good">认证通过 · 最小化按需暴露</div>
-          </div>
-        </div>
-      </div>
-    </div>
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type SpaStatus, type PostureRow, type PostureResp } from '@/lib/api';
+import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type PostureRow, type PostureResp } from '@/lib/api';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
 
-const tab = ref<'baseline' | 'spa' | 'posture'>('baseline');
+const tab = ref<'baseline' | 'posture'>('baseline');
 const live = ref(false);
 
 /* ── 内置 mock（结构同后端 SecurityBundle）── */
@@ -314,16 +246,12 @@ const MOCK_BASELINES: BaselinePolicy[] = [
     ]
   }
 ];
-const MOCK_SPA: SpaStatus = {
-  generation: 'G3',
-  authMode: 'SPA 单包授权 + mTLS 双向证书',
-  protectedPorts: ['443/HTTPS', '8443/HTTPS', '22/SSH', '3389/RDP', '5432/PG', '6379/Redis'],
-  hidden: true,
-  knockOk: true
-};
+// ★这里原来还有一份 MOCK_SPA（G3 / 已隐身 / 敲门正常 / 6 个受保护端口）与页面上的
+// 「SPA 服务隐身」页签，两者都已删除：控制面既不实测端口可见性，也不代数据面宣布
+// 敲门是否正常，那张卡片是在替一台可能压根没配防火墙规则的网关打包票。
+// 真实版本在「安全防护 → 网关与隐身 → SPA 服务隐身」，每一项都来自网关注册心跳。
 
 const baselines = ref<BaselinePolicy[]>(MOCK_BASELINES);
-const spa = ref<SpaStatus>(MOCK_SPA);
 const selected = ref(MOCK_BASELINES[0].id);
 const plat = ref<Platform>('Windows');
 
@@ -428,7 +356,6 @@ onMounted(async () => {
   try {
     const b = await api<SecurityBundle>('/security');
     baselines.value = b.baselines;
-    spa.value = b.spa;
     if (b.baselines.length) selected.value = b.baselines[0].id;
     live.value = true;
   } catch {
@@ -522,35 +449,4 @@ onMounted(async () => {
 }
 .bd-addcheck:hover { border-color: var(--bd-primary); background: var(--bd-primary-1); }
 
-/* ── SPA（复用 Gateway 写法）── */
-.bd-spa { max-width: 1080px; }
-.bd-spacard { padding: 18px 20px 20px; }
-.bd-spa__top { display: flex; gap: 28px; align-items: stretch; }
-.bd-gen { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; width: 168px; flex: none; background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: var(--bd-radius); padding: 18px 0; }
-.bd-gen__badge { font-size: 40px; font-weight: 800; color: var(--bd-primary); line-height: 1; letter-spacing: 1px; }
-.bd-gen__cap { font-size: 12px; color: var(--bd-t3); }
-.bd-spa__meta { flex: 1; min-width: 0; display: flex; flex-direction: column; justify-content: center; }
-
-.bd-spa__ports { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
-.bd-spa__portshead { font-size: 12.5px; color: var(--bd-t3); margin-bottom: 12px; }
-.bd-spa__portslist { display: flex; flex-wrap: wrap; gap: 10px; }
-.bd-port { font-size: 12.5px; padding: 5px 12px; border-radius: 14px; background: var(--bd-fill-2); color: var(--bd-t2); font-family: ui-monospace, monospace; }
-
-/* 对比卡 */
-.bd-cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.bd-cmp__c { padding: 18px 20px; }
-.bd-cmp__c--bad { border-color: var(--bd-tag-red-bg); background: linear-gradient(180deg, #FFF8F7 0%, #fff 60%); }
-.bd-cmp__c--good { border-color: var(--bd-tag-green-bg); background: linear-gradient(180deg, #F6FFF8 0%, #fff 60%); }
-.bd-cmp__h { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
-.bd-cmp__ic { font-size: 18px; }
-.bd-cmp__ic.bad { color: var(--bd-danger); }
-.bd-cmp__ic.good { color: var(--bd-success); }
-.bd-cmp__list { list-style: none; margin: 0; padding: 0; }
-.bd-cmp__list li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--bd-t2); line-height: 1.7; padding: 5px 0; }
-.bd-cmp__list li :deep(svg) { flex: none; margin-top: 4px; color: var(--bd-t4); font-size: 13px; }
-.bd-cmp__list li :deep(svg.li-ok) { color: var(--bd-success); }
-.bd-cmp__list b { color: var(--bd-t1); font-weight: 600; }
-.bd-cmp__foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--bd-fill-2); font-size: 12.5px; font-weight: 600; }
-.bd-cmp__foot.bad { color: var(--bd-danger); }
-.bd-cmp__foot.good { color: #0B8235; }
 </style>

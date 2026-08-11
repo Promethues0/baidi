@@ -1,11 +1,18 @@
 package store
 
-import "context"
-
-// PolicyBundle 策略管理页所需的组织/组继承树 + 用户策略清单。
+// PolicyBundle 策略管理页所需的组织/组继承树。
+//
+// ★原来还有一个 List []UserPolicy 字段（5 条「销售部高敏策略 / 86 人 / 2026-06-20 14:32」
+// 之类的清单），已整体删除。它是「方法实现了、字段仍来自种子」的第三例，也是最没有
+// 辩护余地的一个：SQLiteStore.PolicyBundle 以 s.Memory.PolicyBundle(ctx) 打底、
+// 只把 Tree 换成真实组织树，List 原样继承 5 条编造记录——**而控制台从来没有渲染过它**。
+// 一份没有消费方的假数据仍然是假数据：它会经 GET /api/v1/policies 原样出现在接口响应里，
+// 下一个照着响应写页面的人会理所当然地把它画出来。
+//
+// 真实存在的"自定义策略"事实是 policy_overrides 表，它已经通过 OrgNode.HasCustom
+// 出现在树上（哪个节点自己定了、哪个继承父级），不需要第二份互相矛盾的清单。
 type PolicyBundle struct {
-	Tree []OrgNode    `json:"tree"`
-	List []UserPolicy `json:"list"`
+	Tree []OrgNode `json:"tree"`
 }
 
 // OrgNode 组织/用户组节点，承载"是否有自定义策略"用于继承可视化。
@@ -17,38 +24,7 @@ type OrgNode struct {
 	Children  []OrgNode `json:"children,omitempty"`
 }
 
-// UserPolicy 用户策略清单项。
-type UserPolicy struct {
-	ID            string `json:"id"`
-	Name          string `json:"name"`
-	Scope         string `json:"scope"`         // 适用范围（组/用户）
-	Status        string `json:"status"`        // custom | inherited
-	InheritedFrom string `json:"inheritedFrom"` // 继承自的节点名（inherited 时）
-	Members       int    `json:"members"`
-	Updated       string `json:"updated"`
-}
-
-// PolicyBundle 返回演示用的继承树与策略清单。
-func (m *Memory) PolicyBundle(_ context.Context) (PolicyBundle, error) {
-	return PolicyBundle{
-		Tree: []OrgNode{
-			{Key: "root", Title: "根策略（全局兜底）", HasCustom: true, Members: 1284, Children: []OrgNode{
-				{Key: "east", Title: "华东大区", HasCustom: true, Members: 420, Children: []OrgNode{
-					{Key: "east-sales", Title: "销售部", HasCustom: true, Members: 86},
-					{Key: "east-dev", Title: "研发部", HasCustom: false, Members: 210},
-				}},
-				{Key: "south", Title: "华南大区", HasCustom: false, Members: 300, Children: []OrgNode{
-					{Key: "south-cs", Title: "客服中心", HasCustom: true, Members: 64},
-				}},
-				{Key: "contractor", Title: "外包人员", HasCustom: true, Members: 48},
-			}},
-		},
-		List: []UserPolicy{
-			{ID: "p-sales", Name: "销售部高敏策略", Scope: "销售部", Status: "custom", InheritedFrom: "华东大区", Members: 86, Updated: "2026-06-20 14:32"},
-			{ID: "p-dev", Name: "研发部（继承华东大区）", Scope: "研发部", Status: "inherited", InheritedFrom: "华东大区", Members: 210, Updated: "2026-06-18 09:10"},
-			{ID: "p-contractor", Name: "外包最小授权", Scope: "外包人员", Status: "custom", InheritedFrom: "根策略（全局兜底）", Members: 48, Updated: "2026-06-21 17:05"},
-			{ID: "p-cs", Name: "客服夜班时段限制", Scope: "客服中心", Status: "custom", InheritedFrom: "华南大区", Members: 64, Updated: "2026-06-19 21:48"},
-			{ID: "p-south", Name: "华南大区（继承根策略）", Scope: "华南大区", Status: "inherited", InheritedFrom: "根策略（全局兜底）", Members: 300, Updated: "2026-06-15 11:20"},
-		},
-	}, nil
-}
+// ★这里刻意**没有** (m *Memory) PolicyBundle：种子版本连同它那棵「华东大区 / 华南大区」
+// 的虚构继承树一起删了。留着它的唯一后果是给 SQLiteStore 留一条静默回退的路——
+// 现在 PolicyBundle 只有 SQLiteStore 一份实现，哪天有人把它删掉是编译错误，
+// 而不是页面上悄悄换回四个不存在的大区。

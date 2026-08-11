@@ -18,7 +18,21 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return core.invoke(cmd, args);
 }
 
-interface TunStatusRaw { running: boolean; pid: string; log: string }
+interface TunStatusRaw {
+  running: boolean;
+  pid: string;
+  log: string;
+  /**
+   * 最近一条「网关落点」状态行，由 Rust 侧从**整份日志**里捞出来单独带过来。
+   *
+   * ★不能只靠 log 尾巴解析：落点切换只在切换那一瞬打一行，而之后每条流都会打一行
+   * 引流日志（每行上百字节），几十条流之后那一行就被挤出窗口了。丢了它的后果全是
+   * 静默的——「已故障转移」横幅消失、接入信息显示回那台已经挂掉的网关、
+   * 还可能把未钉扎的隧道显示成「证书钉扎」。老版本 Rust 壳没有这个字段，
+   * 此时退回从尾巴里找（能找到多少算多少）。
+   */
+  endpoint?: string;
+}
 
 /** 从 baidi-tun 真实日志解析出的接入态。 */
 export interface TunView {
@@ -202,7 +216,7 @@ function parse(s: TunStatusRaw): TunView {
   // 直接现算当前剖面会把未钉扎的隧道显示成已钉扎，见 startedOpts 的注释。
   const eff = s.running && startedOpts ? startedOpts : resolveTunOpts();
   const { stale, staleReason } = staleAgainstProfile(s.running);
-  const ep = parseEndpoint(lines, s.running, eff);
+  const ep = parseEndpoint(s.endpoint || '', lines, s.running, eff);
   return {
     running: s.running,
     ready,
@@ -240,14 +254,27 @@ function parse(s: TunStatusRaw): TunView {
  * 取**最后一条**即当前态。契约是双向的：那边改键名要同步改这里的正则，
  * 否则接入页会静默退回「第 1 个落点」——而那恰恰是切换之后最不该显示的信息。
  *
+ * ★这一行由 Rust 侧的 tunnel_status 从**整份日志**里捞出来单独送过来（TunStatusRaw.endpoint）：
+ * 日志尾巴只有 4000 字节，而切换只打一行、引流日志每条流一行，几十条流就把它冲掉了。
+ * 冲掉之后这里会静默退回「第 1 个落点」——而那正是切换之后最不该显示的信息
+ * （地址显示成已经挂掉的那台、pin 退回首选那台的指纹，把未钉扎的隧道显示成已钉扎）。
+ *
  * 解析不到时（老 baidi-tun、日志还没打出来）退回启动快照：第 1 个 / 共 N 个。
  * 这一步只影响展示，不影响数据面真实行为。
  */
-function parseEndpoint(lines: string[], running: boolean, eff: ReturnType<typeof resolveTunOpts>) {
+function parseEndpoint(
+  endpointLine: string,
+  lines: string[],
+  running: boolean,
+  eff: ReturnType<typeof resolveTunOpts>
+) {
   const total = countEndpoints(eff.gateways);
   const fallback = { index: 1, total, id: '', addr: '', pin: eff.pin, reason: '' };
   if (!running) return fallback;
-  const line = lines.filter((l) => /endpoint=\d+\/\d+/.test(l)).pop();
+  // 优先用 Rust 侧从整份日志里捞出来的那一行；没有（老壳）才退回尾巴里找。
+  const line = /endpoint=\d+\/\d+/.test(endpointLine)
+    ? endpointLine
+    : lines.filter((l) => /endpoint=\d+\/\d+/.test(l)).pop();
   if (!line) return fallback;
   const m = line.match(/endpoint=(\d+)\/(\d+)/);
   if (!m) return fallback;

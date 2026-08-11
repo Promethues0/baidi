@@ -106,6 +106,15 @@
             <icon-exclamation-circle-fill />
             <span>接入剖面拉取失败：{{ profile.error }}。当前用本机默认配置接入，业务网段可能未被接管——请检查控制中心连通性后重新接入。</span>
           </div>
+          <!--
+            控制面视角下落点全离线。**只提示不拦**：控制面的心跳视角断了（mTLS 口不通、
+            控制面刚重启清空了内存台账）并不代表终端连不上网关，硬拦会在那种时候把
+            全员挡在门外，而报错指向的恰恰是唯一没问题的组件。
+          -->
+          <div v-if="allOffline" class="ck-pwarn">
+            <icon-exclamation-circle-fill />
+            <span>控制中心显示所有网关落点当前离线（心跳未更新）。这不代表终端连不上——已照常尝试接入；若最终超时，请确认 baidi-gateway 已启动，以及它到控制中心 mTLS 端口的注册是否正常。</span>
+          </div>
           <!-- 控制面下发的降级告警（如网关未上报证书指纹、应用未关联受控资源） -->
           <div v-for="w in profileWarnings" :key="w" class="ck-pwarn">
             <icon-exclamation-circle-fill />
@@ -216,6 +225,8 @@ const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : s
 // 应用未关联受控资源（点开必然不走隧道）等。这些都是「配置齐全、就是不生效」
 // 的静默失效，控制面已经识别出来了，客户端不呈现等于白识别。
 const profileWarnings = computed(() => profile.data?.warnings ?? []);
+// 控制面视角下所有落点都离线：只提示、不拦接入（判据见 connect() 里的说明）。
+const allOffline = ref(false);
 // 当前隧道是否已经不在首选落点上（= 发生过故障转移）。判据取数据面日志解析出的序号，
 // 而不是"剖面里第几个"——剖面随时会刷新，运行中的隧道用的是拉起那一刻的清单。
 const switchedEndpoint = computed(() => tun.value.running && tun.value.endpointIndex > 1);
@@ -254,16 +265,18 @@ async function connect() {
   await loadProfile();
   const bad = validateConfig();
   if (bad) { err2.value = bad; return; }          // 接入前配置校验（端口/网段/URL）
-  // fail-fast：**所有**落点都离线时接入必然失败，早报错好过让用户等一轮超时。
-  // ★判据是「有没有任意一个在线」而不是「首选在不在线」——首选那台掉线、备用还在时
-  // 客户端照样能接入（会自动切过去），此时拦住用户就是把一次本可成功的接入拒之门外。
+  // ★「控制面认为它离线」与「终端连不上它」是两个视角，只有后者才是接入能不能成的事实。
+  //
+  // 这里此前是 fail-fast 硬拦（一个在线的都没有就连 tunnel_start 都不调），与控制面
+  // 「离线也照发落点、让终端自己试」的设计（clientprofile.profileGateways 注释②）
+  // 直接矛盾，也与数据面刻意不收 online 字段（dataplane.Endpoint）不一致。
+  // 后果很具体：网关经 mTLS 口（8092）注册心跳，客户端走明文管理口（8090）——
+  // 8092 证书配错 / 防火墙挡住 / 控制面刚重启（网关台账是内存 map，重启即清空），
+  // 此时网关进程、隧道口、敲门口、客户端到控制面的 8090 全都正常，接入本可 100% 成功，
+  // 却被自家 UI 拦在门外，报错还指向那个唯一没问题的组件。
+  // 现在改成**照常尝试 + 显著提示**：真连不上会在下面 25s 超时那条路上如实报出来。
   const gws = profile.data?.gateways?.length ? profile.data.gateways : profile.data ? [profile.data.gateway] : [];
-  if (gws.length && !gws.some((g) => g.online)) {
-    err2.value = gws.length > 1
-      ? `控制面显示 ${gws.length} 个网关落点全部离线：请先确认 baidi-gateway 已启动并注册到控制中心`
-      : '控制面显示没有网关在线：请先确认 baidi-gateway 已启动并注册到控制中心';
-    return;
-  }
+  allOffline.value = gws.length > 0 && !gws.some((g) => g.online);
   stage.value = 'connecting'; step.value = 0;
   try {
     await tunnelStart();                            // 触发管理员授权 + 后台拉起 baidi-tun（root）

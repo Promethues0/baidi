@@ -225,6 +225,51 @@ struct TunStatus {
     running: bool,
     pid: String,
     log: String,
+    /// 最近一条「网关落点」状态行（从**整份日志**里捞，不受 log 尾巴长度限制）。
+    ///
+    /// ★为什么要单开一个字段：落点切换只在切换发生的那一瞬打**一行**，而之后每条流
+    /// 都会打一行引流日志（每行上百字节）。只把日志尾巴交给前端的话，几十条流之后
+    /// 那一行就被冲掉了，接入页会静默退回「第 1 个落点」——显示的是一台已经挂掉的
+    /// 网关地址，还可能把未钉扎的隧道显示成已钉扎。一次性事件在"最近 N 字节"这种
+    /// 通道上不可能可靠送达，必须单独带出来。
+    endpoint: String,
+}
+
+/// 日志尾巴的字节预算。按**字符边界**回退，绝不按字节硬切。
+const LOG_TAIL_BYTES: usize = 4000;
+
+/// 取日志尾巴：至多 LOG_TAIL_BYTES 字节，且从**行首**开始。
+///
+/// ★`log[log.len() - 4000..]` 会 panic：baidi-tun 每行日志都带中文
+/// （`msg="引流 · 经隧道转发"` 等），偏移落在多字节 UTF-8 的续接字节上时
+/// Rust 直接 `byte index N is not a char boundary`。那会让 tunnel_status 这个命令
+/// 抛出去、invoke 的 Promise 不 resolve，接入页停在上一次的状态上——一个概率性的、
+/// 只在日志长起来之后出现的"界面卡住"。
+fn log_tail(log: &str, budget: usize) -> &str {
+    if log.len() <= budget {
+        return log;
+    }
+    // ★先把切点抬到字符边界上：连 `log[cut..]` 这一步都会 panic，
+    // 不是只有最终返回的那个切片才需要对齐。
+    let mut cut = log.len() - budget;
+    while cut < log.len() && !log.is_char_boundary(cut) {
+        cut += 1;
+    }
+    // 再从切点起找第一个换行，让尾巴从行首开始（半行日志解析出来只会是噪声）。
+    match log[cut..].find('\n') {
+        Some(off) => &log[cut + off + 1..],
+        None => &log[cut..],
+    }
+}
+
+/// 从整份日志里捞最后一条落点状态行（契约见 gateway 的 picker.logCurrent）。
+fn last_endpoint_line(log: &str) -> String {
+    log.lines()
+        .filter(|l| l.contains("endpoint="))
+        .next_back()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
 }
 
 /// 按 pid 判活（ps -p，避免 kill -0 对 root 进程 EPERM 误判）。供状态查询与托盘轮询共用。
@@ -245,11 +290,13 @@ fn tun_running() -> bool {
 fn tunnel_status() -> TunStatus {
     let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
     let running = tun_running();
-    let mut log = fs::read_to_string(LOG).unwrap_or_default();
-    if log.len() > 4000 {
-        log = log[log.len() - 4000..].to_string();
+    let full = fs::read_to_string(LOG).unwrap_or_default();
+    TunStatus {
+        running,
+        pid,
+        log: log_tail(&full, LOG_TAIL_BYTES).to_string(),
+        endpoint: last_endpoint_line(&full),
     }
-    TunStatus { running, pid, log }
 }
 
 /// 断开：以管理员权限 kill 掉 root 数据面进程（utun/路由随进程退出回收），清理临时文件。
@@ -405,4 +452,56 @@ fn main() {
         })
         .run(tauri::generate_context!())
         .expect("运行白帝桌面客户端失败");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// ★按字节硬切会 panic：baidi-tun 的日志几乎每行都含中文。
+    /// 这条用例退回 `log[log.len()-N..]` 的写法立刻 panic（而不是断言失败），
+    /// 那正是现网表现——tunnel_status 抛异常、接入页静默停在旧状态上。
+    #[test]
+    fn 日志尾巴按字符边界回退() {
+        let line = "time=2026-08-11 level=INFO msg=\"引流 · 经隧道转发\" resource=oa\n";
+        let log: String = line.repeat(200);
+        for budget in 1..300 {
+            let tail = log_tail(&log, budget); // 不 panic 即为通过（切点会落在续接字节上）
+            assert!(log.ends_with(tail), "尾巴必须是原文的后缀");
+        }
+    }
+
+    #[test]
+    fn 日志短于预算时原样返回() {
+        let log = "只有一行中文日志\n";
+        assert_eq!(log_tail(log, 4000), log);
+    }
+
+    #[test]
+    fn 日志尾巴从行首开始() {
+        let log = "第一行很长很长很长很长\n第二行\n第三行\n";
+        let tail = log_tail(log, 20);
+        assert!(tail.starts_with("第二行") || tail.starts_with("第三行"), "得 {tail:?}");
+    }
+
+    /// ★落点行必须从**整份日志**里捞：它只在切换那一瞬打一行，
+    /// 之后每条流的引流日志会很快把它挤出尾巴窗口。
+    #[test]
+    fn 落点行不受尾巴窗口影响() {
+        let mut log = String::from(
+            "time=1 level=WARN msg=\"网关落点切换\" endpoint=2/2 id=gw-b addr=10.0.0.2:18443 reason=\"上一落点 gw-a 拨号失败\"\n",
+        );
+        log.push_str(&"time=2 level=INFO msg=\"引流 · 经隧道转发\" resource=oa\n".repeat(200));
+        assert!(
+            !log_tail(&log, LOG_TAIL_BYTES).contains("endpoint="),
+            "前置条件：落点行确实已被挤出尾巴窗口"
+        );
+        let ep = last_endpoint_line(&log);
+        assert!(ep.contains("endpoint=2/2") && ep.contains("id=gw-b"), "得 {ep:?}");
+    }
+
+    #[test]
+    fn 没有落点行时回空串() {
+        assert_eq!(last_endpoint_line("time=1 msg=\"数据面就绪\"\n"), "");
+    }
 }

@@ -187,6 +187,23 @@ func (s *Server) handleIssueGatewayCert(w http.ResponseWriter, r *http.Request) 
 		httpx.Error(w, http.StatusBadRequest, "gatewayId 必填")
 		return
 	}
+	// ★`standby-` 是保留命名空间，本端点拒收。
+	//
+	// CN 前缀是温备同步端点的**唯一分权判据**（standbyCNOnly 就是 HasPrefix），
+	// 而这里对 gatewayId 原样当 CN 签。不拦的话，持 PermSystem 的系统管理员可以
+	// 签一张 CN=standby-任意 的证书，凭它 GET /api/v1/standby/backup 拉走整套信任材料
+	// （CA 私钥 + 三把签名私钥 + 审计链密钥 + 整个库）——那是备机专属的出口。
+	// 备机证书的正路是**离线 CLI**（baidi-control -issue-gateway-cert standby-1 -out …，
+	// 见 deploy/README.md）：要有这台机器的文件系统访问权，不是一次 HTTP 调用。
+	// `ipsec-` 不拦：组网网关的证书本来就走这条 HTTP 路（gateway/ipsec-e2e.sh），
+	// 且它那条分权只是收窄出口，不是拉走信任材料。
+	if strings.HasPrefix(b.GatewayID, standbyCNPrefix) {
+		httpx.Error(w, http.StatusBadRequest,
+			"gatewayId 不得以 "+standbyCNPrefix+" 开头："+
+				"该前缀是温备节点的分权判据，凭它能拉走整套信任材料。"+
+				"备机证书请在主机上离线签发：baidi-control -issue-gateway-cert standby-1 -out <目录>")
+		return
+	}
 	iss, err := s.ca.IssueClient(b.GatewayID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "签发失败")
@@ -230,6 +247,9 @@ func (s *Server) handleRevokeGatewayCert(w http.ResponseWriter, r *http.Request)
 		Reason string `json:"reason"`
 	}
 	_ = json.NewDecoder(r.Body).Decode(&b)
+	// 先查出这张证书属于哪台网关：吊销之后 GatewayCertTrusted 就查不到"可信记录"了，
+	// 而下面要按 CN 把它从内存台账里摘掉。
+	rec, _, _ := s.store.GatewayCertTrusted(r.Context(), fp)
 	err := s.writer.RevokeGatewayCert(r.Context(), fp, b.Reason)
 	if errors.Is(err, store.ErrCertNotFound) {
 		httpx.Error(w, http.StatusNotFound, "证书不存在或已吊销")
@@ -239,8 +259,41 @@ func (s *Server) handleRevokeGatewayCert(w http.ResponseWriter, r *http.Request)
 		httpx.Error(w, http.StatusInternalServerError, "吊销失败")
 		return
 	}
-	s.audit(r, "security", "吊销网关客户端证书 "+fp[:min(16, len(fp))]+"…："+orElse(b.Reason, "管理员主动吊销"), "deny")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "fingerprint": fp})
+	// ★吊销必须同时把这台网关从**下发给终端的落点清单**里摘掉。
+	//
+	// 此前吊销只切断了「网关→控制面」这一半：进程还在跑（机器可能已被攻击者控制），
+	// 剖面照旧把它当落点下发、`tunnelPin` 也照发，客户端钉扎照样校验通过、界面显示
+	// 「已建立 · 证书钉扎」，每轮还主动给它发一次有效敲门令牌（等于持续替一台已吊销的
+	// 网关开着 SPA 窗口）；首选落点一抖就切过去，业务流量流进失陷网关。
+	// 内存台账没有别的清除路径（除了控制面重启），所以摘除点只能在这里。
+	// 它若还持有另一张未吊销的证书，下一次心跳（15s）会自己重新注册回来——
+	// 那正是我们要的语义：吊销的是**证书**，不是"这台机器从此不存在"。
+	dropped := s.dropGatewayRegistration(rec.GatewayID)
+	note := ""
+	if dropped {
+		note = "；已同时从客户端落点清单中摘除网关 " + rec.GatewayID
+	}
+	s.audit(r, "security", "吊销网关客户端证书 "+fp[:min(16, len(fp))]+"…："+
+		orElse(b.Reason, "管理员主动吊销")+note, "deny")
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "fingerprint": fp,
+		"gatewayId": rec.GatewayID, "endpointDropped": dropped,
+	})
+}
+
+// dropGatewayRegistration 把一台网关从内存台账里摘除（落点清单 / 隧道指纹 / 会话）。
+// 返回是否真的摘掉了一条注册记录。
+func (s *Server) dropGatewayRegistration(id string) bool {
+	if strings.TrimSpace(id) == "" {
+		return false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	_, existed := s.gateways[id]
+	delete(s.gateways, id)
+	delete(s.gwTunnelFP, id)
+	delete(s.gwSess, id)
+	return existed
 }
 
 func min(a, b int) int {

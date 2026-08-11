@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 )
 
@@ -107,5 +108,90 @@ func TestGatewayCertTrustLifecycle(t *testing.T) {
 	// 重复吊销 → 明确错误，不静默成功
 	if err := st.RevokeGatewayCert(ctx, fp, "再吊销"); err == nil {
 		t.Fatal("重复吊销应报错")
+	}
+}
+
+// ★吊销证书必须**当场**把这台网关从下发给终端的落点清单里摘掉。
+//
+// 退回旧实现（只写库、不动内存台账）这条立刻红：被吊销的网关会永远留在剖面里、
+// 连隧道指纹一起下发——客户端钉扎照样通过、界面显示「已建立 · 证书钉扎」，
+// 每轮还主动给它发一次有效敲门令牌，首选落点一抖业务流量就流进那台失陷机器。
+// 吊销此前只切断了「网关→控制面」这一半。
+func TestRevokeGatewayCertDropsEndpointFromProfile(t *testing.T) {
+	st := openTestSQLite(t)
+	ca, err := pki.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("建 CA: %v", err)
+	}
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, ca, true)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+
+	// 给 gw-b 签一张证书，并让它注册上线（带隧道指纹）
+	code, out := doJSON(t, h, "POST", "/api/v1/pki/gateway-certs", adminToken(),
+		map[string]string{"gatewayId": "gw-b"})
+	if code != http.StatusCreated {
+		t.Fatalf("签发证书应 201，得 %d %v", code, out)
+	}
+	fp, _ := out["fingerprint"].(string)
+	regGateway(s, "gw-a", "10.0.0.1", 0, "aa")
+	regGateway(s, "gw-b", "10.0.0.2", 0, "bb")
+	if ids := gatewayIDs(mustProfileGateways(s)); len(ids) != 2 {
+		t.Fatalf("前置条件：两台网关都该在落点清单里，得 %v", ids)
+	}
+
+	code, out = doJSON(t, h, "POST", "/api/v1/pki/gateway-certs/"+fp+"/revoke", adminToken(),
+		map[string]string{"reason": "机器失陷"})
+	if code != http.StatusOK {
+		t.Fatalf("吊销应 200，得 %d %v", code, out)
+	}
+	if out["endpointDropped"] != true {
+		t.Fatalf("吊销响应应报告已摘除落点，得 %v", out)
+	}
+	list := mustProfileGateways(s)
+	for _, g := range list {
+		if g.ID == "gw-b" {
+			t.Fatalf("★被吊销的网关仍在落点清单里（还带着指纹 %q）：%v", g.TunnelPin, gatewayIDs(list))
+		}
+	}
+	if ids := gatewayIDs(list); len(ids) != 1 || ids[0] != "gw-a" {
+		t.Fatalf("只该剩 gw-a，得 %v", ids)
+	}
+}
+
+// mustProfileGateways 取当前落点清单（忽略告警）。
+func mustProfileGateways(s *Server) []ProfileGateway {
+	list, _ := s.profileGateways()
+	return list
+}
+
+// ★`standby-` 是保留命名空间：HTTP 签发端点不得签出温备节点身份。
+//
+// CN 前缀是温备同步端点的唯一分权判据，签得出 CN=standby-x 的证书，就等于
+// 持 PermSystem 的系统管理员能拉走整套信任材料（CA 私钥 + 三把签名私钥 + 整个库）。
+// 备机证书的正路是主机上的离线 CLI。
+func TestIssueGatewayCertRejectsReservedStandbyPrefix(t *testing.T) {
+	st := openTestSQLite(t)
+	ca, err := pki.LoadOrCreate(t.TempDir())
+	if err != nil {
+		t.Fatalf("建 CA: %v", err)
+	}
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, ca, true)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+
+	for _, id := range []string{"standby-1", "standby-evil"} {
+		if code, out := doJSON(t, h, "POST", "/api/v1/pki/gateway-certs", adminToken(),
+			map[string]string{"gatewayId": id}); code != http.StatusBadRequest {
+			t.Fatalf("★%s 必须被拒（凭它能拉走整套信任材料），得 %d %v", id, code, out)
+		}
+	}
+	// 反面：组网网关的 ipsec- 前缀本来就走这条路，不能误伤
+	if code, _ := doJSON(t, h, "POST", "/api/v1/pki/gateway-certs", adminToken(),
+		map[string]string{"gatewayId": "ipsec-a"}); code != http.StatusCreated {
+		t.Fatalf("ipsec- 前缀不该被误伤，得 %d", code)
+	}
+	// 也不该误伤形近的普通 id
+	if code, _ := doJSON(t, h, "POST", "/api/v1/pki/gateway-certs", adminToken(),
+		map[string]string{"gatewayId": "xstandby-1"}); code != http.StatusCreated {
+		t.Fatalf("非前缀命中的 id 不该被拒，得 %d", code)
 	}
 }

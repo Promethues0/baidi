@@ -639,6 +639,13 @@ func validDNSName(s string) bool {
 //	③ **指纹逐网关**，见 ProfileGateway.TunnelPin 的说明。
 //
 // 一台网关都没注册时回退到环境变量配置的默认落点，并带出告警让「连不上」有明确归因。
+//
+// ★②「离线也照发」有一个必须成对存在的前提：**吊销证书要当场把那台网关从内存台账里
+// 摘掉**（见 api.dropGatewayRegistration，调用点在 handleRevokeGatewayCert）。
+// 少了那一半，②就把证书吊销从「即刻摘除」降级成了「只是不再更新心跳」——被吊销的
+// 网关会永远留在落点清单里、连指纹一起下发，客户端钉扎照样通过、每轮还主动给它发一次
+// 有效敲门令牌，首选落点一抖就把业务流量送进那台已失陷的机器。改这两处任何一处，
+// 都要同时看另一处。
 func (s *Server) profileGateways() ([]ProfileGateway, []string) {
 	now := time.Now()
 

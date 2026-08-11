@@ -5,6 +5,7 @@
 > 配套自检（各一条命令、自带起栈、无需 root/Docker）：
 > - `cd gateway && ./e2e.sh` —— 南北向：登录 → 剖面 → 敲门 → 钉扎 → 多资源路由 → 越权拒绝
 > - `cd gateway && ./ipsec-e2e.sh` —— 东西向：真 IKEv2 协商 → 真 ESP 加密 → 跨隧道业务流量 → 反例
+> - `cd gateway && ./web-e2e.sh` —— 浏览器路径：取票 → 换 Cookie → 反代真后端 → 跨应用拒绝 → 撤权即断 → XFF 剥离
 
 ---
 
@@ -132,6 +133,7 @@ graph TB
 | 不变量 | 实现位置 | 为什么 |
 |---|---|---|
 | **网关只装 knock 公钥** | [main.go `-jwt-pubkey`](../gateway/cmd/baidi-gateway/main.go) | 会话令牌用另一把密钥签，其 kid 在网关侧查不到 → **从密码学上就敲不开门**。`spa.checkKnock` 的 `use` 语义闸退化为纵深，而非唯一防线 |
+| **敲门与 Web 票据各一把密钥** | [keys.go](../control/internal/auth/keys.go)、[splitkeys_test.go](../control/internal/auth/splitkeys_test.go) | 数据面有两条入场路径（UDP 敲门 / L7 票据），各只装一把公钥：拿错路径的票据在对面**连签名都验不过**，`use` 语义闸退化为纵深而非唯一防线 |
 | **数据面没有 Sign 函数** | [gateway/internal/auth](../gateway/internal/auth/) | 阶段 4 主动删除。要加签发就是给被保护方发钥匙——不加 |
 | **公钥走部署期文件分发，不做 JWKS 端点** | 部署脚本 | 在线端点若自身即信任根，会构成循环论证 |
 | **配了 `-control` 就必须配 mTLS 证书** | [main.go](../gateway/cmd/baidi-gateway/main.go) | 机器身份只有一条路，没有回退 |
@@ -165,6 +167,22 @@ graph TB
 | 5 | **资源鉴权** | [registry.go `Authorize`](../gateway/internal/resource/registry.go) | 资源 id 的 AllowRoles/AllowUsers 不命中 → 断连 |
 
 关键：**接入剖面不是授权凭据**。它只是"路由提示"，告诉客户端哪些地址该进隧道。即使剖面被完整泄露，攻击者也拿不到任何访问权 —— 第 5 道门在网关侧独立重新鉴权（自检第 ⑧ 步专门验证这一点）。
+
+### 浏览器走的是另一条入场路径（同样五道，但第 2~4 道换了）
+
+上面五道门描述的是 **C/S 隧道**。浏览器做不了 SPA 敲门（那是带签名令牌的 UDP 包），
+所以 B/S 免客户端接入另有一条链，只有第 1 道与第 5 道是同一段代码：
+
+| # | 门 | 位置 | 拦什么 |
+|---|---|---|---|
+| 1 | **票据签发闸** | [api/webproxy.go `handleWebTicket`](../control/internal/api/webproxy.go) | 与敲门**共用** `entryGates`：强制下线 / 账号禁用锁定 / 终端合规；再加一次资源鉴权（`accessibleFor`，与剖面同一入口） |
+| 2 | **票据校验** | [webproxy.VerifyTicket](../gateway/internal/webproxy/ticket.go) | 签名（只装 web 公钥）、`use=web`、jti、绑定资源、TTL 上界、角色白名单 |
+| 3 | **会话 Cookie 绑定** | [webproxy/session.go](../gateway/internal/webproxy/session.go) | HttpOnly+Secure+SameSite=Lax + Path 限定到 `/app/<资源id>/`，服务端再复核 Cookie 里的资源与路径一致 |
+| 4 | **强制下线名单** | `spa.Allowlist.UserDenied` | 控制面下发的封禁名单对两条路径同时生效 |
+| 5 | **逐请求资源鉴权** | [registry.go `Authorize`](../gateway/internal/resource/registry.go) | **每个 HTTP 请求**都重查一次（含 DenyUsers 否决）——不是只在建会话时判一次 |
+
+第 5 道是这条链的关键：它让强制下线 / 风险降权 / JIT 到期在**一个策略轮询周期内**自然生效，
+不必等票据或 Cookie 过期。`./web-e2e.sh` 的第 ⑤ 条断言专门验证「撤权后同一个 Cookie 的下一个请求就被拒」。
 
 ### fail-closed 的代价与补偿
 
@@ -332,6 +350,7 @@ sequenceDiagram
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
 | **管理员分级分权 / 三权分立（有真执行方 + 防自锁）** | [admins_sqlite.go](../control/internal/store/admins_sqlite.go)、[api/admins.go](../control/internal/api/admins.go)、[adminrbac_test.go](../control/internal/api/adminrbac_test.go)、[admins_sqlite_test.go](../control/internal/store/admins_sqlite_test.go) |
 | **消息通道 SMTP / Webhook（真发；STARTTLS 不降级；安全事件真通知）** | [internal/notify/](../control/internal/notify/)、[smtp_test.go](../control/internal/notify/smtp_test.go)（进程内 SMTP 服务端跑真协议）、[api/notify_test.go](../control/internal/api/notify_test.go)。★`kind=sms` 就是 webhook，不是短信网关实现 |
+| **七层 Web 代理（B/S 免客户端：票据换会话 + 逐请求重新鉴权 + 反代）** | `./web-e2e.sh` 六条断言；[gateway/internal/webproxy/](../gateway/internal/webproxy/)、[api/webproxy.go](../control/internal/api/webproxy.go)、[api/webproxy_test.go](../control/internal/api/webproxy_test.go) |
 | **业务告警实体与规则（八类触发源全部读真实信号 + 冷却去重 + 处置状态机）** | [internal/alerting/](../control/internal/alerting/)、[alerting_test.go](../control/internal/alerting/alerting_test.go)、[api/alerts_test.go](../control/internal/api/alerts_test.go)（真把心跳调旧 / 真连错口令锁账号 / 真篡改一行审计） |
 
 **按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
@@ -392,6 +411,63 @@ sequenceDiagram
 - **自定义角色只能在三权内收缩**：`*` 与 `admins` 保存时拒绝。拿得到它们的自定义角色等价于一个不叫 root 的超管，而防自锁的计数只认 `power=root`。
 - **`POST /api/v1/users` 收口成只建普通用户**：`DirUser.Role` 是能从请求体解出来的字段，放任它带 `admin` 就意味着持 security 权的人一次请求给自己造个管理员。建管理员的唯一入口是 `POST /api/v1/admins`（需 `admins` 权限）。
 - **集群区块如实回「未部署」**：`ClusterInfo.Deployed` 恒 false、节点列表恒空，与 `/diag` 的 `checkCluster`（skip「集群未部署」）同口径。白帝没有节点发现 / 选主 / 主备同步，此前那三个 healthy 节点是在给不存在的能力背书。
+
+### ✅ 七层 Web 代理（真，但边界很硬：它是新增的入站攻击面）
+
+PRD 8.3.3 / FR-INTRO-09/12。改造前网关只有 L4 CONNECT 隧道，全库没有一处 `httputil.ReverseProxy`，
+而门户 `PortalApps.vue` 的 `openApp()` **整个函数体就是一句 `Message.success`**——
+浏览器用户能登录门户、能看到应用磁贴，却无法通过浏览器访问任何被保护业务。
+这是"页面存在≠功能存在"全项目最典型的一例，也是产品对外宣称的两大接入形态之一。
+
+**浏览器怎么证明身份**（这条链的设计比实现重要，设计错了比不做更糟）：
+
+```
+门户登录（控制面）→ 点开 Web 应用 → 控制面按资源鉴权后签一张短时效一次性票据
+（use=web + jti + res + 60s，用**第三把**密钥签）→ 浏览器跳到网关 /__baidi/enter
+→ 网关用 control 的 web 公钥验票 → 换成网关本地会话 Cookie → 逐请求重新鉴权 → 反代
+```
+
+- **网关没有、也不会有签发能力**。Cookie 用网关启动期随机生成的**本地** HMAC 密钥签，
+  那是本机会话状态（"这个浏览器刚才出示过一张有效票"），不是身份签发：它出不了这台网关、
+  换不到任何控制面凭据、控制面从不验它，网关重启即全部失效。`gateway/internal/auth` 至今没有 Sign。
+- **`use` 语义闸双向且成对**：敲门路径拒 `use=web`（`spa.checkKnock`），L7 路径拒 `use=knock`
+  （`webproxy.VerifyTicket`），两侧各有用例。再加上两条路径各装一把独立公钥，
+  拿错票据在对面**连签名都验不过**——语义闸是纵深，不是唯一防线。
+- **Cookie 不是万能通行证**：HttpOnly + Secure + SameSite=Lax + `Path=/app/<资源id>/` + 15 分钟 TTL
+  + 服务端复核绑定。浏览器的 Path 规则挡的是正常浏览器，服务端那道挡的是手工构造的请求，两道缺一不可。
+- **每个请求都重新鉴权**（本设计的核心）：拿的是与 L4 隧道**同一份** `resource.Registry`
+  （含控制面算好的 `DenyUsers`）。只在建会话时判一次的话，一张 15 分钟的 Cookie 就是一段谁也撤不掉的访问权。
+- **绝不信任进站的 XFF**：`X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-*` 以及
+  白帝自己的 `X-Baidi-*` 一律先剥干净，再按 `net.Conn` 的真实对端重写。PRD 8.3 要求 XFF 透传，
+  但**信任进站的 XFF 等于让任何人伪造来源 IP**，且骗过之后后端日志看起来完全正常。
+
+**不能声称 / 刻意不做**：
+
+- **L7 端口不受 SPA 服务隐身保护**。浏览器敲不了门，这个端口就必须对浏览器可达——
+  它是一个真实的入站攻击面，与「命中 NAT 的流量绕过隐身」是同性质的取舍。
+  默认关闭（`-web` 为空），开启时网关打一条响亮的启动告警，控制台发布向导里当面告警。
+- **HTML 正文里的绝对链接不改写**。改写 `Location` 响应头与后端 `Set-Cookie` 的 Path/Domain 是做了的
+  （前者不改会把用户甩到内网地址，后者不改是跨应用 Cookie 泄露），但**正文**改写要解析并重写
+  HTML/CSS/JS 里的每一个链接，是个无底洞。补偿是「根相对静态资源按 Referer 兜底 302 进正确前缀」，
+  它只产生一个同源重定向、不放行任何数据。仍然不能覆盖 JS 里拼出来的绝对 URL——
+  这类应用需要后端支持子路径部署，或给它配一个专属域名（`webEntry`）+ 前置 nginx。
+- **到内网 HTTPS 后端不校验后端证书**。这是 L7 相对 L4 隧道的一处**安全性下降**：
+  L4 隧道里 TLS 是浏览器与业务端到端的（网关看不到明文），L7 把 TLS 终结在网关，
+  而内网应用普遍自签、白帝也没有内网 CA 可依赖。不做"假装校验"（那会让所有内网 HTTPS 应用直接不可用），
+  也不留一个迟早被永久打开的开关；要收紧应当给内网应用签发内部 CA 证书后再做这件事。
+- **设备准入（授信终端）这道闸对浏览器不生效**。它需要客户端自报的终端指纹，浏览器没有。
+  三道账号闸（强制下线 / 账号状态 / 终端合规）两条路共用同一段代码（`api.entryGates`），第四道不共用。
+- **`BAIDI_POSTURE_ENFORCE=strict` 与 B/S 接入互斥**：浏览器上报不了 posture，strict 下会被
+  「缺报即拒」一并拦住。这是刻意的 fail-closed（判不了 ≠ 合规），不是遗漏。
+- **会话 Cookie 不做滑动续期**，15 分钟到期回门户重新点开应用。续期会让活跃会话无限延长，
+  而账号禁用/锁定并不经数据面撤销通道下发（那条通道只表达"强制下线"），Cookie 越长这段空窗越长。
+- **必须置于 HTTPS 之后**。Cookie 恒带 `Secure`，没有关掉的开关；纯 HTTP 暴露时浏览器不会保存它，
+  网关会回一个写明这件事的说明页（而不是让人陷进"点进去又被弹回门户"的循环）。
+  网关自身可用 `-web-cert/-web-key` 直接跑 HTTPS，也可由前置 nginx 终结。
+- **DLP / 水印 / 禁复制禁打印禁下载不做**（SCOPE.md ch11 整章不做）。这些需要浏览器侧代理注入
+  或客户端管控，做不到就不在 UI 上留开关。
+- **没有做 SSO 免登**：网关只把验过的账号放进 `X-Baidi-User` 头，后端要不要认由后端自己决定。
+- **未与任何真实企业 Web 业务系统做过适配验证**：验证来自进程内 httptest 后端与 `web-e2e.sh`。
 
 ### ✅ IPSec 站点组网（真，但边界很硬）
 

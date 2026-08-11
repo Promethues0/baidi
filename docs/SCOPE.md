@@ -12,7 +12,7 @@
 | 5 | 监控中心 | ✅ | `MonitorDashboard` 安全监控大屏 |
 | 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups` |
 | 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver` |
-| 8 | 应用管理（资源发布） | ➖ | 隧道应用发布/资源鉴权/JIT 审批已真实现；**七层 Web 代理（8.3.3）、DLP/水印/免认证/XFF 未做**（网关是 L4 隧道，无执行载体） |
+| 8 | 应用管理（资源发布） | ➖ | 隧道应用发布/资源鉴权/JIT 审批已真实现；**七层 Web 代理（8.3.3）已真实现**（控制面签 use=web 短时效一次性票据 → 网关 L7 验票换会话 Cookie → 逐请求重新鉴权 → 反代；XFF 按真实对端重写、Location/Set-Cookie 作用域改写、`web-e2e.sh` 六条断言）。仍不做：**HTML 正文绝对链接改写**（无底洞，如实标边界）、**DLP/水印/禁复制打印下载**（属 ch11 UEM，整章不做）、**SSO 免认证代填**；L7 端口不受 SPA 隐身保护，边界见 docs/ARCHITECTURE.md 第七节 |
 | 9 | 终端管理 | ✅ | `IdentityDevices` + `IdentityCompliance`（终端合规基线 = 设备 posture，属身份/设备信任，**保留**） |
 | 10 | 策略管理（全局/用户策略） | ✅ | `Policy` 统一策略 + `PolicySimulator` + `LoginFlowSim` |
 | **11** | **UEM 统一终端数据安全** | ❌ | **整章不做**：移动/PC 数据安全、沙箱工作空间、外发审批等 DLP 移出范围 |

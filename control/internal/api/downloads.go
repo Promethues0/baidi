@@ -70,7 +70,7 @@ func placeholderManifest() downloadsManifest {
 	return downloadsManifest{Clients: []ClientDownload{
 		{Platform: "macos", Label: "macOS 桌面客户端", Note: "构建中，敬请期待"},
 		{Platform: "windows", Label: "Windows 桌面客户端", Note: "需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
-		{Platform: "linux", Label: "Linux 桌面客户端", Note: "构建中，敬请期待"},
+		{Platform: "linux", Label: "Linux 桌面客户端", Note: "pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "ios", Label: "iOS 客户端", Note: "需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"},
 		{Platform: "android", Label: "Android 客户端", Note: "构建中，敬请期待"},
 		{Platform: "harmony", Label: "鸿蒙客户端", Note: "需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员"},

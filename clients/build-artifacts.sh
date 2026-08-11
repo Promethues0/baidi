@@ -140,7 +140,7 @@ clients = [
     entry("windows", "Windows 桌面客户端", "",
           note="需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；"
                "CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
-    entry("linux", "Linux 桌面客户端", "", note="构建中，敬请期待"),
+    entry("linux", "Linux 桌面客户端", "", note="pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("ios", "iOS 客户端", "",
           note="需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"),
     entry("android", "Android 客户端", os.environ["AND_FILE"],

@@ -420,3 +420,75 @@ func TestCreateAppAndDeleteCategoryAreMutuallyExclusive(t *testing.T) {
 		t.Fatalf("库里出现 %d 个分类字典外的应用", orphans)
 	}
 }
+
+// 应用的「已授权」必须按关联资源的真实 ACL 现算，而不是读那列种子写死的数字。
+//
+// 回归背景：apps.authed_users 是种子里写死的 860/64/210/1284，全库没有任何 UPDATE，
+// 一个 8 个用户的系统会在页面上显示「OA 协同办公 · 860 用户」。这类「真实 SQL 读到的
+// 一个虚构值」两道守卫都抓不到（方法覆盖守卫看的是方法、种子打底守卫看的是
+// s.Memory.X 调用），只能靠这条用例钉住。
+func TestAppAuthedUsersAreComputedNotSeeded(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	b, err := s.Apps(ctx)
+	if err != nil {
+		t.Fatalf("Apps: %v", err)
+	}
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users`).Scan(&total); err != nil {
+		t.Fatalf("统计用户数: %v", err)
+	}
+	byID := map[string]App{}
+	for _, a := range b.Apps {
+		byID[a.ID] = a
+		if a.AuthedUsers > total {
+			t.Errorf("应用 %s 的授权数 %d 超过系统用户总数 %d——这只可能来自写死的种子值",
+				a.ID, a.AuthedUsers, total)
+		}
+		switch a.AuthScope {
+		case AuthScopeUnlinked, AuthScopeUnlimited, AuthScopeLimited:
+		default:
+			t.Errorf("应用 %s 的 authScope=%q 不是三种合法性质之一", a.ID, a.AuthScope)
+		}
+	}
+
+	// a4「数据库运维 (SSH)」种子里没有 resourceId：它根本进不了隧道，
+	// 必须报 unlinked 而不是一个数字——「没关联资源」与「授权了 0 人」是两回事。
+	if a4, ok := byID["a4"]; ok {
+		if a4.AuthScope != AuthScopeUnlinked {
+			t.Errorf("未关联资源的应用应为 unlinked，实际 %q（授权数 %d）", a4.AuthScope, a4.AuthedUsers)
+		}
+	}
+
+	// 给一个资源设定精确的用户白名单，授权数必须跟着变（证明是现算而非存量）。
+	res, err := s.Resources(ctx)
+	if err != nil || len(res) == 0 {
+		t.Fatalf("Resources: %v（%d 条）", err, len(res))
+	}
+	target := res[0]
+	target.AllowRoles = nil
+	target.AllowGroups = nil
+	target.AllowOrgs = nil
+	target.AllowUsers = []string{"zhang.wei", "li.fang"}
+	if err := s.SaveResource(ctx, target); err != nil {
+		t.Fatalf("SaveResource: %v", err)
+	}
+	b2, err := s.Apps(ctx)
+	if err != nil {
+		t.Fatalf("Apps 二次: %v", err)
+	}
+	var hit bool
+	for _, a := range b2.Apps {
+		if a.ResourceID != target.ID {
+			continue
+		}
+		hit = true
+		if a.AuthScope != AuthScopeLimited || a.AuthedUsers != 2 {
+			t.Errorf("改 ACL 后应现算为 limited/2，实际 %s/%d", a.AuthScope, a.AuthedUsers)
+		}
+	}
+	if !hit {
+		t.Skipf("种子里没有应用关联资源 %s，跳过现算断言", target.ID)
+	}
+}

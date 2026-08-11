@@ -88,6 +88,8 @@ export interface App {
   id: string; name: string; addr: string;
   mode: 'tunnel' | 'web' | 'global';
   category: string; node: string; authedUsers: number;
+  /** 授权面性质：unlinked 未关联资源 / unlimited 未设 ACL 对全员开放 / limited 按 ACL 限定 */
+  authScope?: 'unlinked' | 'unlimited' | 'limited';
   status: 'running' | 'stopped';
 }
 export interface AppBundle { categories: AppCategory[]; apps: App[] }

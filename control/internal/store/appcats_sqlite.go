@@ -215,3 +215,48 @@ WHERE COALESCE(category,'')<>'' AND category NOT IN (SELECT "key" FROM app_categ
 	}
 	return s.SetSetting(ctx, appCatBackfillMarker, nowStr())
 }
+
+// fillAppAuth 为一批应用现算授权面（AuthedUsers/AuthScope）。取数在这里，判定在
+// resolveAppAuth——与资源授权的其余两个出口（网关策略下发、客户端剖面）共用同一套
+// 「四维皆空即不限」语义，不另起一份口径。
+func (s *SQLiteStore) fillAppAuth(ctx context.Context, apps []App) error {
+	if len(apps) == 0 {
+		return nil
+	}
+	resList, err := s.Resources(ctx)
+	if err != nil {
+		return err
+	}
+	byID := make(map[string]Resource, len(resList))
+	for _, r := range resList {
+		byID[r.ID] = r
+	}
+	ix, err := s.SubjectIndex(ctx)
+	if err != nil {
+		return err
+	}
+	// 鉴权角色（users.role）→ 账号。注意不是 users.roles 那个展示角色列表：
+	// 资源 ACL 的 AllowRoles 比对的是令牌里的 role，展示角色不参与鉴权。
+	rows, err := s.db.QueryContext(ctx, `SELECT lower(trim(account)), lower(trim(COALESCE(role,''))) FROM users`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	roleAccounts := map[string][]string{}
+	total := 0
+	for rows.Next() {
+		var acct, role string
+		if err := rows.Scan(&acct, &role); err != nil {
+			return err
+		}
+		total++
+		if role != "" {
+			roleAccounts[role] = append(roleAccounts[role], acct)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	resolveAppAuth(apps, byID, ix, roleAccounts, total)
+	return nil
+}

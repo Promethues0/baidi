@@ -52,7 +52,7 @@
               </td>
               <td><span class="bd-tg" :style="tagStyle(modeMeta(a.mode).color)">{{ modeMeta(a.mode).label }}</span></td>
               <td>{{ a.node }}</td>
-              <td>{{ a.authedUsers }} 用户</td>
+              <td><span :class="{ 'bd-auth--none': a.authScope === 'unlinked' }" :title="authTitle(a)">{{ authText(a) }}</span></td>
               <td>
                 <span class="bd-st"><span class="d" :style="{ background: a.status === 'running' ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ a.status === 'running' ? '运行中' : '已停用' }}</span>
               </td>
@@ -193,6 +193,19 @@ const MODES = [
   { key: 'global', label: 'WEB 全网资源', desc: '知网 / 图书馆等泛域名公网资源，门户内访问', icon: 'IconPublic', bg: '#E8FFEA', color: '#00B42A' }
 ] as const;
 function modeMeta(m: string) { return MODES.find((x) => x.key === m) ?? MODES[1]; }
+
+/* 「已授权」列：授权面由后端按关联资源的真实 ACL 现算，三种性质要分开呈现——
+   都渲染成一个数字的话，「没关联资源所以谁也进不去」会长得跟「授权了 0 个人」一样。 */
+function authText(a: App) {
+  if (a.authScope === 'unlinked') return '未关联资源';
+  if (a.authScope === 'unlimited') return `全部用户（${a.authedUsers}）`;
+  return `${a.authedUsers} 用户`;
+}
+function authTitle(a: App) {
+  if (a.authScope === 'unlinked') return '该应用未关联受控资源，无法经隧道访问——在发布向导里关联一个资源';
+  if (a.authScope === 'unlimited') return '关联资源未设置任何访问控制，对全部登录用户开放';
+  return '按资源 ACL（用户 / 角色 / 组织 / 用户组展开）统计，不含有时限的 JIT 临时授予';
+}
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 // 向导只收集会真正提交后端的字段——收集了却静默丢弃的控件比没有更糟（见 CLAUDE.md 静默失效缺陷族）。
@@ -375,6 +388,8 @@ onMounted(load);
 .bd-cat__ic { font-size: 15px; }
 .bd-cat__t { flex: 1; text-align: left; }
 .bd-cat__n { font-size: 11px; color: var(--bd-t3); }
+/* 未关联资源不是「授权了 0 人」而是「根本进不去」，用弱化色与虚线下划线区分开。 */
+.bd-auth--none { color: var(--bd-t3); border-bottom: 1px dashed var(--bd-line); cursor: help; }
 .bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
 .bd-appic { width: 34px; height: 34px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
 

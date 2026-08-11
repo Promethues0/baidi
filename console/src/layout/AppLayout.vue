@@ -75,10 +75,15 @@
           </button>
         </template>
 
-        <div class="bd-health">
-          <div class="bd-health__h"><span class="bd-health__dot" />系统运行正常</div>
-          <div class="bd-health__b">集群 HA · 双节点活动<br />公网暴露端口 <b>0</b> · SPA 隐身中</div>
-        </div>
+        <!-- ★这里曾经写死「系统运行正常 / 集群 HA 双节点活动 / 公网暴露端口 0」，
+             三句话没有一句是测出来的：集群根本没部署（System 页与 /diag 都如实回
+             「未部署」，侧栏却宣称双节点活动，两处自相矛盾），暴露端口也从未探测。
+             常驻在每一页的健康结论最容易被当真，所以改成入口而不是结论——
+             真实体检在 /diag，那里有 9 项真探测。 -->
+        <RouterLink to="/diag" class="bd-health bd-health--link">
+          <div class="bd-health__h"><icon-pulse />运维诊断</div>
+          <div class="bd-health__b">集群 / 隐身 / 审计 / 认证源等 9 项实测体检</div>
+        </RouterLink>
       </aside>
 
       <main class="bd-main"><RouterView /></main>
@@ -221,10 +226,10 @@ async function doChangePw() {
   margin-top: 20px; padding: 12px; border-radius: 10px; color: #fff;
   background: linear-gradient(135deg, var(--bd-dark-1), var(--bd-dark-2));
 }
+.bd-health--link { display: block; text-decoration: none; transition: filter .15s; }
+.bd-health--link:hover { filter: brightness(1.18); }
+.bd-health--link:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 2px; }
 .bd-health__h { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
-.bd-health__dot {
-  width: 7px; height: 7px; border-radius: 50%; background: #23C343; box-shadow: 0 0 0 3px rgba(35, 195, 67, .25);
-}
 .bd-health__b { font-size: 11px; color: var(--bd-dark-txt); line-height: 1.7; }
 .bd-health__b b { color: #fff; }
 

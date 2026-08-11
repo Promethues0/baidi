@@ -1261,7 +1261,9 @@ func nowStr() string { return time.Now().Format("2006-01-02 15:04:05") }
 // 那两个常量已删除：分类既然能在页面上增删改，再留一份编译进二进制的清单，
 // 就是第二个真相来源（管理员改完库，筛选条仍按常量显示与排序）。
 func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,authed_users,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
+	// ★不选 authed_users：那一列已废弃（种子写死的 860/64/210/1284，全库无 UPDATE）。
+	// 授权面在下面按关联资源的真实 ACL 现算，见 App.AuthedUsers 的注释。
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
 	if err != nil {
 		return AppBundle{}, err
 	}
@@ -1270,11 +1272,17 @@ func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var a App
-		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Node, &a.AuthedUsers, &a.Status, &a.ResourceID); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Node, &a.Status, &a.ResourceID); err != nil {
 			return AppBundle{}, err
 		}
 		apps = append(apps, a)
 		counts[a.Category]++
+	}
+	if err := rows.Err(); err != nil {
+		return AppBundle{}, err
+	}
+	if err := s.fillAppAuth(ctx, apps); err != nil {
+		return AppBundle{}, err
 	}
 	defs, err := s.AppCategories(ctx)
 	if err != nil {

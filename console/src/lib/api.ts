@@ -24,8 +24,23 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
     location.href = location.pathname.startsWith('/portal') ? '/portal/login' : '/login';
     throw new Error('401 未认证');
   }
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  if (!res.ok) throw new Error(await errText(res));
   return (await res.json()) as T;
+}
+
+/**
+ * errText 取后端的错误文案（httpx.Error 的 {"error":{"message":…}}），拿不到才退回状态行。
+ * ★后端的守卫消息常常是**唯一能指导下一步动作**的信息（"分类下仍有 3 个应用，请先改归属"、
+ * "该组织仍有子部门"），只把 "409 Conflict" 抛给调用方，等于把这些话全丢掉，
+ * 管理员看到的就只是一次没有原因的失败。
+ */
+async function errText(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { message?: string } };
+    const msg = body?.error?.message;
+    if (msg) return msg;
+  } catch { /* 非 JSON 应答（网关 502 之类）：退回状态行 */ }
+  return `${res.status} ${res.statusText}`;
 }
 
 /* ── 与 baidi-control internal/store.Overview 同构 ── */
@@ -65,7 +80,15 @@ export interface PolicyBundle {
 }
 
 /* ── 应用管理（store.AppBundle）── */
+/** 应用页分类筛选条的一项。首项 key='all' 是后端现拼的**合成项**，不在分类字典里。 */
 export interface AppCategory { key: string; label: string; count: number }
+/**
+ * 分类字典行（store.AppCategoryDef，表 app_categories）。
+ * builtin=内置分类：可改名、可排序，不可删（key 被种子应用引用）。
+ * count=该分类下的应用数，删除守卫判的就是它。
+ */
+export interface AppCategoryDef { key: string; label: string; sort: number; builtin: boolean; count: number }
+export interface AppCategoriesResp { categories: AppCategoryDef[] }
 export interface App {
   id: string; name: string; addr: string;
   mode: 'tunnel' | 'web' | 'global';

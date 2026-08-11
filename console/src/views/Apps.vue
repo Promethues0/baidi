@@ -14,7 +14,10 @@
     <div class="bd-two">
       <!-- 分类 -->
       <div class="bd-card bd-cats">
-        <div class="bd-cats__h">应用分类</div>
+        <div class="bd-cats__h">
+          <span>应用分类</span>
+          <span class="bd-link bd-cats__mgr" @click="openCatMgr"><icon-settings />管理分类</span>
+        </div>
         <button v-for="c in categories" :key="c.key" class="bd-cat" :class="{ on: cat === c.key }" @click="cat = c.key">
           <icon-folder class="bd-cat__ic" />
           <span class="bd-cat__t">{{ c.label }}</span>
@@ -58,6 +61,54 @@
       </div>
     </div>
 
+    <!-- ============ 分类维护（增删改 + 排序）============ -->
+    <a-modal v-model:visible="mgr.open" :width="680" title="管理应用分类" :footer="false" unmount-on-close>
+      <div class="bd-catmgr">
+        <div class="bd-catmgr__hint">
+          <icon-info-circle />分类只影响管理台上的归类与筛选，不参与任何访问授权判定——授权在「安全防护 → 资源策略」按资源配置。
+        </div>
+        <div v-if="mgr.err" class="bd-catmgr__err">{{ mgr.err }}</div>
+
+        <table class="bd-table bd-catmgr__t">
+          <thead>
+            <tr><th style="width: 76px">排序</th><th>名称</th><th style="width: 150px">分类 key</th><th style="width: 80px">应用数</th><th class="r" style="width: 64px">操作</th></tr>
+          </thead>
+          <tbody>
+            <tr v-for="(c, i) in mgr.list" :key="c.key">
+              <td>
+                <span class="bd-link bd-catmgr__mv" :class="{ off: i === 0 }" title="上移" @click="move(i, -1)"><icon-arrow-up /></span>
+                <span class="bd-link bd-catmgr__mv" :class="{ off: i === mgr.list.length - 1 }" title="下移" @click="move(i, 1)"><icon-arrow-down /></span>
+              </td>
+              <td>
+                <a-input v-model="c.label" :max-length="64" size="small" :disabled="mgr.busy"
+                  @blur="rename(c)" @press-enter="rename(c)" />
+              </td>
+              <td>
+                <i class="bd-mono">{{ c.key }}</i>
+                <span v-if="c.builtin" class="bd-tg bd-catmgr__bi">内置</span>
+              </td>
+              <td>{{ c.count }}</td>
+              <td class="r">
+                <span v-if="c.builtin" class="bd-catmgr__no" title="内置分类不可删除（key 被既有应用引用），可改名与调整排序">—</span>
+                <span v-else class="bd-link bd-link--danger" @click="remove(c)"><icon-delete /></span>
+              </td>
+            </tr>
+            <tr v-if="!mgr.list.length && mgr.loaded">
+              <td colspan="5" class="bd-catmgr__empty">分类字典为空——新增一个后才能发布应用。</td>
+            </tr>
+          </tbody>
+        </table>
+
+        <div class="bd-catmgr__add">
+          <a-input v-model="mgr.newKey" placeholder="key（小写字母/数字/连字符）" class="bd-mono" :max-length="32" :disabled="mgr.busy" />
+          <a-input v-model="mgr.newLabel" placeholder="显示名称" :max-length="64" :disabled="mgr.busy" @press-enter="create" />
+          <button class="bd-btn" :disabled="mgr.busy || !mgr.newKey || !mgr.newLabel"
+            :style="{ opacity: mgr.busy || !mgr.newKey || !mgr.newLabel ? 0.5 : 1 }" @click="create"><icon-plus />新增</button>
+        </div>
+        <div class="bd-catmgr__foot">key 落库后不可更改（既有应用按 key 引用分类）；名称随时可改，应用页与发布向导立即跟随。</div>
+      </div>
+    </a-modal>
+
     <!-- ============ 发布向导（P1 分步 + 分支）============ -->
     <a-drawer v-model:visible="wz.open" :width="720" title="应用发布向导" :footer="false" unmount-on-close>
       <div class="bd-wz">
@@ -80,8 +131,9 @@
           <div class="bd-fld"><label>应用名称</label><a-input v-model="wz.f.name" placeholder="例如：OA 协同办公" /></div>
           <div class="bd-fld"><label>所属分类</label>
             <a-select v-model="wz.f.cat" placeholder="选择分类">
-              <a-option v-for="c in categories.filter(x => x.key !== 'all')" :key="c.key" :value="c.key">{{ c.label }}</a-option>
+              <a-option v-for="c in pickableCats" :key="c.key" :value="c.key">{{ c.label }}</a-option>
             </a-select>
+            <span v-if="!pickableCats.length" class="bd-fld__d">分类字典为空，请先用左侧「管理分类」新增一个——后端会拒收字典外的分类。</span>
           </div>
           <div v-if="wz.mode === 'tunnel'" class="bd-fld"><label>内网地址</label><a-input v-model="wz.f.addr" placeholder="10.30.5.8:22" class="bd-mono" /></div>
           <div v-else-if="wz.mode === 'web'" class="bd-fld"><label>内网 URL</label><a-input v-model="wz.f.addr" placeholder="http://10.20.1.10:8080" class="bd-mono" /></div>
@@ -117,9 +169,9 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed, onMounted } from 'vue';
+import { ref, reactive, computed, watch, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AppBundle, type App, type AppCategory, type Resource, type ResourcesResp } from '@/lib/api';
+import { api, type AppBundle, type App, type AppCategory, type AppCategoryDef, type AppCategoriesResp, type Resource, type ResourcesResp } from '@/lib/api';
 
 const live = ref(false);
 const categories = ref<AppCategory[]>([{ key: 'all', label: '全部应用', count: 0 }]);
@@ -142,10 +194,19 @@ const wz = reactive({
   open: false, step: 0, mode: '' as '' | 'tunnel' | 'web' | 'global',
   f: { name: '', cat: '', addr: '', resourceId: '' }
 });
-function openWizard() { wz.open = true; wz.step = 0; wz.mode = ''; wz.f.name = ''; wz.f.cat = ''; wz.f.addr = ''; wz.f.resourceId = ''; }
+/** 发布向导可选的分类 = 筛选条去掉合成项 all（它不是真实分类）。 */
+const pickableCats = computed(() => categories.value.filter((c) => c.key !== 'all'));
+function openWizard() {
+  wz.open = true; wz.step = 0; wz.mode = '';
+  wz.f.name = ''; wz.f.addr = ''; wz.f.resourceId = '';
+  // 默认选第一个真实分类。★不再写死 'office'：分类可增删之后，写死一个 key 意味着
+  // 管理员删掉它以后每次发布都会 400，而错误来自一个界面上根本没显示的默认值。
+  wz.f.cat = pickableCats.value[0]?.key ?? '';
+}
 const canNext = computed(() => {
   if (wz.step === 0) return !!wz.mode;
-  if (wz.step === 1) return !!wz.f.name && !!wz.f.addr;
+  // 分类是必选：后端会拒收字典外的 key，前端放行只会把校验推迟到最后一步。
+  if (wz.step === 1) return !!wz.f.name && !!wz.f.addr && !!wz.f.cat;
   return true;
 });
 const publishing = ref(false);
@@ -167,17 +228,114 @@ async function next() {
   try {
     await api('/apps', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat || 'office', resourceId: wz.f.resourceId })
+      body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat, resourceId: wz.f.resourceId })
     });
     wz.open = false;
     Message.success(`应用「${wz.f.name}」已发布并落库`);
     cat.value = 'all';
     await load();
-  } catch {
-    Message.error('发布失败，请检查后端连接');
+  } catch (e) {
+    Message.error(reason(e, '发布失败，请检查后端连接'));
   } finally {
     publishing.value = false;
   }
+}
+
+/* ── 分类维护（增删改 + 排序）──
+   分类此前是编译进后端二进制的两个常量，管理员既加不了也改不了；这里是唯一维护入口。
+   每次操作立刻落库（不做本地暂存 + 批量保存）：批量提交要维护一份差异集，
+   而任何一条失败都会让页面上的状态与库里分家，那种分家在这一屏上看不出来。 */
+const mgr = reactive({
+  open: false, loaded: false, busy: false, err: '',
+  list: [] as AppCategoryDef[],
+  newKey: '', newLabel: ''
+});
+
+async function loadCats() {
+  try {
+    mgr.list = (await api<AppCategoriesResp>('/app-categories')).categories ?? [];
+  } catch (e) {
+    mgr.list = [];
+    mgr.err = reason(e, '读取分类字典失败');
+  } finally {
+    mgr.loaded = true;
+  }
+}
+function openCatMgr() { mgr.open = true; mgr.loaded = false; mgr.err = ''; mgr.newKey = ''; mgr.newLabel = ''; void loadCats(); }
+
+/** 一次分类写操作：统一置忙、统一刷新字典与应用页（计数与筛选条都要跟着变）。 */
+async function catOp(run: () => Promise<unknown>, okMsg: string, failMsg: string): Promise<boolean> {
+  if (mgr.busy) return false;
+  mgr.busy = true;
+  try {
+    await run();
+    mgr.err = '';
+    await loadCats();
+    await load();
+    Message.success(okMsg);
+    return true;
+  } catch (e) {
+    // 后端守卫的原话就是下一步该做什么（"分类下仍有 N 个应用…"），原样呈现。
+    const msg = reason(e, failMsg);
+    Message.error(msg);
+    // ★先刷新再写 err：loadCats 成功时不动 err，但它是异步的，
+    // 顺序反过来的话弹窗里的红条会被这次刷新的时序吃掉，只剩一条转瞬即逝的 toast。
+    await loadCats(); // 回到库里的真实状态，别把本地改了一半的输入留在表格里
+    mgr.err = msg;
+    return false;
+  } finally {
+    mgr.busy = false;
+  }
+}
+
+function create() {
+  const key = mgr.newKey.trim(), label = mgr.newLabel.trim();
+  if (!key || !label) return;
+  void catOp(
+    () => api('/app-categories', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ key, label }) }),
+    `分类「${label}」已新增`, '新增分类失败'
+  ).then((ok) => { if (ok) { mgr.newKey = ''; mgr.newLabel = ''; } });
+}
+
+function putCat(c: AppCategoryDef, label: string, sort: number) {
+  return api(`/app-categories/${encodeURIComponent(c.key)}`, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ label, sort })
+  });
+}
+
+function rename(c: AppCategoryDef) {
+  const label = c.label.trim();
+  const was = prevLabel.get(c.key) ?? '';
+  // 名字清空或没改动都不提交：前者后端本就会拒（400），后者每次失焦都会落一条
+  // 「改名 X→X」的审计——审计只该记真的发生过的事。两种情况都把输入框还原成库里那份。
+  if (!label || label === was) { c.label = was; return; }
+  void catOp(() => putCat(c, label, c.sort), `分类已改名为「${label}」`, '改名失败');
+}
+
+/** 上移/下移：与相邻行交换 sort 后各提交一次（sort 是库里的真实列，不是前端排布）。 */
+function move(i: number, dir: -1 | 1) {
+  const j = i + dir;
+  if (mgr.busy || j < 0 || j >= mgr.list.length) return;
+  const a = mgr.list[i], b = mgr.list[j];
+  // 两行 sort 相同时（历史数据可能如此）交换不会改变顺序，先拉开一档再交换。
+  const sa = a.sort, sb = a.sort === b.sort ? b.sort + dir : b.sort;
+  void catOp(async () => { await putCat(a, a.label, sb); await putCat(b, b.label, sa); }, '排序已更新', '调整排序失败');
+}
+
+function remove(c: AppCategoryDef) {
+  void catOp(
+    () => api(`/app-categories/${encodeURIComponent(c.key)}`, { method: 'DELETE' }),
+    `分类「${c.label}」已删除`, '删除失败'
+  );
+}
+
+/** prevLabel 记住每行改动前的名称：用于「没变就不提交」与失败回滚显示。 */
+const prevLabel = new Map<string, string>();
+watch(() => mgr.list, (l) => { prevLabel.clear(); l.forEach((c) => prevLabel.set(c.key, c.label)); }, { deep: false });
+
+function reason(e: unknown, fallback: string) {
+  const msg = e instanceof Error ? e.message : '';
+  return msg ? `${fallback}（${msg}）` : fallback;
 }
 
 onMounted(load);
@@ -186,7 +344,8 @@ onMounted(load);
 <style scoped>
 .bd-two { display: flex; gap: 16px; align-items: flex-start; }
 .bd-cats { width: 210px; flex: none; padding: 12px; }
-.bd-cats__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; }
+.bd-cats__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.bd-cats__mgr { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; }
 .bd-cat { width: 100%; display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 12px; border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--bd-t2); }
 .bd-cat:hover { background: var(--bd-fill-2); }
 .bd-cat.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 500; }
@@ -195,6 +354,19 @@ onMounted(load);
 .bd-cat__n { font-size: 11px; color: var(--bd-t3); }
 .bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
 .bd-appic { width: 34px; height: 34px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
+
+/* 分类维护弹窗 */
+.bd-catmgr__hint { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--bd-t3); background: var(--bd-fill-1); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
+.bd-catmgr__err { font-size: 12.5px; color: var(--bd-danger); background: var(--bd-danger-1, rgba(245, 63, 63, .08)); border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; }
+.bd-catmgr__t td { vertical-align: middle; }
+.bd-catmgr__mv { display: inline-flex; margin-right: 8px; font-size: 13px; }
+.bd-catmgr__mv.off { color: var(--bd-t4); pointer-events: none; }
+.bd-catmgr__bi { margin-left: 8px; color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-catmgr__no { color: var(--bd-t4); }
+.bd-catmgr__empty { color: var(--bd-t3); text-align: center; padding: 22px 0; }
+.bd-catmgr__add { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+.bd-catmgr__add :deep(.arco-input-wrapper) { flex: 1; }
+.bd-catmgr__foot { font-size: 12px; color: var(--bd-t3); margin-top: 10px; }
 
 /* 向导 */
 .bd-wz { display: flex; flex-direction: column; height: 100%; }

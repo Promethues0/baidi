@@ -12,6 +12,10 @@ dist/
 # 本地测试生成的 SM2 证书/私钥（gmca EnsureGateway 产物），绝不入库
 certs/
 
+# 审计防篡改链的 HMAC 密钥（control 首启自动生成 0600，与库同目录）。
+# 它是"审计有没有被改过"的唯一判据，入库等于把验真能力一并公开——任何情况下不入库。
+audit-hmac.key
+
 # gomobile 绑定产物（.xcframework/.aar，各上百 MB 的编译产物），本地按需重建，不入库
 clients/mobile/native/out/
 

@@ -1,6 +1,7 @@
 package webproxy
 
 import (
+	"bufio"
 	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
@@ -8,12 +9,16 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"fmt"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -76,23 +81,52 @@ type harness struct {
 	key      ctrlKey
 	reg      *resource.Registry
 	al       *spa.Allowlist
+	ws       *Server
 	srv      *httptest.Server
 	backend  *httptest.Server
 	lastXFF  string
 	lastHost string
+	lastReq  *http.Request // 后端**实际收到**的那个请求（头部断言用）
 }
 
-func newHarness(t *testing.T) *harness {
+func newHarness(t *testing.T) *harness { return newHarnessWith(t, nil) }
+
+// newHarnessWith 同上，但允许改装配参数（可信代理、对外主机名、网关 id…）。
+func newHarnessWith(t *testing.T, tweak func(*Config)) *harness {
 	t.Helper()
 	h := &harness{key: newCtrlKey(t)}
 	h.backend = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		h.lastXFF = r.Header.Get("X-Forwarded-For")
 		h.lastHost = r.Host
+		h.lastReq = r.Clone(r.Context())
 		switch r.URL.Path {
 		case "/redir":
 			w.Header().Set("Location", "http://"+r.Host+"/login?next=1")
 			w.Header().Add("Set-Cookie", "sid=abc; Path=/; HttpOnly")
 			w.WriteHeader(http.StatusFound)
+		case "/hostcookie":
+			// 现代框架很常见的形态（Django SESSION_COOKIE_NAME='__Host-sessionid' 等）
+			w.Header().Add("Set-Cookie", "__Host-sid=abc; Path=/; Secure; HttpOnly; SameSite=Lax")
+			w.WriteHeader(http.StatusOK)
+		case "/echo-cookie":
+			_, _ = w.Write([]byte("COOKIE:" + r.Header.Get("Cookie")))
+		case "/exact":
+			// 长度**恰好等于**上界的响应体：cappedBody 的差一在这里暴露
+			_, _ = w.Write(make([]byte, exactBodySize))
+		case "/upgrade":
+			hj, ok := w.(http.Hijacker)
+			if !ok {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			c, buf, err := hj.Hijack()
+			if err != nil {
+				return
+			}
+			defer c.Close()
+			_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_ = buf.Flush()
+			io.Copy(io.Discard, c) //nolint:errcheck // 保持连接直到某一端关闭
 		default:
 			_, _ = w.Write([]byte("BACKEND-OK " + r.URL.Path))
 		}
@@ -111,23 +145,46 @@ func newHarness(t *testing.T) *harness {
 	if err != nil {
 		t.Fatal(err)
 	}
-	ws, err := New(Config{
+	cfg := Config{
 		Verifier: h.key.verifier(t), Registry: h.reg, Allow: h.al,
 		SessionKey: key, SessionTTL: 10 * time.Minute, TicketMaxTTL: time.Minute,
-	})
+		GatewayID: "gw-a",
+	}
+	if tweak != nil {
+		tweak(&cfg)
+	}
+	ws, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	h.srv = httptest.NewServer(ws.Handler())
+	h.ws = ws
+	// ★与 Serve 装同一个 ConnContext：没有它，已升级连接进不了可切断台账，
+	// handleAny 会（正确地）拒绝升级——测试环境也必须复现真实装配。
+	srv := httptest.NewUnstartedServer(ws.Handler())
+	srv.Config.ConnContext = ConnContext
+	srv.Start()
+	h.srv = srv
 	t.Cleanup(h.srv.Close)
 	return h
+}
+
+// exactBodySize 后端 /exact 的响应体长度，测试把 MaxBodyBytes 调到同一个值。
+const exactBodySize = 4096
+
+// jtiSeq 保证每次取票的 jti 唯一——票据现在是**真一次性**的，
+// 复用 jti 会让第二次换票被去重挡掉（那正是我们想要的行为）。
+var jtiSeq atomic.Int64
+
+// ticket 签一张票（不换会话），供重放/绑定类断言直接拿原串用。
+func (h *harness) ticket(user, role, res string) string {
+	return h.key.sign(auth.Claims{Sub: user, Role: role, Name: user,
+		Jti: fmt.Sprintf("j-%d", jtiSeq.Add(1)), Use: auth.UseWeb, Res: res}, 30*time.Second)
 }
 
 // enter 走一次「票据换 Cookie」，返回 Cookie 值。
 func (h *harness) enter(t *testing.T, user, role, res string) string {
 	t.Helper()
-	tok := h.key.sign(auth.Claims{Sub: user, Role: role, Name: user, Jti: "j-" + res + user,
-		Use: auth.UseWeb, Res: res}, 30*time.Second)
+	tok := h.ticket(user, role, res)
 	resp := h.get(t, entryPath+"?t="+url.QueryEscape(tok), "")
 	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusFound {
@@ -360,4 +417,337 @@ func readAll(t *testing.T, resp *http.Response) string {
 	b := make([]byte, 4096)
 	n, _ := resp.Body.Read(b)
 	return string(b[:n])
+}
+
+// ★票据是**一次性**的：同一张票换第二次会话必须被拒。
+//
+// 退回旧实现（只检查 jti 非空、没有去重缓存）这条用例立刻红——那正是此前
+// 控制面审计、文档、门户提示、前端注释四处都写着"60s 内一次性"而实际不成立的地方。
+// 票据整串会进浏览器历史与前置 nginx 的 access.log，拿到即可重放。
+func TestTicketIsSingleUse(t *testing.T) {
+	h := newHarness(t)
+	tok := h.ticket("zhangsan", "user", "oa")
+	first := h.get(t, entryPath+"?t="+url.QueryEscape(tok), "")
+	first.Body.Close()
+	if first.StatusCode != http.StatusFound {
+		t.Fatalf("首次换票应成功，得 %d", first.StatusCode)
+	}
+	for i := 0; i < 3; i++ {
+		again := h.get(t, entryPath+"?t="+url.QueryEscape(tok), "")
+		again.Body.Close()
+		if again.StatusCode != http.StatusUnauthorized {
+			t.Fatalf("★第 %d 次重放同一张票必须被拒，得 %d", i+2, again.StatusCode)
+		}
+		for _, c := range again.Cookies() {
+			if c.Name == CookieName {
+				t.Fatal("★重放被拒时绝不能下发会话 Cookie")
+			}
+		}
+	}
+}
+
+// 票据绑定网关：去重缓存是每台网关自己的内存，票不带网关维度的话，
+// 同一张票在每台装了 web 公钥的网关上都能各换一次会话——去重被台数整除掉。
+func TestTicketBoundToGateway(t *testing.T) {
+	h := newHarnessWith(t, func(c *Config) { c.GatewayID = "gw-a" })
+	mine := h.key.sign(auth.Claims{Sub: "u", Role: "user", Name: "u", Jti: "j-gw-mine",
+		Use: auth.UseWeb, Res: "oa", Gw: "gw-a"}, 30*time.Second)
+	if resp := h.get(t, entryPath+"?t="+url.QueryEscape(mine), ""); resp.StatusCode != http.StatusFound {
+		resp.Body.Close()
+		t.Fatalf("绑定本网关的票应放行，得 %d", resp.StatusCode)
+	} else {
+		resp.Body.Close()
+	}
+	other := h.key.sign(auth.Claims{Sub: "u", Role: "user", Name: "u", Jti: "j-gw-other",
+		Use: auth.UseWeb, Res: "oa", Gw: "gw-b"}, 30*time.Second)
+	resp := h.get(t, entryPath+"?t="+url.QueryEscape(other), "")
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("★绑定别台网关的票必须被拒，得 %d", resp.StatusCode)
+	}
+}
+
+// 可信代理：只有来自白名单网段的请求，其 XFF / XFP 才被采信。
+//
+// 文档推荐的部署就是把七层绑在回环由前置 nginx 终结 HTTPS，没有这一半的话
+// 后端看到的客户端 IP 恒为 nginx 自己、X-Forwarded-Proto 恒为 http。
+func TestTrustedProxyForwardsRealClient(t *testing.T) {
+	h := newHarnessWith(t, func(c *Config) {
+		pfx, err := ParseTrustedProxies("127.0.0.1,::1")
+		if err != nil {
+			t.Fatal(err)
+		}
+		c.TrustedProxies = pfx
+	})
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/oa/x", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck)
+	// nginx 的典型形态：把客户端自称的那一段原样留在左边，自己追加真实对端在右边
+	req.Header.Set("X-Forwarded-For", "9.9.9.9, 203.0.113.7")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if h.lastXFF != "203.0.113.7" {
+		t.Fatalf("★可信代理链上第一个不可信地址才是客户端，得 %q（9.9.9.9 是伪造段，回环是代理自己）", h.lastXFF)
+	}
+	if got := h.lastReq.Header.Get("X-Forwarded-Proto"); got != "https" {
+		t.Fatalf("★可信代理转发的 proto 必须采信，否则后端的 HTTPS 强制跳转会与 Location 改写咬成死循环，得 %q", got)
+	}
+}
+
+// 反面：对端不在可信白名单时，进站的 XFF 一律不采信。
+func TestUntrustedPeerForwardedIgnored(t *testing.T) {
+	h := newHarness(t) // 未配 TrustedProxies
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/oa/x", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck)
+	req.Header.Set("X-Forwarded-For", "9.9.9.9")
+	req.Header.Set("X-Forwarded-Proto", "https")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if strings.Contains(h.lastXFF, "9.9.9.9") {
+		t.Fatalf("不可信对端的 XFF 必须被剥掉，后端却看到 %q", h.lastXFF)
+	}
+	if got := h.lastReq.Header.Get("X-Forwarded-Proto"); got != "http" {
+		t.Fatalf("不可信对端的 proto 不得采信（本监听是明文），得 %q", got)
+	}
+}
+
+// ★Host header injection：Host 头是客户端完全可控的，绝不能当"真实值"下发。
+// 后端（Django/Rails 一类）会用 X-Forwarded-Host 拼绝对 URL——比如找回密码链接。
+func TestHostHeaderNotForwardedAsTruth(t *testing.T) {
+	h := newHarness(t)
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/oa/x", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck)
+	req.Host = "evil.example.com"
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if got := h.lastReq.Header.Get("X-Forwarded-Host"); got != "" {
+		t.Fatalf("★客户端可控的 Host 不得作为 X-Forwarded-Host 下发，得 %q", got)
+	}
+	// 显式配置了对外主机名时，下发的恒是配置值而不是客户端自称的那个
+	h2 := newHarnessWith(t, func(c *Config) { c.ExternalHost = "oa.example.com" })
+	ck2 := h2.enter(t, "zhangsan", "user", "oa")
+	req2, _ := http.NewRequest(http.MethodGet, h2.srv.URL+"/app/oa/x", nil)
+	req2.Header.Set("Cookie", CookieName+"="+ck2)
+	req2.Host = "evil.example.com"
+	resp2, err := (&http.Client{}).Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if got := h2.lastReq.Header.Get("X-Forwarded-Host"); got != "oa.example.com" {
+		t.Fatalf("★配置了对外主机名时必须下发它，得 %q", got)
+	}
+}
+
+// 网关自己的会话 Cookie 不得转发给后端：Cookie 不在 Go 的 hop-by-hop 剔除表里。
+func TestOwnSessionCookieNotForwarded(t *testing.T) {
+	h := newHarness(t)
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/oa/echo-cookie", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck+"; biz=keep")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	got := h.lastReq.Header.Get("Cookie")
+	if strings.Contains(got, CookieName) {
+		t.Fatalf("★网关会话凭据不得白送给被保护应用，后端却收到 %q", got)
+	}
+	if !strings.Contains(got, "biz=keep") {
+		t.Fatalf("业务自己的 Cookie 必须原样转发，得 %q", got)
+	}
+}
+
+// `__Host-` 前缀的 Cookie：改 Path 会让浏览器整条丢弃（RFC 6265bis 要求 Path=/），
+// 症状就是"登录成功后立刻又跳回登录页"。改名保住 Path 限定，出站再改回去。
+func TestHostPrefixedCookieRoundTrip(t *testing.T) {
+	h := newHarness(t)
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	resp := h.get(t, "/app/oa/hostcookie", ck)
+	defer resp.Body.Close()
+	sc := resp.Header.Get("Set-Cookie")
+	if strings.Contains(sc, "__Host-") {
+		t.Fatalf("★带 __Host- 前缀又改了 Path 的 Cookie 会被浏览器整条丢弃，得 %q", sc)
+	}
+	if !strings.Contains(sc, hostPrefixAlias+"sid=abc") || !strings.Contains(sc, "Path=/app/oa/") {
+		t.Fatalf("应改名并收进本应用前缀，得 %q", sc)
+	}
+	// 浏览器把改名后的 Cookie 送回来时，后端要看到它原来的名字
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/oa/echo-cookie", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck+"; "+hostPrefixAlias+"sid=abc")
+	r2, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	if got := h.lastReq.Header.Get("Cookie"); !strings.Contains(got, "__Host-sid=abc") {
+		t.Fatalf("★出站必须把名字改回后端认识的形态，得 %q", got)
+	}
+}
+
+// 响应体上界的边界：长度**恰好等于**上界的下载不该失败。
+func TestBodyExactlyAtLimitSucceeds(t *testing.T) {
+	h := newHarnessWith(t, func(c *Config) { c.MaxBodyBytes = exactBodySize })
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	resp := h.get(t, "/app/oa/exact", ck)
+	defer resp.Body.Close()
+	b, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("★长度恰好等于上界的响应体不该被判超限：%v", err)
+	}
+	if len(b) != exactBodySize {
+		t.Fatalf("响应体应完整读到 %d 字节，得 %d", exactBodySize, len(b))
+	}
+}
+
+// 跨应用同源请求（A 应用页面里 fetch B 应用）按 Referer 拦掉。
+// 这是纵深不是隔离——真正的隔离要给每个应用配独立域名，边界写在 ARCHITECTURE 第七节。
+func TestCrossAppSameOriginRequestRejected(t *testing.T) {
+	h := newHarness(t)
+	gitCk := h.enter(t, "zhangsan", "user", "git")
+	req, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/git/secret", nil)
+	req.Header.Set("Cookie", CookieName+"="+gitCk)
+	req.Header.Set("Referer", h.srv.URL+"/app/oa/index.html") // 从 oa 的页面发起
+	cl := &http.Client{CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := cl.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("★从另一个应用页面发起的带凭据请求必须被拒，得 %d", resp.StatusCode)
+	}
+	// 同应用内的 Referer 不受影响（否则整站静态资源全挂）
+	req2, _ := http.NewRequest(http.MethodGet, h.srv.URL+"/app/git/ok", nil)
+	req2.Header.Set("Cookie", CookieName+"="+gitCk)
+	req2.Header.Set("Referer", h.srv.URL+"/app/git/index.html")
+	r2, err := cl.Do(req2)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Body.Close()
+	if r2.StatusCode != http.StatusOK {
+		t.Fatalf("同应用内的请求不该被误伤，得 %d", r2.StatusCode)
+	}
+}
+
+// ★已升级连接（WebSocket）必须能被强制下线切断，且逃不掉周期复查。
+//
+// 退回旧实现（modifyResponse 对 101 直接 return nil、没有任何台账）这条用例会挂在
+// 读操作上直到超时：连接一直活着，而管理台与审计都显示该账号已被切断。
+func TestUpgradedConnectionKilledOnForcedLogout(t *testing.T) {
+	h := newHarness(t)
+	ck := h.enter(t, "zhangsan", "user", "oa")
+
+	c, err := net.Dial("tcp", strings.TrimPrefix(h.srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET /app/oa/upgrade HTTP/1.1\r\nHost: gw\r\nCookie: %s=%s\r\n"+
+		"Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n", CookieName, ck)
+	br := bufio.NewReader(c)
+	line, err := br.ReadString('\n')
+	if err != nil || !strings.Contains(line, "101") {
+		t.Fatalf("升级应成功，得 %q（err=%v）", line, err)
+	}
+	for { // 把响应头读完，后面读到的就只可能是连接本身的状态了
+		l, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatalf("读 101 响应头失败：%v", rerr)
+		}
+		if strings.TrimSpace(l) == "" {
+			break
+		}
+	}
+	// 台账里必须有它——否则"能切断"只是碰巧
+	deadline := time.Now().Add(2 * time.Second)
+	for h.ws.UpgradedCount() == 0 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if h.ws.UpgradedCount() != 1 {
+		t.Fatalf("★已升级连接必须进可切断台账，当前 %d 条", h.ws.UpgradedCount())
+	}
+
+	if n := h.ws.KillUser("zhangsan"); n != 1 {
+		t.Fatalf("★强制下线应切断 1 条七层长连接，得 %d", n)
+	}
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("★连接被切断后不该还能读到数据")
+	} else if os.IsTimeout(err) {
+		t.Fatal("★连接仍然活着：强制下线对已升级连接没有执行方")
+	}
+}
+
+// 拿不到底层连接时**拒绝**协议升级：放行一条谁也切不断的连接比拒绝它更糟。
+func TestUpgradeRejectedWithoutConnTracking(t *testing.T) {
+	h := newHarness(t)
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	// 这台 httptest 服务器刻意不装 ConnContext
+	bare := httptest.NewServer(h.ws.Handler())
+	defer bare.Close()
+	req, _ := http.NewRequest(http.MethodGet, bare.URL+"/app/oa/upgrade", nil)
+	req.Header.Set("Cookie", CookieName+"="+ck)
+	req.Header.Set("Connection", "Upgrade")
+	req.Header.Set("Upgrade", "websocket")
+	resp, err := (&http.Client{}).Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("★纳不进台账的升级请求必须被拒，得 %d", resp.StatusCode)
+	}
+}
+
+// ★已升级连接逃不掉「逐请求鉴权」的等价物：撤权后周期复查必须把它切断。
+//
+// 这条与上一条的差别是执行路径：那条是管理员点强制下线（KillUser），这条是
+// 授权自己变了（策略轮询把 DenyUsers 下发下来）——L4 那侧后者靠"下一个请求"，
+// 长连接上没有下一个请求，只能靠复查。
+func TestUpgradedConnectionKilledOnAuthorizationLoss(t *testing.T) {
+	h := newHarnessWith(t, func(c *Config) { c.UpgradeRecheck = 50 * time.Millisecond })
+	ck := h.enter(t, "zhangsan", "user", "oa")
+	c, err := net.Dial("tcp", strings.TrimPrefix(h.srv.URL, "http://"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	fmt.Fprintf(c, "GET /app/oa/upgrade HTTP/1.1\r\nHost: gw\r\nCookie: %s=%s\r\n"+
+		"Connection: Upgrade\r\nUpgrade: websocket\r\n\r\n", CookieName, ck)
+	br := bufio.NewReader(c)
+	for {
+		l, rerr := br.ReadString('\n')
+		if rerr != nil {
+			t.Fatalf("读 101 响应失败：%v", rerr)
+		}
+		if strings.TrimSpace(l) == "" {
+			break
+		}
+	}
+	// 风险降权：控制面把该账号放进 DenyUsers（与逐请求那条用例同一个判据来源）
+	bu, _ := url.Parse(h.backend.URL)
+	h.reg.Replace([]resource.Resource{{ID: "oa", Backend: bu.Host,
+		AllowRoles: []string{"user"}, DenyUsers: []string{"zhangsan"}}})
+
+	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
+	if _, err := br.ReadByte(); err == nil {
+		t.Fatal("★撤权后不该还能读到数据")
+	} else if os.IsTimeout(err) {
+		t.Fatal("★撤权后连接仍活着：长连接上没有逐请求鉴权的等价执行方")
+	}
 }

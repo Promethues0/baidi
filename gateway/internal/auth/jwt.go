@@ -34,6 +34,14 @@ type Claims struct {
 	// Res 票据绑定的受控资源 id（只有 Use=UseWeb 时有值）。网关据此把会话 Cookie
 	// 钉死在 (账号, 资源) 上——一个应用的 Cookie 换不到另一个应用。
 	Res string `json:"res,omitempty"`
+	// Gw 票据绑定的网关 id（= mTLS 证书 CN）。控制面按落点算出入口 URL 时一并写进票据，
+	// 网关只收 Gw 为空或等于自己 id 的票。
+	//
+	// ★这条绑定是**一次性去重的前提**：去重缓存是每台网关自己的内存，没有网关维度的话，
+	// 同一张票在每台装了 web 公钥的网关上都能各换一次会话——去重看起来做了，
+	// 实际按网关台数被整除掉。空值（控制面走 BAIDI_WEB_ENTRY_BASE / 资源专属域名，
+	// 不知道票会落到哪台）仍放行，那条路的边界写在 docs/ARCHITECTURE.md 第七节。
+	Gw string `json:"gw,omitempty"`
 }
 
 var b64 = base64.RawURLEncoding

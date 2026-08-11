@@ -35,13 +35,32 @@ func Middleware(keys *Keys, isOpen func(method, path string) bool) func(http.Han
 				_, _ = w.Write([]byte(`{"error":{"message":"未认证或令牌已失效"}}`))
 				return
 			}
-			// 首登强制改密的受限令牌（Use=pwreset）：只放行自助改密与查身份，
-			// 其余端点（含 /knock-token——受限态绝不能拿到能触达数据面的令牌）一律 403。
-			// 闸设在中间件而非各 handler：新增端点默认在禁行列表内，不会漏。
-			if c.Use == UsePwReset && !pwResetAllowed(r.Method, r.URL.Path) {
+			// ── 用途闸（控制面入站这一侧）──
+			//
+			// ★白名单而不是黑名单：只有会话令牌（Use 空）能调控制面 API，其余用途一律拒。
+			// 此前这里只拦 pwreset，于是 Keys.Verify 按 kid 认下的 use=web / use=knock
+			// 票据可以直接当 Bearer 用——一张本该"只开一扇门 60s"的资源级票据，
+			// 等价于该账号 60s 的全量 API 会话（admin 的票就是 60s 全权管理台），
+			// 而且能拿它再调一次 /portal/web-ticket 自我续签，"短时效"被结构性抵消。
+			// 数据面那两条路径各有自己的 use 闸（spa.checkKnock / webproxy.VerifyTicket），
+			// 这一侧此前是缺的那一半，且爆炸半径最大。
+			//
+			// 默认拒绝还有个作用：将来新增任何用途的票据，默认进不了控制面，不会漏。
+			switch c.Use {
+			case "": // 会话令牌 / MFA 半程票据（半程态的收口在各 handler 的 requireUser）
+			case UsePwReset:
+				// 首登强制改密的受限令牌：只放行自助改密与查身份，其余端点
+				// （含 /knock-token——受限态绝不能拿到能触达数据面的令牌）一律 403。
+				if !pwResetAllowed(r.Method, r.URL.Path) {
+					w.Header().Set("Content-Type", "application/json; charset=utf-8")
+					w.WriteHeader(http.StatusForbidden)
+					_, _ = w.Write([]byte(`{"error":{"message":"须先修改初始口令"}}`))
+					return
+				}
+			default:
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":{"message":"须先修改初始口令"}}`))
+				_, _ = w.Write([]byte(`{"error":{"message":"该令牌只用于数据面入场（敲门 / 七层访问票据），不能调用控制面接口"}}`))
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, c)))

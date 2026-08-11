@@ -28,12 +28,21 @@ func TestStripInboundHops(t *testing.T) {
 		t.Fatal("不该误伤其它头")
 	}
 
-	SetForwarded(h, "10.0.0.9", "gw.example", "https", "zhangsan", "oa")
+	SetForwarded(h, Peer{IP: "10.0.0.9", Proto: "https"}, "zhangsan", "oa")
 	if h.Get("X-Forwarded-For") != "10.0.0.9" || h.Get("X-Real-Ip") != "10.0.0.9" {
 		t.Fatalf("应按真实对端重写: %v", h)
 	}
 	if h.Get("X-Baidi-User") != "zhangsan" || h.Get("X-Baidi-Resource") != "oa" {
 		t.Fatalf("身份头应来自网关验过的会话: %v", h)
+	}
+	// ★没有可信来源时**一个字节都不下发** X-Forwarded-Host：此前这里写的是客户端
+	// 完全可控的 r.Host，后端据它拼出的找回密码链接会指向攻击者的域名。
+	if v := h.Get("X-Forwarded-Host"); v != "" {
+		t.Fatalf("无可信来源时不得下发 X-Forwarded-Host，得 %q", v)
+	}
+	SetForwarded(h, Peer{IP: "10.0.0.9", Proto: "https", Host: "oa.example.com"}, "zhangsan", "oa")
+	if h.Get("X-Forwarded-Host") != "oa.example.com" {
+		t.Fatalf("显式配置的对外主机名应下发: %v", h)
 	}
 }
 

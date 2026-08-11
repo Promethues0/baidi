@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"math/big"
 	"net"
+	"net/netip"
 	"os"
 	"strconv"
 	"strings"
@@ -89,6 +90,13 @@ func main() {
 	webTicketTTL := flag.Duration("web-ticket-max-ttl", 2*time.Minute,
 		"Web 访问票据寿命上界（纵深防御；须 ≥ control 的 webTicketTTL=60s）")
 	webMaxBody := flag.Int64("web-max-body", 64<<20, "七层代理单次响应体上界（字节）")
+	webTrusted := flag.String("web-trusted-proxies", env("BAIDI_GW_WEB_TRUSTED_PROXIES", ""),
+		"七层的可信前置代理网段（逗号分隔，单 IP 或 CIDR，如 127.0.0.1,10.0.0.0/8）。"+
+			"★只有来自这些网段的请求，其 X-Forwarded-For/-Proto/-Host 才被采信；"+
+			"不配的话前置 nginx 拓扑下后端看到的客户端 IP 恒为 nginx 自己，且 X-Forwarded-Proto 恒 http")
+	webExtHost := flag.String("web-external-host", env("BAIDI_GW_WEB_EXTERNAL_HOST", ""),
+		"七层对外主机名（如 oa.example.com:9443），下发给后端做 X-Forwarded-Host。"+
+			"不配且对端不可信时**不下发**该头——Host 头是客户端可控的，当真实值转发即 Host header injection")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -114,7 +122,13 @@ func main() {
 	// 七层 Web 代理的验证材料必须**另装一把**，且缺了就拒绝启动——起一个每张票都验不过
 	// 的 L7 监听，只会让人以为"功能开了但业务连不上"，而真正的原因是没分发公钥。
 	var webVerifier *auth.Verifier
+	var webTrustedProxies []netip.Prefix
 	if *webAddr != "" {
+		webTrustedProxies, err = webproxy.ParseTrustedProxies(*webTrusted)
+		if err != nil {
+			log.Fatalf("拒绝启动：-web-trusted-proxies 解析失败（%v）。"+
+				"一条写错的网段会静默退化成「谁都不可信」，与「配了但没生效」在日志里完全同形", err)
+		}
 		if *webPub == "" {
 			log.Fatal("拒绝启动：开了 -web 就必须配 -web-jwt-pubkey（control 的 <BAIDI_JWT_WEB_KEY>.pub）。" +
 				"它与敲门公钥是两把不同的密钥，不能互相顶替")
@@ -131,6 +145,14 @@ func main() {
 		slog.Warn("⚠ 七层 Web 代理已开启：该端口对浏览器可达，**不受 SPA 隐身保护**。"+
 			"它是一个入站攻击面，请只在需要 B/S 免客户端接入时开启，并置于 HTTPS 之后",
 			"addr", *webAddr, "tls", *webCert != "")
+		// 明文监听 + 没有可信代理 = 后端会永远收到 X-Forwarded-Proto: http，
+		// 而文档推荐的部署恰恰是「明文 + 前置 nginx 终结 TLS」。这条在启动时说清楚，
+		// 否则症状是「某些应用一点开就无限重定向」，没人会往 XFP 上想。
+		if *webCert == "" && len(webTrustedProxies) == 0 {
+			slog.Warn("⚠ 七层为明文监听且未配 -web-trusted-proxies：" +
+				"后端看到的客户端 IP 会恒为前置代理自己、X-Forwarded-Proto 恒为 http。" +
+				"前置 nginx 终结 TLS 的部署请把 nginx 的地址填进 -web-trusted-proxies")
+		}
 	}
 	slog.Info("baidi-gateway 启动", "version", version, "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
 		"ttl", ttl.String(), "strictKnock", *strictKnock,
@@ -144,6 +166,32 @@ func main() {
 			log.Fatalf("加载资源注册表失败: %v", err)
 		}
 		slog.Info("资源注册表已加载", "file", *resources, "count", reg.Count())
+	}
+
+	// ── 七层 Web 代理装配 ──
+	// 与 L4 隧道**共用同一份资源注册表与放行表**，于是同一个资源在两条接入形态下的
+	// 后端与授权完全一致，不存在第二套判定。
+	//
+	// ★装配必须排在控制面对接**之前**：强制下线的 L7 执行方（webSrv.KillUser）要被
+	// applyRevoked 闭包捕获，而那个闭包在控制面块里当场就会被首轮策略调用。
+	// 放在后面赋值就是一个数据竞争 + 首轮强制下线切不到 L7 连接。
+	var webSrv *webproxy.Server
+	if *webAddr != "" {
+		sessKey, kerr := webproxy.NewSessionKey()
+		if kerr != nil {
+			log.Fatalf("生成 Web 会话签名密钥失败: %v", kerr)
+		}
+		webSrv, err = webproxy.New(webproxy.Config{
+			Verifier: webVerifier, Registry: reg, Allow: al, SessionKey: sessKey,
+			TicketMaxTTL: *webTicketTTL, SessionTTL: *webSessTTL, MaxBodyBytes: *webMaxBody,
+			TLSTerminated:  *webCert != "" && *webKey != "",
+			TrustedProxies: webTrustedProxies,
+			ExternalHost:   *webExtHost,
+			GatewayID:      *gwid,
+		})
+		if err != nil {
+			log.Fatalf("七层 Web 代理装配失败: %v", err)
+		}
 	}
 
 	// ── 隧道服务端凭据提前就绪 ──
@@ -218,14 +266,24 @@ func main() {
 				al.DenyUser(rv.User, until) // 封禁后续敲门（时钟正常时生效）
 				ips := al.RevokeUser(rv.User)
 				n := proxy.KillUser(rv.User)
+				// ★七层的已升级连接（WebSocket）也要切。少了这一条，回执里"切断 N 条隧道"
+				// 只统计 L4，而一条 Web 终端的 WS 会继续搬运业务数据直到用户自己关标签页。
+				nw := 0
+				if webSrv != nil {
+					nw = webSrv.KillUser(rv.User)
+				}
 				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
-					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n,
+					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n, "killed_web_conns", nw,
 					"until", until.Format("15:04:05"))
 				// 数据面回执：三元组动作**已执行完毕**才入队（措辞是已发生的事实，
 				// 控制面原样落审计——「已下发」与「已生效」从此可区分）。
+				webPart := ""
+				if webSrv != nil {
+					webPart = fmt.Sprintf("、切断 %d 条七层长连接", nw)
+				}
 				cp.QueueEvent("revoke-applied", fmt.Sprintf(
-					"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道",
-					rv.User, until.Format("15:04:05"), len(ips), n))
+					"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道%s",
+					rv.User, until.Format("15:04:05"), len(ips), n, webPart))
 				if *pf {
 					for _, ip := range ips {
 						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过
@@ -355,23 +413,9 @@ func main() {
 		slog.Info("内核态隐身：默认 DROP + 动态放行集合", "backend", darkfw.Backend(), "set", darkfw.Table)
 	}
 
-	// 七层 Web 代理：与 L4 隧道**共用同一份资源注册表与放行表**，于是同一个资源
-	// 在两条接入形态下的后端与授权完全一致，不存在第二套判定。
-	if *webAddr != "" {
-		sessKey, kerr := webproxy.NewSessionKey()
-		if kerr != nil {
-			log.Fatalf("生成 Web 会话签名密钥失败: %v", kerr)
-		}
-		ws, werr := webproxy.New(webproxy.Config{
-			Verifier: webVerifier, Registry: reg, Allow: al, SessionKey: sessKey,
-			TicketMaxTTL: *webTicketTTL, SessionTTL: *webSessTTL, MaxBodyBytes: *webMaxBody,
-			TLSTerminated: *webCert != "" && *webKey != "",
-		})
-		if werr != nil {
-			log.Fatalf("七层 Web 代理装配失败: %v", werr)
-		}
+	if webSrv != nil {
 		go func() {
-			if err := ws.Serve(*webAddr, *webCert, *webKey); err != nil {
+			if err := webSrv.Serve(*webAddr, *webCert, *webKey); err != nil {
 				log.Fatalf("七层 Web 代理监听失败: %v", err)
 			}
 		}()

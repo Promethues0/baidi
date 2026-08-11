@@ -5,6 +5,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/store"
@@ -295,5 +296,84 @@ func TestGatewayPolicyCarriesWebScheme(t *testing.T) {
 	}
 	if got != store.WebSchemeHTTPS {
 		t.Fatalf("8443 后端应按 https 下发（回填/归一只有一处定义），得 %q", got)
+	}
+}
+
+// ★L7 访问票据不得当控制面会话令牌用。
+//
+// 退回旧实现（中间件只拦 pwreset）这条用例立刻红：Keys.Verify 按 kid 同时认
+// sess/knock/web 三把公钥，于是一张本该"只开一扇门 60s"的资源级票据等价于该账号
+// 60s 的全量 API 会话——admin 的票就是 60s 全权管理台，还能拿它再调一次
+// /portal/web-ticket 自我续签，把"短时效"结构性抵消掉。
+func TestDataplaneTicketsRejectedOnControlPlane(t *testing.T) {
+	h := newTestServer(t)
+	for name, c := range map[string]auth.Claims{
+		"Web 访问票据": {Sub: "admin", Role: "admin", Name: "admin", Jti: "j1", Use: auth.UseWeb, Res: "oa"},
+		"敲门令牌":     {Sub: "admin", Role: "admin", Name: "admin", Jti: "j2", Use: auth.UseKnock},
+	} {
+		t.Run(name, func(t *testing.T) {
+			tok := testKeys.Sign(c, time.Minute)
+			for _, ep := range []struct{ method, path string }{
+				{"GET", "/api/v1/users"},
+				{"GET", "/api/v1/auth/me"},
+				{"GET", "/api/v1/client/profile"},
+				{"POST", "/api/v1/portal/web-ticket"}, // 自我续签这条路要一并堵死
+				{"POST", "/api/v1/knock-token"},
+			} {
+				code, body := doRaw(t, h, ep.method, ep.path, tok)
+				if code != http.StatusForbidden {
+					t.Fatalf("★%s 调 %s %s 必须 403，得 %d %s", name, ep.method, ep.path, code, body)
+				}
+			}
+		})
+	}
+	// 对照：正常会话令牌照常可用（否则上面的 403 可能只是把所有人都挡住了）
+	if code, _ := doJSON(t, h, "GET", "/api/v1/auth/me", userToken("li.fang"), nil); code != http.StatusOK {
+		t.Fatalf("正常会话令牌应可用，得 %d", code)
+	}
+}
+
+// 票据要绑定到算出入口的那台网关：数据面的一次性去重是每台网关自己的内存，
+// 不带网关维度的话，同一张票在每台装了 web 公钥的网关上都能各换一次会话。
+func TestWebTicketBoundToChosenGateway(t *testing.T) {
+	h := newTestServer(t)
+	registerWebGateway(t, h, "0.0.0.0:18444", false)
+	code, out := doJSON(t, h, "POST", "/api/v1/portal/web-ticket", userToken("li.fang"),
+		map[string]string{"appId": "a1"})
+	if code != http.StatusOK {
+		t.Fatalf("取票 http %d %v", code, out)
+	}
+	c := ticketClaims(t, out["url"].(string))
+	if c.Gw != "gw-1" {
+		t.Fatalf("★票据必须绑定算出入口的那台网关，得 %q", c.Gw)
+	}
+}
+
+// 混合版本集群：只有开了七层的那台才是候选。
+//
+// 退回旧实现（按 LastSeen 取最大再判有没有开七层）这条会**随机**失败——
+// 那正是现网症状：同一份配置下 Web 磁贴时能点时不能点。
+func TestWebEntryPicksOnlyGatewaysWithWebListener(t *testing.T) {
+	h := newTestServer(t)
+	// gw-old 没开七层（旧版网关连 web 键都不发），gw-web 开了
+	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+		map[string]any{"id": "gw-old", "proxy": "127.0.0.1:18443", "spa": "127.0.0.1:18201"}); code != http.StatusOK {
+		t.Fatal("注册 gw-old 失败")
+	}
+	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+		map[string]any{"id": "gw-web", "proxy": "127.0.0.1:18453", "spa": "127.0.0.1:18211",
+			"web": "0.0.0.0:18444"}); code != http.StatusOK {
+		t.Fatal("注册 gw-web 失败")
+	}
+	// 两台心跳落在同一秒是常态（Unix 秒 + 15s 周期），跑多次不允许有一次落到没开七层的那台
+	for i := 0; i < 20; i++ {
+		code, out := doJSON(t, h, "POST", "/api/v1/portal/web-ticket", userToken("li.fang"),
+			map[string]string{"appId": "a1"})
+		if code != http.StatusOK {
+			t.Fatalf("★第 %d 次取票被拒（候选没按七层能力过滤）：%d %v", i+1, code, out)
+		}
+		if c := ticketClaims(t, out["url"].(string)); c.Gw != "gw-web" {
+			t.Fatalf("★第 %d 次选中了没开七层的网关 %q", i+1, c.Gw)
+		}
 	}
 }

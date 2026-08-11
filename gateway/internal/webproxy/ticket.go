@@ -45,7 +45,9 @@ const maxTicketTTLCeiling = 5 * time.Minute
 // ★用途闸方向与 spa.checkKnock 相反且必须成对存在：那边只收 use=knock，这边只收
 // use=web。少了任一侧，一张票就能同时开两条入场路径——而两条路径的闸完全不同
 // （敲门那条有终端合规/设备准入，这条没有）。
-func VerifyTicket(v *auth.Verifier, raw string, maxTTL time.Duration) (auth.Claims, error) {
+//
+// gwID 是本网关自己的 id（-gwid）。票据带 gw 且不是自己时拒——见 Claims.Gw。
+func VerifyTicket(v *auth.Verifier, raw string, maxTTL time.Duration, gwID string) (auth.Claims, error) {
 	if strings.TrimSpace(raw) == "" {
 		return auth.Claims{}, errors.New("缺少访问票据")
 	}
@@ -53,19 +55,26 @@ func VerifyTicket(v *auth.Verifier, raw string, maxTTL time.Duration) (auth.Clai
 	if err != nil {
 		return auth.Claims{}, fmt.Errorf("票据无效: %w", err)
 	}
-	if err := checkTicket(c, maxTTL); err != nil {
+	if err := checkTicket(c, maxTTL, gwID); err != nil {
 		return auth.Claims{}, err
 	}
 	return c, nil
 }
 
 // checkTicket 票据语义校验（纯函数，便于无网络单测）。
-func checkTicket(c auth.Claims, maxTTL time.Duration) error {
+func checkTicket(c auth.Claims, maxTTL time.Duration, gwID string) error {
 	if c.Use != auth.UseWeb {
 		return fmt.Errorf("非 Web 访问票据（use=%q，需 %q）", c.Use, auth.UseWeb)
 	}
 	if c.Jti == "" {
-		return errors.New("票据缺 jti（无法做一次性去重）")
+		// jti 的消费方是 Server.ticketUsed 的去重缓存（handleEnter 里调）。
+		// 这里只校验它存在——真正的一次性由那一处保证，两处缺一不可。
+		return errors.New("票据缺 jti（一次性去重的依据）")
+	}
+	// 网关绑定：票据点名了别台网关就不是给我们的。去重缓存是本机内存，
+	// 少了这一条，同一张票在每台装了 web 公钥的网关上都能各换出一次会话。
+	if c.Gw != "" && gwID != "" && c.Gw != gwID {
+		return fmt.Errorf("票据绑定的是网关 %q，本网关是 %q", c.Gw, gwID)
 	}
 	if strings.TrimSpace(c.Res) == "" {
 		return errors.New("票据未绑定资源（缺 res）")

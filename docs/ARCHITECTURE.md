@@ -431,16 +431,41 @@ PRD 8.3.3 / FR-INTRO-09/12。改造前网关只有 L4 CONNECT 隧道，全库没
 - **网关没有、也不会有签发能力**。Cookie 用网关启动期随机生成的**本地** HMAC 密钥签，
   那是本机会话状态（"这个浏览器刚才出示过一张有效票"），不是身份签发：它出不了这台网关、
   换不到任何控制面凭据、控制面从不验它，网关重启即全部失效。`gateway/internal/auth` 至今没有 Sign。
-- **`use` 语义闸双向且成对**：敲门路径拒 `use=web`（`spa.checkKnock`），L7 路径拒 `use=knock`
-  （`webproxy.VerifyTicket`），两侧各有用例。再加上两条路径各装一把独立公钥，
-  拿错票据在对面**连签名都验不过**——语义闸是纵深，不是唯一防线。
+- **`use` 语义闸三向且成对**：敲门路径拒 `use=web`（`spa.checkKnock`），L7 路径拒 `use=knock`
+  （`webproxy.VerifyTicket`），**控制面入站两种都拒**（`auth.Middleware` 的用途白名单：
+  只有会话令牌能调 API）。前两道此前就有，第三道是补上的那一半，也是爆炸半径最大的一道——
+  `Keys.Verify` 按 kid 同时认三把公钥，缺了它，一张资源级票据等价于该账号 60s 的全量 API 会话
+  （admin 的票就是 60s 全权管理台），还能拿它再调一次 `/portal/web-ticket` 自我续签。
+  再加上三条路径各装一把独立密钥，拿错票据在对面**连签名都验不过**——语义闸是纵深，不是唯一防线。
+- **票据真是一次性的**：执行方是网关侧的 jti 去重缓存（`webproxy.Server.ticketUsed`，
+  与 `spa.checkKnock` 的 `cache.Seen("j:"+jti)` 同构），去重窗按票据剩余寿命取。
+  去重缓存是**每台网关自己的内存**，所以票据还带 `gw`（= 目标网关 mTLS 证书 CN），
+  网关只收给自己的票——否则同一张票在每台装了 web 公钥的网关上都能各换一次会话，
+  去重被机器台数整除掉。票据整串会进浏览器地址栏、历史与前置 nginx 的 access.log，
+  这三处泄露是它必须一次性的直接理由。
 - **Cookie 不是万能通行证**：HttpOnly + Secure + SameSite=Lax + `Path=/app/<资源id>/` + 15 分钟 TTL
-  + 服务端复核绑定。浏览器的 Path 规则挡的是正常浏览器，服务端那道挡的是手工构造的请求，两道缺一不可。
+  + 服务端复核绑定 + 不转发给后端（`SanitizeOutboundCookies`：Cookie 头不在 Go 的 hop-by-hop
+  剔除表里，不摘的话每个被保护应用都白拿一张网关会话凭据）。浏览器的 Path 规则挡的是正常浏览器，
+  服务端那道挡的是手工构造的请求，两道缺一不可。**但同源下的应用间隔离靠不住，见下方边界**。
 - **每个请求都重新鉴权**（本设计的核心）：拿的是与 L4 隧道**同一份** `resource.Registry`
   （含控制面算好的 `DenyUsers`）。只在建会话时判一次的话，一张 15 分钟的 Cookie 就是一段谁也撤不掉的访问权。
+  **101 升级（WebSocket）之后不再有"下一个请求"**，所以那类连接单独登记进可切断台账
+  （`webproxy` 的 `upgradeTracker`）：周期复查用同一套判据，强制下线经 `Server.KillUser` 逐条切断
+  （与 L4 的 `proxy.KillUser` 成对，回执里分别计数），寿命不超过签发它的那张 Cookie。
 - **绝不信任进站的 XFF**：`X-Forwarded-For` / `X-Real-IP` / `Forwarded` / `X-Forwarded-*` 以及
-  白帝自己的 `X-Baidi-*` 一律先剥干净，再按 `net.Conn` 的真实对端重写。PRD 8.3 要求 XFF 透传，
+  白帝自己的 `X-Baidi-*` 一律先剥干净，再按**真实来源**重写。PRD 8.3 要求 XFF 透传，
   但**信任进站的 XFF 等于让任何人伪造来源 IP**，且骗过之后后端日志看起来完全正常。
+  "真实来源"由 `-web-trusted-proxies`（显式配置的可信代理网段，与控制面 `BAIDI_TRUSTED_PROXIES`
+  同构）决定：对端在白名单内才采信它转发的 XFF / X-Forwarded-Proto / X-Forwarded-Host，
+  否则一律取 `net.Conn` 对端。**没有这一半的话，推荐部署（回环监听 + 前置 nginx）下后端看到的
+  客户端 IP 恒为 127.0.0.1、X-Forwarded-Proto 恒为 http**——前者让按 IP 的风控与限速全失效
+  （还可能命中"本机来源免认证"），后者会让开了 HTTPS 强制跳转的后端与 Location 改写咬成死循环。
+  `X-Forwarded-Host` 尤其严格：不可信来源时**一个字节都不发**（Host 头是客户端可控的，
+  当真实值转发即 Host header injection），要固定对外主机名请显式配 `-web-external-host`。
+- **`__Host-` 前缀的后端 Cookie 会被改名**（`bdhostpfx-`，出站请求再改回去）。
+  RFC 6265bis 要求该前缀必须 `Path=/`，而我们必须把 Path 收进应用前缀，两者不可兼得：
+  不改名浏览器会**静默丢弃**整条 Cookie（症状是"登录成功后立刻又跳回登录页"），
+  不改 Path 则该 Cookie 会被送给同源下的每一个应用。
 
 **不能声称 / 刻意不做**：
 
@@ -467,6 +492,19 @@ PRD 8.3.3 / FR-INTRO-09/12。改造前网关只有 L4 CONNECT 隧道，全库没
   网关自身可用 `-web-cert/-web-key` 直接跑 HTTPS，也可由前置 nginx 终结。
 - **DLP / 水印 / 禁复制禁打印禁下载不做**（SCOPE.md ch11 整章不做）。这些需要浏览器侧代理注入
   或客户端管控，做不到就不在 UI 上留开关。
+- **同一个浏览器源下的应用间隔离靠不住**。所有 Web 应用共用 `https://<网关>:18444` 这一个源，
+  隔离只有 Cookie 的 `Path` + 服务端绑定复核两道。它们挡得住"拿 A 的 Cookie 开 B"，
+  但挡不住"在 A 的页面里用 B 自己的 Cookie 发请求"——那是**同源**请求，浏览器按 Path 规则
+  照样把 B 那张 Cookie 送出去，服务端每一道判定也都对 B 成立。所以一个低敏应用上的 XSS
+  可以读到用户当前打开的高敏应用内容。现在按 `Referer` 拦掉直白的那一种（`CrossAppOrigin`），
+  但那**是纵深不是隔离**：发起方可以用 `referrerPolicy` 抑制 Referer。
+  **真正的隔离只有一条路：给每个应用配独立域名**（资源的 `webEntry` 覆盖 + 前置 nginx），
+  高敏应用与可由业务方自助发布的应用不要共用一个源。
+- **票据的一次性只在"控制面知道票会落到哪台网关"时是全的**。用了 `webEntry` /
+  `BAIDI_WEB_ENTRY_BASE` 统一入口时票据不带 `gw`（控制面确实不知道前置 nginx 会转给谁），
+  此时同一张票在 N 台网关上最多能各换一次会话（每台各自去重）。要收紧就给每台网关配
+  独立入口域名，或让统一入口只指向一台。**刻意不做集中式去重**：那要给数据面一条
+  回控制面的实时校验通路，控制面一抖动全部 B/S 访问就断——比这个残余面更糟。
 - **没有做 SSO 免登**：网关只把验过的账号放进 `X-Baidi-User` 头，后端要不要认由后端自己决定。
 - **未与任何真实企业 Web 业务系统做过适配验证**：验证来自进程内 httptest 后端与 `web-e2e.sh`。
 

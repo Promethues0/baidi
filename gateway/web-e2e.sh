@@ -5,13 +5,16 @@
 # 这条验的是**浏览器路径**——门户取票 → 网关验票换 Cookie → 反代到真后端。
 # 两条路共用同一份资源注册表与同一套授权判定，但入场方式完全不同。
 #
-# 六条断言（每一条都是"只有真做成了才可能成立"的性质）：
+# 九条断言（每一条都是"只有真做成了才可能成立"的性质）：
 #   ① 不带票据直连 L7 端点 → 拒（含伪造票据）
 #   ② 票据换 Cookie 成功，且 Cookie 带 HttpOnly/Secure/SameSite + 路径限定
 #   ③ 经代理拿到后端**真实内容**（不是网关自己编的页面）
 #   ④ 换一个应用的 Cookie 去开本应用 → 拒（跨应用不可用）
 #   ⑤ 撤销授权后**同一个 Cookie 的下一个请求**就被拒（逐请求重新鉴权）
 #   ⑥ 进站伪造的 XFF 被剥掉，后端看到的是真实对端
+#   ⑦ 票据**真是一次性**：同一张票换第二次会话被拒（此前四处文案都这么写，实际可无限重放）
+#   ⑧ 网关自己的会话 Cookie 不转发给后端；客户端可控的 Host 不当 X-Forwarded-Host 下发
+#   ⑨ Web 票据不能当控制面 Bearer 用（用途闸的控制面这一侧）
 #
 # 自带起栈、无需 root / Docker。
 set -uo pipefail
@@ -92,6 +95,9 @@ class H(BaseHTTPRequestHandler):
                 "forwarded": self.headers.get("Forwarded", ""),
                 "user": self.headers.get("X-Baidi-User", ""),
                 "host": self.headers.get("Host", ""),
+                "xfhost": self.headers.get("X-Forwarded-Host", ""),
+                "xfproto": self.headers.get("X-Forwarded-Proto", ""),
+                "cookie": self.headers.get("Cookie", ""),
             }).encode()
             ctype = "application/json"
         else:
@@ -247,6 +253,50 @@ else
     ok "财务应用的 Cookie 开不了 OA（403），开财务本身正常（$c2）"
   else
     bad "跨应用隔离不成立：用财务 Cookie 开 OA=$c，开财务=$c2"
+  fi
+fi
+
+echo "⑦ 票据一次性：同一张票换第二次会话"
+RURL=$(ticket a1)
+if [ -z "$RURL" ]; then
+  bad "取票失败，无法判定一次性"
+else
+  first=$(code -o /dev/null "$RURL")
+  again=$(code -o /dev/null "$RURL")
+  if [ "$first" = "302" ] && [ "$again" = "401" ]; then
+    ok "首次换票 302、重放同一张票 401（jti 去重真有执行方）"
+  else
+    bad "★票据不是一次性的：首次=$first 重放=$again（票据会进浏览器历史与 nginx access.log）"
+  fi
+fi
+
+echo "⑧ 网关会话 Cookie 不外泄给后端 + Host 注入不透传"
+echoed2=$(curl -s -H "Cookie: baidi_web=$CK; biz=keep" -H "Host: evil.example.com" "$WEB/app/oa/echo")
+got=$(echo "$echoed2" | python3 -c "import sys,json;d=json.load(sys.stdin);print('|'.join([d.get('cookie',''),d.get('xfhost',''),d.get('xfproto','')]))" 2>/dev/null)
+if [ -z "$got" ]; then
+  bad "后端回显解析失败：$(echo "$echoed2" | head -c 200)"
+elif echo "$got" | grep -q 'baidi_web'; then
+  bad "★网关会话凭据被白送给后端：$got"
+elif echo "$got" | grep -q 'evil.example.com'; then
+  bad "★客户端可控的 Host 被当作真实值下发（Host header injection）：$got"
+elif echo "$got" | grep -q 'biz=keep'; then
+  ok "业务 Cookie 原样转发、网关自己的不转发、Host 不冒充真实值（$got）"
+else
+  bad "业务自己的 Cookie 被误删了：$got"
+fi
+
+echo "⑨ Web 票据不得当控制面 Bearer 用"
+WTOK=$(printf '%s' "$RURL" | sed -n 's/.*[?&]t=\([^&]*\).*/\1/p')
+if [ -z "$WTOK" ]; then
+  bad "取不到票据串，无法判定"
+else
+  c=$(code -H "Authorization: Bearer $WTOK" "$CONTROL/api/v1/users")
+  c2=$(code -X POST -H "Authorization: Bearer $WTOK" -H 'Content-Type: application/json' \
+        -d '{"appId":"a1"}' "$CONTROL/api/v1/portal/web-ticket")
+  if [ "$c" = "403" ] && [ "$c2" = "403" ]; then
+    ok "票据调控制面 API 与自我续签都被拒（$c/$c2）"
+  else
+    bad "★一张 60s 资源票等价于全量 API 会话：/users=$c 续签=$c2"
   fi
 fi
 

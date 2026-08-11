@@ -50,6 +50,14 @@ type Claims struct {
 	// 一个应用的会话凭据换不到另一个应用。不带资源维度的票据等于一张万能通行证——
 	// 而 L7 端点是对浏览器可达的入站面，万能通行证的爆炸半径是全部已发布 Web 应用。
 	Res string `json:"res,omitempty"`
+	// Gw 票据绑定的网关 id（= mTLS 证书 CN），只有 Use=UseWeb 且入口是由某台在线网关
+	// 自报落点算出来时才填。网关侧只收 Gw 为空或等于自己 id 的票。
+	//
+	// ★它是数据面**一次性去重**的前提：去重缓存在每台网关各自的内存里，票据不带网关维度
+	// 的话，同一张票在每台装了 web 公钥的网关上都能各换出一次会话。
+	// 入口来自 res.WebEntry / BAIDI_WEB_ENTRY_BASE（前置 nginx，可能转发到任意一台）时
+	// 留空——那条路上控制面确实不知道票会落到哪台，写一个猜的值只会让正常访问被拒。
+	Gw string `json:"gw,omitempty"`
 }
 
 var b64 = base64.RawURLEncoding

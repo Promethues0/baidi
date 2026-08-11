@@ -95,7 +95,7 @@ func (s *Server) handleWebTicket(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	base, err := s.webEntryBase(res)
+	base, gwID, err := s.webEntryBase(res)
 	if err != nil {
 		// ★如实回「网关没开七层」而不是给一个连不上的地址：后者会让管理员
 		// 去查浏览器、查网络、查证书，而真正要做的只是给网关加 -web。
@@ -105,10 +105,17 @@ func (s *Server) handleWebTicket(w http.ResponseWriter, r *http.Request) {
 	tok := s.keys.Sign(auth.Claims{
 		Sub: c.Sub, Role: c.Role, Name: account,
 		Jti: auth.RandJTI(), Use: auth.UseWeb, Res: res.ID,
+		// ★票据钉到具体网关（入口是由某台在线网关自报落点算出来时才填）：
+		// 数据面的一次性去重是每台网关自己的内存，不带网关维度的话，同一张票在
+		// 每台装了 web 公钥的网关上都能各换一次会话。走 webEntry / 环境变量覆盖时
+		// 控制面确实不知道票会落到哪台，留空并在边界文档里说清。
+		Gw: gwID,
 	}, webTicketTTL)
 	// 审计记的是**已发生的事实**：票签出去了。能不能真访问由网关逐请求判，
-	// 所以这里不写"已放行访问"。
-	s.audit(r, "access", "签发 Web 访问票据："+account+" → 应用「"+app.Name+"」(资源 "+res.ID+"，60s 内一次性)", "ok")
+	// 所以这里不写"已放行访问"。「一次性」是数据面 jti 去重（webproxy.Server.ticketUsed）
+	// 的语义，两侧措辞必须同真同假。
+	s.audit(r, "access", fmt.Sprintf("签发 Web 访问票据：%s → 应用「%s」(资源 %s，%ds 内有效、一次性、%s)",
+		account, app.Name, res.ID, int(webTicketTTL.Seconds()), gatewayBindNote(gwID)), "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"url":        base + webEntryPath + "?t=" + url.QueryEscape(tok),
 		"expiresIn":  int(webTicketTTL.Seconds()),
@@ -177,20 +184,25 @@ func (s *Server) resolveWebApp(r *http.Request, appID string) (store.App, store.
 //  3. 心跳最新鲜的在线网关**自报的**七层落点。
 //
 // 三条都拿不到就报错——绝不猜一个地址出来。
-func (s *Server) webEntryBase(res store.Resource) (string, error) {
+//
+// 第二个返回值是**票据该绑到哪台网关**（只有走第 3 条时才有值）：前两条覆盖下票会经过
+// 一个前置入口，可能落到任意一台网关上，写一个猜的值只会让正常访问被拒。
+func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	if v := strings.TrimSpace(res.WebEntry); v != "" {
-		return strings.TrimRight(v, "/"), nil
+		return strings.TrimRight(v, "/"), "", nil
 	}
 	if v := strings.TrimSpace(envOr("BAIDI_WEB_ENTRY_BASE", "")); v != "" {
-		return strings.TrimRight(v, "/"), nil
+		return strings.TrimRight(v, "/"), "", nil
 	}
-	gw, online := s.freshestGateway()
+	gw, online, anyOnline := s.freshestWebGateway()
 	if !online {
-		return "", errors.New("没有网关在线，无法经浏览器访问（请先确认网关已注册到控制面）")
-	}
-	if strings.TrimSpace(gw.Web) == "" {
-		return "", errors.New("网关未开启七层 Web 代理（需给 baidi-gateway 加 -web 监听并分发 Web 票据公钥）；" +
-			"也可配置 BAIDI_WEB_ENTRY_BASE 指向前置入口")
+		if anyOnline {
+			// ★区分「一台网关都没有」与「网关在线但都没开七层」：后者照着前者的提示
+			// 去查网关有没有启动，会白花很多时间。
+			return "", "", errors.New("在线网关都未开启七层 Web 代理（需给 baidi-gateway 加 -web 监听并分发 Web 票据公钥）；" +
+				"也可配置 BAIDI_WEB_ENTRY_BASE 指向前置入口")
+		}
+		return "", "", errors.New("没有网关在线，无法经浏览器访问（请先确认网关已注册到控制面）")
 	}
 	host, port := splitHostPortLoose(gw.Web)
 	// 网关上报的常是 ":18444" / "0.0.0.0:18444" 这类监听地址，对浏览器没有意义：
@@ -207,28 +219,51 @@ func (s *Server) webEntryBase(res store.Resource) (string, error) {
 		scheme = "https"
 	}
 	if port == "" {
-		return scheme + "://" + host, nil
+		return scheme + "://" + host, gw.ID, nil
 	}
-	return fmt.Sprintf("%s://%s:%s", scheme, host, port), nil
+	return fmt.Sprintf("%s://%s:%s", scheme, host, port), gw.ID, nil
 }
 
-// freshestGateway 取心跳最新鲜的在线网关，在线判据与网关页/客户端剖面共用 gatewayFresh。
+// gatewayBindNote 审计里描述这张票绑没绑网关（措辞只说已发生的事实）。
+func gatewayBindNote(gwID string) string {
+	if gwID == "" {
+		return "经统一入口下发、未绑定具体网关"
+	}
+	return "绑定网关 " + gwID
+}
+
+// freshestWebGateway 取**开了七层**且心跳最新鲜的在线网关。
+// 第三个返回值报告"有没有任何网关在线"，供调用方区分两种失败原因。
 //
-// ★这里保留「最新鲜优先」而不是像剖面那样按 id 定序，是因为两者的用途不同：剖面要给
-// 终端一份**稳定**的落点顺序（抖一下就是隧道重连），而这里只是给浏览器算一个跳转地址，
-// 每次现算、无状态可抖。B/S 路径**没有故障转移**（浏览器只会收到一个 302），
-// 这条边界写在 docs/ARCHITECTURE.md 第七节。
-func (s *Server) freshestGateway() (GatewayInfo, bool) {
+// ★候选必须先按 Web != "" 过滤。此前只按 LastSeen 取最大再判有没有开七层，于是
+// 混合版本集群（gw-a 加了 -web、gw-b 还没升级）里，谁的心跳更新鲜每 15s 翻一次，
+// 门户的 Web 磁贴与取票接口就有大约一半的请求回 503「网关未开启七层」——
+// 管理员照着报错去给"网关"加 -web，却发现明明已经加了。
+//
+// ★平局按 id 字典序而不是 map 遍历序：LastSeen 是 Unix**秒**、心跳周期 15s，
+// 两台网关启动时间相差不到 1s 时会持续落在同一秒，入口主机名于是在两台之间随机跳。
+//
+// 在线判据与网关页/客户端剖面共用 gatewayFresh。B/S 路径**没有故障转移**
+// （浏览器只会收到一个 302），这条边界写在 docs/ARCHITECTURE.md 第七节。
+func (s *Server) freshestWebGateway() (best GatewayInfo, ok bool, anyOnline bool) {
 	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	var best GatewayInfo
 	for _, g := range s.gateways {
-		if g.LastSeen > best.LastSeen {
+		if !gatewayFresh(g.LastSeen, now) {
+			continue
+		}
+		anyOnline = true
+		if strings.TrimSpace(g.Web) == "" {
+			continue
+		}
+		switch {
+		case best.ID == "", g.LastSeen > best.LastSeen,
+			g.LastSeen == best.LastSeen && g.ID < best.ID:
 			best = g
 		}
 	}
-	return best, best.ID != "" && gatewayFresh(best.LastSeen, now)
+	return best, best.ID != "", anyOnline
 }
 
 // webProxyStatus 门户用的一句话状态：七层入口此刻能不能用、不能用是为什么。
@@ -236,7 +271,7 @@ func (s *Server) freshestGateway() (GatewayInfo, bool) {
 // ★它不是装饰：Web 磁贴的「访问」按钮要不要给点、点不动时该说什么，都靠它。
 // 没有它的话，用户点下去只会拿到一个 503，而 503 的文案在弹窗里一闪而过。
 func (s *Server) webProxyStatus() (bool, string) {
-	if _, err := s.webEntryBase(store.Resource{}); err != nil {
+	if _, _, err := s.webEntryBase(store.Resource{}); err != nil {
 		return false, err.Error()
 	}
 	return true, ""

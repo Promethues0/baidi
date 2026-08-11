@@ -16,7 +16,9 @@
       <div class="bd-card bd-cats">
         <div class="bd-cats__h">
           <span>应用分类</span>
-          <span class="bd-link bd-cats__mgr" @click="openCatMgr"><icon-settings />管理分类</span>
+          <!-- 真 button 而非 <span @click>：裸 span 不进 Tab 焦点序列、读屏也报不出它是可操作的，
+               键盘用户根本到不了分类维护这唯一的入口（Users.vue 的组织树同批已改）。 -->
+          <button type="button" class="bd-link bd-cats__mgr" @click="openCatMgr"><icon-settings />管理分类</button>
         </div>
         <button v-for="c in categories" :key="c.key" class="bd-cat" :class="{ on: cat === c.key }" @click="cat = c.key">
           <icon-folder class="bd-cat__ic" />
@@ -76,8 +78,12 @@
           <tbody>
             <tr v-for="(c, i) in mgr.list" :key="c.key">
               <td>
-                <span class="bd-link bd-catmgr__mv" :class="{ off: i === 0 }" title="上移" @click="move(i, -1)"><icon-arrow-up /></span>
-                <span class="bd-link bd-catmgr__mv" :class="{ off: i === mgr.list.length - 1 }" title="下移" @click="move(i, 1)"><icon-arrow-down /></span>
+                <button type="button" class="bd-link bd-catmgr__mv" :disabled="mgr.busy || i === 0"
+                  :title="`把「${c.label}」上移一位`" :aria-label="`把分类「${c.label}」上移一位`"
+                  @click="move(i, -1)"><icon-arrow-up /></button>
+                <button type="button" class="bd-link bd-catmgr__mv" :disabled="mgr.busy || i === mgr.list.length - 1"
+                  :title="`把「${c.label}」下移一位`" :aria-label="`把分类「${c.label}」下移一位`"
+                  @click="move(i, 1)"><icon-arrow-down /></button>
               </td>
               <td>
                 <a-input v-model="c.label" :max-length="64" size="small" :disabled="mgr.busy"
@@ -90,7 +96,9 @@
               <td>{{ c.count }}</td>
               <td class="r">
                 <span v-if="c.builtin" class="bd-catmgr__no" title="内置分类不可删除（key 被既有应用引用），可改名与调整排序">—</span>
-                <span v-else class="bd-link bd-link--danger" @click="remove(c)"><icon-delete /></span>
+                <button v-else type="button" class="bd-link bd-link--danger" :disabled="mgr.busy"
+                  :title="`删除分类「${c.label}」`" :aria-label="`删除分类「${c.label}」`"
+                  @click="askRemove(c)"><icon-delete /></button>
               </td>
             </tr>
             <tr v-if="!mgr.list.length && mgr.loaded">
@@ -170,7 +178,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue';
-import { Message } from '@arco-design/web-vue';
+import { Message, Modal } from '@arco-design/web-vue';
 import { api, type AppBundle, type App, type AppCategory, type AppCategoryDef, type AppCategoriesResp, type Resource, type ResourcesResp } from '@/lib/api';
 
 const live = ref(false);
@@ -215,6 +223,9 @@ async function load() {
   try {
     const b = await api<AppBundle>('/apps');
     categories.value = b.categories; apps.value = b.apps; live.value = true;
+    // 当前筛选的分类可能刚被删掉（自己删的，或另一个管理员删的）：不重置的话左栏一项都不高亮、
+    // 右侧列表恒空，看起来像"这个分类下没有应用"，而实际是筛选卡在了一个不存在的 key 上。
+    if (cat.value !== 'all' && !b.categories.some((c) => c.key === cat.value)) cat.value = 'all';
   } catch { live.value = false; }
   try {
     const r = await api<ResourcesResp>('/resources');
@@ -322,8 +333,20 @@ function move(i: number, dir: -1 | 1) {
   void catOp(async () => { await putCat(a, a.label, sb); await putCat(b, b.label, sa); }, '排序已更新', '调整排序失败');
 }
 
-function remove(c: AppCategoryDef) {
-  void catOp(
+/** 删除前先确认：这个图标常驻可见（不依赖 hover），点中即删的代价是一次不可撤销的字典变更。 */
+function askRemove(c: AppCategoryDef) {
+  Modal.confirm({
+    title: '删除分类',
+    content: `确认删除分类「${c.label}」（${c.key}）？分类下若仍有应用，后端会拒绝删除并说明还剩几个。`,
+    okText: '删除', cancelText: '取消', okButtonProps: { status: 'danger' },
+    onOk: () => remove(c)
+  });
+}
+
+// 删掉的正好是当前筛选项时，筛选由 load() 里那道守卫统一拨回「全部应用」——
+// 只写在这里的话，另一个管理员删掉同一个分类时本页仍会卡在空列表上。
+async function remove(c: AppCategoryDef) {
+  await catOp(
     () => api(`/app-categories/${encodeURIComponent(c.key)}`, { method: 'DELETE' }),
     `分类「${c.label}」已删除`, '删除失败'
   );
@@ -355,12 +378,17 @@ onMounted(load);
 .bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
 .bd-appic { width: 34px; height: 34px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
 
+/* 链接样式的 <button>：外观沿用 .bd-link，但可聚焦、可回车触发、有禁用态。 */
+button.bd-link { border: none; background: transparent; padding: 0; font: inherit; line-height: inherit; }
+button.bd-link[disabled] { color: var(--bd-t4); cursor: not-allowed; text-decoration: none; }
+button.bd-link[disabled]:hover { text-decoration: none; }
+button.bd-link:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 2px; border-radius: 3px; }
+
 /* 分类维护弹窗 */
 .bd-catmgr__hint { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--bd-t3); background: var(--bd-fill-1); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
 .bd-catmgr__err { font-size: 12.5px; color: var(--bd-danger); background: var(--bd-danger-1, rgba(245, 63, 63, .08)); border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; }
 .bd-catmgr__t td { vertical-align: middle; }
 .bd-catmgr__mv { display: inline-flex; margin-right: 8px; font-size: 13px; }
-.bd-catmgr__mv.off { color: var(--bd-t4); pointer-events: none; }
 .bd-catmgr__bi { margin-left: 8px; color: var(--bd-t3); background: var(--bd-fill-2); }
 .bd-catmgr__no { color: var(--bd-t4); }
 .bd-catmgr__empty { color: var(--bd-t3); text-align: center; padding: 22px 0; }

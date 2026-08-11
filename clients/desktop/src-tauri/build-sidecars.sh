@@ -2,29 +2,47 @@
 # 构建桌面客户端 Tauri sidecar 二进制（baidi-knock 敲门器 + baidi-tun 数据面引擎），
 # 按当前 Rust host 三元组命名放到 binaries/，供 tauri.conf.json externalBin 打包。
 # 用法：./build-sidecars.sh
+#
+# 命名约定（Tauri v2 externalBin）：配置里写 "binaries/baidi-tun"，打包时**精确查找**
+# `binaries/baidi-tun-<host 三元组><可执行后缀>`——Windows 上那个后缀是 `.exe`，
+# 少了它 tauri build 直接报「找不到 sidecar」。运行期客户端找的也是同一批名字，
+# 见 src/elevate.rs `sidecar_candidates`（那边同样要求 Windows 带 .exe），两处必须对得上。
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GW="$(cd "$HERE/../../../gateway" && pwd)"
-TRIPLE="$(rustc -vV | sed -n 's/host: //p')"
+# 防御性剥 CR：Windows 上若 rustc 的输出走了 CRLF，三元组尾巴会挂一个不可见的 \r，
+# 产物名随之带上它——而 Tauri 报的错是「找不到 sidecar」，与把名字拼错完全同形。
+TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
 echo "==> host 三元组：$TRIPLE"
 
-# 解析 GOOS/GOARCH
+# 解析 GOOS/GOARCH/可执行后缀
+EXT=""
 case "$TRIPLE" in
   aarch64-apple-darwin) GOOS=darwin GOARCH=arm64 ;;
   x86_64-apple-darwin)  GOOS=darwin GOARCH=amd64 ;;
   x86_64-*linux*)       GOOS=linux  GOARCH=amd64 ;;
   aarch64-*linux*)      GOOS=linux  GOARCH=arm64 ;;
+  x86_64-pc-windows-*)  GOOS=windows GOARCH=amd64 EXT=.exe ;;
+  aarch64-pc-windows-*) GOOS=windows GOARCH=arm64 EXT=.exe ;;
   *) echo "✗ 未适配的三元组 $TRIPLE，请手动设置 GOOS/GOARCH"; exit 1 ;;
 esac
 
 mkdir -p "$HERE/binaries"
 echo "==> 编译 baidi-knock（$GOOS/$GOARCH）"
 ( cd "$GW" && CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags='-s -w' \
-    -o "$HERE/binaries/baidi-knock-$TRIPLE" ./cmd/baidi-knock )
-echo "==> 编译 baidi-tun（$GOOS/$GOARCH，utun 数据面引擎）"
+    -o "$HERE/binaries/baidi-knock-$TRIPLE$EXT" ./cmd/baidi-knock )
+echo "==> 编译 baidi-tun（$GOOS/$GOARCH，utun/tun/wintun 数据面引擎）"
 ( cd "$GW" && CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags='-s -w' \
-    -o "$HERE/binaries/baidi-tun-$TRIPLE" ./cmd/baidi-tun )
+    -o "$HERE/binaries/baidi-tun-$TRIPLE$EXT" ./cmd/baidi-tun )
 chmod +x "$HERE/binaries/"*
+
+# Windows 上 baidi-tun 还需要 wintun.dll 才能建虚拟网卡，本仓库**不分发**它
+# （第三方二进制，不进本仓库的供应链）。这里只提醒，不去网上抓：
+# 缺它时客户端会在提权**之前**把话说清楚（src/elevate.rs `preflight_start`）。
+if [ "$GOOS" = "windows" ]; then
+  echo "⚠ Windows 数据面还差 wintun.dll：请自行从 https://www.wintun.net/ 取同架构的 DLL，"
+  echo "  放到 baidi-tun.exe 同目录或 %SystemRoot%\\System32（wintun 只看这两处）。"
+fi
 
 # macOS 上顺带产出另一 darwin 架构，供 universal 打包（Tauri 按 <name>-<triple> 查找）
 if [[ "$TRIPLE" == *apple-darwin ]]; then

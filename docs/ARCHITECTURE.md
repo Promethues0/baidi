@@ -362,7 +362,9 @@ sequenceDiagram
 
 `SQLiteStore` **内嵌** `*Memory`（[sqlite.go](../control/internal/store/sqlite.go)），漏写一个方法不是编译错误而是**静默落回种子**——这是「页面看起来是真的」的机制性原因。**当前 0 个 Store 方法走种子**：[coverage_guard_test.go](../control/internal/store/coverage_guard_test.go) 的豁免清单已清空并双向钉住（新增接口方法要吃种子必须在那里登记并说明理由）。
 
-**方法级之下还有字段级**：方法写了 SQLite 实现，但方法体以 `b, _ := s.Memory.X(ctx)` 打底、只覆盖一部分字段，剩下的字段照样带着种子返回——**接口层面完全合规，页面上真假字段混排**。上面那道守卫抓不到它。这一形态已全部清掉，并由 [memory_fallback_guard_test.go](../control/internal/store/memory_fallback_guard_test.go) 用 AST 双向钉住（登记清单当前为空；要留必须写清"哪些字段来自种子、为什么"）：
+**方法级之下还有字段级**：方法写了 SQLite 实现，但方法体以 `b, _ := s.Memory.X(ctx)` 打底、只覆盖一部分字段，剩下的字段照样带着种子返回——**接口层面完全合规，页面上真假字段混排**。上面那道守卫抓不到它。这一形态已全部清掉，并由 [memory_fallback_guard_test.go](../control/internal/store/memory_fallback_guard_test.go) 用 AST 双向钉住（登记清单当前为空；要留必须写清"哪些字段来自种子、为什么"）。
+
+守卫的口径是「**任何** `*SQLiteStore` 方法体内出现种子引用都要登记」，且三种形状都算：调用式 `s.Memory.X(...)`、取值式（`m := s.Memory` 别名 / `f := s.Memory.X` 方法值）、以及包级种子构造函数调用（`seedApps()` / `builtinAppCategories()`——种子抽成包级函数之后，打底连 `s.Memory` 这个形状都不再出现）。早先按形状筛（只看 Store 接口方法与同名方法）留下的三个零成本绕过口子已封掉，`TestSeedRefDetectorCatchesEvasions` 拿这三种写法的源码喂给检测器逐一断言——守卫失效不会有任何症状，它照常 PASS，只是从此什么都拦不住。建库播种与一次性回填（`seed` / `backfill*`）走 `memorySeeders` 显式豁免名单，名单被四条断言拴住：必须是真方法、必须仍在碰种子、理由不许空、**不许豁免 Store 接口方法**（读取路径没有任何理由拿种子打底）。
 
 | 方法 / 页面 | 悄悄躺着的种子字段 | 现在 |
 |---|---|---|

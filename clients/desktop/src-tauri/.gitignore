@@ -1,5 +1,10 @@
 target/
 gen/schemas/
+# sidecar 产物（build-sidecars.sh）+ Wintun 暂存区（fetch-wintun.sh 解出的 wintun/）
 binaries/
+# Wintun 官方 zip 的下载缓存（fetch-wintun.sh，构建期按哈希强校验后取件）。
+# ★第三方二进制一律不入库：入库之后没人再核对它的来源，clone 的人也无从判断它是不是官方那一份
+#   （本仓库已经被 gateway/baidi-tun 那两个 13MB 历史二进制坑过一次）。
+.wintun-cache/
 icons/android/
 icons/ios/

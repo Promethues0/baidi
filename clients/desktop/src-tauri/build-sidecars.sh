@@ -36,12 +36,12 @@ echo "==> 编译 baidi-tun（$GOOS/$GOARCH，utun/tun/wintun 数据面引擎）"
     -o "$HERE/binaries/baidi-tun-$TRIPLE$EXT" ./cmd/baidi-tun )
 chmod +x "$HERE/binaries/"*
 
-# Windows 上 baidi-tun 还需要 wintun.dll 才能建虚拟网卡，本仓库**不分发**它
-# （第三方二进制，不进本仓库的供应链）。这里只提醒，不去网上抓：
-# 缺它时客户端会在提权**之前**把话说清楚（src/elevate.rs `preflight_start`）。
+# Windows 上 baidi-tun 还需要 wintun.dll 才能建虚拟网卡。二进制**不入库**（第三方产物，
+# 入库之后没人再核对来源），改为构建期从官方取件 + SHA-256 强校验，逻辑全在 fetch-wintun.sh。
+# 这里只是把它接进 Windows 这条构建线；离线/内网构建、排障时那个脚本可以单独跑。
 if [ "$GOOS" = "windows" ]; then
-  echo "⚠ Windows 数据面还差 wintun.dll：请自行从 https://www.wintun.net/ 取同架构的 DLL，"
-  echo "  放到 baidi-tun.exe 同目录或 %SystemRoot%\\System32（wintun 只看这两处）。"
+  echo "==> 取 wintun.dll（$GOARCH，官方 zip + 哈希强校验）"
+  "$HERE/fetch-wintun.sh" --arch "$GOARCH"
 fi
 
 # macOS 上顺带产出另一 darwin 架构，供 universal 打包（Tauri 按 <name>-<triple> 查找）

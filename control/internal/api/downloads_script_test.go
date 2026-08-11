@@ -112,9 +112,9 @@ func readManifest(t *testing.T, root string) map[string]ClientDownload {
 //   - macOS 缺 dmg 时脚本写的是 note=""，而 manifest 整体缺失时页面回落到
 //     placeholderManifest 的「构建中，敬请期待」：同一个平台，某些情况下有一句解释，
 //     另一些情况下空着，没有任何提示说明为什么没有包；
-//   - Windows 两处都写「构建中，敬请期待」，可它缺的是我们不分发的 wintun.dll，
+//   - Windows 两处都写「构建中，敬请期待」，可它缺的是实机验证（包与 wintun.dll 都齐了），
 //     CI 产物也刻意不进下载中心——那是一个不会到来的版本，用户会一直等，
-//     而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）没人告诉他。
+//     而正确的下一步（找管理员要 UNVERIFIED 包）没人告诉他。
 func TestBuildArtifactsPlaceholdersMatchServer(t *testing.T) {
 	root := fakeClientsRepo(t)
 	runArtifacts(t, root) // 这台机器上既没有 dmg 也没有 APK → 六平台全占位
@@ -151,9 +151,11 @@ func TestBuildArtifactsPlaceholdersMatchServer(t *testing.T) {
 			t.Errorf("%s 的占位文案不该说「敬请期待」——那是给一个不会到来的版本许诺：%q", p, got[p].Note)
 		}
 	}
-	// Windows 那句必须给得出真实的下一步，否则与「敬请期待」是同一种没用
-	if n := got["windows"].Note; !strings.Contains(n, "wintun.dll") || !strings.Contains(n, "联系管理员") {
-		t.Errorf("Windows 占位要说清缺什么、找谁：%q", n)
+	// Windows 那句必须给得出真实的下一步，否则与「敬请期待」是同一种没用。
+	// ★还要说清"未实机验证"：包现在组件是齐的（wintun.dll 随包分发），只说"找管理员要"
+	// 而不说为什么不上架，用户会以为这只是流程麻烦，而不是一份没人试过的产物。
+	if n := got["windows"].Note; !strings.Contains(n, "未实机验证") || !strings.Contains(n, "联系管理员") {
+		t.Errorf("Windows 占位要说清为什么没有包、找谁：%q", n)
 	}
 }
 

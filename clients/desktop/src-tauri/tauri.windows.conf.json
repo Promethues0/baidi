@@ -1,0 +1,9 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "bundle": {
+    "resources": {
+      "binaries/wintun/wintun.dll": "",
+      "binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt"
+    }
+  }
+}

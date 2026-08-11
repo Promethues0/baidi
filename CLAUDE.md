@@ -87,6 +87,7 @@ BAIDI_STANDBY_PASSPHRASE=… deploy/promote-standby.sh --dry-run  # 提升备机
 ## 坑
 
 - gateway/ 根目录 tracked 了两个 13MB 预编译二进制 baidi-tun(.exe)——是历史提交的产物非源码（源码在 gateway/cmd/baidi-tun/），别当文本处理也别轻易删。
+- **Windows 的 wintun.dll 必须与 `baidi-tun.exe` 同目录**：wintun 用 `LoadLibraryEx(APPLICATION_DIR|SYSTEM32)` 加载，只看**发起加载的进程自身 exe 目录**与 System32——不看 PATH、不看 cwd。DLL 不入库，`src-tauri/fetch-wintun.sh` 构建期从官方取件 + SHA-256 强校验（版本/URL/哈希三常量挨着写），`build-sidecars.sh` 在 GOOS=windows 时自动调；随包分发的依据是 Wintun 预编译许可第 3(d) 条例外，义务是不改 DLL、许可原文随包（`wintun-LICENSE.txt`）、不借其名号背书。打包配置在 **`tauri.windows.conf.json`**（平台专属，放主配置会让 mac/Linux 构建失败），且 `bundle.resources` **必须写成映射形 + 目的地空串**——列表形会保留 `binaries/wintun/` 目录层级装进子目录，包照样打得出、装得上、文件也在，只在用户点「接入」那一刻炸。守卫有三道：Rust 单测钉住配置写法、CI 打包前验 PE machine 与 runner 架构一致、CI 打包后解析生成的 `installer.nsi` + `msiexec /a` 摊开 MSI 断言 DLL 与 `baidi-tun.exe` 父目录同一。运行期 `elevate.rs::preflight_start` 在**弹 UAC 之前**查存在性与架构（三态：读不出/认不出→放行）。
 - `design-system/` 是烛龙黏土橙**遗留目录**（fork 残留），白帝不消费它——改主题只动 console/src/styles/tokens.css。
 - **烛龙共存契约**：nginx 站点绝不允许 default_server（build.sh/install-remote.sh 有自检，检出即中止）；deploy/wipe-remote.sh + WIPE=1 会铲目标机原有业务，慎开。
 - certs/（SM2 双证 pem，含私钥）已进 .gitignore——是本地 gmca 产物，任何情况下不入库。

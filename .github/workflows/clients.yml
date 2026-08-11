@@ -10,11 +10,15 @@
 # ★三个平台的真伪边界（不许在别处写得比这更乐观）：
 #   - macOS   ：唯一在真机上跑通过隧道的平台。产物是 universal dmg，**未签名未公证**。
 #   - Linux   ：包能出，数据面代码（tun + pkexec 提权）**未实机验证**。
-#   - Windows ：包能出，但 baidi-tun 建虚拟网卡要 wintun.dll，本仓库**不分发**该 DLL
-#               （第三方二进制，不进本仓库供应链，也不在 CI 里从网上抓）。装完之后不自备
-#               wintun.dll 就只有 UI 与敲门可用，隧道起不来——客户端会在提权**之前**
-#               把这句话说清楚（src-tauri/src/elevate.rs `preflight_start`），不会先弹 UAC 再失败。
-#               产物因此打上 UNVERIFIED 标记并附一份说明，**刻意不进下载中心 manifest**。
+#   - Windows ：包能出且**自带 wintun.dll**（baidi-tun 建虚拟网卡要它）。DLL 不入库，
+#               构建期从官方取件 + SHA-256 强校验（fetch-wintun.sh），随包分发的依据是
+#               Wintun 预编译许可第 3(d) 条的例外，许可原文一并装进包里。
+#               装完之后仍**只是"应该能用"**：UAC 提权、建卡、NRPT 分离式 DNS 全部
+#               **未在真实 Windows 上跑过**，产物照旧打 UNVERIFIED 标记并附说明，
+#               **刻意不进下载中心 manifest**。
+#               ★DLL 必须与 **baidi-tun.exe 同目录**（wintun 用 LoadLibraryEx 只看
+#               「发起加载的进程自身 exe 目录」与 System32），落错地方的症状是包照样
+#               打得出、装得上，只在用户点「接入」那一刻失败——下面两步断言就是为它设的。
 #
 # ★本文件未在 GitHub Actions 上真实运行过（本机无法运行 Actions）。语法过 actionlint，
 #   但「runner 上是否真的能出包」尚待第一次真实运行验证；红了先看步骤名，别怀疑构建脚本。
@@ -60,11 +64,14 @@ jobs:
           - os: ubuntu-latest
             label: Linux · deb + AppImage（未实机验证）
           - os: windows-latest
-            label: Windows · msi + nsis（未实机验证，需自备 wintun.dll）
+            label: Windows · msi + nsis（未实机验证，自带 wintun.dll）
 
     defaults:
       run:
         # 三个平台同一套 bash 脚本（Windows 上是 Git Bash），省掉一份 PowerShell 分身。
+        # 例外只有两处：下面两步 Windows 专属断言用 pwsh。理由不是偏好——那两步要读 PE 头、
+        # 要调 `msiexec /a`，而 MSYS 的路径转换会把 `/a` 当成路径改写掉（症状是 msiexec 弹一个
+        # 用法对话框然后超时），绕开它的写法比换个 shell 更难读也更容易被下一个人改坏。
         shell: bash
 
     steps:
@@ -153,6 +160,50 @@ jobs:
             echo "✓ $f"
           done
 
+      # ── Windows 专属：wintun.dll 的打包输入 ──
+      #
+      # 取件本身在 build-sidecars.sh 里（GOOS=windows 分支调 fetch-wintun.sh，官方 zip +
+      # SHA-256 强校验）。这一步只做**输入侧**的断言，与打包后那一步是两码事：
+      # 这里管"取到的这份对不对"，那里管"它有没有进包、进到哪个目录"。
+      - name: 核对 wintun 打包输入（DLL / 许可齐全，且架构与 runner 一致）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stage = 'clients/desktop/src-tauri/binaries/wintun'
+          foreach ($f in @('wintun.dll', 'LICENSE.txt')) {
+            if (-not (Test-Path "$stage/$f")) {
+              # 许可缺席不是小事：Wintun 预编译许可第 3(c) 条要求不得移除版权声明，
+              # 少了它这个包就不该被分发。故与 DLL 同档，一起当硬失败。
+              Write-Host "✗ 缺 $stage/$f（fetch-wintun.sh 没跑成？）"
+              Get-ChildItem -Recurse $stage -ErrorAction SilentlyContinue | Out-Host
+              exit 1
+            }
+          }
+          # ★架构复核：zip 里有 amd64/arm64/x86/arm 四份，选错一份的话包照样打得出、
+          #   装得上、DLL 也确实躺在 baidi-tun.exe 旁边，只有用户点「接入」那一刻炸。
+          #   判据与客户端运行期那道（elevate.rs::pe_machine）同一套 PE 头解析。
+          $bytes = [System.IO.File]::ReadAllBytes("$stage/wintun.dll")
+          if ($bytes.Length -lt 0x40 -or $bytes[0] -ne 0x4D -or $bytes[1] -ne 0x5A) {
+            Write-Host "✗ $stage/wintun.dll 不是 PE 文件（下载被截断？）"; exit 1
+          }
+          $off = [BitConverter]::ToUInt32($bytes, 0x3C)
+          if ($off + 6 -gt $bytes.Length -or $bytes[$off] -ne 0x50 -or $bytes[$off+1] -ne 0x45) {
+            Write-Host "✗ $stage/wintun.dll 的 PE 签名对不上"; exit 1
+          }
+          $machine = [BitConverter]::ToUInt16($bytes, $off + 4)
+          $triple = (& rustc -vV | Select-String '^host: ').ToString().Substring(6).Trim()
+          $want = switch -Wildcard ($triple) {
+            'x86_64-*'  { 0x8664 }
+            'aarch64-*' { 0xAA64 }
+            default     { Write-Host "✗ 未适配的三元组 $triple"; exit 1 }
+          }
+          if ($machine -ne $want) {
+            Write-Host ("✗ wintun.dll 架构错配：DLL machine=0x{0:x4}，runner 三元组 {1} 需要 0x{2:x4}" -f $machine, $triple, $want)
+            exit 1
+          }
+          Write-Host ("✓ wintun.dll machine=0x{0:x4}（{1}），许可 {2} 字节" -f $machine, $triple, (Get-Item "$stage/LICENSE.txt").Length)
+
       - name: 前端依赖
         working-directory: clients/desktop
         run: npm ci
@@ -178,6 +229,91 @@ jobs:
         if: runner.os == 'Windows'
         working-directory: clients/desktop
         run: npm run tauri:build -- --bundles msi,nsis
+
+      # ★这一步是本条流水线里最该存在的断言，理由是失败形态：
+      #   wintun.dll 没进包、或者进了包但落在子目录（`bundle.resources` 写成列表形就会
+      #   保留 `binaries/wintun/` 这层目录），**包照样打得出、装得上、装完文件也确实在**，
+      #   只有用户点「接入」那一刻加载失败。构建日志、安装过程、文件清单里全都看不出来。
+      #   所以断言的不是"文件在不在包里"，而是"它与 baidi-tun.exe **在同一个目录**"——
+      #   那才是 wintun 的加载规则（LOAD_LIBRARY_SEARCH_APPLICATION_DIR）真正要的东西。
+      #
+      # 两种安装器分开验，因为它们的落位是两套独立实现（tauri-bundler nsis/mod.rs 与
+      # msi/mod.rs），一处对不代表另一处对：
+      #   - NSIS：验**生成出来的** installer.nsi 脚本（`SetOutPath $INSTDIR` 之后的
+      #     `File /oname=` 清单）。这就是安装器将来照做的那份指令，比解包 exe 更直接。
+      #   - MSI ：`msiexec /a` 做一次管理式安装（不真装、不需要提权），把文件树摊到临时
+      #     目录，直接比对两个文件的父目录是不是同一个。
+      - name: 断言 wintun.dll 与 baidi-tun.exe 真的同目录进了安装包
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $root = 'clients/desktop/src-tauri/target'
+          $fail = $false
+
+          # ── NSIS ──
+          # 常规落点是 target/release/nsis/<arch>/installer.nsi；兜底再全量找一遍，
+          # 免得 bundler 换了目录结构时把"落点变了"报成"断言失败"（两者的下一步完全不同）。
+          $nsi = Get-ChildItem -Path "$root/release/nsis" -Recurse -Filter 'installer.nsi' -ErrorAction SilentlyContinue |
+                 Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          if (-not $nsi) {
+            $nsi = Get-ChildItem -Path $root -Recurse -Filter 'installer.nsi' -ErrorAction SilentlyContinue |
+                   Sort-Object LastWriteTime -Descending | Select-Object -First 1
+          }
+          if (-not $nsi) {
+            Write-Host "✗ 找不到生成的 installer.nsi（tauri-bundler 落点变了？）"; exit 1
+          }
+          Write-Host "→ NSIS 脚本：$($nsi.FullName)"
+          $txt = Get-Content -Raw -LiteralPath $nsi.FullName
+          $m = [regex]::Match($txt, '(?ms)^Section Install\b.*?^SectionEnd')
+          if (-not $m.Success) { Write-Host "✗ installer.nsi 里找不到 Section Install"; exit 1 }
+          $sec = $m.Value
+          if ($sec -notmatch '(?m)^\s*SetOutPath \$INSTDIR\s*$') {
+            Write-Host "✗ Section Install 里没有 SetOutPath `$INSTDIR —— 相对 oname 的落点不再可推断"; $fail = $true
+          }
+          foreach ($n in @('wintun.dll', 'wintun-LICENSE.txt', 'baidi-tun.exe', 'baidi-knock.exe')) {
+            # oname 必须是**纯文件名**：带上目录（如 binaries\wintun\wintun.dll）就等于装进子目录，
+            # 那正是这一步要拦的静默失效。
+            if ($sec -match [regex]::Escape("/oname=$n`"")) {
+              Write-Host "  ✓ $n → `$INSTDIR"
+            } else {
+              Write-Host "  ✗ installer.nsi 的 Section Install 里没有 /oname=$n（漏装，或落进了子目录）"
+              $fail = $true
+            }
+          }
+          if ($fail) {
+            Write-Host "--- Section Install 原文 ---"; Write-Host $sec; exit 1
+          }
+
+          # ── MSI ──
+          $msi = Get-ChildItem -Path "$root/release/bundle/msi" -Filter '*.msi' -ErrorAction SilentlyContinue |
+                 Select-Object -First 1
+          if (-not $msi) { Write-Host "✗ 找不到 msi 产物"; exit 1 }
+          $dest = Join-Path $env:RUNNER_TEMP 'baidi-msi-admin'
+          if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
+          New-Item -ItemType Directory -Force -Path $dest | Out-Null
+          # 管理式安装：只摊开文件树，不写注册表、不跑 InstallExecuteSequence 里的自定义动作。
+          $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
+                 '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$dest`"")
+          if ($p.ExitCode -ne 0) {
+            Write-Host "✗ msiexec /a 失败，退出码 $($p.ExitCode)（无法验证 msi 里的落位）"; exit 1
+          }
+          $dll = Get-ChildItem -Path $dest -Recurse -Filter 'wintun.dll' | Select-Object -First 1
+          $tun = Get-ChildItem -Path $dest -Recurse -Filter 'baidi-tun.exe' | Select-Object -First 1
+          $lic = Get-ChildItem -Path $dest -Recurse -Filter 'wintun-LICENSE.txt' | Select-Object -First 1
+          if (-not $dll) { Write-Host "✗ msi 里没有 wintun.dll"; $fail = $true }
+          if (-not $tun) { Write-Host "✗ msi 里没有 baidi-tun.exe"; $fail = $true }
+          if (-not $lic) { Write-Host "✗ msi 里没有 wintun-LICENSE.txt（许可必须随包分发）"; $fail = $true }
+          if ($fail) { Get-ChildItem -Recurse $dest | Select-Object FullName | Out-Host; exit 1 }
+          if ($dll.DirectoryName -ne $tun.DirectoryName) {
+            Write-Host "✗ msi 里 wintun.dll 与 baidi-tun.exe 不同目录 —— 装完点「接入」会失败："
+            Write-Host "    wintun.dll   : $($dll.FullName)"
+            Write-Host "    baidi-tun.exe: $($tun.FullName)"
+            Write-Host "  （wintun 只看进程自身 exe 目录与 System32，放在别处等于没放）"
+            exit 1
+          }
+          Write-Host "✓ msi：wintun.dll 与 baidi-tun.exe 同在 $($tun.DirectoryName)"
+          Write-Host "✓ msi：许可随包 $($lic.FullName)"
 
       # ── macOS：汇集进下载中心的产物目录，并注入构建溯源 ──
       - name: 汇集产物 + 生成 manifest（注入 BAIDI_CLIENT_SRC_REV）
@@ -283,26 +419,28 @@ jobs:
         if: runner.os == 'Windows'
         run: |
           cat > clients/desktop/src-tauri/target/release/bundle/README-windows.txt <<'TXT'
-          白帝安全接入客户端 · Windows 包（未实机验证，且缺一个必备组件）
+          白帝安全接入客户端 · Windows 包（未实机验证）
 
-          这个包在 GitHub Actions 的 windows runner 上原生构建，能装、能登录、能敲门，
-          但**装完直接用不了隧道**，因为还差一个我们不分发的第三方组件：
+          这个包在 GitHub Actions 的 windows runner 上原生构建，组件是齐的：
 
-            wintun.dll —— baidi-tun 在 Windows 上用 Wintun 建虚拟网卡。
-            请到 https://www.wintun.net/ 取与本客户端同架构（amd64 / arm64）的 wintun.dll，
-            放到 baidi-tun.exe 同目录，或 %SystemRoot%\System32。
-            （wintun 用 LoadLibraryEx 只看这两处：不看 PATH，不看当前目录。）
+            wintun.dll —— baidi-tun 在 Windows 上用 Wintun 建虚拟网卡。它随本包一起安装，
+            就放在 baidi-tun.exe 同目录（wintun 用 LoadLibraryEx 只看「进程自身 exe 目录」
+            与 %SystemRoot%\System32 两处：不看 PATH，不看当前目录）。
+            该 DLL 不入本仓库，构建期从官方 https://www.wintun.net/ 取件并逐字节校验
+            SHA-256；许可原文见同目录 wintun-LICENSE.txt（Wintun 预编译许可要求随包分发）。
+            白帝与 WireGuard LLC 无任何关联，本产品未获其背书。
 
-          缺它时客户端会在**弹 UAC 之前**把上面这段话原样告诉你，不会让你白输一次口令
-          再去看一个看不懂的建卡失败。
+          但请仍按「未验证代码」对待——**没有任何一台真实 Windows 上跑通过**：
+            1) UAC 提权路径（Start-Process -Verb RunAs）；
+            2) 建虚拟网卡与路由接管；
+            3) NRPT 分离式 DNS 的下发与清理。
+          以上三项只在 macOS 上做过单元断言。若隧道起不来，客户端会在**弹 UAC 之前**
+          把找过的绝对路径原样告诉你（缺 DLL / DLL 架构对不上分别是两句不同的话），
+          不会让你白输一次口令再去看一个看不懂的建卡失败。
 
-          其余未验证项：UAC 提权路径、NRPT 分离式 DNS 清理，都只在 macOS 上做过单元断言，
-          没有在真实 Windows 上跑过。请按「未验证代码」对待。
-
-          正因为如此，这个包**不进下载中心**（deploy/artifacts/downloads 的 manifest 里
-          Windows 那一行照实说明缺 wintun.dll、产物标 UNVERIFIED、请联系管理员，
+          正因为「能装 ≠ 验证过」，这个包**不进下载中心**（deploy/artifacts/downloads 的
+          manifest 里 Windows 那一行照实说明未实机验证、产物标 UNVERIFIED、请联系管理员，
           **不写「构建中，敬请期待」**——那等于让人一直等一个按现有决策不会下发的包）。
-          装了也连不上的包，比没有包更糟；但"正确的下一步"必须说出来。
           TXT
           # 溯源与包同行，理由同 Linux 那一步
           {

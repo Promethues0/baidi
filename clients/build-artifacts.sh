@@ -125,11 +125,12 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 # ★「构建中，敬请期待」只能用在**真的会被构建出来、且装了能用**的平台上。
 #   - iOS 与鸿蒙缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 +
 #     Network Extension 授权 / DevEco Studio 工具链）；
-#   - Windows 缺的是 wintun.dll（第三方二进制，本仓库不分发、也不在 CI 里从网上抓），
-#     加上 UAC 提权路径未实机验证——CI 出的包因此标 UNVERIFIED 且刻意不进下载中心。
+#   - Windows 的包组件已经齐了（wintun.dll 构建期取件 + 哈希校验，随包装在 baidi-tun.exe
+#     旁边），缺的是**实机验证**：UAC 提权、建卡、NRPT 分离式 DNS 一次都没在真实 Windows
+#     上跑过。CI 出的包因此标 UNVERIFIED 且刻意不进下载中心。
 #     对用户来说重点不是"包能不能出"，是"能不能用"：写「敬请期待」等于让他一直等一个
-#     按现有决策不会下发的包，而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）
-#     恰恰是存在的，却被那句占位文案挡住了。
+#     按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）恰恰是存在的，
+#     却被那句占位文案挡住了。
 # 写「敬请期待」等于给一个不会到来的版本许诺。理由见 clients/BUILD.md 第九节。
 clients = [
     # ★缺 dmg 时的 note 不能留空：空着的话页面上 macOS 那一行什么都不说，而 manifest
@@ -138,7 +139,7 @@ clients = [
           note="" if os.environ["MAC_FILE"] else "构建中，敬请期待",
           rev=os.environ.get("MAC_REV", ""), built=os.environ.get("MAC_BUILT", "")),
     entry("windows", "Windows 桌面客户端", "",
-          note="需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；"
+          note="包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；"
                "CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("linux", "Linux 桌面客户端", "", note="pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("ios", "iOS 客户端", "",

@@ -61,15 +61,16 @@ type downloadsManifest struct {
 // ★「构建中，敬请期待」只能用在**真的会被构建出来、且装了能用**的平台上。
 // iOS 与鸿蒙不是——它们缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号
 // 签名 + Network Extension 授权 / DevEco Studio 工具链）。
-// **Windows 也不是**：包在 CI 上出得来，但 baidi-tun 建虚拟网卡要 wintun.dll，那是我们
-// 不分发的第三方二进制，加上 UAC 提权路径未实机验证，产物因此标 UNVERIFIED 且刻意不进
-// 下载中心。用户看到的不是「包能不能出」，是「能不能用」——对他写「敬请期待」等于让他
-// 一直等一个按现有决策不会下发的包，而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）
+// **Windows 也不是**：包在 CI 上出得来、组件也齐（wintun.dll 构建期从官方取件 + 哈希校验，
+// 随包装在 baidi-tun.exe 旁边），缺的是**实机验证**——UAC 提权、建卡、NRPT 分离式 DNS
+// 一次都没在真实 Windows 上跑过，产物因此标 UNVERIFIED 且刻意不进下载中心。
+// 用户看到的不是「包能不能出」，是「能不能用」——对他写「敬请期待」等于让他
+// 一直等一个按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）
 // 明明存在，却被那句话挡住了。照实说，他才知道该找谁。理由见 clients/BUILD.md 第九节。
 func placeholderManifest() downloadsManifest {
 	return downloadsManifest{Clients: []ClientDownload{
 		{Platform: "macos", Label: "macOS 桌面客户端", Note: "构建中，敬请期待"},
-		{Platform: "windows", Label: "Windows 桌面客户端", Note: "需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
+		{Platform: "windows", Label: "Windows 桌面客户端", Note: "包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "linux", Label: "Linux 桌面客户端", Note: "pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "ios", Label: "iOS 客户端", Note: "需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"},
 		{Platform: "android", Label: "Android 客户端", Note: "构建中，敬请期待"},

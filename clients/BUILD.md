@@ -111,27 +111,70 @@ manifest 里仍是占位）。要下发它们，得先解决下面第四、五�
 在那之前，占位文案要照实说**为什么**：
 - **Linux** 是「构建中，敬请期待」—— 包能出、数据面代码在那儿，缺的是一次实机验证，
   这是真的会到来的东西；
-- **Windows 不是**。它缺的是我们不分发的 `wintun.dll`（见第四节），装了也起不来隧道。
-  占位文案因此写成「需自备 wintun.dll…请联系管理员」。用户看到的不是「包能不能出」，
-  是「能不能用」—— 对他说「敬请期待」等于让他一直等一个按现有决策不会下发的包，
-  而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）明明存在，却被那句话挡住了。
+- **Windows 也不是**，但原因和以前不一样了：包里的组件现在是齐的（`wintun.dll` 随包分发，
+  见第四节），缺的是**实机验证** —— UAC 提权、建卡、NRPT 分离式 DNS 一次都没在真实
+  Windows 上跑过。占位文案因此写成「包内已含 wintun.dll…但未实机验证…请联系管理员」。
+  用户看到的不是「包能不能出」，是「能不能用」—— 对他说「敬请期待」等于让他一直等一个
+  按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）明明存在。
 
-## 四、Windows：包能出，但少一个我们不分发的 DLL
+## 四、Windows：wintun.dll 随包分发（构建期取件 + 强校验）
 
-`baidi-tun` 在 Windows 上用 **Wintun** 建虚拟网卡，需要 `wintun.dll`。这个 DLL：
+`baidi-tun` 在 Windows 上用 **Wintun** 建虚拟网卡，需要 `wintun.dll`。
 
-- **不在本仓库里**，也**不在 CI 里从网上抓** —— 第三方二进制不进本仓库的供应链；
-- wintun 用 `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)`
-  加载它，**只看两处**：`baidi-tun.exe` 自己所在目录、`%SystemRoot%\System32`。
-  不看 PATH，不看当前目录 —— 放错地方的症状是「DLL 明明在包里，还是报 Unable to load library」；
-- 缺它时客户端在**弹 UAC 之前**就把话说完（`src-tauri/src/elevate.rs` `preflight_start`），
-  绝不先让用户输一次管理员口令、再在建网卡那步失败。
+### 从哪来：构建期取件，不入库
 
-自备方式：到 <https://www.wintun.net/> 取与客户端**同架构**（amd64 / arm64）的
-`wintun.dll`，放到上面两处之一。
+`src-tauri/fetch-wintun.sh` 从官方 <https://www.wintun.net/> 下载 zip 并做 **SHA-256 强校验**
+（版本 / URL / 哈希三个常量挨在一起写在脚本顶部），按架构解出 DLL 与 `LICENSE.txt` 到
+`src-tauri/binaries/wintun/`。`build-sidecars.sh` 在 `GOOS=windows` 时自动调它。
+二进制**不进 git**：本仓库被 `gateway/baidi-tun` 那两个 13MB 历史产物坑过一次，
+入库之后没人再核对来源，clone 的人也无从判断它是不是官方那一份。
 
-其余 Windows 未验证项：UAC 提权路径（`Start-Process -Verb RunAs`）、NRPT 分离式 DNS
-及其清理。它们的**构造**在 macOS 上被单测逐字断言，但**没有在真实 Windows 上跑过**。
+许可依据：Wintun「Prebuilt Binaries License」第 3(d) 条允许「随只经 Permitted API 使用它的
+软件一同分发」，我们的 Go 绑定只调 `wintun.h` 导出的函数，落在这条例外里。附带义务三条：
+不得改动 DLL（原样解出）、不得移除版权声明（`LICENSE.txt` 随包装成 `wintun-LICENSE.txt`）、
+不得借 WireGuard/Wintun 的名号背书本产品（文案只做事实陈述）。
+
+### 放哪去：必须与 `baidi-tun.exe` **同目录**
+
+wintun 用 `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRARY_SEARCH_SYSTEM32)`
+加载它，**只看两处**：**发起加载的那个进程**自身 exe 所在目录、`%SystemRoot%\System32`。
+不看 PATH，不看当前目录。发起方是 sidecar `baidi-tun.exe`，所以 DLL 要落在**它**旁边。
+
+打包配置在 `src-tauri/tauri.windows.conf.json`（平台专属配置，只在 Windows 目标上合并进
+`tauri.conf.json`；放主配置里会让 macOS/Linux 构建因找不到这两个文件而失败）：
+
+```json
+"resources": { "binaries/wintun/wintun.dll": "", "binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt" }
+```
+
+**必须是这种「映射形 + 目的地空串」的写法**，理由是失败形态：写成列表形
+`["binaries/wintun/wintun.dll"]` 时，Tauri 按 `resource_relpath` **保留目录结构**，
+DLL 会装到 `<安装目录>\binaries\wintun\wintun.dll` —— 包照样打得出、装得上、文件也确实在，
+只有用户点「接入」那一刻加载失败。空串是 Tauri 里「放到资源根目录、保留原文件名」的
+唯一写法（`tauri-utils/src/resources.rs`），而 Windows 上资源根目录就是安装目录本身。
+
+externalBin 与 resources 在 Windows 上落到同一处，这一点是查过打包器源码的：
+NSIS 模板在 `Section Install` 里先 `SetOutPath $INSTDIR`，随后 resources 与 binaries 都用
+`File /a "/oname=<目标名>"`；MSI 的 `main.wxs` 把两者都放进 `<DirectoryRef Id="INSTALLDIR">`，
+且外部二进制会被剥掉 `-<三元组>` 后缀（`tauri-bundler` 的 `nsis/mod.rs` 与 `msi/mod.rs`）。
+CI 不满足于"查过源码"：Windows 作业在打包后**真的**校验一遍 —— 解析生成出来的
+`installer.nsi`，并用 `msiexec /a` 把 MSI 摊开，断言 `wintun.dll` 与 `baidi-tun.exe`
+的父目录是同一个（见 `.github/workflows/clients.yml`）。
+
+### 万一还是没放对：客户端要能自证
+
+`src-tauri/src/elevate.rs` 的 `preflight_start` 在**弹 UAC 之前**就把话说完，绝不先让用户
+输一次管理员口令再在建网卡那步失败。它查两件事：
+
+1. DLL 在不在（判据与加载器一字不差：sidecar 自身目录 + System32），找不到时把**实际找过的
+   绝对路径逐条列出** —— 落位真改错了，用户报障时那两行就是第一手证据；
+2. 找到的那份**架构对不对**（读 PE 头的 machine 码）。zip 里有 amd64/arm64/x86/arm 四份，
+   选错一份的症状与"根本没装"在界面上完全同形。三态：对→放行、错→当场拒并说清是架构问题、
+   **读不出或认不出→放行**（不可判定不当作不合规，与 posture 采集同一条纪律）。
+
+其余 Windows 未验证项：UAC 提权路径（`Start-Process -Verb RunAs`）、建卡与路由接管、
+NRPT 分离式 DNS 及其清理。它们的**构造**在 macOS 上被单测逐字断言，但**没有在真实
+Windows 上跑过** —— 包里组件齐了不等于跑得通，产物照旧标 UNVERIFIED。
 
 ## 五、Linux：包能出，数据面未实机验证
 
@@ -293,7 +336,7 @@ Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实
 |---|---|---|
 | iOS | 需企业签名 / TestFlight 分发，请联系管理员 | 需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员 |
 | 鸿蒙 | **构建中，敬请期待** | 需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员 |
-| Windows | **构建中，敬请期待** | 需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员 |
+| Windows | **构建中，敬请期待** | 包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员 |
 | macOS（缺 dmg 时） | *（空着，什么都不说）* | 构建中，敬请期待（与 `placeholderManifest()` 同） |
 
 鸿蒙那句「构建中，敬请期待」是不对的：它暗示有一个正在进行的构建、等等就有 —— 而实际上
@@ -301,10 +344,12 @@ Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实
 平台上。
 
 Windows 起初被豁免过一次，理由是「包能出，所以算数」—— 那是拿错了判据：
-**用户看到的不是「包能不能出」，是「能不能用」。** 它缺的 `wintun.dll` 我们不分发，
-CI 产物也刻意不进下载中心，那个包按现有决策不会下发；而它的正确下一步（自备 DLL、
-或找管理员要 UNVERIFIED 包）恰恰是存在的，只是被那句占位文案挡住了。Linux 不同：
-包能出、数据面代码也在，缺的只是一次实机验证，那是真会到来的东西，仍写「敬请期待」。
+**用户看到的不是「包能不能出」，是「能不能用」。** CI 产物刻意不进下载中心，
+那个包按现有决策不会下发；而它的正确下一步（找管理员要 UNVERIFIED 包）恰恰是存在的，
+只是被那句占位文案挡住了。（这句话的**理由**后来变了一次：`wintun.dll` 从"我们不分发、
+请用户自备"改成了随包分发，见第四节；剩下的差距是实机验证。结论没变，措辞跟着改了——
+占位文案说的必须是**此刻**的真实缺口，不是历史上的那个。）Linux 不同：包能出、
+数据面代码也在，缺的只是一次实机验证，那是真会到来的东西，仍写「敬请期待」。
 
 macOS 那一行是同一条纪律的另一半：脚本在**缺 dmg** 时曾写 `note=""`，而 manifest 整体
 缺失时页面回落到 `placeholderManifest()` 的「构建中，敬请期待」—— 同一个平台在两条路径上

@@ -1,7 +1,10 @@
 // Command baidi-tun 是白帝客户端数据面 CLI：用 TUN（macOS utun / Linux tun / Windows wintun）
 // 真正接管系统流量进隧道。引擎在 internal/dataplane（与移动端 gomobile 库共享）。
 // 需管理员/root（创建 TUN、配 IP/路由）。平台接口配置见 ifup_{darwin,linux,windows}.go。
-// Windows 还需运行目录有 wintun.dll（https://www.wintun.net/）。
+// Windows 还需 wintun.dll，且必须放在**本可执行文件自己所在目录**或 %SystemRoot%\System32
+// ——wintun 用 LoadLibraryEx(APPLICATION_DIR|SYSTEM32) 加载，不看 PATH、不看当前工作目录
+// （"运行目录"这个说法坑过人：把 DLL 放在 cwd 里是找不到的）。桌面客户端的安装包自带一份，
+// 单跑 CLI 时到 https://www.wintun.net/ 取同架构的那份。
 package main
 
 import (

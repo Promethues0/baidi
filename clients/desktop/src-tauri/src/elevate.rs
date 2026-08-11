@@ -500,6 +500,13 @@ fn windows_stop_script(pid: &str, paths: &Paths) -> String {
 /// 与 posture 的 `Env` 同一个理由。
 pub trait Probe {
     fn exists(&self, path: &str) -> bool;
+
+    /// 读文件开头若干字节（够解 PE 头即可）。**读不到一律回 None = 不可判定**，
+    /// 判定方按三态处理（见 `preflight_start` 的架构复核），绝不塌缩成"不合规"。
+    /// 默认实现回 None：只关心存在性的既有调用点（`resolve_elevator`）不必实现它。
+    fn read_head(&self, _path: &str) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 pub struct RealProbe;
@@ -507,6 +514,16 @@ pub struct RealProbe;
 impl Probe for RealProbe {
     fn exists(&self, path: &str) -> bool {
         std::path::Path::new(path).exists()
+    }
+
+    fn read_head(&self, path: &str) -> Option<Vec<u8>> {
+        use std::io::Read;
+        // 1 KiB 足够覆盖 e_lfanew（DOS stub 之后就是 PE 头，实测 wintun.dll 在 0x100 附近）。
+        // 整读一个 400 KB 的 DLL 只为看 6 个字节没有必要，而且这条路径在 UI 线程上。
+        let f = std::fs::File::open(path).ok()?;
+        let mut buf = Vec::new();
+        f.take(1024).read_to_end(&mut buf).ok()?;
+        Some(buf)
     }
 }
 
@@ -557,29 +574,122 @@ pub fn wintun_search_paths(tun_dir: &str, system_root: &str) -> Vec<String> {
     ]
 }
 
+// ── PE 头里的架构（IMAGE_FILE_MACHINE_*）──
+//
+// ★为什么要看这个：wintun.dll 是**按架构分放**的（zip 里 amd64 / arm64 / x86 / arm 四份），
+// 打包时选错一份的话，包照样打得出、装得上、DLL 也确实躺在 baidi-tun.exe 旁边，
+// 只有用户点「接入」那一刻 LoadLibraryEx 回一句「不是有效的 Win32 应用程序」——
+// 与"根本没装"、"权限不够"在界面上完全同形。判出来才能把话说准。
+
+/// x64。
+pub const PE_MACHINE_AMD64: u16 = 0x8664;
+/// ARM64。
+pub const PE_MACHINE_ARM64: u16 = 0xAA64;
+/// 32 位 x86。
+pub const PE_MACHINE_I386: u16 = 0x014C;
+/// 32 位 ARM（Thumb-2）。
+pub const PE_MACHINE_ARMNT: u16 = 0x01C4;
+
+/// 从 PE 文件开头的若干字节里解析 machine 码。
+///
+/// 结构：`0x3C` 处是 u32-LE 的 `e_lfanew`（PE 头偏移）→ 该处 4 字节须为 `PE\0\0`
+/// → 紧随其后的 2 字节 u16-LE 就是 machine。
+/// **任何一步对不上都回 `None`（不可判定），绝不猜**——喂进来的可能是半截文件、
+/// 一个 HTML 错误页，或者将来某个我们没见过的格式。
+pub fn pe_machine(head: &[u8]) -> Option<u16> {
+    if head.len() < 0x40 || &head[0..2] != b"MZ" {
+        return None;
+    }
+    let off = u32::from_le_bytes([head[0x3C], head[0x3D], head[0x3E], head[0x3F]]) as usize;
+    // off + 4(签名) + 2(machine)
+    if off.checked_add(6)? > head.len() || &head[off..off + 4] != b"PE\0\0" {
+        return None;
+    }
+    Some(u16::from_le_bytes([head[off + 4], head[off + 5]]))
+}
+
+/// machine 码 → 给人看的一句。未知码原样以十六进制回显（比"未知"多说一点，便于报障）。
+pub fn pe_machine_label(m: u16) -> String {
+    match m {
+        PE_MACHINE_AMD64 => String::from("x64 / amd64"),
+        PE_MACHINE_ARM64 => String::from("arm64"),
+        PE_MACHINE_I386 => String::from("x86（32 位）"),
+        PE_MACHINE_ARMNT => String::from("arm（32 位）"),
+        other => format!("未知架构（machine=0x{other:04x}）"),
+    }
+}
+
+/// 本进程自身架构（`std::env::consts::ARCH`）对应的 machine 码。
+/// 认不出来回 `None` —— 同样是不可判定，不参与判否。
+pub fn arch_pe_machine(arch: &str) -> Option<u16> {
+    match arch {
+        "x86_64" => Some(PE_MACHINE_AMD64),
+        "aarch64" => Some(PE_MACHINE_ARM64),
+        "x86" => Some(PE_MACHINE_I386),
+        "arm" => Some(PE_MACHINE_ARMNT),
+        _ => None,
+    }
+}
+
 /// 拉起数据面**之前**的平台前置检查。返回 Err 时调用方必须直接把话说清楚，
 /// **不许先弹提权框再失败**——那等于让用户白输一次口令去看一个看不懂的错误。
+///
+/// Windows 上查两件事，顺序即语义：
+///  1. wintun.dll 在不在（`wintun_search_paths` 那两处，与加载器一字不差）。安装包**自带**
+///     这个 DLL（`tauri.windows.conf.json` 的 `bundle.resources` 把它放到 baidi-tun.exe 旁边），
+///     所以"找不到"通常意味着安装不完整，而不是用户少做了一步——文案要按这个前提写，
+///     同时把实际找过的**绝对路径**逐条列出：万一将来打包落位改错了，用户报障时那两行
+///     就是最直接的证据，不必猜。
+///  2. 找到的那一份架构对不对（三态：对 → 放行；不对 → 当场拒；**读不出/认不出 → 放行**）。
+///     "不可判定"不当作"不合规"，与 posture 采集三态同一条纪律：塌缩成拒会把真实可用的
+///     终端挡在门外，而这里本来就只是提前诊断，真正的加载器随后还会再判一次。
 pub fn preflight_start(
     platform: Platform,
     probe: &dyn Probe,
     tun_dir: &str,
     system_root: &str,
+    arch: &str,
 ) -> Result<(), String> {
     if platform != Platform::Windows {
         return Ok(());
     }
     let cands = wintun_search_paths(tun_dir, system_root);
-    if cands.iter().any(|p| probe.exists(p)) {
-        return Ok(());
+    // ★只看**第一个**存在的候选，且顺序必须与加载器一致（APPLICATION_DIR 先于 SYSTEM32）：
+    // LoadLibraryEx 按搜索顺序找到第一个同名文件就用它，加载失败**不会**接着去找下一处。
+    // 换句话说，程序自身目录里放了一份坏的，System32 里那份好的救不了——判定也得这么判，
+    // 否则会出现"我们说没问题、加载器说不行"。
+    let Some(hit) = cands.iter().find(|p| probe.exists(p)) else {
+        return Err(format!(
+            "Windows 数据面暂不可用：未找到 wintun.dll。\n\
+             baidi-tun 在 Windows 上用 Wintun 建虚拟网卡，而 wintun 只在\
+             「程序自身目录」与 System32 两处找这个 DLL，当前两处都没有：\n  {}\n\
+             这个 DLL 本应随安装包一起装好（就放在上面第一条路径），两处都没有通常说明\
+             安装不完整——建议重新安装客户端。\n\
+             临时办法：到 https://www.wintun.net/ 取与客户端同架构（{}）的 wintun.dll 放到上述任一位置。\n\
+             （刻意没有弹出管理员授权框：弹了也只会在建网卡那一步失败。）",
+            cands.join("\n  "),
+            arch_pe_machine(arch).map(pe_machine_label).unwrap_or_else(|| arch.to_string()),
+        ));
+    };
+    // 架构复核。两个 Option 任意一个是 None 就是"判不了"，直接放行。
+    if let (Some(head), Some(want)) = (probe.read_head(hit), arch_pe_machine(arch)) {
+        if let Some(got) = pe_machine(&head) {
+            if got != want {
+                return Err(format!(
+                    "Windows 数据面暂不可用：wintun.dll 架构不匹配。\n\
+                     找到的这一份是 {}，而本客户端是 {}：\n  {}\n\
+                     换个位置放同一份没有用——wintun 只认「程序自身目录」与 System32，\
+                     两处都只接受同架构的 DLL。\n\
+                     请重新安装与本机架构相符的客户端，或到 https://www.wintun.net/ 取对应架构的 wintun.dll 覆盖上述文件。\n\
+                     （刻意没有弹出管理员授权框：弹了也只会在建网卡那一步失败。）",
+                    pe_machine_label(got),
+                    pe_machine_label(want),
+                    hit,
+                ));
+            }
+        }
     }
-    Err(format!(
-        "Windows 数据面暂不可用：未找到 wintun.dll。\n\
-         baidi-tun 在 Windows 上用 Wintun 建虚拟网卡，而 wintun 只在\
-         「程序自身目录」与 System32 两处找这个 DLL，当前两处都没有：\n  {}\n\
-         请到 https://www.wintun.net/ 取与客户端同架构（amd64 / arm64）的 wintun.dll 放到上述任一位置。\n\
-         （刻意没有弹出管理员授权框：弹了也只会在建网卡那一步失败。）",
-        cands.join("\n  ")
-    ))
+    Ok(())
 }
 
 // ── 进程判活 ──
@@ -1101,57 +1211,217 @@ mod tests {
         assert!(cmd.contains("-ArgumentList '-File \"C:\\a b\\x.ps1\"'"), "{cmd}");
     }
 
-    #[test]
-    fn windows_缺_wintun_必须当场说清楚而不是弹个_uac_再失败() {
-        struct 无;
-        impl Probe for 无 {
-            fn exists(&self, _p: &str) -> bool {
-                false
+    /// 构造一份最小 PE 头：`MZ` + e_lfanew 指向 `PE\0\0` + machine。
+    /// 只造头不造体——`pe_machine` 按定义也只读头，够用且看得清。
+    fn 造_pe(machine: u16) -> Vec<u8> {
+        let off: usize = 0x80;
+        let mut b = vec![0u8; off + 8];
+        b[0] = b'M';
+        b[1] = b'Z';
+        b[0x3C..0x40].copy_from_slice(&(off as u32).to_le_bytes());
+        b[off..off + 4].copy_from_slice(b"PE\0\0");
+        b[off + 4..off + 6].copy_from_slice(&machine.to_le_bytes());
+        b
+    }
+
+    /// 有这个文件，且内容是给定字节。
+    struct 只有(&'static str, Vec<u8>);
+    impl Probe for 只有 {
+        fn exists(&self, p: &str) -> bool {
+            p == self.0
+        }
+        fn read_head(&self, p: &str) -> Option<Vec<u8>> {
+            if p == self.0 {
+                Some(self.1.clone())
+            } else {
+                None
             }
         }
-        let e = preflight_start(Platform::Windows, &无, "C:\\Program Files\\白帝", "C:\\Windows")
-            .unwrap_err();
+    }
+
+    struct 无;
+    impl Probe for 无 {
+        fn exists(&self, _p: &str) -> bool {
+            false
+        }
+    }
+
+    #[test]
+    fn windows_缺_wintun_必须当场说清楚而不是弹个_uac_再失败() {
+        let e = preflight_start(
+            Platform::Windows,
+            &无,
+            "C:\\Program Files\\白帝",
+            "C:\\Windows",
+            "x86_64",
+        )
+        .unwrap_err();
         assert!(e.contains("数据面暂不可用"), "{e}");
         assert!(e.contains("wintun.dll"), "{e}");
         assert!(e.contains("C:\\Program Files\\白帝\\wintun.dll"), "要把找过的位置报出来：{e}");
         assert!(e.contains("C:\\Windows\\System32\\wintun.dll"), "{e}");
         assert!(e.contains("没有弹出"), "必须说明为什么不弹提权框：{e}");
+        // 安装包自带这个 DLL 之后，"找不到"的第一嫌疑是装坏了，而不是用户少做一步。
+        // 文案不指出这一点的话，用户会照着旧说法去手工下载一份，把一个安装问题变成两个。
+        assert!(e.contains("重新安装"), "要指出这通常是安装不完整：{e}");
     }
 
     #[test]
     fn windows_wintun_在_sidecar_目录或_system32_都算数() {
-        struct 只有(&'static str);
-        impl Probe for 只有 {
-            fn exists(&self, p: &str) -> bool {
-                p == self.0
-            }
-        }
         assert!(preflight_start(
             Platform::Windows,
-            &只有("C:\\App\\wintun.dll"),
+            &只有("C:\\App\\wintun.dll", 造_pe(PE_MACHINE_AMD64)),
             "C:\\App",
-            "C:\\Windows"
+            "C:\\Windows",
+            "x86_64",
         )
         .is_ok());
         assert!(preflight_start(
             Platform::Windows,
-            &只有("C:\\Windows\\System32\\wintun.dll"),
+            &只有("C:\\Windows\\System32\\wintun.dll", 造_pe(PE_MACHINE_AMD64)),
             "C:\\App",
-            "C:\\Windows"
+            "C:\\Windows",
+            "x86_64",
         )
         .is_ok());
     }
 
     #[test]
     fn 非_windows_不做_wintun_检查() {
-        struct 无;
-        impl Probe for 无 {
-            fn exists(&self, _p: &str) -> bool {
-                false
+        assert!(preflight_start(Platform::MacOS, &无, "/x", "", "aarch64").is_ok());
+        assert!(preflight_start(Platform::Linux, &无, "/x", "", "x86_64").is_ok());
+    }
+
+    /// ★回归背景：wintun.dll 按架构分四份，取件脚本按 GOARCH 选一份。选错的话包照样打得出、
+    /// 装得上、DLL 也确实躺在 baidi-tun.exe 旁边——只有点「接入」那一刻加载器回一句
+    /// 「不是有效的 Win32 应用程序」，与"没装""权限不够"在界面上完全同形。
+    #[test]
+    fn windows_wintun_架构对不上要当场说是架构问题() {
+        let e = preflight_start(
+            Platform::Windows,
+            &只有("C:\\App\\wintun.dll", 造_pe(PE_MACHINE_ARM64)),
+            "C:\\App",
+            "C:\\Windows",
+            "x86_64",
+        )
+        .unwrap_err();
+        assert!(e.contains("架构不匹配"), "{e}");
+        assert!(e.contains("arm64"), "要报出实际是什么架构：{e}");
+        assert!(e.contains("x64"), "也要报出需要什么架构：{e}");
+        assert!(e.contains("C:\\App\\wintun.dll"), "要报出是哪一个文件：{e}");
+        assert!(e.contains("没有弹出"), "{e}");
+        // 反向：同一条路径放对架构就必须放行（别把这道闸写成"只要看得懂就拒"）
+        assert!(preflight_start(
+            Platform::Windows,
+            &只有("C:\\App\\wintun.dll", 造_pe(PE_MACHINE_ARM64)),
+            "C:\\App",
+            "C:\\Windows",
+            "aarch64",
+        )
+        .is_ok());
+    }
+
+    /// 三态里的第三态：读不出内容 / 不是 PE / 认不出本机架构，一律**放行**。
+    /// 与 posture 采集的 unknown 同一条纪律——不可判定塌缩成"不合规"会把真实可用的终端挡在门外。
+    #[test]
+    fn windows_wintun_架构判不了时放行而不是拒绝() {
+        // ① 探针读不到内容（默认实现回 None）
+        struct 只判存在(&'static str);
+        impl Probe for 只判存在 {
+            fn exists(&self, p: &str) -> bool {
+                p == self.0
             }
         }
-        assert!(preflight_start(Platform::MacOS, &无, "/x", "").is_ok());
-        assert!(preflight_start(Platform::Linux, &无, "/x", "").is_ok());
+        assert!(preflight_start(
+            Platform::Windows,
+            &只判存在("C:\\App\\wintun.dll"),
+            "C:\\App",
+            "C:\\Windows",
+            "x86_64",
+        )
+        .is_ok());
+        // ② 内容不是 PE（半截文件 / 代理返回的 HTML 错误页）
+        assert!(preflight_start(
+            Platform::Windows,
+            &只有("C:\\App\\wintun.dll", b"<html>404</html>".to_vec()),
+            "C:\\App",
+            "C:\\Windows",
+            "x86_64",
+        )
+        .is_ok());
+        // ③ 本机架构我们不认识（将来的新架构）
+        assert!(preflight_start(
+            Platform::Windows,
+            &只有("C:\\App\\wintun.dll", 造_pe(PE_MACHINE_AMD64)),
+            "C:\\App",
+            "C:\\Windows",
+            "riscv64",
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn pe_machine_解析边界() {
+        assert_eq!(pe_machine(&造_pe(PE_MACHINE_AMD64)), Some(PE_MACHINE_AMD64));
+        assert_eq!(pe_machine(&造_pe(PE_MACHINE_ARM64)), Some(PE_MACHINE_ARM64));
+        assert_eq!(pe_machine(b""), None);
+        assert_eq!(pe_machine(&[0u8; 0x40]), None, "没有 MZ 就不是 PE");
+        // e_lfanew 越界：**必须回 None 而不是 panic**——这个函数吃的是磁盘上任意一份文件，
+        // 被截断的下载、别人塞进 System32 的同名文件都会走到这里，越界切片会让客户端整个崩掉。
+        let mut 越界 = 造_pe(PE_MACHINE_AMD64);
+        越界[0x3C..0x40].copy_from_slice(&u32::MAX.to_le_bytes());
+        assert_eq!(pe_machine(&越界), None);
+        // 偏移对但签名不对
+        let mut 假签名 = 造_pe(PE_MACHINE_AMD64);
+        假签名[0x80] = b'X';
+        assert_eq!(pe_machine(&假签名), None);
+        // 头被切掉一半（只下到 0x3F）
+        assert_eq!(pe_machine(&造_pe(PE_MACHINE_AMD64)[..0x3F]), None);
+    }
+
+    /// ★这道守卫拦的是本任务里唯一一种**静默**失效：把打包配置从「映射形」改回「列表形」。
+    ///
+    /// Tauri 的 `bundle.resources` 有两种写法，落位完全不同（tauri-utils
+    /// `resources.rs::resource_from_path`）：
+    ///   - 列表形 `["binaries/wintun/wintun.dll"]` → 目标路径 = `resource_relpath(原路径)`，
+    ///     **保留目录结构**，装到 `<安装目录>\binaries\wintun\wintun.dll`；
+    ///   - 映射形 `{"binaries/wintun/wintun.dll": ""}` → 目的地为空是一条特判，
+    ///     目标路径退化成**文件名**，装到 `<安装目录>\wintun.dll`，即 baidi-tun.exe 旁边。
+    ///
+    /// 只有后者能被 wintun 找到（它只看进程 exe 目录与 System32）。而写成前者时：
+    /// 构建成功、安装包更大、文件确实在包里、安装也不报错——**只有用户点「接入」那一刻**
+    /// 才会说找不到 DLL。改成列表形看起来只是"写法更简洁"，这条断言把它挡在提交前。
+    #[test]
+    fn 打包配置必须把_wintun_装到安装根目录而不是子目录() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json")).expect("配置得是合法 JSON");
+        let res = &conf["bundle"]["resources"];
+        assert!(res.is_object(), "必须是映射形（键=源路径，值=目标路径）而不是列表形：{res}");
+        assert_eq!(
+            res["binaries/wintun/wintun.dll"].as_str(),
+            Some(""),
+            "目的地必须是空串——那是 Tauri 里「放到安装根目录、保留原文件名」的唯一写法：{res}"
+        );
+        // 许可必须随包分发（Wintun 预编译许可第 3(c) 条），改名是为了不与本产品的许可混淆。
+        assert_eq!(
+            res["binaries/wintun/LICENSE.txt"].as_str(),
+            Some("wintun-LICENSE.txt"),
+            "许可原文必须随包分发：{res}"
+        );
+        // 源路径要与取件脚本的暂存位一致（那边改了这边不改 = 构建期 ResourcePathNotFound）。
+        assert!(
+            include_str!("../fetch-wintun.sh").contains(r#"STAGE_DIR="$HERE/binaries/wintun""#),
+            "取件脚本的暂存目录变了，打包配置要跟着改"
+        );
+    }
+
+    #[test]
+    fn 架构与_machine_码的映射() {
+        assert_eq!(arch_pe_machine("x86_64"), Some(PE_MACHINE_AMD64));
+        assert_eq!(arch_pe_machine("aarch64"), Some(PE_MACHINE_ARM64));
+        assert_eq!(arch_pe_machine("riscv64"), None);
+        assert!(pe_machine_label(PE_MACHINE_AMD64).contains("x64"));
+        assert!(pe_machine_label(0x1234).contains("0x1234"), "未知码要原样回显便于报障");
     }
 
     // ── 含空格 / 中文的路径不被截断（三平台各一遍） ──

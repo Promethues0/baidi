@@ -34,9 +34,12 @@
 # 运行期约束（读 wintun 绑定源码 dll.go:86 得到，与 src/elevate.rs::wintun_search_paths 同口径）：
 #   wintun 用 LoadLibraryEx(name, 0, LOAD_LIBRARY_SEARCH_APPLICATION_DIR|LOAD_LIBRARY_SEARCH_SYSTEM32)
 #   加载 DLL —— **只**看「进程自身 exe 所在目录」与 System32，不看 PATH、不看当前目录。
-#   我们的进程是 sidecar baidi-tun.exe，所以最终必须是 <安装目录>\wintun.dll（Tauri 把 externalBin
-#   sidecar 放在主程序旁边，两者同目录）。**把暂存区的文件真正装进安装包**是打包配置那一步的事
-#   （tauri.conf.json bundle.resources），本脚本不做——它只保证"取到的这份是官方那一份"。
+#   我们的进程是 sidecar baidi-tun.exe，所以最终必须是 <安装目录>\wintun.dll —— Tauri 把
+#   externalBin sidecar 与 bundle.resources 都装进安装根目录（NSIS 的 $INSTDIR / MSI 的
+#   INSTALLDIR），两者同目录。**把暂存区的文件真正装进安装包**是打包配置那一步的事
+#   （tauri.windows.conf.json 的 bundle.resources，**必须是映射形 + 目的地空串**，
+#   写成列表形会保留 binaries/wintun/ 这层目录 → 装进子目录 → wintun 永远找不到），
+#   本脚本不做——它只保证"取到的这份是官方那一份"。
 set -euo pipefail
 
 # ── 上游常量：版本 / URL / SHA-256 三者必须一起改 ───────────────────────────

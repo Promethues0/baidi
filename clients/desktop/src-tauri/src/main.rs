@@ -255,8 +255,9 @@ fn run_elevator(e: &Elevator) -> std::io::Result<Output> {
 }
 
 /// 以管理员权限拉起 baidi-tun。要点：
-///  - **先做平台前置检查再谈提权**：Windows 上缺 wintun.dll 时当场说清楚，绝不先弹一个
-///    UAC 框再在建网卡那步失败（见 elevate::preflight_start）；
+///  - **先做平台前置检查再谈提权**：Windows 上缺 wintun.dll、或 DLL 架构与客户端对不上时
+///    当场说清楚（两句不同的话），绝不先弹一个 UAC 框再在建网卡那步失败
+///    （见 elevate::preflight_start）；
 ///  - launcher 脚本落**每用户私有目录**（见 runtime_dir，unix 上目录 0700、文件 0600），
 ///    提权器只跑该脚本路径（规避中文 .app 路径 + token 转义）；
 ///  - unix 侧 `exec </dev/null >/dev/null 2>&1` 先断开脚本自身与提权器的管道 →
@@ -335,9 +336,14 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     let plat = Platform::host();
     // ★前置检查在提权之前：Windows 缺 wintun.dll 时这里直接把话说完，
     // 不会出现「输了管理员口令 → 网卡建不出来 → 一句看不懂的英文错误」。
+    // ★tun_dir 取的是 **baidi-tun.exe 自己所在目录**，不是主程序目录：wintun 的
+    // LOAD_LIBRARY_SEARCH_APPLICATION_DIR 指的是发起加载的那个进程的 exe 目录，而发起方是
+    // sidecar。Tauri 把 externalBin 与 bundle.resources 都放进安装根目录（$INSTDIR /
+    // INSTALLDIR），所以现实中两者同目录——但判据仍按"sidecar 自己的目录"写，
+    // 将来落位真变了，这里报的路径就是排障的第一手证据。
     let tun_dir = tun.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
     let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| String::from("C:\\Windows"));
-    elevate::preflight_start(plat, &elevate::RealProbe, &tun_dir, &sysroot)?;
+    elevate::preflight_start(plat, &elevate::RealProbe, &tun_dir, &sysroot, std::env::consts::ARCH)?;
     let elevator = elevate::resolve_elevator(plat, &elevate::RealProbe)?;
 
     // 提权进程拿到的是一份全新的最小环境（pkexec 会主动清空），要什么必须点名。

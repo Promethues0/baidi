@@ -42,8 +42,16 @@ echo "==> 交叉编译站点组网网关 baidi-ipsec（linux/amd64）"
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-ipsec" ./cmd/baidi-ipsec )
 
+# 控制面温备节点（PRD 15.5）。同 baidi-ipsec：无条件编译、装不装由部署时决定。
+# ★它同时是**提升流程的执行方**——promote-standby.sh 靠它校验备份完整性与解包。
+# 产物里没有它的话，系统页上那条切换命令就是一句谎话（脚本第一步就会退出）。
+echo "==> 交叉编译控制面温备节点 baidi-standby（linux/amd64）"
+( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-standby" ./cmd/baidi-standby )
+
 echo "==> 携带部署脚本/模板"
-cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" "$OUT/"
+cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" \
+      "$HERE/promote-standby.sh" "$OUT/"
 
 if [ -d "$HERE/artifacts/downloads" ]; then
   echo "==> 携带客户端安装包（deploy/artifacts/downloads）"

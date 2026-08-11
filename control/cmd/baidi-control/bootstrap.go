@@ -25,7 +25,9 @@ import (
 
 // bootstrapFlags 离线模式的开关；返回 true 表示已处理并应退出。
 func runBootstrap() bool {
-	gwID := flag.String("issue-gateway-cert", "", "离线签发网关客户端证书（值为网关 id，如 gw-1），写入 -out 后退出")
+	gwID := flag.String("issue-gateway-cert", "",
+		"离线签发 mTLS 客户端证书（值即证书 CN）：接入网关填网关 id（如 gw-1）；"+
+			"站点组网填 ipsec- 前缀；控制面温备节点填 standby- 前缀（主机按前缀分权）。写入 -out 后退出")
 	out := flag.String("out", "", "证书输出目录（与 -issue-gateway-cert 搭配）")
 	flag.Parse()
 

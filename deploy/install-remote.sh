@@ -19,6 +19,17 @@ mkdir -p "$BD_PREFIX"/{bin,web,data,etc/tls}
 
 # 二进制 + 前端
 install -m 0755 "$HERE/bin/baidi-control" "$BD_PREFIX/bin/baidi-control"
+# 温备节点与切换脚本（PRD 15.5）：**主机上也装**。
+# 备机侧显然要用；主机侧装它的理由是——这台机器将来也可能是"被提升的那台"，
+# 而灾难当天没人有心情先去打包一个二进制。两者都不起任何服务，装着不占资源。
+# ★用 if 而不是 `[ ] && install`：后者在条件为假时整条语句返回 1，set -e 下会让
+# 安装脚本在这里静默中止（同本文件末尾那条注释里踩过的坑）。
+if [ -f "$HERE/bin/baidi-standby" ]; then
+  install -m 0755 "$HERE/bin/baidi-standby" "$BD_PREFIX/bin/baidi-standby"
+fi
+if [ -f "$HERE/promote-standby.sh" ]; then
+  install -m 0755 "$HERE/promote-standby.sh" "$BD_PREFIX/bin/promote-standby.sh"
+fi
 rm -rf "$BD_PREFIX/web"; mkdir -p "$BD_PREFIX/web"
 cp -R "$HERE/web/." "$BD_PREFIX/web/"
 

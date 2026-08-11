@@ -17,24 +17,118 @@ mod posture;
 
 use elevate::{Elevator, Paths, Platform, StartReq};
 
+/// 本次运行的**私有落盘目录**：`<临时目录>/baidi-<uid>`（unix 上 0700）。
+///
+/// ★不能直接用 `std::env::temp_dir()` 那个根目录。三平台的实况并不一样，此前的注释把它们
+/// 一律说成「每用户私有目录」是错的：
+///   - macOS `/var/folders/…/T` —— 确实是每用户 0700；
+///   - Windows `%LOCALAPPDATA%\Temp` —— 每用户，但保护靠 ACL（见 [`write_private`]）；
+///   - **Linux `$TMPDIR` 或 `/tmp`** —— 桌面会话通常不设 TMPDIR，于是就是 **`/tmp`，1777，
+///     全机任何用户都能在里面建文件**。
+///
+/// 而我们往里放的东西全是固定文件名、且全部由 **root** 消费：launcher 脚本被 root 执行、
+/// pid 被 root 拿去 `kill`、`gateways.json` 是 root 数据面的落点与钉扎指纹来源。攻击者
+/// （同机另一个普通用户，或本账号下任一沙箱进程）只要预先建好同名文件，`fs::write`
+/// 就会写进他那个文件（没有 `O_EXCL`/`O_NOFOLLOW`），再趁认证框弹着的那几秒把内容换掉，
+/// 就是一次本地提权到 root。80b2e96 说 `C:\tmp` 是「任何用户都能写的目录，而我们要往里放
+/// 含会话令牌的 launcher 脚本」——`/tmp` 是同一件事，只是没被写进那条注释。
+///
+/// 对策是先收敛到一个只有本人能写的目录，且**每次用之前复核属主与权限**（见 [`secure_paths`]）。
+fn runtime_dir() -> &'static str {
+    static D: OnceLock<String> = OnceLock::new();
+    D.get_or_init(|| {
+        elevate::runtime_dir(&std::env::temp_dir().to_string_lossy(), &account_tag(), Platform::host())
+    })
+}
+
 /// 运行期落盘的那几份文件（日志 / pid / launcher 脚本 / resmap / DNS 记录 / 落点清单）。
 ///
-/// ★目录取 `std::env::temp_dir()` 而不是写死 `/tmp`：Windows 上根本没有 `/tmp`
-/// （真去创建的话就是 `C:\tmp`——一个**任何用户都能写**的目录，而我们要往里放含会话令牌的
-/// launcher 脚本）。temp_dir() 在三个平台上给的都是每用户私有目录：
-/// macOS `/var/folders/…/T`（0700）、Linux `$TMPDIR` 或 `/tmp`、Windows `%LOCALAPPDATA%\Temp`。
+/// **纯路径拼接**，不建目录也不校验——要落盘或读取时一律走 [`secure_paths`]。
 ///
-/// 这几份文件都不含凭据（除了短暂存在的 launcher 脚本），但都按「仅本人可读」收紧——
+/// 这几份文件都不含凭据（除了短暂存在的 launcher 脚本），但都按「仅本人可读」落盘——
 /// resmap 与 DNS 记录合起来就是一张现成的内网资产地图，落点清单是一张"网关都部署在哪"的地图。
 /// root 进程读它们不受限。
 fn paths() -> &'static Paths {
     static P: OnceLock<Paths> = OnceLock::new();
-    P.get_or_init(|| elevate::paths_in(&std::env::temp_dir().to_string_lossy(), Platform::host()))
+    P.get_or_init(|| elevate::paths_in(runtime_dir(), Platform::host()))
 }
 
-/// 把刚落盘的临时文件收紧到「仅本人可读」。
+/// 建好（或复核）私有运行目录，再把路径清单交出去。
 ///
-/// 这是本文件里**唯一**的 `#[cfg]`：`PermissionsExt` 是 unix-only 的 trait，没有跨平台写法。
+/// **每一次落盘、每一次读 pid 之前都要过这道闸**，且失败必须往上抛：判定逻辑是纯函数
+/// [`elevate::check_runtime_dir`]（无 cfg，四条判据在 macOS 上被逐字断言），这里只做
+/// 建目录 + lstat 这层薄执行。刻意不缓存结果——目录是可以在两次接入之间被换掉的。
+fn secure_paths() -> Result<&'static Paths, String> {
+    ensure_private_dir(runtime_dir())?;
+    Ok(paths())
+}
+
+/// 当前账号标识（进私有目录名）。unix 取 euid；Windows 留空——`%LOCALAPPDATA%\Temp`
+/// 本身就是每用户一份。
+#[cfg(unix)]
+fn account_tag() -> String {
+    current_uid().to_string()
+}
+#[cfg(not(unix))]
+fn account_tag() -> String {
+    String::new()
+}
+
+/// 当前 euid。标准库没有这个 API，只能过一次 libc（它本来就在依赖树里）。
+#[cfg(unix)]
+fn current_uid() -> u32 {
+    // SAFETY: geteuid(2) 无参数、无副作用、按 POSIX 规定不会失败。
+    unsafe { libc::geteuid() }
+}
+
+/// 建/复核私有运行目录。这是本文件里的 `#[cfg]` 之一：属主与权限位是 unix 概念，
+/// Windows 上没有对应物（如实退化，见 [`elevate::check_runtime_dir`] 的 `facts=None`）。
+#[cfg(unix)]
+fn ensure_private_dir(dir: &str) -> Result<(), String> {
+    use std::os::unix::fs::{DirBuilderExt, MetadataExt, PermissionsExt};
+    // create 而不是 create_all：目录已存在时走复核那条路，绝不"存在就当没事"。
+    match fs::DirBuilder::new().mode(0o700).create(dir) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(e) => return Err(format!("建运行目录 {dir} 失败：{e}")),
+    }
+    let stat = |d: &str| {
+        // ★lstat 而不是 stat：符号链接必须被看见（见 elevate::DirFacts::is_symlink）。
+        fs::symlink_metadata(d).map_err(|e| format!("读运行目录 {dir} 失败：{e}"))
+    };
+    let mut md = stat(dir)?;
+    // 属主是自己、只是权限松（老版本留下的目录）→ 收紧后复核。
+    // **属主不是自己时绝不 chmod**：那等于替攻击者的目录做整改，然后照用。
+    if !md.file_type().is_symlink()
+        && md.is_dir()
+        && md.uid() == current_uid()
+        && md.permissions().mode() & 0o077 != 0
+    {
+        fs::set_permissions(dir, fs::Permissions::from_mode(0o700))
+            .map_err(|e| format!("收紧运行目录 {dir} 权限失败：{e}"))?;
+        md = stat(dir)?;
+    }
+    let facts = elevate::DirFacts {
+        is_symlink: md.file_type().is_symlink(),
+        is_dir: md.is_dir(),
+        uid: md.uid(),
+        mode: md.permissions().mode() & 0o7777,
+    };
+    elevate::check_runtime_dir(dir, Some(&facts), current_uid())
+}
+#[cfg(not(unix))]
+fn ensure_private_dir(dir: &str) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("建运行目录 {dir} 失败：{e}"))?;
+    // Windows 上拿不到 unix 属主/权限，如实放行（保护退化成继承 ACL，见 write_private）。
+    elevate::check_runtime_dir(dir, None, 0)
+}
+
+/// 以「仅本人可读写」落盘。**失败即中止，不再 `let _ =` 吞掉**。
+///
+/// ★为什么权限位要在 `open` 那一刻就给（`OpenOptionsExt::mode`）而不是写完再 chmod：
+/// 先 `fs::write` 再 `set_permissions` 的写法，中间那一小段文件是 0644 的——含会话令牌的
+/// launcher 脚本在那个窗口里对同机所有用户可读。而更要命的是旧写法把 chmod 的错误
+/// `let _ =` 掉了：文件若不属于自己（攻击者预置），chmod 返回 EPERM 被吞，程序照样往下走。
 ///
 /// ★Windows 侧如实说明：那边没有 0600 的等价物，权限模型是 ACL。我们**不做 ACL 编程**，
 /// 这些文件的保护就退化成 `%LOCALAPPDATA%\Temp` 的目录继承 ACL——本人 + SYSTEM +
@@ -42,13 +136,24 @@ fn paths() -> &'static Paths {
 /// launcher 脚本里那段会话令牌（它只在提权那几百毫秒内存在，用后即删，但窗口不是零）。
 /// 写在这里是为了别让人以为三个平台一样严。
 #[cfg(unix)]
-fn harden(path: &str) {
-    use std::os::unix::fs::PermissionsExt;
-    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+fn write_private(path: &str, content: &str) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+    let mut f = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .mode(0o600)
+        .open(path)
+        .map_err(|e| format!("写 {path} 失败：{e}"))?;
+    f.write_all(content.as_bytes()).map_err(|e| format!("写 {path} 失败：{e}"))?;
+    // O_CREAT 不改既有文件的模式（上一轮留下的那份可能更松），显式收紧一次。
+    fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+        .map_err(|e| format!("收紧 {path} 权限失败：{e}"))
 }
 #[cfg(not(unix))]
-fn harden(_path: &str) {
-    // 见上：Windows 无 0600 等价物，依赖 %TEMP% 的继承 ACL，保护弱于 unix。
+fn write_private(path: &str, content: &str) -> Result<(), String> {
+    fs::write(path, content).map_err(|e| format!("写 {path} 失败：{e}"))
 }
 
 #[derive(serde::Deserialize)]
@@ -152,14 +257,16 @@ fn run_elevator(e: &Elevator) -> std::io::Result<Output> {
 /// 以管理员权限拉起 baidi-tun。要点：
 ///  - **先做平台前置检查再谈提权**：Windows 上缺 wintun.dll 时当场说清楚，绝不先弹一个
 ///    UAC 框再在建网卡那步失败（见 elevate::preflight_start）；
-///  - launcher 脚本落 temp_dir()（unix 0600），提权器只跑该脚本路径（规避中文 .app 路径 + token 转义）；
+///  - launcher 脚本落**每用户私有目录**（见 runtime_dir，unix 上目录 0700、文件 0600），
+///    提权器只跑该脚本路径（规避中文 .app 路径 + token 转义）；
 ///  - unix 侧 `exec </dev/null >/dev/null 2>&1` 先断开脚本自身与提权器的管道 →
 ///    osascript / pkexec 立即返回，不会因后台 baidi-tun 常驻持有 fd 而卡死（会冻结 UI）；
 ///  - token 经 BAIDI_TOKEN 环境变量传入，不进进程参数；脚本用后即删。
 #[tauri::command]
 fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     let tun = find_tun()?;
-    let p = paths();
+    // ★私有目录的复核在**任何落盘之前**：这几份文件的消费方是 root。
+    let p = secure_paths()?;
     let spa = format!("{}:{}", opts.gateway, opts.spa_port);
     let proxy = format!("{}:{}", opts.gateway, opts.proxy_port);
     let mut args: Vec<String> = vec![
@@ -187,8 +294,7 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     // 与 resmap 同一套写法，包括「空就把上一轮的残留删掉」——留着会让这次接入
     // 按上一个用户/上一份策略的落点做故障转移，切过去连的是一台不该连的网关。
     if !opts.gateways.trim().is_empty() {
-        fs::write(&p.gateways, opts.gateways.trim()).map_err(|e| format!("写网关落点清单失败：{e}"))?;
-        harden(&p.gateways);
+        write_private(&p.gateways, opts.gateways.trim())?;
         args.push("-gateways".into());
         args.push(p.gateways.clone());
     } else {
@@ -197,8 +303,7 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     // 资源映射表：写盘后经 -resmap 交给 root 数据面。控制面是这张表的唯一来源——
     // 客户端不自己推导「哪个地址属于哪个资源」，避免终端与网关对资源归属产生分歧。
     if !opts.resmap.trim().is_empty() {
-        fs::write(&p.resmap, opts.resmap.trim()).map_err(|e| format!("写资源映射表失败：{e}"))?;
-        harden(&p.resmap);
+        write_private(&p.resmap, opts.resmap.trim())?;
         args.push("-resmap".into());
         args.push(p.resmap.clone());
     } else {
@@ -217,8 +322,7 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
             args.push(opts.dns_domains.trim().into());
         }
         if !opts.dns_records.trim().is_empty() {
-            fs::write(&p.dnsrec, opts.dns_records.trim()).map_err(|e| format!("写 DNS 记录表失败：{e}"))?;
-            harden(&p.dnsrec);
+            write_private(&p.dnsrec, opts.dns_records.trim())?;
             args.push("-dns-records".into());
             args.push(p.dnsrec.clone());
         } else {
@@ -243,8 +347,8 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
         &StartReq { tun: &tun.to_string_lossy(), args: &args, env: &env, paths: p, elevator: &elevator },
     );
     if let Some(sc) = &plan.script {
-        fs::write(&sc.path, &sc.content).map_err(|e| e.to_string())?;
-        harden(&sc.path); // 仅所有者可读（token 短暂落盘）；Windows 上退化为继承 ACL，见 harden
+        // 仅所有者可读（token 短暂落盘）；Windows 上退化为继承 ACL，见 write_private
+        write_private(&sc.path, &sc.content)?;
     }
     let out = run_elevator(&plan.elevator);
     if let Some(sc) = &plan.script {
@@ -256,7 +360,9 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
         if elevate::is_cancel(plat, out.status.code(), &err) {
             return Err("已取消管理员授权".into());
         }
-        return Err(format!("启动数据面失败：{}", err.trim()));
+        // 提权那一侧是另一个进程，stderr 常常到不了这里（Windows 只回传退出码），
+        // 空文案等于没说——failure_message 会把退出码与日志路径补上。
+        return Err(elevate::failure_message("启动数据面", out.status.code(), &err, &p.log));
     }
     Ok(())
 }
@@ -314,8 +420,11 @@ fn last_endpoint_line(log: &str) -> String {
 }
 
 /// 读 pid 文件（非纯数字一律当"没有"，见 elevate::sanitize_pid）。
-fn read_pid() -> Option<String> {
-    elevate::sanitize_pid(&fs::read_to_string(&paths().pid).unwrap_or_default())
+///
+/// ★调用方必须先过 [`secure_paths`]：这个 pid 会被 `tunnel_stop` 拿去**以 root 执行 kill**，
+/// 目录不私有时它就是攻击者写进来的数字（比如 `1`）。
+fn read_pid(p: &Paths) -> Option<String> {
+    elevate::sanitize_pid(&fs::read_to_string(&p.pid).unwrap_or_default())
 }
 
 /// 按 pid 判活。供状态查询与托盘轮询共用。
@@ -325,7 +434,9 @@ fn read_pid() -> Option<String> {
 /// 只看退出码的话托盘会永远显示「已接入」。两边的解析都在 elevate 里被单测钉住。
 fn tun_running() -> bool {
     let plat = Platform::host();
-    let Some(pid) = read_pid() else { return false };
+    // 目录不私有时连 pid 都不读：那份 pid 不可信，据它显示「已接入」是替攻击者背书。
+    let Ok(p) = secure_paths() else { return false };
+    let Some(pid) = read_pid(p) else { return false };
     let (prog, args) = elevate::running_probe(plat, &pid);
     Command::new(prog)
         .args(args)
@@ -337,9 +448,15 @@ fn tun_running() -> bool {
 /// 读 pid + 日志，回最近日志供前端解析真实状态。
 #[tauri::command]
 fn tunnel_status() -> TunStatus {
-    let pid = read_pid().unwrap_or_default();
+    // ★运行目录不安全时**什么都不读**，并把原因经 log 原样交给接入页：pid 与日志都可能是
+    // 别人塞进来的。停在一个看起来正常的「未接入」上，用户永远不知道发生了什么。
+    let p = match secure_paths() {
+        Ok(p) => p,
+        Err(e) => return TunStatus { running: false, pid: String::new(), log: e, endpoint: String::new() },
+    };
+    let pid = read_pid(p).unwrap_or_default();
     let running = tun_running();
-    let full = fs::read_to_string(&paths().log).unwrap_or_default();
+    let full = fs::read_to_string(&p.log).unwrap_or_default();
     TunStatus {
         running,
         pid,
@@ -358,18 +475,18 @@ fn tunnel_status() -> TunStatus {
 /// 这条兜底——细节与后果写在 elevate::windows_stop_script 上。
 #[tauri::command]
 fn tunnel_stop() -> Result<(), String> {
-    let p = paths();
+    // ★同 tunnel_start：这里读出来的 pid 会被 root `kill`，目录不私有就直接拒绝。
+    let p = secure_paths()?;
     let _ = fs::remove_file(&p.launch);
     let _ = fs::remove_file(&p.resmap); // 断开即清映射表，不给下一轮留下陈旧路由
     let _ = fs::remove_file(&p.dnsrec); // 同理：陈旧的 DNS 记录表会让下轮解析到已下线的地址
-    let Some(pid) = read_pid() else { return Ok(()) };
+    let Some(pid) = read_pid(p) else { return Ok(()) };
 
     let plat = Platform::host();
     let elevator = elevate::resolve_elevator(plat, &elevate::RealProbe)?;
     let plan = elevate::with_elevator(elevate::plan_stop(plat, &pid, p), &elevator);
     if let Some(sc) = &plan.script {
-        fs::write(&sc.path, &sc.content).map_err(|e| e.to_string())?;
-        harden(&sc.path);
+        write_private(&sc.path, &sc.content)?;
     }
     let out = run_elevator(&plan.elevator);
     if let Some(sc) = &plan.script {
@@ -381,7 +498,7 @@ fn tunnel_stop() -> Result<(), String> {
         if elevate::is_cancel(plat, out.status.code(), &err) {
             return Err("已取消管理员授权".into());
         }
-        return Err(format!("断开失败：{}", err.trim()));
+        return Err(elevate::failure_message("断开", out.status.code(), &err, &p.log));
     }
     Ok(())
 }
@@ -556,5 +673,89 @@ mod tests {
     #[test]
     fn 没有落点行时回空串() {
         assert_eq!(last_endpoint_line("time=1 msg=\"数据面就绪\"\n"), "");
+    }
+
+    // ── 私有运行目录（薄执行层）──
+    //
+    // 判定逻辑本身是 elevate::check_runtime_dir，纯函数、无 cfg、四条判据在任何主机上都被
+    // 逐字断言。这里测的是**执行那一层**：建目录用没用 0700、复核用的是不是 lstat、
+    // 收紧失败会不会被吞掉。执行层本身就是 unix-only（属主/权限位是 unix 概念），
+    // 所以这几条用例带 cfg——但它们守的不是判定逻辑。
+
+    #[cfg(unix)]
+    fn 临时用目录(名: &str) -> String {
+        let d = std::env::temp_dir().join(format!("baidi-test-{}-{}", std::process::id(), 名));
+        let _ = fs::remove_dir_all(&d);
+        let _ = fs::remove_file(&d);
+        fs::create_dir_all(&d).unwrap();
+        d.to_string_lossy().to_string()
+    }
+
+    /// 新建的运行目录必须是 0700，且第二次调用（目录已存在）照样放行。
+    #[cfg(unix)]
+    #[test]
+    fn 运行目录建出来就是_0700() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = 临时用目录("mk");
+        let dir = format!("{base}/baidi-501");
+        ensure_private_dir(&dir).expect("首次应建成功");
+        let m = fs::metadata(&dir).unwrap().permissions().mode() & 0o7777;
+        assert_eq!(m, 0o700, "得 {m:04o}");
+        ensure_private_dir(&dir).expect("已存在的自有 0700 目录应放行");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 目录属于自己但权限松（老版本留下的）→ 收紧后放行，而不是照用。
+    #[cfg(unix)]
+    #[test]
+    fn 权限松的自有目录会被收紧() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = 临时用目录("loose");
+        let dir = format!("{base}/baidi-501");
+        fs::create_dir(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        ensure_private_dir(&dir).expect("自有目录收紧后应放行");
+        assert_eq!(fs::metadata(&dir).unwrap().permissions().mode() & 0o7777, 0o700);
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// ★这条是那个本地提权的直接回归：`/tmp` 全局可写，攻击者预置一个同名**符号链接**
+    /// 或普通文件，旧实现会照写不误（`fs::write` 不带 O_EXCL/O_NOFOLLOW），
+    /// 随后 root 去执行/读取它。复核必须走 lstat 并当场拒绝。
+    #[cfg(unix)]
+    #[test]
+    fn 符号链接或普通文件冒充运行目录时拒绝() {
+        let base = 临时用目录("evil");
+        let 真目录 = format!("{base}/attacker");
+        fs::create_dir(&真目录).unwrap();
+        let 链接 = format!("{base}/baidi-501");
+        std::os::unix::fs::symlink(&真目录, &链接).unwrap();
+        let e = ensure_private_dir(&链接).expect_err("符号链接必须被拒");
+        assert!(e.contains("符号链接"), "{e}");
+
+        let 文件 = format!("{base}/baidi-502");
+        fs::write(&文件, "x").unwrap();
+        let e = ensure_private_dir(&文件).expect_err("普通文件必须被拒");
+        assert!(e.contains("不是目录"), "{e}");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 落盘从 open 那一刻就是 0600：先写后 chmod 的写法中间有一段 0644 的窗口，
+    /// 而 launcher 脚本里有会话令牌。
+    #[cfg(unix)]
+    #[test]
+    fn 落盘文件从一开始就只有本人可读() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = 临时用目录("write");
+        let f = format!("{base}/launch.sh");
+        write_private(&f, "#!/bin/bash\ntrue\n").unwrap();
+        assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        // 覆盖既有的松权限文件时也要收紧
+        fs::set_permissions(&f, fs::Permissions::from_mode(0o644)).unwrap();
+        write_private(&f, "x").unwrap();
+        assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        // 写不进去必须报错，绝不静默成功
+        assert!(write_private(&format!("{base}/没有这个目录/x"), "y").is_err());
+        let _ = fs::remove_dir_all(&base);
     }
 }

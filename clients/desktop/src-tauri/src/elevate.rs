@@ -13,8 +13,9 @@
 //!     [`Platform::host()`] 用 `cfg!` 宏选平台（是布尔常量，不删代码），
 //!     [`plan_start`] 在 Linux 上永远不会吐出 `Osascript`，于是那条分支自然走不到。
 //!
-//! 全模块唯一的 `#[cfg]` 在 main.rs 的 `harden()`（`PermissionsExt` 是 unix-only 的 trait，
-//! 没有替代写法）。
+//! 本模块**没有任何 `#[cfg]`**。仅有的几处在 main.rs 的落盘层（`ensure_private_dir` /
+//! `write_private` / `account_tag`）：属主、权限位、`geteuid` 都是 unix 概念，没有跨平台写法；
+//! 而它们的**判据**仍在这里（[`check_runtime_dir`]），无 cfg、在任何主机上都被单测。
 //!
 //! `allow(dead_code)`：三平台的构造函数无条件编译，非本平台那两套在真实调用链上没人调。
 #![allow(dead_code)]
@@ -62,8 +63,16 @@ impl Platform {
 
 // ── 运行期临时文件清单 ──
 
-/// 数据面运行期落盘的那几份文件。**全部放在 `std::env::temp_dir()` 下**，不再硬编码 `/tmp`
-/// （Windows 上根本没有 `/tmp`，而 `C:\tmp` 是任何人都能写的目录）。
+/// 数据面运行期落盘的那几份文件。**全部放在 [`runtime_dir`] 排出来的每用户私有目录下**
+/// （`<临时目录>/baidi-<uid>`，unix 上 0700），不是直接落临时目录根。
+///
+/// ★为什么不能直接用临时目录根：Linux 桌面会话通常不设 `TMPDIR`，`std::env::temp_dir()`
+/// 返回的就是 **`/tmp`（1777，全局可写）**。而这里的 launcher 脚本会被 **root 执行**、
+/// pid 文件会被 root 拿去 `kill`、`gateways.json` 是 root 数据面的落点与钉扎指纹来源——
+/// 文件名全是固定可预测的。同机任一普通用户预先建好同名文件（`fs::write` 不带
+/// `O_EXCL`/`O_NOFOLLOW`，会直接写进他那个文件），再趁认证框弹着的几秒把内容换掉，
+/// 就是一次本地提权到 root。所以落盘位置必须先收敛成一个**只有本人能写**的目录，
+/// 且该目录的属主与权限每次都要复核（见 [`check_runtime_dir`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
     /// baidi-tun 日志（进程 stderr：slog 默认写 stderr，接入页解析的就是这一份）。
@@ -104,6 +113,83 @@ pub fn paths_in(dir: &str, platform: Platform) -> Paths {
 fn join_path(dir: &str, name: &str, sep: char) -> String {
     let d = dir.trim_end_matches(['/', '\\']);
     format!("{d}{sep}{name}")
+}
+
+// ── 每用户私有运行目录 ──
+
+/// 排出「本次运行该往哪个目录落盘」。纯字符串拼接，不碰文件系统。
+///
+/// `tag` 是账号标识（unix 传 euid 的十进制，Windows 传空串——`%LOCALAPPDATA%\Temp`
+/// 本身就是每用户一份）。**必须进目录名**：`/tmp` 是全机共用的，不带 uid 的话，
+/// 同机第一个登录的人建出 `/tmp/baidi`（0700，属主是他），第二个人就再也建不出来、
+/// 也写不进去——那时的表现是"接入按钮点了报错"，比静默好，但仍是拒绝服务。
+/// 带上 uid 之后，每个账号各自一份，互不干涉。
+pub fn runtime_dir(temp: &str, tag: &str, platform: Platform) -> String {
+    let t = sanitize_tag(tag);
+    let name = if t.is_empty() { String::from("baidi") } else { format!("baidi-{t}") };
+    join_path(temp, &name, platform.sep())
+}
+
+/// 目录名里的账号标识只留 `[A-Za-z0-9_-]`。uid 本来就是纯数字，这道闸防的是
+/// 将来有人把用户名之类的东西接进来（`../` 会把私有目录整个挪出临时目录）。
+fn sanitize_tag(tag: &str) -> String {
+    tag.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect()
+}
+
+/// 私有目录的实况（unix）。抽成纯数据是为了让判定逻辑无 `#[cfg]`、在任何主机上都被单测——
+/// 与 `posture::Env`、[`Probe`] 同一个理由：只活在 cfg 里的分支验不到。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DirFacts {
+    /// `lstat` 看到的是不是符号链接（**必须用 lstat**：`stat` 会跟着链接走，
+    /// 攻击者把 `/tmp/baidi-501` 做成指向自己目录的软链，`stat` 看到的属主是他自己
+    /// 建的那个目录、模式也可以是 0700，全部检查都能过）。
+    pub is_symlink: bool,
+    pub is_dir: bool,
+    /// 属主 uid。
+    pub uid: u32,
+    /// 权限位（`mode & 0o7777`）。
+    pub mode: u32,
+}
+
+/// 判定「这个目录能不能拿来放 root 要执行/读取的文件」。纯函数。
+///
+/// `facts=None` 表示本平台拿不到 unix 属主/权限（Windows）——**如实放行并在文档里说明**
+/// 保护退化成 `%LOCALAPPDATA%\Temp` 的继承 ACL，而不是假装校验过。
+///
+/// 四条判据缺一不可，错法各有各的静默：
+///   - **符号链接**：见 [`DirFacts::is_symlink`]；
+///   - **不是目录**：攻击者预先建个同名普通文件，后续 create_dir 失败但我们照写不误；
+///   - **属主不是自己**：目录归别人时，他能随意 rename/替换里面的每一个文件条目——
+///     launcher 脚本被 root 执行、pid 被 root `kill`，两条都是直通 root 的路；
+///   - **组/其他人有任何权限位**：0777 的目录等价于没有目录（`/tmp` 的原样重演）；
+///     连读位都不留是因为 launcher 脚本里有会话令牌。
+pub fn check_runtime_dir(path: &str, facts: Option<&DirFacts>, my_uid: u32) -> Result<(), String> {
+    let Some(f) = facts else { return Ok(()) };
+    if f.is_symlink {
+        return Err(format!(
+            "运行目录 {path} 是一个符号链接，拒绝使用。\n\
+             它会被用来把提权脚本重定向到别处（本地提权），请删除它后重试。"
+        ));
+    }
+    if !f.is_dir {
+        return Err(format!("运行目录 {path} 不是目录，拒绝使用。请删除它后重试。"));
+    }
+    if f.uid != my_uid {
+        return Err(format!(
+            "运行目录 {path} 的属主是 uid={}（当前账号 uid={my_uid}），拒绝使用。\n\
+             这里要放的是**将以 root 执行**的提权脚本与 pid 文件，目录归别人\
+             等于把 root 权限交出去。请删除该目录后重试。",
+            f.uid
+        ));
+    }
+    if f.mode & 0o077 != 0 {
+        return Err(format!(
+            "运行目录 {path} 的权限是 {:04o}，对同机其他用户开放，拒绝使用。\n\
+             请改成 0700（chmod 700）后重试。",
+            f.mode
+        ));
+    }
+    Ok(())
 }
 
 // ── 提权计划（纯数据） ──
@@ -346,7 +432,16 @@ fn unix_stop_script(pid: &str, paths: &Paths) -> String {
 ///    baidi-tun 的 slog 写 stderr，所以接入页解析的那份日志落 `paths.log`（= stderr），
 ///    stdout 落 `paths.out`（一般是空的）。
 ///  - **拿 PID 靠 `-PassThru`**：Windows 没有 `$!`。
-///  - **不做 `exec </dev/null`**：`-WindowStyle Hidden` + `Start-Process` 本身就不挂管道。
+///  - **不做 `exec </dev/null`**：`Start-Process` 本身就不挂管道。
+///
+/// ★这里必须是 `-NoNewWindow` 而**不是** `-WindowStyle Hidden`：Windows PowerShell 5.1 的
+/// `Start-Process` 有两个**互斥**参数集——`-Verb`/`-WindowStyle` 属 UseShellExecute 那一组，
+/// `-RedirectStandard*`/`-NoNewWindow` 属 Default 那一组。两组混用时 PowerShell 连命令都
+/// 解析不了（`Parameter set cannot be resolved using the specified named parameters.`），
+/// 而脚本首行的 `$ErrorActionPreference='Stop'` 会让它当场终止：baidi-tun 一次都不会被拉起，
+/// pid 文件也不会写。也就是说混用等于 **Windows 数据面 100% 起不来**，而这一整段只在
+/// Windows 上执行、在 mac 上永远测不到——只能靠对这一行的逐字断言守住（见单测）。
+/// `-NoNewWindow` 隐含 `UseShellExecute=false`，与重定向同集，且不弹控制台窗口。
 fn windows_start_script(req: &StartReq) -> String {
     let p = req.paths;
     let mut s = String::from("$ErrorActionPreference = 'Stop'\n");
@@ -363,7 +458,7 @@ fn windows_start_script(req: &StartReq) -> String {
         s.push_str(&format!("$env:{} = {}\n", k, ps_quote(v)));
     }
     s.push_str(&format!(
-        "$p = Start-Process -FilePath {tun} -ArgumentList {args} -WindowStyle Hidden -PassThru \
+        "$p = Start-Process -FilePath {tun} -ArgumentList {args} -NoNewWindow -PassThru \
          -RedirectStandardOutput {out} -RedirectStandardError {log}\n",
         tun = ps_quote(req.tun),
         // ★整条命令行按 CommandLineToArgvW 规则转义后作为**一个** ArgumentList 元素传入。
@@ -558,12 +653,32 @@ pub fn is_cancel(platform: Platform, code: Option<i32>, stderr: &str) -> bool {
         Platform::Windows => {
             // UAC 拒绝/取消 → ShellExecute 回 ERROR_CANCELLED(1223)，
             // PowerShell 包装成「The operation was canceled by the user.」/「操作已被用户取消。」
-            stderr.contains("canceled by the user")
+            //
+            // ★退出码这一路是 ps_runas_command 里 `if ($null -eq $p) { exit 1223 }` 的对侧：
+            // 那条分支走到时进程可能一个字的 stderr 都没有，只认文案的话取消会被报成"启动失败"。
+            code == Some(1223)
+                || stderr.contains("canceled by the user")
                 || stderr.contains("cancelled by the user")
                 || stderr.contains("操作已被用户取消")
                 || stderr.contains("1223")
         }
     }
+}
+
+/// 提权器非零退出、但**没有任何 stderr** 时该说什么。纯函数。
+///
+/// ★为什么单开一个函数：提权那一侧是**另一个进程**（osascript 的 `do shell script` /
+/// pkexec / UAC 提升出来的 powershell），它的 stderr 常常到不了我们手里——尤其
+/// Windows 现在会把被提升进程的退出码经 `exit $p.ExitCode` 传回来，而错误文本留在了
+/// 那一侧。此时直接 `format!("启动数据面失败：{}", stderr.trim())` 会渲染成
+/// 「启动数据面失败：」后面一片空白，用户拿不到任何下一步。至少要把退出码与日志路径给出去。
+pub fn failure_message(action: &str, code: Option<i32>, stderr: &str, log_path: &str) -> String {
+    let e = stderr.trim();
+    if !e.is_empty() {
+        return format!("{action}失败：{e}");
+    }
+    let c = code.map(|c| c.to_string()).unwrap_or_else(|| String::from("未知（进程被信号中止）"));
+    format!("{action}失败：提权进程以退出码 {c} 结束，且没有可显示的错误输出。数据面日志见 {log_path}")
 }
 
 // ── sidecar 定位 ──
@@ -670,9 +785,24 @@ fn win_cmdline_owned(args: &[String]) -> String {
 ///
 /// `-Wait`：等 launcher 脚本本身跑完（它只负责 Start-Process 拉起 baidi-tun 再写 pid 就退出），
 /// 这样函数返回时 pid 文件已经在了；真正的数据面进程是它的孙子，不受影响。
+///
+/// ★`-PassThru` + `exit $p.ExitCode` 一个都不能少：少了它们，**外层 powershell 的退出码只
+/// 反映 `Start-Process` 自己有没有抛终止性异常**，被提升那一侧发生的一切（用户在 UAC 框上
+/// 点「否」、launcher 脚本失败）全被报成成功——`tunnel_start` 返回 Ok、接入页显示"已接入"
+/// 并列出网段与钉扎信息，而系统里根本没有 baidi-tun。那与刚在 `parse_running` 上修掉的
+/// 「tasklist 无匹配也回 0 → 托盘永远显示已接入」是同一类谎，且 [`is_cancel`] 的 Windows
+/// 分支会因此变成永远走不到的死代码。
+///
+/// ★`$ErrorActionPreference='Stop'` 与 `$null -eq $p` 那道判空是配套的：用户取消 UAC 时
+/// `Start-Process` 报的是**非终止性**错误，默认 preference 下脚本会继续往下走，此时 `$p`
+/// 是 `$null`，`exit $null` 等于 `exit 0`——又变回"取消也算成功"。置 Stop 让它成为终止性
+/// 错误（错误文本进 stderr，[`is_cancel`] 按文案认得出），判空则兜住 preference 万一被
+/// 别处改掉的情况，直接以 `1223`（`ERROR_CANCELLED`）退出。
 pub fn ps_runas_command(file: &str, parameters: &str) -> String {
     format!(
-        "Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -WindowStyle Hidden -Wait",
+        "$ErrorActionPreference = 'Stop'; \
+         $p = Start-Process -FilePath {} -ArgumentList {} -Verb RunAs -WindowStyle Hidden -PassThru -Wait; \
+         if ($null -eq $p) {{ exit 1223 }}; exit $p.ExitCode",
         ps_quote(file),
         ps_quote(parameters)
     )
@@ -729,6 +859,83 @@ mod tests {
         assert_eq!(w.launch, "C:\\Users\\张三\\AppData\\Local\\Temp\\baidi-tun-launch.ps1");
         // 末尾已经带分隔符的目录（macOS 的 TMPDIR 就是这样）不该拼出双斜杠
         assert_eq!(paths_in("/tmp/", Platform::Linux).pid, "/tmp/baidi-tun.pid");
+    }
+
+    // ── 每用户私有运行目录 ──
+
+    /// ★回归背景（本地提权）：运行期文件此前直接落 `std::env::temp_dir()` 根。
+    /// Linux 桌面会话不设 TMPDIR 时那就是 **`/tmp`（1777，全局可写）**，而落在那里的
+    /// launcher 脚本会被 root 执行、pid 会被 root `kill`、gateways.json 是 root 数据面的
+    /// 落点与钉扎来源，文件名还全是固定的。私有子目录是这条链的第一道闸。
+    #[test]
+    fn 运行目录是每用户一份而不是临时目录根() {
+        assert_eq!(runtime_dir("/tmp", "501", Platform::Linux), "/tmp/baidi-501");
+        assert_eq!(runtime_dir("/tmp/", "0", Platform::MacOS), "/tmp/baidi-0");
+        assert_eq!(
+            runtime_dir("C:\\Users\\张三\\AppData\\Local\\Temp", "", Platform::Windows),
+            "C:\\Users\\张三\\AppData\\Local\\Temp\\baidi"
+        );
+        // 落盘清单必须整体在私有目录里，不能有哪一份漏在外面
+        let p = paths_in(&runtime_dir("/tmp", "501", Platform::Linux), Platform::Linux);
+        for f in [&p.log, &p.out, &p.pid, &p.launch, &p.stop, &p.resmap, &p.dnsrec, &p.gateways] {
+            assert!(f.starts_with("/tmp/baidi-501/"), "漏在私有目录外：{f}");
+        }
+        // uid 不同 → 目录不同：同机两个账号互不干涉，也谁都占不住对方的名字
+        assert_ne!(runtime_dir("/tmp", "501", Platform::Linux), runtime_dir("/tmp", "502", Platform::Linux));
+    }
+
+    #[test]
+    fn 运行目录名里的账号标识只留安全字符() {
+        // `../` 能把私有目录整个挪出临时目录，一律剔掉
+        assert_eq!(runtime_dir("/tmp", "../../etc", Platform::Linux), "/tmp/baidi-etc");
+        assert_eq!(runtime_dir("/tmp", "a b;rm -rf /", Platform::Linux), "/tmp/baidi-abrm-rf");
+    }
+
+    #[test]
+    fn 合规的私有目录放行() {
+        let f = DirFacts { is_symlink: false, is_dir: true, uid: 501, mode: 0o700 };
+        assert!(check_runtime_dir("/tmp/baidi-501", Some(&f), 501).is_ok());
+    }
+
+    /// 四条判据各自对应一种**只在 Linux 上出现、且完全静默**的提权路径。
+    #[test]
+    fn 私有目录不合规时一律拒绝而不是照用() {
+        let 基准 = DirFacts { is_symlink: false, is_dir: true, uid: 501, mode: 0o700 };
+
+        // ① 符号链接：lstat 认得出，stat 认不出（跟着链接走，看到的是攻击者自己的 0700 目录）
+        let mut f = 基准;
+        f.is_symlink = true;
+        let e = check_runtime_dir("/tmp/baidi-501", Some(&f), 501).unwrap_err();
+        assert!(e.contains("符号链接") && e.contains("提权"), "{e}");
+
+        // ② 不是目录（预先建个同名普通文件）
+        let mut f = 基准;
+        f.is_dir = false;
+        assert!(check_runtime_dir("/tmp/baidi-501", Some(&f), 501).unwrap_err().contains("不是目录"));
+
+        // ③ 属主是别人：他能替换目录里的每一个条目 → launcher 被 root 执行 = 任意 root 代码执行
+        let mut f = 基准;
+        f.uid = 1000;
+        let e = check_runtime_dir("/tmp/baidi-501", Some(&f), 501).unwrap_err();
+        assert!(e.contains("属主") && e.contains("1000") && e.contains("501"), "{e}");
+
+        // ④ 组/其他人有任何权限位：0777 的目录等价于没有目录（/tmp 原样重演）；
+        //    连读位都不留——launcher 脚本里有会话令牌。
+        for mode in [0o777, 0o755, 0o750, 0o701, 0o704, 0o770] {
+            let mut f = 基准;
+            f.mode = mode;
+            assert!(
+                check_runtime_dir("/tmp/baidi-501", Some(&f), 501).is_err(),
+                "{mode:04o} 必须被拒"
+            );
+        }
+    }
+
+    /// Windows 拿不到 unix 属主/权限：**如实放行**（保护退化成 %LOCALAPPDATA%\\Temp 的
+    /// 继承 ACL），而不是假装校验过——与 write_private 在 Windows 上的诚实说明同一条纪律。
+    #[test]
+    fn 拿不到_unix_属主权限时如实放行() {
+        assert!(check_runtime_dir("C:\\Users\\张三\\AppData\\Local\\Temp\\baidi", None, 0).is_ok());
     }
 
     // ── macOS ──
@@ -844,6 +1051,54 @@ mod tests {
         // PID 靠 -PassThru 拿（Windows 没有 $!）
         assert!(sc.content.contains("-PassThru"));
         assert!(sc.content.contains("Set-Content -LiteralPath 'C:\\Temp\\baidi-tun.pid' -Value $p.Id"));
+    }
+
+    /// ★回归背景：这条 `Start-Process` 曾经同时带 `-WindowStyle Hidden` 与
+    /// `-RedirectStandardOutput/-RedirectStandardError`。Windows PowerShell 5.1 里这两组
+    /// 分属**互斥**的参数集（UseShellExecute vs Default），混用时命令根本解析不了：
+    /// `Start-Process : Parameter set cannot be resolved using the specified named parameters.`
+    /// 脚本首行的 `$ErrorActionPreference='Stop'` 让它当场终止 → baidi-tun 一次都不会被拉起、
+    /// pid 文件也不会写 = **Windows 数据面 100% 起不来**。这段只在 Windows 上执行，
+    /// 在 mac 上永远测不到，只能靠这条逐字断言守住。
+    #[test]
+    fn windows_launcher_重定向不能与_windowstyle_同时出现() {
+        let p = paths_in("C:\\Temp", Platform::Windows);
+        let args = 参数();
+        let env = 环境();
+        let sc = plan_start(Platform::Windows, &请求("C:\\baidi-tun.exe", &args, &env, &p, "powershell.exe"))
+            .script
+            .unwrap();
+        let line = sc
+            .content
+            .lines()
+            .find(|l| l.contains("Start-Process"))
+            .expect("必须有拉起 baidi-tun 的 Start-Process");
+        assert!(line.contains("-RedirectStandardOutput") && line.contains("-RedirectStandardError"));
+        assert!(
+            !line.contains("-WindowStyle"),
+            "-WindowStyle 与 -RedirectStandard* 参数集互斥，同用则整条命令解析失败：{line}"
+        );
+        assert!(!line.contains("-Verb"), "-Verb 同属 UseShellExecute 参数集，同样不能与重定向混用：{line}");
+        // 与重定向同集、且不弹控制台窗口的那一个
+        assert!(line.contains("-NoNewWindow"), "{line}");
+    }
+
+    /// ★回归背景：`ps_runas_command` 曾经既没有 `-PassThru` 也不 `exit $p.ExitCode`，
+    /// 于是外层 powershell 的退出码只反映 Start-Process 自身有没有抛异常——
+    /// 「用户在 UAC 框上点否」与「被提升的 launcher 失败」双双被报成成功，
+    /// 接入页显示「已接入」而系统里没有 baidi-tun，`is_cancel(Windows,…)` 成了死代码。
+    #[test]
+    fn windows_uac_退出码必须回传() {
+        let cmd = ps_runas_command("powershell.exe", "-File \"C:\\a b\\x.ps1\"");
+        assert!(cmd.contains("-PassThru"), "没有 -PassThru 就拿不到被提升进程：{cmd}");
+        assert!(cmd.contains("-Wait"), "{cmd}");
+        assert!(cmd.contains("exit $p.ExitCode"), "退出码必须原样回传，否则失败与成功同形：{cmd}");
+        // 取消 UAC 时 Start-Process 报的是**非终止性**错误，默认 preference 下会继续往下走、
+        // $p 为 $null、`exit $null` 等于 exit 0 —— 又变回"取消也算成功"。两道都要在。
+        assert!(cmd.contains("$ErrorActionPreference = 'Stop'"), "{cmd}");
+        assert!(cmd.contains("if ($null -eq $p) { exit 1223 }"), "判空兜底不能少：{cmd}");
+        // 参数与路径仍按 PS 单引号规则转义
+        assert!(cmd.contains("-ArgumentList '-File \"C:\\a b\\x.ps1\"'"), "{cmd}");
     }
 
     #[test]
@@ -1033,9 +1288,27 @@ mod tests {
     fn ps_runas_命令形态固定() {
         assert_eq!(
             ps_runas_command("powershell.exe", "-File \"C:\\a b\\x.ps1\""),
-            "Start-Process -FilePath 'powershell.exe' -ArgumentList '-File \"C:\\a b\\x.ps1\"' \
-             -Verb RunAs -WindowStyle Hidden -Wait"
+            "$ErrorActionPreference = 'Stop'; \
+             $p = Start-Process -FilePath 'powershell.exe' -ArgumentList '-File \"C:\\a b\\x.ps1\"' \
+             -Verb RunAs -WindowStyle Hidden -PassThru -Wait; \
+             if ($null -eq $p) { exit 1223 }; exit $p.ExitCode"
         );
+    }
+
+    /// 提权那一侧是另一个进程，它的 stderr 常常到不了我们手里（Windows 现在只回传退出码）。
+    /// 「启动数据面失败：」后面一片空白等于没说，至少要给出退出码与日志路径。
+    #[test]
+    fn 没有_stderr_时的失败文案要给得出下一步() {
+        let m = failure_message("启动数据面", Some(1), "", "/tmp/baidi-501/baidi-tun.log");
+        assert!(m.contains("退出码 1"), "{m}");
+        assert!(m.contains("/tmp/baidi-501/baidi-tun.log"), "{m}");
+        // 有 stderr 时原样展示，不要被兜底文案盖掉
+        assert_eq!(
+            failure_message("断开", Some(1), " pkexec: 权限不足\n", "/x.log"),
+            "断开失败：pkexec: 权限不足"
+        );
+        // 被信号打掉时没有退出码，也不能说成 0
+        assert!(failure_message("启动数据面", None, "", "/x.log").contains("信号"));
     }
 
     // ── 断开 ──
@@ -1121,6 +1394,8 @@ mod tests {
         assert!(is_cancel(Platform::Windows, Some(1), "The operation was canceled by the user."));
         assert!(is_cancel(Platform::Windows, Some(1), "操作已被用户取消。"));
         assert!(!is_cancel(Platform::Windows, Some(1), "找不到指定的文件。"));
+        // ps_runas_command 的判空分支会 `exit 1223`，那一路可能一个字的 stderr 都没有
+        assert!(is_cancel(Platform::Windows, Some(1223), ""));
     }
 
     // ── sidecar 定位 ──

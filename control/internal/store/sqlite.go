@@ -519,6 +519,27 @@ CREATE TABLE IF NOT EXISTS gateway_metrics (
 );
 -- 留存清理是 DELETE ... WHERE ts < ?，趋势查询是 ts 范围扫，两者都吃这条索引
 CREATE INDEX IF NOT EXISTS idx_gateway_metrics_ts ON gateway_metrics(ts);
+
+-- 地址转换（PRD 第 18 章）。NAT 是网关的**设备本地**能力，故每条策略必须绑定 gateway_id：
+-- 不绑的话一条规则会被所有网关领走，而各网关的网卡名与拓扑根本不同。
+CREATE TABLE IF NOT EXISTS nat_policies (
+  id TEXT PRIMARY KEY, name TEXT NOT NULL, type TEXT NOT NULL, gateway_id TEXT NOT NULL,
+  src_iface TEXT NOT NULL, src_addr TEXT NOT NULL,
+  dst_iface TEXT NOT NULL, dst_addr TEXT NOT NULL,
+  protocol TEXT NOT NULL DEFAULT 'all',
+  dst_port INTEGER NOT NULL DEFAULT 0,
+  translated_addr TEXT NOT NULL DEFAULT '', translated_port INTEGER NOT NULL DEFAULT 0,
+  enabled INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT, updated_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_nat_gateway ON nat_policies(gateway_id);
+
+-- 网关实测上报的网卡清单。if_type（lan/wan）是**管理员**定的，网关无从判断，
+-- 故它由 ReplaceGatewayIfaces 在整体替换时按网卡名回填保留。
+CREATE TABLE IF NOT EXISTS gateway_ifaces (
+  gateway_id TEXT, name TEXT, if_type TEXT, addrs_json TEXT, up INTEGER, updated_at TEXT,
+  PRIMARY KEY(gateway_id, name)
+);
 -- ── 审计日志外送（PRD ch16 + ch21.6）──
 -- 配置与凭据**物理分表**（与 notify_channel_secrets / auth_source_secrets 同一条推理）。
 -- last_status/last_detail/last_at/last_ok_at/dropped 只由**真正发出那一次**（或真的丢弃那一次）

@@ -21,6 +21,7 @@ import (
 	"sync"
 	"time"
 
+	"baidi.dev/gateway/internal/natfw"
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/sysstat"
 )
@@ -47,7 +48,16 @@ type Client struct {
 	// ★用函数而不是快照值：CPU 与吞吐是差分指标，必须**每次心跳恰好采一次**。
 	// 存快照会让采样节奏与心跳脱钩，速率的分母就不再是两次上报的真实间隔。
 	metrics func() sysstat.Sample
-	httpc   *http.Client
+	// ifaces 本机网卡枚举源（地址转换用）。nil = 不上报，报文里无该字段。
+	ifaces func() []sysstat.Iface
+	httpc  *http.Client
+
+	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
+	// 两者分开存是必须的：nil（旧控制面不认识 NAT）与空数组（本网关无策略）
+	// 在内核动作上完全相反——前者保持现状，后者清空规则。
+	mu         sync.Mutex
+	lastNAT    []natfw.Policy
+	natPresent bool
 }
 
 // SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
@@ -58,6 +68,9 @@ func (c *Client) SetVersion(v string) { c.version = v }
 
 // SetMetrics 装上宿主机设备状态采样源；不调用即不上报（向后兼容：报文里无 metrics 字段）。
 func (c *Client) SetMetrics(fn func() sysstat.Sample) { c.metrics = fn }
+
+// SetIfaces 装上网卡枚举源；不调用即不上报。
+func (c *Client) SetIfaces(fn func() []sysstat.Iface) { c.ifaces = fn }
 
 // Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实。
 // 措辞必须是已发生的事（"已撤销/已生效"），控制面会原样落审计——谎报即审计失实。
@@ -224,6 +237,11 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	if c.metrics != nil {
 		payload["metrics"] = c.metrics()
 	}
+	// 网卡清单：地址转换选源/目的接口时只能从真实存在的卡里挑（见 sysstat.Ifaces 注释）。
+	// 与 metrics 同款兼容策略——未装枚举源就连字段都不出现，旧控制面照常忽略。
+	if c.ifaces != nil {
+		payload["ifaces"] = c.ifaces()
+	}
 	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {
@@ -267,8 +285,9 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 		return nil, nil, fmt.Errorf("control 拉策略返回 %d", resp.StatusCode)
 	}
 	var r struct {
-		Resources []resourceDTO `json:"resources"`
-		Revoked   []Revoked     `json:"revoked"`
+		Resources []resourceDTO  `json:"resources"`
+		Revoked   []Revoked      `json:"revoked"`
+		NAT       []natfw.Policy `json:"nat"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return nil, nil, err
@@ -278,5 +297,20 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 		out = append(out, resource.Resource{ID: d.ID, Backend: d.Backend,
 			AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers, DenyUsers: d.DenyUsers})
 	}
+	// NAT 策略与资源策略同一次响应取回，单独暴露给调用方（main 决定灌不灌内核）。
+	// ★旧控制面不带 nat 字段时这里是 nil，与「本网关无 NAT 策略」的空数组**语义不同**：
+	// 前者应保持现状不动内核，后者应清空规则。故用 NATPresent 区分，别让缺字段
+	// 被读成「把 NAT 全删掉」——那会在升级控制面的瞬间把生产 NAT 规则清空。
+	c.mu.Lock()
+	c.lastNAT, c.natPresent = r.NAT, r.NAT != nil
+	c.mu.Unlock()
 	return out, r.Revoked, nil
+}
+
+// NATPolicies 返回上一次 Policy() 取回的地址转换策略，以及控制面**是否下发了**该字段。
+// present=false 表示对端是不认识 NAT 的旧控制面，调用方应保持内核规则现状。
+func (c *Client) NATPolicies() (policies []natfw.Policy, present bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastNAT, c.natPresent
 }

@@ -199,7 +199,7 @@ func main() {
 		Gm: *gm, TLCPConfig: tlcpCfg, Resmap: resmap, DefaultRes: *defaultRes,
 		Reknock: *reknock, MTU: mtu, TunnelPin: *pin,
 		DNSListen: dnsIP, DNSRecords: records,
-		Device:    *device,
+		Device: *device,
 	}
 	if err := dataplane.Run(dev, cfg); err != nil {
 		// ★ log.Fatalf 不跑 defer——这里必须显式清理，否则「数据面异常退出」会顺带

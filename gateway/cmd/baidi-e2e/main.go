@@ -67,7 +67,10 @@ func main() {
 	if err != nil {
 		die("登录请求失败: %v", err)
 	}
-	var lr struct{ Ok bool; Token string }
+	var lr struct {
+		Ok    bool
+		Token string
+	}
 	json.NewDecoder(resp.Body).Decode(&lr)
 	resp.Body.Close()
 	if !lr.Ok || lr.Token == "" {

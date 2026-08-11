@@ -68,7 +68,11 @@ type Server struct {
 	// ★业务告警走的是**同一批通道、另一条路径**（api/alerts.go 的 notifyAlert 同步发）：
 	// 告警评估跑在后台循环里没人等，同步换来"这一条发出去没有"当场可知；
 	// 而这里的消费方在登录主流程上，必须异步。两条路径共用 sendVia 与通道配置。
-	notices  *notify.Dispatcher
+	notices *notify.Dispatcher
+	// nat 地址转换策略与网关网卡台账（PRD 第 18 章）。独立接口、按需断言：
+	// 纯 Memory 后端（未连库的降级演示栈）拿不到它，端点如实回 503 而不是空列表——
+	// 空列表会让「没配 NAT 策略」与「这个后端根本不支持 NAT」长得一模一样。
+	nat      store.NATStore
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -187,6 +191,9 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		ls = v
 	}
 	s.lockout = lockout.New(ls)
+	if v, ok := wr.(store.NATStore); ok {
+		s.nat = v
+	}
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
@@ -394,6 +401,11 @@ func (s *Server) Routes() http.Handler {
 	// IPSec VPN 组网：站点清单（配置 + 网关实测运行态）+ CRUD + 启停意图 + PSK 只写不读
 	// ★数据面侧的三个 ipsec 端点只挂 mTLS 监听（见 MTLSHandler），明文口没有它们——
 	// PSK 原文在 :8090 上不存在任何形态的出口。
+	// 地址转换（PRD 第 18 章）。读=任意管理员现算角色，写=PermSystem（见 nat.go 文件头）。
+	mux.HandleFunc("GET /api/v1/nat", s.handleNAT)
+	mux.HandleFunc("POST /api/v1/nat/policies", s.handleSaveNATPolicy)
+	mux.HandleFunc("DELETE /api/v1/nat/policies/{id}", s.handleDeleteNATPolicy)
+	mux.HandleFunc("PUT /api/v1/nat/ifaces/{gw}/{name}", s.handleSetIfaceType)
 	mux.HandleFunc("GET /api/v1/ipsec", s.handleIpsec)
 	mux.HandleFunc("POST /api/v1/ipsec", s.handleSaveIpsec)               // 新增/改站点（admin）
 	mux.HandleFunc("DELETE /api/v1/ipsec/{id}", s.handleDeleteIpsec)      // 删站点（admin）
@@ -1004,6 +1016,11 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// （旧版本），与「上报了但一项都没采到」（非 nil 但各项为 nil）必须分得开——
 		// 前者去升级网关，后者去查这台机器为什么读不到 /proc。
 		Metrics *gwMetrics `json:"metrics"`
+		// Ifaces 网关实测枚举的网卡清单（地址转换选接口用）。★同样是指针：
+		// nil（字段缺席，旧网关）必须**保留**库里已有的记录，而空数组才表示
+		// 「这台网关真的一张可用网卡都没有」。混为一谈的话，升级前的旧网关
+		// 每次心跳都会把网卡表连同管理员定的 LAN/WAN 定性一起清空。
+		Ifaces *[]gwIface `json:"ifaces"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -1033,6 +1050,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	// 设备状态落时序表（缺字段的旧网关在这里是空操作，双向兼容）。
 	// 落库失败只记日志：指标是观测通道，不该让一次写库抖动把网关判成离线。
 	s.recordGatewayMetrics(r, id, b.Metrics)
+	s.recordGatewayIfaces(r, id, b.Ifaces)
 
 	// 数据面回执逐条落审计：category=dataplane，行为人=网关自身。措辞只转述网关报告的
 	// 既成事实（「网关 X 报告：…」），控制面不在此替网关下任何断言——审计失实是大忌。
@@ -1157,7 +1175,33 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"resources": gwRes, "revoked": revoked})
+	// 地址转换策略：只下发**这台网关**启用中的那几条（NAT 是设备本地能力，
+	// 各网关网卡名与拓扑都不同，一条规则被所有网关领走会灌出一堆不匹配的规则）。
+	// 网关拿到后编译成 nft/pf 灌内核；它不知道「哪个网段该上网」，只执行算好的结果。
+	// 取不到时下发空数组而不是省略字段：省略会让新网关误以为「控制面还不支持 NAT」
+	// 从而保留上一轮的旧规则，而空数组的语义是明确的「本网关当前无 NAT 策略」。
+	natOut := []store.NATPolicy{}
+	if s.nat != nil {
+		if all, err := s.nat.NATPolicies(r.Context()); err == nil {
+			natOut = store.NATForGateway(all, gatewayIDFrom(r))
+		} else {
+			slog.Error("下发 NAT 策略失败，本轮按空集下发", "err", err.Error())
+		}
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"resources": gwRes, "revoked": revoked, "nat": natOut})
+}
+
+// gatewayIDFrom 取本次请求的网关身份。mTLS 侧是客户端证书 CN，明文兼容侧退回
+// 令牌主体——两条路都拿不到就返回空串，NATForGateway 会因此下发空集（fail-closed：
+// 认不出是哪台网关时，宁可不下发规则，也不能把别人的 NAT 规则灌进这台机器）。
+func gatewayIDFrom(r *http.Request) string {
+	if r.TLS != nil && len(r.TLS.PeerCertificates) > 0 {
+		return r.TLS.PeerCertificates[0].Subject.CommonName
+	}
+	if c, ok := auth.FromContext(r.Context()); ok {
+		return c.Sub
+	}
+	return ""
 }
 
 // GatewayDetail 网关清单条目：注册信息 + 该网关上报的活跃会话明细（就近处置/审计用）。

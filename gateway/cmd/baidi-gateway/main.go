@@ -18,6 +18,7 @@ import (
 	"math/big"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -27,6 +28,7 @@ import (
 	"baidi.dev/gateway/internal/cplane"
 	"baidi.dev/gateway/internal/darkfw"
 	"baidi.dev/gateway/internal/gmcert"
+	"baidi.dev/gateway/internal/natfw"
 	"baidi.dev/gateway/internal/proxy"
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/spa"
@@ -65,6 +67,11 @@ func main() {
 		"是否接受旧的 HS256 共享密钥令牌（阶段4 起默认 false）；=true 为过渡逃生舱，会让持共享密钥者可伪造令牌")
 	statDisk := flag.String("stat-disk", env("BAIDI_GW_STAT_DISK", "/"),
 		"设备状态里量哪个挂载点的磁盘水位（随心跳上报控制面；采不到的指标报「不可判定」而非 0）")
+	natOn := flag.Bool("nat", envBool("BAIDI_GW_NAT", false),
+		"启用地址转换（PRD 第 18 章）：把控制面下发的 SNAT/DNAT 策略灌进内核 nft/pf。需 root。"+
+			"★启用后命中 NAT 的流量绕过 SPA 隐身，且网关以路由设备形态工作")
+	natDry := flag.Bool("nat-dryrun", false,
+		"只生成 NAT 规则集并打印，不灌内核（无 root 时核对规则用）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -154,6 +161,7 @@ func main() {
 		// Register 里调一次——CPU 与吞吐是差分指标，采样节奏必须与上报节奏一致。
 		// 首次心跳里这两项必然缺席（还没有第二个采样点），控制面按不可判定落 NULL。
 		cp.SetMetrics(sysstat.New(*statDisk).Sample)
+		cp.SetIfaces(sysstat.Ifaces) // 网卡清单随心跳上报，供控制面配置地址转换时选接口
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
 		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关
 		// 本地时钟快于控制面时会把 until 判过期而返回 false，若据此 continue 会连撤窗/断隧道
@@ -199,6 +207,57 @@ func main() {
 				cp.QueueEvent("policy-applied", fmt.Sprintf("资源授权策略已生效：资源数 %d→%d", before, after))
 			}
 		}
+		// 地址转换（PRD 第 18 章）。规则由控制面策略编译而来，网关不做任何推导。
+		//
+		// ★排除项由**网关自己**填：控制面不知道本机隧道/敲门监听在哪个端口，
+		// 而这两个端口上的流量若被 SNAT 改写源地址，回包就找不到发起方——
+		// 症状是「配完 NAT 零信任就断了」，两件事之间没有任何线索。
+		var natApp *natfw.Applier
+		if *natOn || *natDry {
+			natApp = natfw.New(natfw.Exempt{
+				TunnelPort: portOf(*proxyAddr),
+				SPAPort:    portOf(*spaAddr),
+			})
+			natApp.DryRun = *natDry
+			if *natDry {
+				slog.Warn("NAT 处于 dry-run：只生成规则集不灌内核")
+			} else if !natApp.Available() {
+				// 不静默退化：配了 -nat 却没有内核后端，规则一条都不会生效，
+				// 而管理台上策略是「已启用」的——这正是最难自证的失效形态。
+				log.Fatal("拒绝启动：-nat 需要内核防火墙后端（Linux 的 nft 或 macOS 的 pfctl），均未找到")
+			} else {
+				if err := natfw.EnableForwarding(); err != nil {
+					// 转发关着的话规则全部正确但一个包都过不去，同样没有报错。
+					slog.Error("打开内核 IP 转发失败：NAT 规则会全部正确但一个包都不通", "err", err.Error())
+				}
+				if on, known := natfw.ForwardingEnabled(); known && !on {
+					slog.Error("内核 IP 转发仍处于关闭状态，NAT 不会生效")
+				}
+			}
+			slog.Info("地址转换已启用", "backend", natApp.Backend(), "dryrun", *natDry,
+				"exempt_tunnel", portOf(*proxyAddr), "exempt_spa", portOf(*spaAddr))
+			defer natApp.Flush() //nolint:errcheck // 退出即清规则，别把 NAT 留在内核里
+		}
+		// applyNAT 把本轮下发的策略灌进内核。控制面**没下发** nat 字段（旧控制面）时
+		// 保持现状不动——把「缺字段」读成「清空」会在升级控制面的瞬间抹掉生产 NAT 规则。
+		applyNAT := func() {
+			if natApp == nil {
+				return
+			}
+			ps, present := cp.NATPolicies()
+			if !present {
+				return
+			}
+			changed, err := natApp.Apply(ps)
+			if err != nil {
+				slog.Error("地址转换规则灌入内核失败（保留上一版规则，下轮重试）", "err", err.Error())
+				return
+			}
+			if changed {
+				slog.Info("地址转换规则已更新", "policies", len(ps))
+				cp.QueueEvent("nat-applied", fmt.Sprintf("地址转换规则已灌入内核：%d 条策略生效", len(ps)))
+			}
+		}
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
@@ -207,6 +266,7 @@ func main() {
 		} else {
 			applyPolicy(rs)
 			applyRevoked(rv)
+			applyNAT()
 			slog.Info("控制面策略已拉取", "control", *control, "count", reg.Count())
 		}
 		go func() {
@@ -217,6 +277,7 @@ func main() {
 				if rs, rv, err := cp.Policy(); err == nil {
 					applyPolicy(rs)
 					applyRevoked(rv)
+					applyNAT()
 				} else {
 					slog.Warn("轮询拉策略失败（保留上次策略）", "err", err.Error())
 				}
@@ -326,4 +387,18 @@ func mustSelfSigned() tls.Certificate {
 		log.Fatal(err)
 	}
 	return cert
+}
+
+// portOf 从监听地址（":18443" / "0.0.0.0:18443"）里取端口号；取不到回 0。
+// NAT 的排除规则要按端口写，而端口只有本进程知道（控制面不下发监听地址）。
+func portOf(addr string) int {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return 0
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return 0
+	}
+	return n
 }

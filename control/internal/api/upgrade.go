@@ -53,8 +53,10 @@ func upgradeBoundaries() []string {
 		"源 PRD 里的版本链（2.1.1→2.1.5→2.1.12）、包格式（.run/.ssu/.bin）、" +
 			"后台账号与默认口令是源产品的实现事实，白帝没有那段历史，故未照搬。" +
 			"强制跳跃链路机制保留，版本号由管理员在下方规则里自行配置。",
-		"集群升级编排（先备后主 / 拆集群逐台）未实现：白帝当前是单机形态，" +
-			"集群本身就没有部署，编排一个不存在的拓扑没有意义。",
+		"集群升级编排（先备后主 / 拆集群逐台）未实现：白帝控制面没有双活形态，" +
+			"只有温备（备机周期拉加密备份、不提供服务，见系统管理→集群）。" +
+			"温备节点上没有需要升级的服务端进程——它只跑 baidi-standby，" +
+			"换版本就是重跑一次部署脚本；编排一个不存在的多活拓扑没有意义。",
 	}
 }
 
@@ -382,15 +384,22 @@ func (s *Server) backupSources() ([]upgrade.BackupSource, error) {
 	}
 	add("baidi.db", p.DBPath())
 	add("pki", os.Getenv("BAIDI_PKI_DIR"))
-	if k := os.Getenv("BAIDI_JWT_KEY"); k != "" {
-		add(filepath.Base(k), k)
-		add(filepath.Base(k)+".pub", k+".pub")
+	// 三把签名私钥都要进备份。**web 那把此前漏了**：恢复后 control 会重新生成一把，
+	// 而各网关 L7 监听装的还是旧的 web.pub —— 七层 Web 代理整体失效，
+	// 症状是所有 B/S 应用点开都验不过票，而隧道路径一切正常（最难往"备份缺了个文件"上想）。
+	for _, envKey := range []string{"BAIDI_JWT_KEY", "BAIDI_JWT_KNOCK_KEY", "BAIDI_JWT_WEB_KEY"} {
+		if k := os.Getenv(envKey); k != "" {
+			add(filepath.Base(k), k)
+			add(filepath.Base(k)+".pub", k+".pub")
+		}
 	}
-	if k := os.Getenv("BAIDI_JWT_KNOCK_KEY"); k != "" {
-		add(filepath.Base(k), k)
-		add(filepath.Base(k)+".pub", k+".pub")
+	// ★审计链密钥问 store 要真正在用的那份，不读环境变量。
+	// 该变量默认为空（默认路径由 OpenSQLite 按库文件目录推导），照旧写法的后果是
+	// **标准部署的备份里根本没有这把密钥**，恢复后全链校验永久失败。
+	type auditKeyPather interface{ AuditKeyPath() string }
+	if k, ok := s.store.(auditKeyPather); ok {
+		add("audit-hmac.key", k.AuditKeyPath())
 	}
-	add("audit-hmac.key", os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE"))
 	return out, nil
 }
 

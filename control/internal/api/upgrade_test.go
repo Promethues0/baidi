@@ -4,10 +4,13 @@ import (
 	"bytes"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/upgrade"
 )
 
@@ -209,4 +212,67 @@ func keysOf(m map[string][]byte) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// TestBackupContainsAuditChainKeyAndSigningKeys 备份必须含审计链密钥与**三把**签名私钥。
+//
+// 回归背景（温备落地时发现）：
+//   - 审计链 HMAC 密钥原先按 `os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE")` 收集，而该变量
+//     **默认为空**（默认路径由 OpenSQLite 按库文件目录推导），于是标准部署导出的备份里
+//     根本没有它。恢复后 control 重新生成一把新的 → **全链校验永久失败**：
+//     审计数据都在、每一条都验不过，且只在有人点「审计链校验」的那天才发现。
+//   - BAIDI_JWT_WEB_KEY 那把（七层 Web 代理票据）整个漏掉了。恢复后 control 重生成，
+//     而各网关 L7 监听装的还是旧的 web.pub → 所有 B/S 应用点开都验不过票，
+//     而隧道路径一切正常（最难往"备份缺了个文件"上想的一种失效）。
+//
+// 现在：库/审计密钥问 store 要真正在用的那份，三把签名私钥逐一收集。
+func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
+	dir := t.TempDir()
+	// 三把签名密钥各造一份（内容不重要，测的是"有没有被收进备份"）
+	for _, k := range []struct{ env, name string }{
+		{"BAIDI_JWT_KEY", "jwt-ed25519.pem"},
+		{"BAIDI_JWT_KNOCK_KEY", "jwt-ed25519-knock.pem"},
+		{"BAIDI_JWT_WEB_KEY", "jwt-ed25519-web.pem"},
+	} {
+		p := filepath.Join(dir, k.name)
+		if err := os.WriteFile(p, []byte("-----BEGIN PRIVATE KEY-----\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p+".pub", []byte("-----BEGIN PUBLIC KEY-----\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv(k.env, p)
+	}
+	// ★刻意**不设** BAIDI_AUDIT_HMAC_KEY_FILE：这正是出问题的那种标准部署。
+	st, err := store.OpenSQLite(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, false)
+	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+
+	req := httptest.NewRequest("POST", "/api/v1/upgrade/backup",
+		strings.NewReader(`{"passphrase":"correct-horse-battery"}`))
+	req.Header.Set("Authorization", "Bearer "+adminToken())
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("备份应成功，实际 %d %s", rec.Code, rec.Body.String())
+	}
+	_, files, err := upgrade.OpenBackup(rec.Body.Bytes(), "correct-horse-battery")
+	if err != nil {
+		t.Fatalf("解开备份: %v", err)
+	}
+	for _, want := range []string{
+		"baidi.db", "audit-hmac.key",
+		"jwt-ed25519.pem", "jwt-ed25519-knock.pem", "jwt-ed25519-web.pem",
+		"jwt-ed25519-web.pem.pub",
+	} {
+		if _, ok := files[want]; !ok {
+			t.Errorf("备份里缺 %s（恢复出来的系统会以一种没人看得出的方式坏掉）；实际：%v",
+				want, keysOf(files))
+		}
+	}
 }

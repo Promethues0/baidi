@@ -19,11 +19,19 @@
 # ── 许可（必须遵守，不是形式）─────────────────────────────────────────────
 # Wintun 的「Prebuilt Binaries License」默认禁止再分发，但第 3(d) 条留了一条例外：
 # 随「只经 Permitted API 使用本软件的其他软件」一同分发是允许的。baidi-tun 的 Go 绑定
-# 只调用 wintun.h 导出的函数，落在这条例外里，**随白帝客户端分发是合法的**。附带义务三条：
-#   (a) 不得改动 DLL —— 本脚本从官方 zip 原样解出，不做任何加工（连改名都没有）；
-#   (b) 第 3(c) 条不得移除版权声明 —— 故 LICENSE.txt 一并解出并**必须随安装包分发**；
-#   (c) 第 3(e) 条不得用 WireGuard / Wintun 的名号为本产品背书 —— UI/文案里只做事实陈述
+# 只调用 wintun.h 导出的函数，落在这条例外里，**随白帝客户端分发是合法的**。附带义务两条：
+#   (a) 不得改动 DLL、不得从中剥掉版权注记 —— 出处是第 3 条 a/b/c 三项（a 禁 modify，
+#       b 禁衍生作品且只放行"仅使用 wintun.h 的 API 接口"，c 禁 remove any proprietary
+#       notices *from the Software*）。执行方是同一件事：本脚本从官方 zip **原样解出**，
+#       不改名、不加壳、不重签。
+#   (b) 不得用 WireGuard / Wintun 的名号为本产品背书 —— 第 3 条 e 项。UI/文案里只做事实陈述
 #       （「Windows 用 Wintun 建虚拟网卡」「到 wintun.net 取 DLL」），不得写成合作/认证/推荐。
+#
+# ★LICENSE.txt 随包附上是**我们自愿**的做法，许可原文并未要求：§1 把 "Software" 定义为
+#   wintun.dll 的精确内容，3(c) 管的是"不得从那个二进制里移除版权注记"，通篇没有
+#   "必须附带许可文件"这一条。仍然要附，是因为收到包的人应当能读到约束这份 DLL 的条款。
+#   但**不许把它写成许可的硬性要求**——那等于替第三方许可作一个原文没有的事实陈述，
+#   而这句话会随安装包发到用户手里（README-windows.txt）。
 #
 # ── 产物落位（本脚本只负责取件与暂存）───────────────────────────────────────
 #   binaries/wintun/LICENSE.txt                          ← 许可原文，随包分发
@@ -213,9 +221,24 @@ else
     echo "==> 下载 $WINTUN_URL"
     TMP="$(mktemp "${TMPDIR:-/tmp}/wintun-dl.XXXXXX")"
     if command -v curl >/dev/null 2>&1; then
-      curl -fsSL --proto '=https' --tlsv1.2 -o "$TMP" "$WINTUN_URL"
+      # ★两个 --proto* 缺一不可：`--proto '=https'` 只约束**首个** URL。少了
+      #   `--proto-redir '=https'`，一个 30x 跳到 http:// 的响应会被 -L 老老实实跟过去，
+      #   整包明文取回。哈希校验兜得住投毒（结果是构建失败），但这道纵深是零成本的，
+      #   而且少了它，文档里「下载地址只有 https 这一条」与实际可达的协议就不相等了。
+      curl -fsSL --proto '=https' --proto-redir '=https' --tlsv1.2 -o "$TMP" "$WINTUN_URL"
     elif command -v wget >/dev/null 2>&1; then
-      wget -q --https-only -O "$TMP" "$WINTUN_URL"
+      # ★wget 没有 --proto-redir 这种东西，而 `--https-only` 按 man 页**只在递归模式生效**——
+      #   非递归下它管不住重定向，写了只是看着安心。所以这条路径改成**直接禁止重定向**：
+      #   实测（2026-08-12）该 URL 是 200、零跳转，禁掉不影响正常取件；哪天上游真改成
+      #   跳转，会当场报错而不是安静地降级成明文 http。
+      if ! wget -q --https-only --max-redirect=0 -O "$TMP" "$WINTUN_URL"; then
+        cat >&2 <<'EOF'
+✗ wget 取件失败。若是因为上游改成了 30x 跳转：wget 无法约束跳转之后的协议
+  （--https-only 只在递归模式生效），所以这里刻意不允许它跟随重定向。
+  处理办法：改用 curl（它有 --proto-redir '=https'），或在别处下好后用 BAIDI_WINTUN_ZIP 指过来。
+EOF
+        exit 1
+      fi
     else
       echo "✗ 既没有 curl 也没有 wget，无法下载。可先在别处下好，再用 BAIDI_WINTUN_ZIP 指过来。" >&2
       exit 1
@@ -234,10 +257,10 @@ fi
 
 mkdir -p "$STAGE_DIR"
 
-# 许可原文：第 3(c) 条的硬性义务，必须随包分发。它和 DLL 一起解，就不会出现
-# 「DLL 更新了、许可还是旧版本」或者「打包时漏了它」。
+# 许可原文：我们自愿随包附上（不是许可条款的要求，出处见顶部注释）。它和 DLL 一起解，
+# 就不会出现「DLL 更新了、许可还是旧版本」或者「打包时漏了它」。
 extract_member "$ZIP" "wintun/LICENSE.txt" "$STAGE_DIR/LICENSE.txt"
-echo "==> 许可：$STAGE_DIR/LICENSE.txt（$(file_bytes "$STAGE_DIR/LICENSE.txt") 字节，必须随安装包分发）"
+echo "==> 许可：$STAGE_DIR/LICENSE.txt（$(file_bytes "$STAGE_DIR/LICENSE.txt") 字节，随安装包一起附上）"
 
 echo "==> DLL（从官方 zip 原样解出，不做任何加工）"
 for a in "${ARCHES[@]}"; do

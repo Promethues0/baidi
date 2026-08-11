@@ -1,6 +1,11 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "bundle": {
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine"
+      }
+    },
     "resources": {
       "binaries/wintun/wintun.dll": "",
       "binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt"

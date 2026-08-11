@@ -12,7 +12,11 @@
 #   - Linux   ：包能出，数据面代码（tun + pkexec 提权）**未实机验证**。
 #   - Windows ：包能出且**自带 wintun.dll**（baidi-tun 建虚拟网卡要它）。DLL 不入库，
 #               构建期从官方取件 + SHA-256 强校验（fetch-wintun.sh），随包分发的依据是
-#               Wintun 预编译许可第 3(d) 条的例外，许可原文一并装进包里。
+#               Wintun 预编译许可第 3(d) 条的例外；许可原文一并装进包里 —— 那是我们自愿的，
+#               许可原文并未要求随包附带（别在别处把它写成许可的硬性要求）。
+#               安装器是 **perMachine**（装 Program Files、需管理员）：缺省的 currentUser
+#               会把随后被 UAC 提权加载的 wintun.dll / baidi-tun.exe 放进用户可写目录。
+#               产物**未签名**（没有证书），Windows 侧没有第二道完整性兜底。
 #               装完之后仍**只是"应该能用"**：UAC 提权、建卡、NRPT 分离式 DNS 全部
 #               **未在真实 Windows 上跑过**，产物照旧打 UNVERIFIED 标记并附说明，
 #               **刻意不进下载中心 manifest**。
@@ -173,8 +177,9 @@ jobs:
           $stage = 'clients/desktop/src-tauri/binaries/wintun'
           foreach ($f in @('wintun.dll', 'LICENSE.txt')) {
             if (-not (Test-Path "$stage/$f")) {
-              # 许可缺席不是小事：Wintun 预编译许可第 3(c) 条要求不得移除版权声明，
-              # 少了它这个包就不该被分发。故与 DLL 同档，一起当硬失败。
+              # 许可缺席不是小事：不是因为 Wintun 的许可强制附带（它没有这一条 ——
+              # 3(c) 管的是"不得从 DLL 里剥掉版权注记"），而是因为**我们对外说了会附**
+              # （README-windows.txt、BUILD.md）。说过的话要有执行方，故与 DLL 同档当硬失败。
               Write-Host "✗ 缺 $stage/$f（fetch-wintun.sh 没跑成？）"
               Get-ChildItem -Recurse $stage -ErrorAction SilentlyContinue | Out-Host
               exit 1
@@ -265,6 +270,19 @@ jobs:
           }
           Write-Host "→ NSIS 脚本：$($nsi.FullName)"
           $txt = Get-Content -Raw -LiteralPath $nsi.FullName
+          # ★安装模式：必须是 perMachine。缺省的 currentUser 会把整个安装目录放进
+          #   %LOCALAPPDATA%（用户可写），而 wintun.dll 与 baidi-tun.exe 随后被 UAC 提权加载/执行 ——
+          #   任何一个中完整性级别的进程替换掉那份 DLL 就是管理员代码执行。构建期的 SHA-256
+          #   钉扎只覆盖构建机上那个 zip，覆盖不到用户机上装好的那一份。
+          #   判据取 tauri NSIS 模板里那行字面量（perMachine 时它同时生成
+          #   RequestExecutionLevel admin 与 $PROGRAMFILES64 落点），配置里写没写与真生成出什么是两回事。
+          if ($txt -notmatch '(?m)^!define INSTALLMODE "perMachine"\s*$') {
+            $mode = [regex]::Match($txt, '(?m)^!define INSTALLMODE "(.*)"').Groups[1].Value
+            Write-Host "✗ NSIS 安装模式是 '$mode'，必须是 perMachine —— 否则装进用户可写目录，"
+            Write-Host "  而里面的 wintun.dll / baidi-tun.exe 会被提权加载。改 tauri.windows.conf.json 的 bundle.windows.nsis.installMode。"
+            exit 1
+          }
+          Write-Host "  ✓ NSIS installMode=perMachine（装进 Program Files，需管理员）"
           $m = [regex]::Match($txt, '(?ms)^Section Install\b.*?^SectionEnd')
           if (-not $m.Success) { Write-Host "✗ installer.nsi 里找不到 Section Install"; exit 1 }
           $sec = $m.Value
@@ -303,7 +321,7 @@ jobs:
           $lic = Get-ChildItem -Path $dest -Recurse -Filter 'wintun-LICENSE.txt' | Select-Object -First 1
           if (-not $dll) { Write-Host "✗ msi 里没有 wintun.dll"; $fail = $true }
           if (-not $tun) { Write-Host "✗ msi 里没有 baidi-tun.exe"; $fail = $true }
-          if (-not $lic) { Write-Host "✗ msi 里没有 wintun-LICENSE.txt（许可必须随包分发）"; $fail = $true }
+          if (-not $lic) { Write-Host "✗ msi 里没有 wintun-LICENSE.txt（我们承诺许可原文随包附上）"; $fail = $true }
           if ($fail) { Get-ChildItem -Recurse $dest | Select-Object FullName | Out-Host; exit 1 }
           if ($dll.DirectoryName -ne $tun.DirectoryName) {
             Write-Host "✗ msi 里 wintun.dll 与 baidi-tun.exe 不同目录 —— 装完点「接入」会失败："
@@ -427,8 +445,17 @@ jobs:
             就放在 baidi-tun.exe 同目录（wintun 用 LoadLibraryEx 只看「进程自身 exe 目录」
             与 %SystemRoot%\System32 两处：不看 PATH，不看当前目录）。
             该 DLL 不入本仓库，构建期从官方 https://www.wintun.net/ 取件并逐字节校验
-            SHA-256；许可原文见同目录 wintun-LICENSE.txt（Wintun 预编译许可要求随包分发）。
+            SHA-256；许可原文见同目录 wintun-LICENSE.txt —— 那是我们主动附上的，
+            Wintun 的预编译许可原文并未要求随包附带（它要求的是不得改动 DLL、不得从中
+            剥掉版权注记），附上只是为了让拿到这个包的人能读到约束该 DLL 的条款。
             白帝与 WireGuard LLC 无任何关联，本产品未获其背书。
+
+          安装位置：安装器装进 Program Files（需要管理员），不装进 %LOCALAPPDATA%。
+            这不是习惯问题——wintun.dll 与 baidi-tun.exe 随后会被 UAC 提权、以管理员身份
+            加载和执行，把它们放在一个当前用户就能改写的目录里，等于给任何一个普通权限的
+            进程留了一条提权路径。另请注意：**本包没有代码签名**（我们没有证书），
+            Windows 会弹 SmartScreen 警告，也没有第二道兜底能替你验证包的完整性 ——
+            请只从可信渠道取包，并自行核对下面的构建溯源。
 
           但请仍按「未验证代码」对待——**没有任何一台真实 Windows 上跑通过**：
             1) UAC 提权路径（Start-Process -Verb RunAs）；

@@ -1402,16 +1402,264 @@ mod tests {
             Some(""),
             "目的地必须是空串——那是 Tauri 里「放到安装根目录、保留原文件名」的唯一写法：{res}"
         );
-        // 许可必须随包分发（Wintun 预编译许可第 3(c) 条），改名是为了不与本产品的许可混淆。
+        // 许可原文随包附上（我们自愿的做法，不是许可条款的硬性要求——出处见下面那条测试），
+        // 改名是为了不与本产品的许可混淆。
         assert_eq!(
             res["binaries/wintun/LICENSE.txt"].as_str(),
             Some("wintun-LICENSE.txt"),
-            "许可原文必须随包分发：{res}"
+            "许可原文要随包附上：{res}"
         );
         // 源路径要与取件脚本的暂存位一致（那边改了这边不改 = 构建期 ResourcePathNotFound）。
         assert!(
             include_str!("../fetch-wintun.sh").contains(r#"STAGE_DIR="$HERE/binaries/wintun""#),
             "取件脚本的暂存目录变了，打包配置要跟着改"
+        );
+    }
+
+    /// ★NSIS 的默认安装模式（tauri-utils `NSISInstallerMode` 的 `#[default]`）是 `currentUser`，
+    /// 文档原文就是「装进一个不需要管理员权限的目录」——落点是 `$LOCALAPPDATA\<产品名>`。
+    ///
+    /// 对别的应用这只是个偏好，对白帝是**提权链上的一个洞**：装完之后
+    ///   `<安装目录>\wintun.dll` 与 `<安装目录>\baidi-tun.exe` 都是**当前用户可写**的，
+    /// 而这两个文件随后会被 UAC 提权、以管理员身份加载/执行（wintun 的加载规则只看
+    /// 进程自身 exe 目录与 System32，见 `wintun_search_paths`）。于是任何一个中完整性级别的
+    /// 进程——用户自己跑的脚本、普通权限的恶意软件——只要替换掉那份 DLL，就能在用户下次
+    /// 点「接入」时拿到管理员代码执行。取件脚本那道 SHA-256 钉扎只覆盖**构建机上的 zip**，
+    /// 覆盖不到用户机上装好的那一份；`preflight_start` 也只查存在性与 PE machine 码，
+    /// 一个同架构的恶意 DLL 两项都过。
+    ///
+    /// `perMachine` 让 NSIS 生成 `RequestExecutionLevel admin` + 默认落点
+    /// `$PROGRAMFILES64\<产品名>`（模板 `installer.nsi` 的 `!if "${INSTALLMODE}" == "perMachine"`
+    /// 两处分支），把「写这个目录」抬回到与「以管理员运行」同一道门槛之上——
+    /// 与 MSI（WiX 侧本来就是 perMachine）也终于是同一套安全姿态。
+    ///
+    /// 仍**不能**声称因此就安全了：产物没有代码签名（配置里既无 `certificateThumbprint`
+    /// 也无 `signCommand`，我们没有证书），NSIS 也允许用户在安装向导里把目录改到一个可写位置。
+    /// 这条断言只保证默认路径不再是一个用户可写目录，别把它读成完整性校验。
+    #[test]
+    fn nsis_安装器不得默认装进用户可写目录() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.windows.conf.json")).expect("配置得是合法 JSON");
+        let mode = conf["bundle"]["windows"]["nsis"]["installMode"].as_str();
+        assert_eq!(
+            mode,
+            Some("perMachine"),
+            "NSIS installMode 必须显式写成 perMachine —— 缺省（currentUser）会把 wintun.dll \
+             与 baidi-tun.exe 装进 %LOCALAPPDATA%，而它们随后被 UAC 提权加载。实际读到：{mode:?}"
+        );
+    }
+
+    /// ★这条守的不是代码，是**我们替第三方许可作的事实陈述**。
+    ///
+    /// 回归背景：四处文案（`fetch-wintun.sh`、`clients/BUILD.md` 的义务表、CI 注释，以及
+    /// 最要紧的 —— 随 UNVERIFIED 包下发给用户的 `README-windows.txt`）都把「必须随包分发
+    /// LICENSE.txt」援引到 Wintun 预编译许可第 3 条 c 项。而 3(c) 原文是
+    /// "remove any proprietary notices, labels, or copyrights **from the Software**"，
+    /// §1 又把 "Software" 定义为 `wintun.dll` 的精确内容 —— 它管的是"不得从那个二进制里
+    /// 剥掉注记"，通篇没有"必须附带许可文件"这一条。
+    ///
+    /// 随包附许可本身是好做法（也确实有执行方），错的是「出处」栏：对着用户说一条许可里
+    /// 没有的义务，比漏附许可更难被发现，也更难自证。所以这里两头都钉：
+    ///   - 不许再出现把「随包分发」写成硬性要求的措辞；
+    ///   - 必须留着那句自陈（"许可原文并未要求"）—— 删掉它就等于悄悄退回旧说法。
+    #[test]
+    fn 许可义务的出处不许张冠李戴() {
+        let 源 = [
+            ("fetch-wintun.sh", include_str!("../fetch-wintun.sh")),
+            ("clients/BUILD.md", include_str!("../../../BUILD.md")),
+            (
+                ".github/workflows/clients.yml",
+                include_str!("../../../../.github/workflows/clients.yml"),
+            ),
+            ("verify-wintun-stage.sh", include_str!("../verify-wintun-stage.sh")),
+        ];
+        for (名, 文) in 源 {
+            for 错措辞 in ["必须随安装包分发", "许可必须随包分发", "许可要求随包分发"] {
+                assert!(
+                    !文.contains(错措辞),
+                    "{名} 里出现「{错措辞}」—— Wintun 许可没有这一条义务，别替它作原文没有的陈述"
+                );
+            }
+        }
+        for (名, 文) in &源[..3] {
+            assert!(
+                文.contains("许可原文并未要求"),
+                "{名} 必须留着「随包附许可是我们自愿、许可原文并未要求」这句自陈"
+            );
+        }
+        // 用户手里那份说明（README-windows.txt 由 CI 写出）是这条错误陈述影响面最大的地方，单独钉一次。
+        assert!(
+            源[2].1.contains("预编译许可原文并未要求随包附带"),
+            "README-windows.txt 的文案必须照实说：许可原文没有要求随包附带"
+        );
+    }
+
+    // ── wintun 暂存区复核（verify-wintun-stage.sh 的执行方就是它自己，这里跑真脚本）──
+    //
+    // ★为什么用真脚本而不是在 Rust 里再实现一遍判定：这条守卫的价值全在"打包那一步真的跑了它"。
+    //   在 Rust 里复刻一份逻辑，测的是复刻件，而复刻件不参与构建——正是本项目一再避免的
+    //   「第二个真相来源」。脚本本身刻意做成纯参数化（--triple / --stage），好让 mac 上
+    //   构造出 Windows 才会出现的错配场景。
+
+    fn 造暂存区(名: &str, 文件: &[(&str, &[u8])]) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("baidi-wintun-stage-{}-{}", std::process::id(), 名));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        for (rel, body) in 文件 {
+            let p = d.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, body).unwrap();
+        }
+        d
+    }
+
+    fn 跑暂存区复核(stage: &std::path::Path, triple: &str) -> (bool, String) {
+        let o = std::process::Command::new("bash")
+            .arg(concat!(env!("CARGO_MANIFEST_DIR"), "/verify-wintun-stage.sh"))
+            .args(["--triple", triple, "--stage", &stage.to_string_lossy()])
+            .output()
+            .unwrap();
+        let mut s = String::from_utf8_lossy(&o.stdout).into_owned();
+        s.push_str(&String::from_utf8_lossy(&o.stderr));
+        let _ = std::fs::remove_dir_all(stage);
+        (o.status.success(), s)
+    }
+
+    fn 有_bash() -> bool {
+        std::process::Command::new("bash").arg("-c").arg("true").output().is_ok()
+    }
+
+    /// 齐整的暂存区（DLL / 许可 / .triple 三者齐全且自洽）必须放行——先把"正常也能过"钉住，
+    /// 否则下面几条拒绝用例可能只是因为脚本永远失败。
+    #[test]
+    fn wintun_暂存区_齐整时放行() {
+        if !有_bash() {
+            return;
+        }
+        let dll = 造_pe(PE_MACHINE_AMD64);
+        let d = 造暂存区(
+            "ok",
+            &[
+                ("wintun.dll", &dll),
+                ("x86_64-pc-windows-msvc/wintun.dll", &dll),
+                ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n"),
+                ("LICENSE.txt", b"Prebuilt Binaries License"),
+            ],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
+        assert!(ok, "齐整的暂存区不该被拦：{out}");
+    }
+
+    /// ★这条是 `wintun.dll.triple` 存在的全部理由。
+    ///
+    /// 回归背景：那个文件此前**只写不读**——全仓没有任何消费方。于是"固定位那份 DLL 是哪个
+    /// 架构"这条信息没有执行方，等于没记。实测本机暂存区当时就处在这个状态：`.triple` 写着
+    /// aarch64，两个架构目录却都在（先跑了 `--arch all`、又单跑过一次别的架构）。
+    /// 在 Windows amd64 打包机上，这会把 arm64 的 DLL 打进 x64 包，而**构建全程零报错**，
+    /// 要到用户点「接入」那一刻才由 `preflight_start` 报出来。
+    #[test]
+    fn wintun_暂存区_架构错配必须在打包前拦下() {
+        if !有_bash() {
+            return;
+        }
+        let d = 造暂存区(
+            "mismatch",
+            &[
+                ("wintun.dll", &造_pe(PE_MACHINE_ARM64)),
+                ("wintun.dll.triple", b"aarch64-pc-windows-msvc\n"),
+                ("LICENSE.txt", b"Prebuilt Binaries License"),
+            ],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
+        assert!(!ok, "arm64 的 DLL 配 x64 的包必须拦下：{out}");
+        assert!(out.contains("aarch64-pc-windows-msvc"), "要报出暂存区里那份是什么：{out}");
+        assert!(out.contains("x86_64-pc-windows-msvc"), "也要报出本次目标是什么：{out}");
+    }
+
+    /// 只有 DLL、没有 `.triple`：那份是手工放进去的，"它是哪个架构"没人能替你回答。
+    /// 放行等于把这道守卫退化成"文件在不在"，与修复前完全同形。
+    #[test]
+    fn wintun_暂存区_没有架构记录不许放行() {
+        if !有_bash() {
+            return;
+        }
+        let d = 造暂存区(
+            "no-triple",
+            &[
+                ("wintun.dll", &造_pe(PE_MACHINE_AMD64)),
+                ("LICENSE.txt", b"Prebuilt Binaries License"),
+            ],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
+        assert!(!ok, "缺 wintun.dll.triple 必须拒绝：{out}");
+        assert!(out.contains("wintun.dll.triple"), "{out}");
+    }
+
+    /// `.triple` 是取件脚本自报的，只信它等于只信一句话。分架构目录那份是从官方 zip 原样解出的，
+    /// 拿它做交叉印证：两者对不上说明固定位在取件之后被换过——这正是"构建期哈希钉扎覆盖不到"的那一段。
+    #[test]
+    fn wintun_暂存区_固定位被换过要拦下() {
+        if !有_bash() {
+            return;
+        }
+        let d = 造暂存区(
+            "tampered",
+            &[
+                ("wintun.dll", b"\x4d\x5a\xde\xad\xbe\xef"),
+                ("x86_64-pc-windows-msvc/wintun.dll", &造_pe(PE_MACHINE_AMD64)),
+                ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n"),
+                ("LICENSE.txt", b"Prebuilt Binaries License"),
+            ],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
+        assert!(!ok, "固定位与按架构解出的那份不一致必须拦下：{out}");
+    }
+
+    /// 许可原文随包附上是我们**对外说过**的话（README-windows.txt / BUILD.md）。
+    /// 它不是 Wintun 许可的硬性要求，但既然说了，就得有执行方——少了它，发出去的包与说明不符。
+    #[test]
+    fn wintun_暂存区_缺许可原文要拦下() {
+        if !有_bash() {
+            return;
+        }
+        let dll = 造_pe(PE_MACHINE_AMD64);
+        let d = 造暂存区(
+            "no-license",
+            &[("wintun.dll", &dll), ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n")],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
+        assert!(!ok, "缺许可原文必须拒绝：{out}");
+        assert!(out.contains("LICENSE.txt"), "{out}");
+    }
+
+    /// 非 Windows 目标上这套暂存区根本不存在，复核必须安静跳过——否则 mac/Linux 的
+    /// `tauri build` 会被 `beforeBundleCommand` 一律挡住。
+    #[test]
+    fn wintun_暂存区_非_windows_目标跳过复核() {
+        if !有_bash() {
+            return;
+        }
+        let d = 造暂存区("skip", &[]);
+        let (ok, out) = 跑暂存区复核(&d, "aarch64-apple-darwin");
+        assert!(ok, "非 Windows 目标不该被拦：{out}");
+    }
+
+    /// 守卫得真的被调用才算数：一处在 `build-sidecars.sh`（取完件立刻复核），
+    /// 一处在 `tauri.conf.json` 的 `beforeBundleCommand`（打包前最后一道，覆盖
+    /// "build-sidecars 之后又有人手工跑过 fetch-wintun.sh" 那个缺口）。
+    /// 两处都删掉的话，这个脚本就退回成第二个"只写不读"的文件。
+    #[test]
+    fn 打包链上必须真的调用暂存区复核() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("配置得是合法 JSON");
+        let hook = conf["build"]["beforeBundleCommand"].as_str().unwrap_or_default();
+        assert!(
+            hook.contains("verify-wintun-stage.sh"),
+            "beforeBundleCommand 必须跑一次暂存区复核，实际是：{hook:?}"
+        );
+        assert!(
+            include_str!("../build-sidecars.sh").contains("verify-wintun-stage.sh"),
+            "build-sidecars.sh 取完 wintun 之后必须复核一次"
         );
     }
 

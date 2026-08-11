@@ -777,9 +777,21 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   把 DLL 与 `wintun-LICENSE.txt` 装进安装根目录 —— 也就是 `baidi-tun.exe` 旁边，
   那是 `LoadLibraryEx(APPLICATION_DIR|SYSTEM32)` 唯一会看的两处之一。
   分发依据是 Wintun 预编译许可第 3(d) 条那句例外（随「只经 Permitted API 使用它的软件」
-  一同分发），义务（不改 DLL / 许可随包 / 不借其名号背书）逐条有执行方，见
-  [clients/BUILD.md 第四节](../clients/BUILD.md)。
-- **提权链与落位有单测顶着**（`cargo test` 60 条全绿，`elevate.rs` 占 37 条）。Windows 那批是
+  一同分发），义务两条（**不改 DLL / 不从中剥版权注记**＝3(a)(b)(c)、**不借其名号背书**＝3(e)）
+  逐条有执行方，见 [clients/BUILD.md 第四节](../clients/BUILD.md)。
+  **随包附 `LICENSE.txt` 是我们自愿的做法，许可原文并未要求**（3(c) 管的是"不得从 DLL 这个
+  二进制里移除版权注记"，不是"必须附带许可文件"）—— 既然对外说了会附，就有执行方顶着：
+  `verify-wintun-stage.sh` 打包前查在不在、CI 打包后查进没进包。
+- **安装器装进需要管理员的目录**（`bundle.windows.nsis.installMode = perMachine`）。
+  Tauri 的缺省是 `currentUser` → `%LOCALAPPDATA%\<产品名>`，那是**当前用户可写**的目录，
+  而 `wintun.dll` 与 `baidi-tun.exe` 随后要被 UAC 提权、以管理员身份加载和执行：
+  任何一个中完整性级别的进程替换掉那份 DLL（同架构即可，`preflight_start` 只查存在性与
+  PE machine 码），就能在用户下次点「接入」时拿到管理员代码执行。构建期那道 SHA-256 钉扎
+  只覆盖**构建机上的 zip**，覆盖不到用户机上装好的那一份。改成 perMachine 后落点是
+  `$PROGRAMFILES64\<产品名>`、安装器 `RequestExecutionLevel admin`，与 MSI（WiX 本就 perMachine）
+  终于同一套姿态。守卫两道：Rust 单测钉住配置、CI 断言**生成出来的** `installer.nsi` 里
+  `!define INSTALLMODE "perMachine"`。
+- **提权链与落位有单测顶着**（`cargo test` 69 条全绿，`elevate.rs` 占 46 条）。Windows 那批是
   逐字断言，因为它们只在 Windows 上执行、在 mac 上永远走不到：launcher 必须是 `-NoNewWindow`
   而不能与 `-WindowStyle Hidden` 混用（PowerShell 5.1 下混用等于数据面 100% 起不来）、
   UAC 退出码必须经 `exit $p.ExitCode` 回传、参数按 `CommandLineToArgvW` 规则转义、
@@ -789,7 +801,14 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   绝对路径）、架构对不对（读 PE 头 machine 码），三态 —— 对→放行、错→当场拒并说清是架构问题、
   **读不出/认不出→放行**（不可判定不塌缩成不合规，与 posture 同一条纪律）。
 - **CI 有落位断言**：打包前验 DLL/许可齐全且 PE machine 与 runner 三元组一致；打包后解析生成的
-  `installer.nsi`、并用 `msiexec /a` 摊开 MSI，断言 `wintun.dll` 与 `baidi-tun.exe` 父目录同一。
+  `installer.nsi`（同时断言 `!define INSTALLMODE "perMachine"`）、并用 `msiexec /a` 摊开 MSI，
+  断言 `wintun.dll` 与 `baidi-tun.exe` 父目录同一。
+- **暂存区架构错配在打包前就被拦**（`verify-wintun-stage.sh`）：取件脚本把「固定位那份 DLL 是
+  哪个架构」写进 `wintun.dll.triple`，该文件此前**只写不读**、没有执行方 —— 于是"排障时手工跑过
+  一次 `fetch-wintun.sh`"就足以让 arm64 的 DLL 进 x64 包，而构建全程零报错。现在
+  `build-sidecars.sh`（取完即查）与 `tauri.conf.json` 的 `beforeBundleCommand`（打包前最后一道，
+  覆盖"build-sidecars 之后又有人手工取件"）两处都读它，并与按架构分放的那份逐字节比对。
+  脚本参数化成 `--triple/--stage`，六条 Rust 用例在 mac 上真跑它构造出 Windows 才会有的错配场景。
 
 **不能声称**：
 
@@ -802,6 +821,13 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 - **提权执行层是 PowerShell `Start-Process -Verb RunAs`，不是 `ShellExecuteW`**。选它是为了不引
   Windows 专属 crate、让构造逻辑在 mac 上可测；代价是多一层 PowerShell 的行为差异（执行策略、
   引号、编码），而这一层恰恰只能在真机上验。
+- **产物没有代码签名，安装后也没有任何完整性校验**。`tauri.conf.json` 里既没有
+  `certificateThumbprint` 也没有 `signCommand` —— 我们没有代码签名证书，这不是忘了配。
+  后果要说全：Windows 会弹 SmartScreen；`fetch-wintun.sh` 那道 SHA-256 钉扎是**构建期**的，
+  只证明构建机上那个 zip 是官方那一份，**证明不了用户机上装好的 `wintun.dll` 还是它**；
+  `preflight_start` 也只查存在性与 PE machine 码，一个同架构的恶意 DLL 两项都过。
+  改成 perMachine 是把「改写那个目录」抬到管理员门槛之上，**不是**完整性校验 ——
+  而且 NSIS 允许用户在安装向导里把目录改到一个可写位置，那条路仍然敞着。
 - **posture 采集的 Windows 分支同样未实机**（见上一节），**网关侧 Windows 的系统指标五项全部
   不可判定**（见后面「网关设备状态采集」一节）—— 三处的 Windows 支持都停在同一道线上。
 - 因此 **CI 产物标 `UNVERIFIED`，刻意不进下载中心 manifest**。下载页的 Windows 占位文案照实说

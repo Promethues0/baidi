@@ -7,6 +7,7 @@
     "beforeDevCommand": "npm run dev",
     "devUrl": "http://localhost:5294",
     "beforeBuildCommand": "npm run build",
+    "beforeBundleCommand": "bash src-tauri/verify-wintun-stage.sh",
     "frontendDist": "../dist"
   },
   "app": {

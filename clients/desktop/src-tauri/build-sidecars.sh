@@ -42,6 +42,12 @@ chmod +x "$HERE/binaries/"*
 if [ "$GOOS" = "windows" ]; then
   echo "==> 取 wintun.dll（$GOARCH，官方 zip + 哈希强校验）"
   "$HERE/fetch-wintun.sh" --arch "$GOARCH"
+  # ★取完立刻复核一次固定位的架构。看着像多余（上一行刚按 GOARCH 取的），但它拦的是
+  #   "暂存区在此之前被手工动过"：取件脚本只在**单一架构**时才写固定位，别的路径
+  #   （比如先跑过一次 --arch all）会留下与本次目标对不上的残留。判据是 wintun.dll.triple
+  #   —— 那个文件此前只写不读，这里是它的第一个消费方。打包前还会再跑一次，
+  #   见 tauri.conf.json 的 beforeBundleCommand。
+  "$HERE/verify-wintun-stage.sh" --triple "$TRIPLE"
 fi
 
 # macOS 上顺带产出另一 darwin 架构，供 universal 打包（Tauri 按 <name>-<triple> 查找）

@@ -146,13 +146,20 @@ transfer / sublicense。但同一项留了一条例外，原文（英文）是�
 `baidi-tun` 的 Go 绑定只调用 `wintun.h` 导出的函数（即 Permitted API），DLL 也只随白帝客户端
 一同分发、不单独提供 —— 落在这条例外里，**分发是合法的，不需要另外去要书面许可**。
 
-附带义务三条，每条都有执行方（不是写在文档里就算数）：
+附带义务两条，每条都有执行方（不是写在文档里就算数）：
 
 | 义务 | 出处 | 执行方 |
 |---|---|---|
-| 不得改动 DLL | 例外以「原样随附」为前提 | `fetch-wintun.sh` 从官方 zip **原样解出**：不改名、不加壳、不重签 |
-| 不得移除版权声明 | 第 3 条 c 项 | `LICENSE.txt` 与 DLL **同一步**解出（不会出现"DLL 换了、许可还是旧的"），打包成 `wintun-LICENSE.txt`；CI 打包前查它在不在、打包后查它进没进安装包 |
+| 不得改动 DLL、不得从中剥掉版权注记 | 第 3 条 a 项（禁 modify）、b 项（禁衍生作品，只放行"仅用 `wintun.h` 的 API 接口"）、c 项（禁 remove any proprietary notices **from the Software**） | `fetch-wintun.sh` 从官方 zip **原样解出**：不改名、不加壳、不重签 |
 | 不得借 WireGuard / Wintun 的名号背书本产品 | 第 3 条 e 项 | 文案只做事实陈述（「Windows 用 Wintun 建虚拟网卡」「到 wintun.net 取 DLL」），不写成合作 / 认证 / 推荐 |
+
+★**「随包附上 `LICENSE.txt`」是我们自愿的做法，许可原文并未要求**。这一栏此前把它援引到
+第 3 条 c 项，是错的：§1 把 "Software" 定义为 `wintun.dll` 的精确内容，3(c) 管的是
+「不得从那个二进制里移除版权注记」，通篇没有「必须附带许可文件」这一条。
+仍然要附，理由是收到包的人应当能读到约束这份 DLL 的条款；但**不许把它写成许可的硬性要求** ——
+那是替第三方许可作一个原文没有的事实陈述，而这句话会随 UNVERIFIED 包发到用户手里
+（`README-windows.txt`）。既然对外说了要附，就得有执行方：`verify-wintun-stage.sh` 在打包前
+查它在不在，CI 打包后查它进没进安装包。
 
 ### 哈希从哪儿来
 
@@ -229,6 +236,62 @@ CI 不满足于"查过源码"：Windows 作业在打包后**真的**校验一遍
 `installer.nsi`，并用 `msiexec /a` 把 MSI 摊开，断言 `wintun.dll` 与 `baidi-tun.exe`
 的父目录是同一个（见 `.github/workflows/clients.yml`）。
 
+### 装到哪去：必须是需要管理员的目录（`installMode = perMachine`）
+
+同一份配置里还有一行不能少：
+
+```json
+"windows": { "nsis": { "installMode": "perMachine" } }
+```
+
+Tauri 的 NSIS 缺省是 **`currentUser`**（`tauri-utils` 里 `NSISInstallerMode` 的 `#[default]`，
+文档原文就是「装进一个不需要管理员权限的目录」），落点是 `%LOCALAPPDATA%\<产品名>`。
+对别的应用这只是个偏好，对白帝是**提权链上的一个洞**：
+
+> 装完之后 `<安装目录>\wintun.dll` 与 `<安装目录>\baidi-tun.exe` 都是**当前用户可写**的，
+> 而这两个文件随后会被 UAC 提权、以管理员身份加载和执行。任何一个中完整性级别的进程
+> —— 用户自己跑的脚本、一个普通权限的恶意程序 —— 只要把 DLL 换成同架构的恶意 PE，
+> 就能在用户下次点「接入」时拿到**管理员代码执行**。`preflight_start` 只查存在性与
+> PE machine 码，这两项它都过；`fetch-wintun.sh` 的 SHA-256 钉扎是**构建期**的，
+> 只管构建机上那个 zip，管不到用户机上装好的那一份。
+
+`perMachine` 让 NSIS 生成 `RequestExecutionLevel admin` + 默认落点 `$PROGRAMFILES64\<产品名>`
+（模板 `installer.nsi` 的 `!if "${INSTALLMODE}" == "perMachine"` 两处分支），把「改写这个目录」
+抬回到与「以管理员运行」同一道门槛之上 —— 也与 MSI 对齐（WiX 那侧本来就是 perMachine，
+两个安装器此前是两种安全姿态）。代价是安装本身需要管理员，这对一个必须以管理员跑数据面的
+客户端是合理的。
+
+守卫两道：`elevate.rs` 的单测钉住配置里写了 `perMachine`；CI 断言**生成出来的**
+`installer.nsi` 里有 `!define INSTALLMODE "perMachine"`（配置里写没写与真生成出什么是两回事）。
+
+**别把它读成完整性校验**：产物没有代码签名（见第六节），NSIS 也允许用户在安装向导里
+把目录改到一个可写位置 —— 这一步只保证**默认路径**不再是用户可写目录。
+
+### 暂存区架构复核：`verify-wintun-stage.sh`
+
+`fetch-wintun.sh --arch <a>` 在把 DLL 复制到固定位 `binaries/wintun/wintun.dll` 时，
+会把「它是哪个架构」写进旁边的 `wintun.dll.triple`。那个文件一度**只写不读** —— 全仓没有
+消费方，于是这条信息没有执行方，等于没记。它兜的失败形态是：
+
+> 有人在打包机上手工跑过 `./fetch-wintun.sh`（排障时先 `--arch all`、又单跑了一次别的架构），
+> 而不是经 `build-sidecars.sh` 按 GOARCH 调用。此时两个架构目录都在，固定位躺的却是另一份。
+> 接下来 tauri build 不报错、包打得出、装得上、DLL 也确实在 `baidi-tun.exe` 旁边 ——
+> 只有用户点「接入」那一刻才炸。
+
+现在它有两个消费方：`build-sidecars.sh` 取完件立刻复核一次，`tauri.conf.json` 的
+`beforeBundleCommand` 在打包前再复核一次（后者覆盖「build-sidecars 跑完之后又有人手工取件」
+这个缺口）。复核内容：DLL / 许可 / `.triple` 三者齐全、`.triple` 的架构与本次目标一致、
+固定位那份与按架构分放的那份**逐字节相同**（`.triple` 是脚本自报的，拿原样解出的那份交叉印证）。
+目标不是 Windows 时安静跳过。
+
+脚本刻意参数化成 `--triple` / `--stage`，好让 mac 上的 `cargo test` 真跑它、构造出只会在
+Windows 打包机上出现的错配场景（六条用例，见 `elevate.rs`）。这条守卫与 CI 那道
+（自己重解 PE 头比对 rustc 三元组）判据来源不同，两者对不上就说明暂存区被手工动过。
+
+> `beforeBundleCommand` 是 `bash src-tauri/verify-wintun-stage.sh` —— 打包机上要有 bash
+> （Windows 上即 Git Bash；`build-sidecars.sh` 本来就要它）。没有的话打包会直接失败，
+> 这是刻意的 fail-closed 方向：宁可打不出包，不要打出一个架构对不上的包。
+
 ### 万一还是没放对：客户端要能自证
 
 `src-tauri/src/elevate.rs` 的 `preflight_start` 在**弹 UAC 之前**就把话说完，绝不先让用户
@@ -260,6 +323,13 @@ Windows 上跑过** —— 包里组件齐了不等于跑得通，产物照旧�
 macOS 的 dmg **未签名未公证**，首次打开需右键「打开」或 `xattr -dr com.apple.quarantine`；
 Windows 包**未签名**，会触发 SmartScreen。CI 里没有配置任何签名密钥，也没有留放密钥的口子 ——
 要做签名分发，先想清楚密钥托管在哪，别顺手往仓库 Secrets 里塞。
+
+Windows 这边要把后果说全：`tauri.conf.json` 里既没有 `certificateThumbprint` 也没有
+`signCommand`（没证书，不是忘了配），于是**装完之后没有任何一道完整性校验**能替用户
+判断 `wintun.dll` / `baidi-tun.exe` 还是不是我们发出去的那一份 —— 而它们会被以管理员身份
+加载执行。`installMode=perMachine`（第四节）把安装目录抬到管理员门槛之上，是目前唯一
+真正起作用的缓解；签名是那道缺失的兜底。别在下载页或 README 里用"经过校验"之类的说法
+把构建期的哈希钉扎说成运行期的保护，两者覆盖的根本不是同一段路。
 
 ## 七、这份流水线的验证状态
 

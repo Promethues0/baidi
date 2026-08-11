@@ -50,8 +50,12 @@ const (
 
 // Config 数据面运行参数。
 type Config struct {
-	SpaAddr    string            // 网关 SPA 敲门 host:port
-	ProxyAddr  string            // 网关隧道代理 host:port
+	// Endpoints 网关落点清单，**顺序即优先级**，由控制面接入剖面下发（见 failover.go）。
+	// 空 = 退回下面的单落点三件套（SpaAddr/ProxyAddr/TunnelPin），移动端绑定与手工
+	// 起的 baidi-tun 走这条路；非空时三件套不再被读取。
+	Endpoints  []Endpoint
+	SpaAddr    string            // 网关 SPA 敲门 host:port（单落点入口）
+	ProxyAddr  string            // 网关隧道代理 host:port（单落点入口）
 	Token      string            // baidi-control 签发的会话 JWT
 	Control    string            // baidi-control 地址（必填）：敲门令牌的唯一合规来源
 	Gm         bool              // 隧道用国密 TLCP
@@ -97,6 +101,10 @@ func Run(dev tun.Device, cfg *Config) error {
 	if cfg.Reknock <= 0 {
 		cfg.Reknock = 15 * time.Second
 	}
+	eps := cfg.endpoints()
+	if err := validateEndpoints(eps); err != nil {
+		return err
+	}
 
 	// 解析器 VIP 先解析出来：配错了要在起栈之前就失败，而不是起来之后静默没有 DNS。
 	// "配了 -dns-listen 却没生效"和"没配"在日志里看起来一模一样，必须早失败。
@@ -121,7 +129,7 @@ func Run(dev tun.Device, cfg *Config) error {
 		{Destination: header.IPv6EmptySubnet, NIC: 1},
 	})
 
-	t := &tunneler{cfg: cfg, deny: make(chan error, 1)}
+	t := newTunneler(cfg)
 	fwd := tcp.NewForwarder(s, 0, 2048, func(r *tcp.ForwarderRequest) {
 		id := r.ID()
 		dst := net.JoinHostPort(id.LocalAddress.String(), strconv.Itoa(int(id.LocalPort)))
@@ -184,7 +192,14 @@ func Run(dev tun.Device, cfg *Config) error {
 		return false // 交回协议栈 → ICMP 端口不可达，让应用快速失败而不是干等
 	})
 
-	slog.Info("数据面就绪：TUN→netstack→隧道", "proxy", cfg.ProxyAddr, "gm", cfg.Gm)
+	_, first := t.pick.current()
+	slog.Info("数据面就绪：TUN→netstack→隧道", "proxy", first.ProxyAddr, "gm", cfg.Gm)
+	t.pick.logCurrent("网关落点已选定", false)
+	if len(eps) == 1 {
+		// 单落点 = 没有容灾余量。这台网关一挂就是整机断网，说清楚好过让人以为
+		// "客户端支持多活"这件事在这次接入里也生效了。
+		slog.Info("只有一个网关落点：无故障转移余量（控制面只下发了这一个落点）")
+	}
 	if resolver != nil {
 		slog.Info("隧道内 DNS 就绪（只作答不转发，未知域名回 REFUSED）",
 			"listen", net.JoinHostPort(cfg.DNSListen, strconv.Itoa(dnsPort)), "records", len(resolver.records))
@@ -234,38 +249,75 @@ func Run(dev tun.Device, cfg *Config) error {
 
 type tunneler struct {
 	cfg      *Config
+	pick     *picker    // 网关落点选择器（多活 + 故障转移，见 failover.go）
 	deny     chan error // control 定性拒绝（403：强制下线/账号禁用）单次上报，供 Run 停机
 	denyOnce sync.Once
 }
 
-// knock 发一次 SPA 敲门：向 control 换取短时效一次性令牌（use=knock），换不到就不敲。
+// newTunneler 是构造 tunneler 的**唯一**入口：落点选择器必须随之建好。
+// 直接用结构体字面量构造的话，漏掉 pick 会在第一次敲门/拨号时空指针崩溃，
+// 而那是运行期才出现的路径（编译期一点提示都没有）。
+func newTunneler(cfg *Config) *tunneler {
+	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1)}
+}
+
+// knock 向**全部**落点各发一次 SPA 敲门：逐个向 control 换取短时效一次性令牌
+// （use=knock），换不到就不敲那一个。
+//
+// ★为什么每轮都敲全部落点，而不是只敲当前那个：网关对未敲门者是隐身的，一个没被敲过
+// 的落点在故障转移那一刻只会给出一次拨号超时——"有备用落点"就退化成"多等 5 秒再失败"。
+// 保活成本是每轮 N 次取令牌 + N 个 UDP 包（N = 落点数，通常 2~3），换来的是切换即通。
+//
+// ★为什么逐落点各取一张令牌，而不是取一张发给所有网关：jti 去重是**每台网关各自**做的，
+// 同一个封包发两处等于让它在第二台那里仍然可用一次——链路上截获它的人就能拿去
+// 给**自己的源 IP** 开一扇窗。一次性语义只有在"一张令牌只出现在一条链路上"时才成立。
 //
 // ★绝不回退会话令牌：网关 strict 模式只认 control 签发的敲门令牌，回退包必被丢弃，
 // 只会制造"日志显示已敲门、实际窗口到期即断"的假象。控制面不可达时窗口自然过期
 // 是 fail-closed 的正确姿态——零信任下失去策略源就该收窗，而不是拿长效令牌硬撑。
-// 遇 control 定性拒绝（ErrDenied）向 deny 通道上报一次，让 Run 停机并带出原因。
+// 遇 control 定性拒绝（ErrDenied）向 deny 通道上报一次，让 Run 停机并带出原因：
+// 那是**账号级**判定（强制下线/账号禁用/终端不合规），与落点无关，换一台也一样被拒。
+// ★逐落点**并发**敲：取令牌的 HTTP 超时是 5s，串行的话 N 个落点最坏要 N×5s，
+// 而整轮保活必须显著小于网关的放行窗口（默认 30s）——否则一次 control 慢响应就会
+// 让所有落点的窗口一起过期，症状是"隧道每隔一会儿断一下"，且落点越多越容易复现。
+// 定性拒绝经 denyOnce 上报，并发安全。
 func (t *tunneler) knock() {
+	var wg sync.WaitGroup
+	for _, ep := range t.pick.all() {
+		wg.Add(1)
+		go func(ep Endpoint) {
+			defer wg.Done()
+			t.knockOne(ep)
+		}(ep)
+	}
+	wg.Wait()
+}
+
+// knockOne 敲一个落点。返回 true 表示遇到了控制面的定性拒绝（**账号级**判定，与落点无关）。
+func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
 	tok, err := knock.FetchToken(t.cfg.Control, t.cfg.Token, t.cfg.Device)
 	switch {
 	case err == nil:
 	case errors.Is(err, knock.ErrDenied):
 		t.denyOnce.Do(func() { t.deny <- err })
-		return
+		return true
 	default:
 		// 瞬时错误：本轮不敲门，等下一次 reknock 重试（间隔须显著小于网关 SPA 放行 TTL，
 		// 否则 control 抖动会直接关窗——这是 fail-closed 的代价，须靠 reknock 频度补偿）。
-		slog.Warn("取短时效敲门令牌失败，本轮放弃敲门（等待下轮 reknock 重试）", "err", err.Error())
-		return
+		slog.Warn("取短时效敲门令牌失败，本轮放弃敲门（等待下轮 reknock 重试）",
+			"gateway", ep.Label(), "err", err.Error())
+		return false
 	}
-	uc, err := net.Dial("udp", t.cfg.SpaAddr)
+	uc, err := net.Dial("udp", ep.SPAAddr)
 	if err != nil {
-		slog.Warn("SPA 拨号失败", "err", err.Error())
-		return
+		slog.Warn("SPA 拨号失败", "gateway", ep.Label(), "err", err.Error())
+		return false
 	}
 	defer uc.Close()
 	if sealed, e := knock.Seal(tok); e == nil {
 		_, _ = uc.Write(sealed)
 	}
+	return false
 }
 
 // tunnel 把一条被 TUN 捕获的 TCP 流，经 SPA 敲门后拨入网关隧道并双向拷贝。
@@ -273,14 +325,7 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 	defer local.Close()
 	c := t.cfg
 
-	var remote net.Conn
-	var err error
-	d := &net.Dialer{Timeout: 5 * time.Second}
-	if c.Gm {
-		remote, err = tlcp.DialWithDialer(d, "tcp", c.ProxyAddr, c.TLCPConfig)
-	} else {
-		remote, err = tls.DialWithDialer(d, "tcp", c.ProxyAddr, tlsClientConfig(c.TunnelPin))
-	}
+	remote, ep, err := t.dialTunnel(dst)
 	if err != nil {
 		slog.Warn("隧道拨号失败（未敲门成功/网关隐身?）", "dst", dst, "err", err.Error())
 		return
@@ -293,9 +338,57 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 	if rid != "" {
 		_, _ = remote.Write([]byte("CONNECT " + rid + "\n"))
 	}
-	slog.Info("引流 · 经隧道转发", "captured_dst", dst, "resource", rid, "via", c.ProxyAddr, "gm", c.Gm)
+	slog.Info("引流 · 经隧道转发", "captured_dst", dst, "resource", rid, "via", ep.ProxyAddr, "gm", c.Gm)
 	go func() { _, _ = io.Copy(remote, local) }()
 	_, _ = io.Copy(local, remote)
+}
+
+// dialTunnel 从当前落点开始按序拨号，第一个拨通的即为新的当前落点。
+//
+// ★顺序不重排、只轮转起点：清单顺序是控制面算好的优先级，终端手里没有任何能推翻它的
+// 材料。轮转起点则让"这台已经死了"这个事实在后续每条流上直接生效——每条流都从头撞一遍
+// 死网关的话，5s 拨号超时会把体验拖成"接入后什么都打不开"，而日志里只有零星几条超时。
+//
+// 全部落点都拨不通时返回**首选落点**那次的错误：那是用户最该看到的原因
+// （后面几台多半只是"没敲上门"的次生现象）。
+func (t *tunneler) dialTunnel(dst string) (net.Conn, Endpoint, error) {
+	start, _ := t.pick.current()
+	eps := t.pick.all()
+	var firstErr error
+	for off := 0; off < len(eps); off++ {
+		i := (start + off) % len(eps)
+		ep := eps[i]
+		conn, err := t.dialEndpoint(ep)
+		if err == nil {
+			if t.pick.promote(i, fmt.Sprintf("上一落点 %s 拨号失败：%v", eps[start].Label(), firstErr)) {
+				// 切换必须让用户知道——桌面客户端接入页从这条日志解析出
+				// 「当前用的是第几落点、为什么切」。静默切换 = "我明明连着但很慢"无从排查。
+				t.pick.logCurrent("网关落点切换", true)
+			}
+			return conn, ep, nil
+		}
+		if firstErr == nil {
+			firstErr = err
+		}
+		if len(eps) > 1 {
+			slog.Warn("网关落点拨号失败，尝试下一个",
+				"gateway", ep.Label(), "addr", ep.ProxyAddr, "dst", dst, "err", err.Error())
+		}
+	}
+	return nil, Endpoint{}, firstErr
+}
+
+// dialEndpoint 按落点自己的信任材料拨一条隧道。
+// ★钉扎指纹取 ep.Pin 而不是 cfg.TunnelPin：指纹是逐网关的，取错的后果是
+// 故障转移后握手必然失败，且症状看起来像"第二台网关也坏了"。
+func (t *tunneler) dialEndpoint(ep Endpoint) (net.Conn, error) {
+	d := &net.Dialer{Timeout: 5 * time.Second}
+	if t.cfg.Gm {
+		// 国密路径走 TLCP 的 CA 链校验，信任材料与指纹钉扎完全不同、不可混用，
+		// 故这里不读 ep.Pin（网关证书由国密 CA 签，客户端认的是那条链）。
+		return tlcp.DialWithDialer(d, "tcp", ep.ProxyAddr, t.cfg.TLCPConfig)
+	}
+	return tls.DialWithDialer(d, "tcp", ep.ProxyAddr, tlsClientConfig(ep.Pin))
 }
 
 // buildResolver 按配置装配隧道内 DNS 解析器，返回解析器与它监听的地址。

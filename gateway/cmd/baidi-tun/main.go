@@ -33,8 +33,13 @@ func main() {
 	// 10.30.5.0/24 的 Git…），只接管单个网段是「隧道通了但点开应用不走隧道」的根因。
 	// 网段清单由控制面接入剖面下发（GET /api/v1/client/profile 的 routes），不该由用户手填。
 	route := flag.String("route", "10.99.0.0/24", "引流进隧道的受保护网段，逗号分隔可多段（如 10.99.0.0/24,10.20.1.10/32）")
-	spaAddr := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址")
-	proxyAddr := flag.String("proxy", "127.0.0.1:18443", "网关隧道代理地址")
+	spaAddr := flag.String("spa", "127.0.0.1:18201", "网关 SPA 敲门地址（单落点；有 -gateways 时被它取代）")
+	proxyAddr := flag.String("proxy", "127.0.0.1:18443", "网关隧道代理地址（单落点；有 -gateways 时被它取代）")
+	// 多落点（网关多活 + 故障转移）：清单由控制面接入剖面的 gateways 段下发，
+	// **顺序即优先级**，客户端按序尝试、失败切下一个。一台网关挂掉不再等于全部终端断。
+	// 与 -resmap/-dns-records 同一套写法（JSON 文件），由桌面客户端落盘后传入。
+	gatewaysPath := flag.String("gateways", "", `网关落点清单 JSON 文件（控制面剖面下发，顺序即优先级）：`+
+		`[{"id":"gw-a","spa":"h:18201","proxy":"h:18443","pin":"<hex>"}]；空=用 -spa/-proxy/-pin 单落点`)
 	token := flag.String("token", "", "baidi-control 签发的 JWT")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP，否则通用 TLS")
 	caDir := flag.String("ca", "certs", "CA 证书目录（国密隧道校验网关证书链）")
@@ -83,6 +88,23 @@ func main() {
 			}
 			tlcpCfg.RootCAs = pool
 		}
+	}
+
+	// ── 网关落点清单 ──
+	// 放在创建 TUN 之前解析：清单填错要在动系统状态之前失败。
+	endpoints, err := loadGateways(*gatewaysPath, *spaAddr, *proxyAddr, *pin)
+	if err != nil {
+		log.Fatalf("网关落点清单不可用: %v", err)
+	}
+	if len(endpoints) == 1 {
+		slog.Info("只有一个网关落点：无故障转移余量", "gateway", endpoints[0].ProxyAddr)
+	} else {
+		labels := make([]string, 0, len(endpoints))
+		for _, e := range endpoints {
+			labels = append(labels, e.Label()+"("+e.ProxyAddr+")")
+		}
+		slog.Info("网关落点清单已装载（顺序即优先级，由控制面剖面下发）",
+			"count", len(endpoints), "order", strings.Join(labels, " → "))
 	}
 
 	resmap := map[string]string{}
@@ -195,9 +217,9 @@ func main() {
 
 	// ④ 跑共享数据面引擎（阻塞）
 	cfg := &dataplane.Config{
-		SpaAddr: *spaAddr, ProxyAddr: *proxyAddr, Token: *token, Control: *control,
+		Endpoints: endpoints, Token: *token, Control: *control,
 		Gm: *gm, TLCPConfig: tlcpCfg, Resmap: resmap, DefaultRes: *defaultRes,
-		Reknock: *reknock, MTU: mtu, TunnelPin: *pin,
+		Reknock: *reknock, MTU: mtu,
 		DNSListen: dnsIP, DNSRecords: records,
 		Device: *device,
 	}

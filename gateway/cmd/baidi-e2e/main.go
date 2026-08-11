@@ -42,14 +42,19 @@ import (
 // PUT /api/v1/devices/settings），第 ④ 步会如实失败——那正是该功能生效的证据。
 const e2eDevice = "FP-E2E-SELFCHECK"
 
+// profileGW 一个网关落点。剖面同时下发单数 `gateway`（旧客户端只读它）与
+// 有序的 `gateways` 清单（新客户端按序尝试、失败切下一个），自检两者都验。
+type profileGW struct {
+	ID, Host, SPAPort, ProxyPort, TunnelPin string
+	Online                                  bool
+}
+
 type profile struct {
-	Gateway struct {
-		Host, SPAPort, ProxyPort, TunnelPin string
-		Online                              bool
-	} `json:"gateway"`
-	Routes []string          `json:"routes"`
-	Resmap map[string]string `json:"resmap"`
-	Apps   []struct {
+	Gateway  profileGW         `json:"gateway"`
+	Gateways []profileGW       `json:"gateways"`
+	Routes   []string          `json:"routes"`
+	Resmap   map[string]string `json:"resmap"`
+	Apps     []struct {
 		Name, VIP, URL, ResourceID, Backend string
 		Accessible                          bool
 	} `json:"apps"`
@@ -94,7 +99,18 @@ func main() {
 	if p.Gateway.TunnelPin == "" {
 		die("剖面未下发隧道证书指纹")
 	}
-	ok("网关 %s:%s，接管 %d 个网段，%d 条资源映射", p.Gateway.Host, p.Gateway.ProxyPort, len(p.Routes), len(p.Resmap))
+	// 多活契约：清单非空，且单数字段恒等于清单首项。
+	// ★单数字段是给**旧客户端**的兼容出口——它一旦缺席或与清单首项不一致，
+	// 存量终端会连到一台与控制面认定不同的网关上，而两侧日志都完全正常。
+	if len(p.Gateways) == 0 {
+		die("剖面未下发网关落点清单（gateways）")
+	}
+	if p.Gateways[0].Host != p.Gateway.Host || p.Gateways[0].ProxyPort != p.Gateway.ProxyPort ||
+		p.Gateways[0].TunnelPin != p.Gateway.TunnelPin {
+		die("单数 gateway 与清单首项不一致：旧客户端会连到另一台网关（%+v vs %+v）", p.Gateway, p.Gateways[0])
+	}
+	ok("网关 %s:%s（落点清单 %d 个，首选 %s），接管 %d 个网段，%d 条资源映射",
+		p.Gateway.Host, p.Gateway.ProxyPort, len(p.Gateways), p.Gateways[0].ID, len(p.Routes), len(p.Resmap))
 
 	fmt.Println("③ 敲门前直连隧道端口（期望失败＝对未授权者隐身）")
 	c, err := net.DialTimeout("tcp", p.Gateway.Host+":"+p.Gateway.ProxyPort, 2*time.Second)

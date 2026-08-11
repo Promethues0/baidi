@@ -27,10 +27,8 @@ func TestKnockSignalsDenyOn403(t *testing.T) {
 	}
 	defer spa.Close()
 
-	tn := &tunneler{
-		cfg:  &Config{Control: control.URL, Token: "sess", SpaAddr: spa.LocalAddr().String()},
-		deny: make(chan error, 1),
-	}
+	tn := newTunneler(&Config{Control: control.URL, Token: "sess",
+		SpaAddr: spa.LocalAddr().String(), ProxyAddr: "127.0.0.1:1"})
 	tn.knock()
 
 	select {
@@ -57,10 +55,8 @@ func TestKnockDenyReportedOnce(t *testing.T) {
 	}))
 	defer control.Close()
 
-	tn := &tunneler{
-		cfg:  &Config{Control: control.URL, Token: "sess", SpaAddr: "127.0.0.1:1"},
-		deny: make(chan error, 1),
-	}
+	tn := newTunneler(&Config{Control: control.URL, Token: "sess",
+		SpaAddr: "127.0.0.1:1", ProxyAddr: "127.0.0.1:1"})
 	done := make(chan struct{})
 	go func() {
 		tn.knock()

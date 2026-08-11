@@ -8,7 +8,7 @@
 | S / 1 | 执行摘要 · 产品概述与定位 | ✅ | 复用；定位收窄为"零信任访问控制系统" |
 | 2 | 安装与部署 | ✅ | 分离式 / AIO 形态复用烛龙引擎；console 无专页 |
 | 3 | 系统架构与总体设计 | ✅ | 控制面/数据面分离原则不变 |
-| 4 | 产品升级管理 | ✅ | 复用（System 诊断/升级相关） |
+| 4 | 产品升级管理 | ➖ | 升级前校验（版本序/禁降级/强制链路/组件一致性/包签名）、加密配置备份、**客户端灰度真跑通**；服务端换二进制仍由部署脚本执行，集群升级编排未做（集群本就没部署） |
 | 5 | 监控中心 | ✅ | `MonitorDashboard` 安全监控大屏 |
 | 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups` |
 | 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver` |
@@ -22,7 +22,7 @@
 | 15 | 系统管理 | ✅ | `SystemCerts/License/RBAC/Logging/Notify/Time/HA/Backup/Report/Diag` |
 | 16 | 审计中心（日志） | ➖ | 写操作实时落库已真（45+ 审计点，admin 门 + XFF 信任边界）；HMAC-SM3 防篡改链（/audit/verify 全链校验）、留存轮转（BAIDI_AUDIT_RETENTION_DAYS，链锚点接续）、CSV 流式导出均已真；**日志外送已真**（RFC 5424 syslog over TCP/TLS + HTTP JSON，持久化队列 + 退避重试 + 队列上界与丢弃计数，外送带 seq/mac 供 SIEM 独立验真；刻意不做 UDP） |
 | 17 | IPSec VPN 组网 | ✅ | `GatewayIpsec` 站点编排（复用烛龙 IPSEC 引擎） |
-| 18 | 地址转换（NAT） | ❌ | SNAT/DNAT/端口映射未实现（仅 IPSec 内建 NAT-T 穿越，属第 17 章能力，不是本章的 NAT） |
+| 18 | 地址转换（NAT） | ✅ | SNAT/DNAT 策略建模 + 校验 + 编译成内核 nft/pf 规则并下发；隧道/敲门流量自动排除、SPA 互斥当面告警。真实报文转换需 root + 多网卡实机，未实测（同 darkfw 边界） |
 | 19 | 典型部署场景 | ✅ | 文档级，后续补 |
 | 20 | 非功能性需求（NFR） | ✅ | 安全/性能/可靠/信创/合规，贯穿 |
 | 21 | 集成、开放能力与数据模型 | ✅ | 认证源 / SSO / 开放平台 API/SDK / 日志外送 |
@@ -30,7 +30,7 @@
 
 ## Console IA（6 中心 + 系统管理，40 页全保留）
 
-> ⚠️ 下面是**规划 IA**（自烛龙沿袭的目标形态），不是现状。实际落地的导航见 `console/src/nav.ts`：4 组 16 页，页名与此处的 `MonitorDashboard/IdentityUsers` 等规划名不一一对应。以代码为准。
+> ⚠️ 下面是**规划 IA**（自烛龙沿袭的目标形态），不是现状。实际落地的导航见 `console/src/nav.ts`：4 组 20 页，页名与此处的 `MonitorDashboard/IdentityUsers` 等规划名不一一对应。以代码为准。
 
 ```
 概览     安全监控大屏 · 运行总览

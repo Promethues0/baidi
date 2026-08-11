@@ -785,6 +785,15 @@ export interface ClientDownload {
   available: boolean;
   arch?: string;
   note?: string;
+  /** 构建溯源：这包出自哪份客户端源码、什么时候构建的（由 build-artifacts.sh 写入）。 */
+  builtAt?: string;
+  sourceCommit?: string;
+  /** 服务端现算：该包所依据的源码之后又被改过（包里不含此后的能力）。 */
+  stale?: boolean;
+  /** 服务端现算：没有溯源信息，**无法判断**新旧——不等于「不过期」。 */
+  provenanceUnknown?: boolean;
+  /** stale / provenanceUnknown 的人话解释，直接展示给用户。 */
+  staleReason?: string;
 }
 export interface DownloadsResp { clients: ClientDownload[] }
 

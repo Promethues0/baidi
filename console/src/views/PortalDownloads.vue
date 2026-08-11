@@ -63,6 +63,19 @@
                   </div>
                 </dl>
                 <p v-if="c.note" class="bd-dtile__note">{{ c.note }}</p>
+                <!-- 构建溯源：包比源码旧 / 无法判断新旧，都必须当面说。
+                     后端算出结论却不显示等于没做——用户拿到的仍是一个看起来正常的旧包。
+                     两种状态用不同颜色区分：过期是确定的坏消息（红），
+                     不可判定是「我们不知道」（黄），不能混成同一句话。 -->
+                <p v-if="c.stale" class="bd-dtile__stale">
+                  <icon-exclamation-circle-fill />{{ c.staleReason }}
+                </p>
+                <p v-else-if="c.provenanceUnknown" class="bd-dtile__unknown">
+                  <icon-question-circle-fill />{{ c.staleReason }}
+                </p>
+                <p v-if="c.builtAt" class="bd-dtile__built">
+                  构建于 {{ fmtBuilt(c.builtAt) }}<template v-if="c.sourceCommit"> · 源码 {{ c.sourceCommit }}</template>
+                </p>
                 <div class="bd-dtile__act">
                   <button class="bd-dtile__btn" @click="download(c)"><icon-download /> 下载</button>
                   <div v-if="c.platform === 'android'" class="bd-qr">
@@ -135,6 +148,13 @@ function fmtSize(n?: number): string {
   if (n >= 1 << 30) return `${(n / (1 << 30)).toFixed(1)} GB`;
   if (n >= 1 << 20) return `${(n / (1 << 20)).toFixed(1)} MB`;
   return `${Math.max(1, Math.round(n / 1024))} KB`;
+}
+
+/** 构建时间按本地时区显示；解析不了就原样回显（绝不显示一个编造的时间）。 */
+function fmtBuilt(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  return isNaN(d.getTime()) ? iso : d.toLocaleString('zh-CN', { hour12: false });
 }
 
 function shortSha(s?: string): string {
@@ -241,6 +261,16 @@ onMounted(load);
 }
 .bd-copybtn:hover { color: var(--bd-primary); }
 .bd-dtile__note { font-size: 12px; color: var(--bd-warning); margin: 0; }
+/* 过期＝确定的坏消息；不可判定＝我们不知道。两者必须一眼能分开，
+   混成同一种样式会让「我们不确定」被读成「有问题」，反之亦然。 */
+.bd-dtile__stale, .bd-dtile__unknown {
+  display: flex; align-items: flex-start; gap: 6px; margin: 8px 0 0;
+  padding: 8px 10px; border-radius: 7px; font-size: 12px; line-height: 1.6;
+}
+.bd-dtile__stale { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
+.bd-dtile__unknown { color: #A8620E; background: #FFF7E8; }
+.bd-dtile__stale svg, .bd-dtile__unknown svg { flex: none; margin-top: 2px; font-size: 13px; }
+.bd-dtile__built { font-size: 11px; color: var(--bd-t3); margin: 6px 0 0; font-family: ui-monospace, monospace; }
 .bd-dtile__act { margin-top: auto; display: flex; align-items: flex-end; justify-content: space-between; gap: 12px; }
 .bd-dtile__btn {
   display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 18px;

@@ -191,3 +191,60 @@ func TestDownloadFileQuoteStripped(t *testing.T) {
 		t.Fatalf("Content-Disposition = %q, 引号未剔除", cd)
 	}
 }
+
+// ── 构建溯源三态（安装包与源码的漂移必须可见）──
+//
+// 回归背景：manifest 此前只有 version+size+sha256，看起来很权威却不说这包出自哪份源码。
+// 真实发生过的形态是安装包停在三周前、客户端源码此后改了 11 次，而页面上
+// available=true、有版本号有校验和，一切正常——用户装下去是个旧客户端。
+// 版本号救不了：源码改了但 package.json 没动，两边看起来还"一致"。
+func TestDownloadProvenanceThreeStates(t *testing.T) {
+	base := downloadsManifest{Clients: []ClientDownload{
+		{Platform: "macos", Available: true, File: "a.dmg", SourceCommit: "abc1234"},
+		{Platform: "android", Available: true, File: "b.apk", SourceCommit: ""},
+		{Platform: "linux", Available: false, Note: "构建中"},
+	}}
+
+	// ① 溯源一致：什么都不提示（正常情况不该打扰人）
+	got := annotateProvenance(clone(base), "abc1234")
+	if got.Clients[0].Stale || got.Clients[0].ProvenanceUnknown || got.Clients[0].StaleReason != "" {
+		t.Errorf("溯源一致时不该有任何提示：%+v", got.Clients[0])
+	}
+
+	// ② 溯源对不上：必须标过期并说清差在哪
+	got = annotateProvenance(clone(base), "def5678")
+	if !got.Clients[0].Stale {
+		t.Fatal("源码已前进，包必须被标为过期")
+	}
+	for _, want := range []string{"abc1234", "def5678"} {
+		if !strings.Contains(got.Clients[0].StaleReason, want) {
+			t.Errorf("过期理由要点明新旧两个版本，缺 %q：%s", want, got.Clients[0].StaleReason)
+		}
+	}
+
+	// ③ 无溯源（老 manifest / 别处构建的包）：报**不可判定**，绝不报 Stale=false。
+	//    报 false 等于替一个我们无从验证的包背书，与 posture「采不到就说不可判定」同纪律。
+	if !got.Clients[1].ProvenanceUnknown || got.Clients[1].Stale {
+		t.Errorf("无溯源应报不可判定而非「不过期」：%+v", got.Clients[1])
+	}
+	if got.Clients[1].StaleReason == "" {
+		t.Error("不可判定也要说清为什么")
+	}
+
+	// 服务端读不到当前源码版本时同样是不可判定，而不是「一切正常」
+	got = annotateProvenance(clone(base), "")
+	if !got.Clients[0].ProvenanceUnknown || got.Clients[0].Stale {
+		t.Errorf("读不到当前源码版本时应不可判定：%+v", got.Clients[0])
+	}
+
+	// 占位条目没有包，谈不上新旧，不该被打扰
+	if got.Clients[2].Stale || got.Clients[2].ProvenanceUnknown {
+		t.Errorf("占位条目不该有溯源结论：%+v", got.Clients[2])
+	}
+}
+
+func clone(m downloadsManifest) downloadsManifest {
+	out := downloadsManifest{Clients: make([]ClientDownload, len(m.Clients))}
+	copy(out.Clients, m.Clients)
+	return out
+}

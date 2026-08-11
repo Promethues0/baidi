@@ -152,6 +152,38 @@
             </a-select>
             <span v-if="!wz.f.resourceId" class="bd-fld__d">不关联资源的应用无法经隧道访问、也无法被 JIT 申请——客户端剖面会对此显式告警。</span>
           </div>
+
+          <!-- 七层 Web 代理（B/S 免客户端）专属：只有 web 模式且已关联资源时才有执行方 -->
+          <template v-if="wz.mode === 'web' && wz.f.resourceId">
+            <div class="bd-fld">
+              <label>内网后端协议</label>
+              <a-select v-model="wz.f.webScheme">
+                <a-option value="http">HTTP</a-option>
+                <a-option value="https">HTTPS（内网应用自带 TLS）</a-option>
+              </a-select>
+              <span class="bd-fld__d">
+                七层代理拨后端时用哪个协议。选错的症状是浏览器上一个空白页而两侧日志都正常，
+                所以这里显式选，不按端口猜。留空保存则按端口推默认（443 / 8443 → HTTPS）。
+              </span>
+            </div>
+            <div class="bd-fld">
+              <label>对外访问域名（可选）</label>
+              <a-input v-model="wz.f.webEntry" placeholder="https://oa.corp.example" class="bd-mono" allow-clear />
+              <span class="bd-fld__d">
+                浏览器该跳到哪个入口。留空 = 用网关自报的七层落点。只填到主机[:端口]，不要带路径；
+                实际路由按 <code>/app/&lt;资源id&gt;/</code> 路径前缀分流，与域名无关。
+              </span>
+            </div>
+            <div class="bd-wz__warn">
+              <icon-exclamation-circle-fill />
+              <div>
+                <b>七层入口不受 SPA 服务隐身保护。</b>
+                浏览器做不了 SPA 敲门，所以该端口必须对浏览器可达——它是一个真实的入站攻击面，
+                与地址转换（NAT）绕过隐身是同性质的取舍。请确认已由前置 HTTPS 暴露，
+                并只对确需 B/S 免客户端的业务开启；C/S 隧道那条路不受影响。
+              </div>
+            </div>
+          </template>
         </div>
 
         <!-- Step 3: 确认发布 -->
@@ -159,6 +191,10 @@
           <div class="bd-wz__summary">
             <b>发布摘要</b>
             <div>{{ modeMeta(wz.mode || 'web').label }} · {{ wz.f.name || '未命名' }} · {{ wz.f.addr || '—' }} · {{ wz.f.resourceId ? `关联资源 ${wz.f.resourceId}` : '未关联资源' }}</div>
+            <div v-if="wz.mode === 'web' && wz.f.resourceId" class="bd-wz__summary-sub">
+              七层代理：后端 {{ wz.f.webScheme.toUpperCase() }} · 入口 {{ wz.f.webEntry || '网关默认落点' }}
+              （这两项会写进资源「{{ wz.f.resourceId }}」）
+            </div>
           </div>
           <div class="bd-wz__note"><icon-info-circle />访问授权在「安全防护 → 资源策略」按资源配置（角色/用户白名单），时限授予走「JIT 即时访问」审批流。</div>
         </div>
@@ -213,13 +249,16 @@ function tagStyle(color: string) { return { color, background: color + '14' }; }
 const STEPS = ['发布模式', '基础配置', '确认发布'];
 const wz = reactive({
   open: false, step: 0, mode: '' as '' | 'tunnel' | 'web' | 'global',
-  f: { name: '', cat: '', addr: '', resourceId: '' }
+  // webScheme/webEntry 只在 web 模式下有执行方，落的是**资源**而不是应用
+  // （七层代理按资源路由与鉴权，同一资源被多个应用引用时不该有两份配置）。
+  f: { name: '', cat: '', addr: '', resourceId: '', webScheme: 'http' as 'http' | 'https', webEntry: '' }
 });
 /** 发布向导可选的分类 = 筛选条去掉合成项 all（它不是真实分类）。 */
 const pickableCats = computed(() => categories.value.filter((c) => c.key !== 'all'));
 function openWizard() {
   wz.open = true; wz.step = 0; wz.mode = '';
   wz.f.name = ''; wz.f.addr = ''; wz.f.resourceId = '';
+  wz.f.webScheme = 'http'; wz.f.webEntry = '';
   // 默认选第一个真实分类。★不再写死 'office'：分类可增删之后，写死一个 key 意味着
   // 管理员删掉它以后每次发布都会 400，而错误来自一个界面上根本没显示的默认值。
   wz.f.cat = pickableCats.value[0]?.key ?? '';
@@ -232,6 +271,13 @@ const canNext = computed(() => {
 });
 const publishing = ref(false);
 const resources = ref<Resource[]>([]);
+// 选中资源时回填它已有的七层配置：不回填的话，发布第二个引用同一资源的应用
+// 会用表单默认值把管理员配好的入口静默覆盖掉。
+watch(() => wz.f.resourceId, (id) => {
+  const r = resources.value.find((x) => x.id === id);
+  wz.f.webScheme = r?.webScheme ?? 'http';
+  wz.f.webEntry = r?.webEntry ?? '';
+});
 async function load() {
   try {
     const b = await api<AppBundle>('/apps');
@@ -250,6 +296,17 @@ async function next() {
   if (wz.step < 2) { wz.step++; return; }
   publishing.value = true;
   try {
+    // web 模式的两项七层配置落在**资源**上，须先保存资源再发布应用：
+    // 顺序反了的话，资源保存失败时应用已经建出来了，而它的入口配置是空的——
+    // 页面上看起来发布成功，浏览器点开却拿不到正确的后端协议。
+    const res = resources.value.find((x) => x.id === wz.f.resourceId);
+    if (wz.mode === 'web' && res && (res.webScheme !== wz.f.webScheme || (res.webEntry ?? '') !== wz.f.webEntry)) {
+      await api('/resources', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        // 整条资源回写（后端是 upsert）：只发改动字段会把 ACL 等未提交的列清空。
+        body: JSON.stringify({ ...res, webScheme: wz.f.webScheme, webEntry: wz.f.webEntry.trim() })
+      });
+    }
     await api('/apps', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name: wz.f.name, addr: wz.f.addr, mode: wz.mode, category: wz.f.cat, resourceId: wz.f.resourceId })
@@ -417,6 +474,14 @@ button.bd-link:focus-visible { outline: 2px solid var(--bd-primary); outline-off
 .bd-wz__body { flex: 1; overflow-y: auto; padding-right: 2px; }
 .bd-wz__hint { font-size: 13px; color: var(--bd-t3); margin-bottom: 14px; }
 .bd-wz__note { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--bd-t3); background: var(--bd-fill-1); border-radius: 8px; padding: 12px 14px; }
+/* 隐身互斥告警：与 NAT 页那条同性质，必须当面说而不是藏进文档 */
+.bd-wz__warn {
+  display: flex; gap: 10px; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2);
+  background: var(--bd-tag-gold-bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;
+}
+.bd-wz__warn > :first-child { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
+.bd-wz__warn b { color: var(--bd-t1); font-weight: 600; }
+.bd-wz__summary-sub { margin-top: 6px; font-size: 12.5px; color: var(--bd-t3); }
 .bd-mode-card { width: 100%; display: flex; align-items: center; gap: 14px; padding: 16px; margin-bottom: 12px; border: 1.5px solid var(--bd-border); border-radius: 10px; background: #fff; cursor: pointer; text-align: left; transition: all .15s; }
 .bd-mode-card:hover { border-color: var(--bd-primary-b); }
 .bd-mode-card.on { border-color: var(--bd-primary); background: var(--bd-primary-1); }

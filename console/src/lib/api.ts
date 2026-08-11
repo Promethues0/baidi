@@ -522,6 +522,17 @@ export interface Resource {
    * low/normal 照常可访问（降权而非全断）。空 = 未标注，后端按 normal 处理。
    */
   sensitivity?: 'low' | 'normal' | 'high';
+  /**
+   * 七层 Web 代理拨内网后端用的协议（store.Resource.WebScheme）。空 = 后端按端口推默认
+   * （443/8443 → https，其余 http）。★它是拨号参数不是策略：猜错的症状是浏览器上一个
+   * 空白页，而两侧日志都正常，所以 Web 应用发布时应显式选。
+   */
+  webScheme?: 'http' | 'https';
+  /**
+   * 对外访问入口基址覆盖（store.Resource.WebEntry），如 https://oa.corp.example。
+   * 空 = 用网关自报的七层落点。只影响控制面发给浏览器的跳转地址，不影响网关路由。
+   */
+  webEntry?: string;
   addrRef?: string; svcRef?: string;
 }
 /**
@@ -715,7 +726,12 @@ export interface PortalTile {
    *  用户该做的是修复终端环境——两种"不可访问"的下一步动作完全不同，必须分开提示。 */
   degraded?: boolean;
 }
-export interface PortalAppsResp { apps: PortalTile[] }
+/** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线）。
+ *  ★门户据此把 Web 磁贴的「访问」按钮置灰并显示原因，而不是让人点了才拿到一个一闪而过的 503。 */
+export interface WebProxyStatus { ready: boolean; note: string }
+export interface PortalAppsResp { apps: PortalTile[]; webProxy?: WebProxyStatus }
+/** POST /portal/web-ticket 的响应：短时效一次性入口 URL（浏览器直接跳过去换会话 Cookie）。 */
+export interface WebTicketResp { url: string; expiresIn: number; resourceId: string }
 
 /* ── JIT 即时访问申请 / 时限授予（store.AccessRequest / store.JitGrant）── */
 export interface AccessRequest {

@@ -67,8 +67,14 @@
               <button
                 v-if="app.accessible"
                 class="bd-tile__btn"
+                :disabled="opening === app.id || (browserOpenable(app) && !webProxy.ready)"
+                :title="browserOpenable(app) && !webProxy.ready ? webProxy.note : ''"
                 @click="openApp(app)"
-              ><icon-link />访问</button>
+              ><icon-link />{{ opening === app.id ? '正在打开…' : (browserOpenable(app) ? '访问' : '接入地址') }}</button>
+              <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
+              <div v-if="app.accessible && browserOpenable(app) && !webProxy.ready" class="bd-tile__warn">
+                <icon-exclamation-circle-fill />{{ webProxy.note }}
+              </div>
               <button
                 v-else-if="app.degraded"
                 class="bd-tile__btn bd-tile__btn--ghost"
@@ -118,7 +124,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, clearToken, type PortalAppsResp, type PortalTile } from '@/lib/api';
+import { api, clearToken, type PortalAppsResp, type PortalTile, type WebProxyStatus, type WebTicketResp } from '@/lib/api';
 import PortalBar from '@/components/PortalBar.vue';
 
 const router = useRouter();
@@ -127,6 +133,11 @@ const loading = ref(false);
 const keyword = ref('');
 const apps = ref<PortalTile[]>([]);
 const displayName = ref('');
+/** 七层 Web 代理入口状态（后端下发）。ready=false 时 Web 磁贴的「访问」按钮置灰并说明原因，
+ *  而不是让人点下去才拿到一个一闪而过的错误提示。 */
+const webProxy = ref<WebProxyStatus>({ ready: true, note: '' });
+/** 正在取票的应用 id（避免连点重复签票）。 */
+const opening = ref('');
 
 /* JIT 访问申请弹窗 */
 const reqOpen = ref(false);
@@ -159,8 +170,49 @@ function logout() {
   router.push('/portal/login');
 }
 
-function openApp(app: PortalTile) {
-  Message.success(`正在通过安全隧道打开 ${app.name}…`);
+/** 该磁贴能不能在浏览器里直接打开：只有 Web 发布模式经七层代理，
+ *  隧道 / 全网资源两种模式浏览器没有载体（前者要桌面客户端隧道）。 */
+function browserOpenable(app: PortalTile) { return app.mode === 'web'; }
+
+/**
+ * 真正打开一个受保护业务。
+ *
+ * ★这里此前整个函数体就是一句 Message.success——磁贴点得动、什么也不会发生，
+ * 是本项目"页面存在≠功能存在"最典型的一例。现在的流程是：
+ *   控制面按资源鉴权 → 签一张 60s 一次性访问票据（use=web，绑定资源 id）
+ *   → 浏览器跳到网关七层入口 → 网关验票换会话 Cookie → 逐请求重新鉴权后反代。
+ *
+ * 用 window.open 新开标签而不是当前页跳转：门户本身是这条链路的入口，
+ * 被业务系统顶掉之后用户再打开第二个应用就得重新登录门户。
+ */
+async function openApp(app: PortalTile) {
+  if (!browserOpenable(app)) {
+    Message.info(`「${app.name}」是 ${modeMeta[app.mode].label}，浏览器无法直达，请用桌面客户端接入后访问 ${app.addr}`);
+    return;
+  }
+  if (!webProxy.value.ready) { Message.warning(webProxy.value.note || '七层 Web 代理入口不可用'); return; }
+  opening.value = app.id;
+  try {
+    const t = await api<WebTicketResp>('/portal/web-ticket', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ appId: app.id })
+    });
+    // 票据只有 60s 且一次性：拿到就立刻跳，不缓存、不放进任何可分享的地方。
+    window.open(t.url, '_blank', 'noopener');
+  } catch (e) {
+    // 后端的拒绝理由（无授权 / 终端降级 / 网关没开七层）都写在 message 里，原样呈现——
+    // 换成一句"打开失败"就等于把唯一的线索丢掉。
+    Message.error(reason(e, '打开失败，请稍后再试'));
+  } finally {
+    opening.value = '';
+  }
+}
+
+/** 从 api() 抛出的错误里取后端那句中文说明（形如 "403 终端环境不合规：…"）。 */
+function reason(e: unknown, fallback: string) {
+  const msg = String((e as Error)?.message ?? '').trim();
+  const m = msg.match(/^\d{3}\s+(.+)$/s);
+  return m ? m[1] : (msg || fallback);
 }
 
 function requestAccess(app: PortalTile) {
@@ -196,6 +248,8 @@ async function load() {
   try {
     const resp = await api<PortalAppsResp>('/portal/apps');
     apps.value = resp.apps ?? [];
+    // 旧后端不下发 webProxy：按"可用"处理，点开时若真不可用会拿到后端的 503 原文。
+    if (resp.webProxy) webProxy.value = resp.webProxy;
   } catch {
     Message.error('应用列表加载失败');
   } finally {
@@ -298,6 +352,10 @@ onMounted(() => {
   box-shadow: 0 2px 6px rgba(22, 93, 255, .25); transition: background .15s;
 }
 .bd-tile__btn:hover { background: var(--bd-primary-h); }
+.bd-tile__btn:disabled { background: var(--bd-fill-2); color: var(--bd-t4); box-shadow: none; cursor: not-allowed; }
+.bd-tile__warn {
+  display: flex; gap: 6px; margin-top: 8px; font-size: 11.5px; line-height: 1.55; color: var(--bd-warning);
+}
 .bd-tile__btn--ghost {
   background: #fff; color: var(--bd-t2); border: 1px solid var(--bd-border); box-shadow: none;
 }

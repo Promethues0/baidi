@@ -1,0 +1,265 @@
+# 移动客户端安装包 · Android
+#
+# ★为什么与 clients.yml 分开：两条流水线的工具链毫无交集（Tauri/Rust vs JDK+Android SDK+NDK
+#   +gomobile），触发路径也不同——改 src-tauri 不该去跑 gradle，改 gateway/mobile 也不该
+#   去编 dmg。分开还有个实际作用：桌面那条已经能出包，安卓这条是新的、大概率要修几轮，
+#   混在一起会让"客户端安装包"这个检查项长期红着。
+#
+# ★这里**只有 Android**，而且这不是遗漏：
+#   - iOS：需 Apple 付费账号的签名证书 + Network Extension（`com.apple.developer.networking.
+#     networkextension`）授权。公共 runner 上没有、也不该往仓库 Secrets 里塞。
+#   - 鸿蒙：DevEco Studio / HarmonyOS SDK 根本不在 GitHub Actions 的镜像里，也没有官方 action。
+#   与其挂两个永远失败（或永远 skip）的 job 把"没有能力"伪装成"这次没跑"，不如一个都不写，
+#   把原因写在 clients/BUILD.md 第九节，并让下载中心的占位文案照实说。
+#
+# ★本文件未在 GitHub Actions 上真实运行过（本机没有 Java 运行时、没设 ANDROID_HOME、
+#   gomobile 也跑不起来）。已在本机验证的只有 build-gomobile.sh 的命令构造与落点
+#   （BAIDI_GOMOBILE_DRYRUN=1，四条 NDK 探测分支 + 三个 target + 非法 target 逐条跑过）。
+#   runner 上的步骤编排尚待第一次真实运行验证；红了先看步骤名。
+
+name: 移动客户端安装包
+
+on:
+  workflow_dispatch:
+    inputs:
+      apiBase:
+        description: '控制中心地址（写进 APK 的 BAIDI_API_BASE，留空用 gradle 默认值）'
+        required: false
+        default: ''
+  push:
+    branches: [main]
+    paths:
+      - 'clients/mobile/**'
+      - 'gateway/mobile/**'
+      - 'gateway/internal/dataplane/**'
+      - 'gateway/internal/knock/**'
+      - 'clients/build-artifacts.sh'
+      - '.github/workflows/clients-mobile.yml'
+  pull_request:
+    paths:
+      - 'clients/mobile/**'
+      - 'gateway/mobile/**'
+      - 'gateway/internal/dataplane/**'
+      - 'gateway/internal/knock/**'
+      - 'clients/build-artifacts.sh'
+      - '.github/workflows/clients-mobile.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  android:
+    name: Android · debug APK（未实机验证）
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # 与 clients.yml 同理：溯源取的是**路径过滤**查询 `git log -1 -- clients/`，
+          # 深度 1 的浅克隆下只要本次提交没碰 clients/ 就返回空。见下一步。
+          fetch-depth: 0
+
+      - name: 取 clients/ 子树 commit（构建溯源）
+        id: rev
+        run: |
+          # ★路径必须是 `clients/` 而**不是** `clients/mobile/`：控制面
+          # （control/internal/api/downloads.go 的 clientSourceRev）拿**一个**
+          # clients/ 子树版本去和 manifest 里**每个**平台的 sourceCommit 比对。
+          # 这里若只取 mobile 子树，只要有人改了 clients/desktop，APK 的 sourceCommit
+          # 就永远对不上当前值 → 页面把一个刚出炉的 APK 长期标成「已过期」，
+          # 而这条提示一旦开始误报，管理员两天后就不看了。
+          REV="$(git log -1 --format=%h -- clients/)"
+          if [ -z "$REV" ]; then
+            echo "✗ 取不到 clients/ 子树 commit（checkout 是不是又变回浅克隆了？）"
+            exit 1
+          fi
+          echo "rev=$REV" >> "$GITHUB_OUTPUT"
+          echo "→ clients/ 子树版本：$REV"
+
+      - name: Node（移动端 webview 页面是 Vue3 + Vite 打的）
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: clients/mobile/package-lock.json
+
+      - name: JDK 17（AGP 8.5.2 要求 17；gradle 工程也把 jvmTarget 钉在 17）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Android SDK + NDK
+        uses: android-actions/setup-android@v3
+        with:
+          # NDK 是 gomobile bind -target=android 的硬前置（它要用 clang 交叉编 4 个 ABI）。
+          # 版本写死而不是 "latest"：换 NDK 大版本会换 clang，属于会改变产物的事，
+          # 应该是一次显式提交，不该某天早上自己变。
+          packages: 'platform-tools platforms;android-34 build-tools;34.0.0 ndk;27.2.12479018'
+
+      - name: Go（版本随 gateway/go.mod——数据面引擎是 Go 编的）
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+          cache-dependency-path: gateway/go.sum
+
+      - name: 装 gomobile
+        run: |
+          # ★把 $(go env GOPATH)/bin 加进 PATH：go install 装到那里，而它不一定在 PATH 上。
+          # 这是**两道保险**里的第一道——build-gomobile.sh 的 resolve_gomobile 会再兜一次底
+          # （只认 PATH 的话，明明刚装好却报"缺 gomobile"，人会以为是 go install 失败了）。
+          echo "$(go env GOPATH)/bin" >> "$GITHUB_PATH"
+          go install golang.org/x/mobile/cmd/gomobile@latest
+          "$(go env GOPATH)/bin/gomobile" init
+          "$(go env GOPATH)/bin/gomobile" version
+
+      - name: gradle 缓存
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ hashFiles('clients/mobile/native/android/**/*.gradle.kts', 'clients/mobile/native/android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-
+
+      - name: 构建 webview 页面（Vue3 → dist/）
+        working-directory: clients/mobile
+        run: |
+          npm ci
+          npm run build
+
+      - name: 铺 webview 资源进 app assets
+        run: |
+          # MainActivity 用 WebViewAssetLoader 把 https://appassets.local/ 映射到 app assets 根，
+          # 加载 /index.html——所以 dist 必须**平铺**进 assets/，不是放进 assets/dist/。
+          # ★这一步以前是无人记录的手工动作，漏了它 APK 照样能打出来、照样能装，
+          # 只是一开就白屏（WebView 里 404），日志里什么都没有。assets/ 被 .gitignore
+          # 排除，所以干净 checkout 上必然是空的。
+          SRC=clients/mobile/dist
+          DST=clients/mobile/native/android/app/src/main/assets
+          test -f "$SRC/index.html" || { echo "✗ 前端没产出 $SRC/index.html"; exit 1; }
+          rm -rf "$DST"
+          mkdir -p "$DST"
+          cp -R "$SRC/." "$DST/"
+          test -f "$DST/index.html" || { echo "✗ assets 里没有 index.html"; exit 1; }
+          echo "→ assets 内容："; ls -la "$DST"
+
+      - name: gomobile bind → baidimobile.aar
+        run: bash clients/mobile/native/build-gomobile.sh android
+
+      - name: 核对 .aar 落到了 gradle 引用的位置
+        run: |
+          # gradle 工程写死 implementation(files("libs/baidimobile.aar"))，且该目录被 .gitignore
+          # 排除。缺文件时 gradle 报的是 Kotlin 侧 `Unresolved reference: Baidimobile`，
+          # 与"绑定层源码写错了"完全同形——在这里先把两种失败分开。
+          AAR=clients/mobile/native/android/app/libs/baidimobile.aar
+          test -f "$AAR" || { echo "✗ 缺 $AAR"; ls -la clients/mobile/native/out/ || true; exit 1; }
+          echo "✓ $AAR（$(stat -c%s "$AAR") 字节）"
+
+      - name: 打包（gradle assembleDebug）
+        working-directory: clients/mobile/native/android
+        env:
+          API_BASE: ${{ inputs.apiBase }}
+        run: |
+          # local.properties 被 .gitignore 排除（里面是构建者本机的 sdk.dir 绝对路径），
+          # CI 上不存在——AGP 于是回落到 ANDROID_HOME/ANDROID_SDK_ROOT，setup-android 已设好。
+          # 别在 CI 里生成 local.properties：那等于把两个真相来源都留着。
+          chmod +x ./gradlew
+          if [ -n "$API_BASE" ]; then
+            ./gradlew --no-daemon "-PbaidiApiBase=$API_BASE" assembleDebug
+          else
+            ./gradlew --no-daemon assembleDebug
+          fi
+
+      - name: 核对 APK
+        id: apk
+        run: |
+          APK=clients/mobile/native/android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK" || { echo "✗ 没产出 $APK"; exit 1; }
+          echo "✓ $APK（$(stat -c%s "$APK") 字节）"
+          # 构建时刻取**服务端时间**并显式往下传，不靠文件 mtime：产物一旦经
+          # upload/download-artifact 转一手，mtime 就变成解压那一刻了（见下一步）。
+          echo "builtAt=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+
+      - name: 自检：溯源真的能注进 manifest
+        env:
+          BAIDI_APK_SRC_REV: ${{ steps.rev.outputs.rev }}
+          BAIDI_APK_BUILT_AT: ${{ steps.apk.outputs.builtAt }}
+        run: |
+          # ★这一步只**验证**注入通路，产出的 manifest 刻意**不上传**：
+          # 这台机器上没有 dmg，build-artifacts.sh 会把 macOS/Windows/Linux 全写成占位。
+          # 把它铺到部署机等于用一份"只有安卓"的清单覆盖掉桌面那份——
+          # 页面上 macOS 会凭空消失，而两边日志都显示成功。
+          # 真正的合并在部署机上做，只跑**一次** build-artifacts.sh，见 clients/BUILD.md 第八节。
+          bash clients/build-artifacts.sh
+          python3 - <<'PY'
+          import json, os, sys
+          m = json.load(open("deploy/artifacts/downloads/manifest.json"))
+          a = next(c for c in m["clients"] if c["platform"] == "android")
+          if not a.get("available"):
+              sys.exit("✗ manifest 里安卓不是 available，APK 是不是没在预期路径上？")
+          for k, want in (("sourceCommit", os.environ["BAIDI_APK_SRC_REV"]),
+                          ("builtAt", os.environ["BAIDI_APK_BUILT_AT"])):
+              if a.get(k) != want:
+                  sys.exit(f"✗ 安卓条目 {k}={a.get(k)!r}，期望 {want!r}（注入通路断了）")
+          print(f"✓ 溯源可注入：sourceCommit={a['sourceCommit']} builtAt={a['builtAt']}")
+          PY
+
+      - name: 汇集产物（APK + 溯源 + 说明）
+        env:
+          SRC_REV: ${{ steps.rev.outputs.rev }}
+          BUILT_AT: ${{ steps.apk.outputs.builtAt }}
+        run: |
+          STAGE=clients/mobile/native/out/apk-artifact
+          rm -rf "$STAGE"; mkdir -p "$STAGE"
+          # 保留 gradle 的原文件名：下面那份说明里的"放回原路径"是**直接拷贝**，
+          # 改了名就得让人再改回来，多一步就多一次出错。
+          cp clients/mobile/native/android/app/build/outputs/apk/debug/app-debug.apk "$STAGE/"
+          # ★溯源与 APK 同行：这两个值只有构建它的这台机器知道。分开走（比如让部署机
+          # 事后 `git log` 猜一个）就等于允许它猜错，而猜错的方向恰好是"看起来是新的"。
+          cat > "$STAGE/apk-provenance.env" <<EOF
+          BAIDI_APK_SRC_REV=$SRC_REV
+          BAIDI_APK_BUILT_AT=$BUILT_AT
+          EOF
+          cat > "$STAGE/README-android.txt" <<'TXT'
+          白帝安全接入客户端 · Android debug APK（未实机验证）
+
+          这个包在 GitHub Actions 的 ubuntu runner 上构建：
+            Vue3 页面 → app assets；gomobile bind → baidimobile.aar；gradle assembleDebug。
+
+          状态（别在别处写得比这更乐观）：
+          1) **debug 签名**。安装需在系统里允许「未知来源应用」；不能上架，也不能覆盖安装
+             正式签名版。仓库里没有配置任何发布签名密钥，也没有留放密钥的口子。
+          2) 数据面（VpnService 建 TUN → Baidimobile.start(fd,cfg) → SPA 敲门 + 国密 TLCP 隧道）
+             **没有在任何一台真实安卓设备上跑通过**。Go 引擎与 gomobile 绑定层编译验证过，
+             壳工程能编出 APK——「能装」与「能连」之间的那一段还没有证据。
+          3) 未做 ABI 拆包：.aar 带 armeabi-v7a / arm64-v8a / x86 / x86_64 四套，包因此偏大。
+
+          放进下载中心（与桌面 dmg 合成同一份 manifest.json）：
+
+            # 在有 dmg 的那台机器上，仓库根目录：
+            cp app-debug.apk clients/mobile/native/android/app/build/outputs/apk/debug/app-debug.apk
+            set -a; . ./apk-provenance.env; set +a
+            BAIDI_CLIENT_SRC_REV=<clients/ 子树短哈希> bash clients/build-artifacts.sh
+
+          ★apk-provenance.env 必须一起带上、也不许手改：它记的是"这个包出自哪个 commit、
+            什么时候构建的"。不带它的话，build-artifacts.sh 只能退回读文件 mtime——
+            而 artifact 下载解压后 mtime 就是**解压那一刻**，于是一个上个月的包会在页面上
+            写着「刚刚构建」。溯源机制本来就是为了消灭这种谎，别让它自己制造一个。
+          TXT
+          ls -la "$STAGE"
+
+      - name: 上传产物（Android）
+        uses: actions/upload-artifact@v4
+        with:
+          name: baidi-mobile-android-debug-UNVERIFIED
+          path: clients/mobile/native/out/apk-artifact/
+          if-no-files-found: error

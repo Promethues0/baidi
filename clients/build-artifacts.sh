@@ -58,18 +58,29 @@ else
 fi
 
 # ── Android APK ──
-# ── Android APK ──
 # ★溯源按**产物自己的**构建时间算，不套用本次运行的 SRC_REV：安卓要 JDK + Android SDK，
 # 常常不在跑本脚本这台机器上构建。套用的话，一个几周前的 APK 会被标成「刚从当前源码构建」——
 # 那正是这套溯源机制要消灭的谎，反而由它自己制造出来。
 # 用 BAIDI_APK_SRC_REV 显式声明该 APK 出自哪个 commit；没声明就留空 = 页面报「无法判断新旧」。
+#
+# ★BAIDI_APK_BUILT_AT 同理必须能被显式声明，不能只靠文件 mtime：
+# APK 现在由 .github/workflows/clients-mobile.yml 在另一台机器上构建，取回来时是
+# actions/download-artifact 解出来的——mtime 是**解压那一刻**。只信 mtime 的话，
+# 一个上个月构建的 APK 会在页面上写着「刚刚构建」，而 sourceCommit 明明对不上。
+# 两个字段一起说谎才最难发现，所以两个字段一起支持注入（CI 把它们成对写进
+# apk-provenance.env，与 APK 同行同源）。
 APK="$HERE/mobile/native/android/app/build/outputs/apk/debug/app-debug.apk"
 AND_FILE="" AND_REV="" AND_BUILT=""
 if [ -f "$APK" ]; then
   AND_FILE="baidi-mobile_${VER}_debug.apk"
   cp "$APK" "$OUT/$AND_FILE"
   AND_REV="${BAIDI_APK_SRC_REV:-}"
-  AND_BUILT="$(date -u -r "$APK" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+  AND_BUILT="${BAIDI_APK_BUILT_AT:-}"
+  if [ -n "$AND_BUILT" ]; then
+    echo "→ APK 构建时刻由 BAIDI_APK_BUILT_AT 注入：$AND_BUILT"
+  else
+    AND_BUILT="$(date -u -r "$APK" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "")"
+  fi
   [ -n "$AND_REV" ] || echo "⚠ APK 未声明来源 commit（BAIDI_APK_SRC_REV），页面将报「无法判断新旧」"
 else
   echo "⚠ 未找到 Android APK，android 将占位"

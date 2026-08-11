@@ -7,10 +7,14 @@
 | macOS `.dmg`（universal） | **能** | `./src-tauri/build-sidecars.sh && npm run tauri:build -- --target universal-apple-darwin` |
 | Linux `.deb` / `.AppImage` | **不能** | GitHub Actions `ubuntu-latest`，或一台真 Linux |
 | Windows `.msi` / `.exe` | **不能** | GitHub Actions `windows-latest`，或一台真 Windows |
-| Android `.apk` | 需要 JDK + Android SDK（+ gomobile/NDK） | 见 `mobile/README.md`，**不在 CI 里** |
-| iOS / 鸿蒙 | 需要 Xcode / DevEco | 需签名材料，不在 CI 里 |
+| Android `.apk` | **不能**（本机无 Java 运行时、未设 `ANDROID_HOME`、gomobile 跑不起来） | GitHub Actions `ubuntu-latest`，见第八节 |
+| iOS `.ipa` | **不能** | **只能人工构建**，公共 CI 上做不到，见第九节 |
+| 鸿蒙 `.hap` | **不能** | **只能人工构建**，公共 CI 上做不到，见第九节 |
 
-流水线：[`.github/workflows/clients.yml`](../.github/workflows/clients.yml)。
+流水线两条，工具链毫无交集所以分开：
+
+- 桌面：[`.github/workflows/clients.yml`](../.github/workflows/clients.yml)（Tauri/Rust，三平台矩阵）
+- 移动：[`.github/workflows/clients-mobile.yml`](../.github/workflows/clients-mobile.yml)（JDK + Android SDK/NDK + gomobile，**只有 Android**）
 
 ---
 
@@ -142,3 +146,132 @@ Windows 包**未签名**，会触发 SmartScreen。CI 里没有配置任何签�
 
 也就是说：**构建脚本是验过的，runner 上的步骤编排没有。** 第一次真实运行大概率还要修，
 红了先看步骤名。
+
+## 八、Android：在 CI 上出 debug APK（`.github/workflows/clients-mobile.yml`）
+
+本机构建不了（无 Java 运行时、未设 `ANDROID_HOME`、gomobile 也跑不起来），所以走
+`ubuntu-latest`。整条链是四段，缺一段的失败形态都不长得像"缺了那一段"：
+
+```
+clients/mobile          npm ci && npm run build            → dist/
+  ↓ 平铺进 app assets（不是 assets/dist/）
+gateway/mobile/baidimobile  gomobile bind -target=android  → out/baidimobile.aar
+  ↓ 复制进 android/app/libs/
+clients/mobile/native/android  ./gradlew assembleDebug     → app-debug.apk
+```
+
+### 三个"漏了也不报错"的接缝（CI 里各有一步专门断言）
+
+1. **dist → `app/src/main/assets/`**：`MainActivity` 用 `WebViewAssetLoader` 把
+   `https://appassets.local/` 映射到 assets 根并加载 `/index.html`，所以 dist 必须**平铺**。
+   漏了这一步 APK 照样打得出来、照样能装，**一开就白屏**，logcat 里只有一条 404。
+   `assets/` 被 `.gitignore` 排除，干净 checkout 上必然是空的。
+2. **`.aar` → `app/libs/baidimobile.aar`**：gradle 写死 `implementation(files("libs/baidimobile.aar"))`，
+   该目录同样被 `.gitignore` 排除。缺文件时 gradle 报的是 Kotlin 侧
+   `Unresolved reference: Baidimobile` —— 与"绑定层源码写错了"完全同形。
+   现在这一步由 `native/build-gomobile.sh` 自己做（以前是无人记录的手工动作）。
+3. **`gomobile` 不在 PATH 上**：`go install` 装到 `$(go env GOPATH)/bin`，那目录不一定在 PATH。
+   只认 PATH 的话，明明刚装好却报"缺 gomobile"，人会以为是 `go install` 失败了。
+   两道保险：workflow 里 `echo "$(go env GOPATH)/bin" >> $GITHUB_PATH`，
+   脚本里 `resolve_gomobile()` 再兜一次底。
+
+`local.properties`（里面是构建者本机的 `sdk.dir` 绝对路径）被 `.gitignore` 排除，CI 上不存在
+—— AGP 于是回落到 `ANDROID_HOME`/`ANDROID_SDK_ROOT`，`setup-android` 已设好。
+**别在 CI 里生成 `local.properties`**：那等于把两个真相来源都留着。
+
+### `build-gomobile.sh` 的 target 参数与 dry-run
+
+```bash
+native/build-gomobile.sh [all|android|ios]        # 默认 all
+BAIDI_GOMOBILE_DRYRUN=1 native/build-gomobile.sh android   # 只打印命令与落点，不真跑
+```
+
+原先它无条件先编 iOS 再编 Android。iOS 那一条只可能在装了 Xcode 的 macOS 上成功，
+于是在 Linux CI 上第一步就 `set -e` 退出 —— "安卓到底能不能编出来"这个问题永远得不到回答。
+
+dry-run 存在的理由与 `posture.rs` / `sysstat` 那条纪律同源：**只在别的机器上才走到的分支
+是验不到的**。所以脚本切成「纯构造」+ 一层薄薄的 `run()` 执行，构造部分在本机（macOS，
+无 Android SDK/NDK）也能逐条走一遍。已在本机真跑过的分支：三个 target + 非法 target 退出码 2 +
+NDK 探测四条（`ANDROID_NDK_HOME` / `ANDROID_NDK_ROOT` / `$ANDROID_HOME/ndk-bundle` /
+`$ANDROID_HOME/ndk/<版本>` 取 `sort -V` 最大者）+ 用假 `gomobile` 真跑一遍非 dry-run 路径。
+
+### APK 的溯源必须与包同行
+
+CI 产出 `baidi-mobile-android-debug-UNVERIFIED`，里面三样东西：
+`app-debug.apk` + `apk-provenance.env` + `README-android.txt`。
+
+`apk-provenance.env` 是两行：
+
+```
+BAIDI_APK_SRC_REV=<clients/ 子树短哈希>
+BAIDI_APK_BUILT_AT=<构建时刻 RFC3339>
+```
+
+★**两个值都必须显式带走，不能事后补**：
+
+- `SRC_REV` 取的是 **`clients/`** 子树而不是 `clients/mobile/` —— 控制面
+  （`downloads.go` 的 `clientSourceRev`）拿**一个** `clients/` 版本去比对 manifest 里**每个**
+  平台的 `sourceCommit`。只取 mobile 子树的话，别人改一次 `clients/desktop`，
+  刚出炉的 APK 就被标成「已过期」；这条提示一旦开始误报，管理员两天后就不看了。
+- `BUILT_AT` 不能靠文件 mtime。APK 经 `upload/download-artifact` 转一手之后，
+  mtime 就是**解压那一刻** —— 一个上个月的包会在页面上写着「刚刚构建」。
+  `build-artifacts.sh` 为此加了 `BAIDI_APK_BUILT_AT` 注入口（与 `BAIDI_APK_SRC_REV` 成对）。
+
+CI 里有一步「自检：溯源真的能注进 manifest」，它真的跑一遍 `build-artifacts.sh` 并断言安卓条目的
+`sourceCommit`/`builtAt` 与注入值逐字相等 —— 但**刻意不上传**那份 manifest：
+那台机器上没有 dmg，生成的清单会把 macOS/Windows/Linux 全写成占位，铺到部署机等于
+让 macOS 从页面上凭空消失，而两边日志都显示成功。
+
+### 合进下载中心（在有 dmg 的那台机器上，只跑一次 `build-artifacts.sh`）
+
+```bash
+cp app-debug.apk clients/mobile/native/android/app/build/outputs/apk/debug/app-debug.apk
+set -a; . ./apk-provenance.env; set +a
+BAIDI_CLIENT_SRC_REV=$(git log -1 --format=%h -- clients/) bash clients/build-artifacts.sh
+```
+
+### 已知的坑（还没修，先记着）
+
+- APK 文件名与 manifest 里的 `version` 取的是 **`clients/desktop/package.json`** 的版本号，
+  而 APK 自己的 `versionName` 写在 `app/build.gradle.kts` 里。两处现在都是 `0.1.0`，
+  桌面先升版的那天它们就会不一致 —— 包名说 0.2.0、装到机器上是 0.1.0。
+- 没做 ABI 拆包：`.aar` 带 armeabi-v7a / arm64-v8a / x86 / x86_64 四套，APK 因此 60MB 起。
+- **debug 签名**，不能上架、不能覆盖安装正式签名版。仓库里没有配置任何发布签名密钥，
+  也没有留放密钥的口子（与桌面同一条：要做签名分发，先想清楚密钥托管在哪）。
+- 数据面（`VpnService` 建 TUN → `Baidimobile.start(fd,cfg)` → SPA 敲门 + 国密 TLCP 隧道）
+  **没有在任何一台真实安卓设备上跑通过**。「能装」与「能连」之间那一段还没有证据。
+- 这条流水线同样**没有在 GitHub Actions 上真实运行过**。本机验证到 `build-gomobile.sh`
+  为止（见上），`actionlint`（含 shellcheck）对该 workflow 零告警。
+
+## 九、iOS 与鸿蒙：为什么 CI 上一个 job 都没有
+
+这两个平台在 `clients-mobile.yml` 里**一个 job 都没写**，这不是遗漏。
+
+**iOS.** 白帝的 iOS 数据面是 `NEPacketTunnelProvider`（Network Extension）。要出一个能装的包，
+必须同时有：Apple **付费**开发者账号的签名证书与 provisioning profile、
+`com.apple.developer.networking.networkextension` **授权**（这个 entitlement 需向 Apple 申请，
+不是勾一下就有）、以及一台装了完整 Xcode 的 macOS。公共 runner 上有 Xcode，但**没有**、
+也不该有前两样 —— 往仓库 Secrets 里塞签名私钥是另一个量级的决定，不能顺手做。
+此外 `native/ios/` 目前只有 `PacketTunnelProvider.swift` 这一份参考源码，
+**还没有 Xcode 工程**：即便签名齐了，也不是"跑个命令"就能出包。
+
+**鸿蒙.** 工具链（DevEco Studio / HarmonyOS SDK）不在 GitHub Actions 的 runner 镜像里，
+也没有官方 action，更没有可直接 `apt install` 的 CLI。`native/harmony/` 目前也只有
+`VpnExtAbility.ets` 这一份骨架源码，同样没有工程。
+
+**为什么不挂两个 skip 掉的 job 占位**：那会把"我们没有这个能力"伪装成"这次没跑"。
+Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实际是能力缺口 —— 与本项目
+「采不到就说不可判定，绝不补 0」是同一条纪律。所以：不写 job，把原因写在这里，
+并让下载中心的占位文案照实说。
+
+占位文案因此改成了（`clients/build-artifacts.sh` 与 `control/internal/api/downloads.go`
+的 `placeholderManifest()` **两处逐字一致**，改要一起改）：
+
+| 平台 | 改前 | 改后 |
+|---|---|---|
+| iOS | 需企业签名 / TestFlight 分发，请联系管理员 | 需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员 |
+| 鸿蒙 | **构建中，敬请期待** | 需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员 |
+
+鸿蒙那句「构建中，敬请期待」是不对的：它暗示有一个正在进行的构建、等等就有 —— 而实际上
+没有任何流水线在构建它，也不会有。「敬请期待」只能用在**真的会被构建出来**的平台上
+（Windows/Linux 是那种情况：包能出，只是因为第四、五节的原因暂不下发）。

@@ -52,12 +52,33 @@ stopTunnel(): Promise<void>
   · `android/BaidiVpnService.kt`（VpnService 建 TUN → `Baidimobile.start(fd,cfg)`）+ `MainActivity.kt`（WebView 注入 `__BAIDI_NATIVE__` 桥）
   · `harmony/VpnExtAbility.ets`（鸿蒙 VpnExtensionAbility 骨架）
 
+### 出包
+
+```bash
+native/build-gomobile.sh [all|android|ios]                  # 默认 all；ios 需 macOS+Xcode
+BAIDI_GOMOBILE_DRYRUN=1 native/build-gomobile.sh android    # 只打印命令与落点，不真跑
+```
+
+脚本会把 `.aar` 一并复制进 `native/android/app/libs/`（gradle 写死引用那里，且该目录被
+`.gitignore` 排除 —— 漏了这一步 gradle 报的是 `Unresolved reference: Baidimobile`，
+与"绑定层源码写错了"完全同形）。
+
+**Android APK 由 CI 出**：`.github/workflows/clients-mobile.yml`（`ubuntu-latest`，
+JDK 17 + Android SDK/NDK + gomobile → gradle `assembleDebug`），debug 签名、未实机验证。
+webview 页面必须**平铺**进 `app/src/main/assets/`（漏了会开机白屏且无报错）。
+完整说明、溯源注入与已知的坑见 [`../BUILD.md`](../BUILD.md) 第八节。
+
+**iOS 与鸿蒙不在 CI 上，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +
+Network Extension 授权，鸿蒙的 DevEco 工具链根本不在 runner 镜像里；而且这两端目前
+只有单文件参考源码，还没有壳工程。理由与下载中心的占位文案见 `../BUILD.md` 第九节。
+
 ### 落地路线
 1. ✅ 移动优先 UI + 后端链路（浏览器实测）
 2. ✅ 共享数据面引擎 `internal/dataplane` + gomobile 包 `baidimobile`（多平台基座编译过）
 3. ✅ 三端 VPN 壳脚手架源码（`native/`）+ gomobile 构建脚本
-4. ⏳ `gomobile init` + `build-gomobile.sh` 产出 `.xcframework`/`.aar`（需 Xcode / Android NDK）
-5. ⏳ iOS/安卓/鸿蒙 壳工程编译 + 真机：登录 → 系统级 VPN → TUN 引流到国密网关
+4. ✅ 安卓：`gomobile bind` → `.aar` → `assembleDebug` 出 APK（CI 上，**流水线本身尚未真实运行过**）
+   · ⏳ iOS `.xcframework` / 鸿蒙：需 Xcode（付费账号）/ DevEco，只能人工构建
+5. ⏳ iOS/安卓/鸿蒙 壳工程 + 真机：登录 → 系统级 VPN → TUN 引流到国密网关
 
-> 4–5 需 Mac+Xcode（付费账号）/ Android Studio+NDK / DevEco Studio + 真机，本环境不具备；
-> 引擎与绑定层（Go）已编译验证，原生壳为可直接编译的参考源码。
+> 5 需真机，本环境不具备。引擎与绑定层（Go）已编译验证，「能装」与「能连」之间那一段
+> 在**任何一台**移动真机上都还没有证据 —— 别把"CI 能出 APK"读成"安卓端跑通了"。

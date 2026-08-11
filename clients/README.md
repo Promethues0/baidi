@@ -72,4 +72,6 @@ npm install && npm run dev             # :5295，vite /api→control:8090、/kno
 | 桌面系统托盘常驻 | ✅ 落地 |
 | 移动 webview（登录/接入/应用/诊断/配置） | ✅ 落地，浏览器实测 |
 | 共享引擎 `dataplane` + gomobile `baidimobile` | ✅ 多平台基座编译过 |
-| 三端原生壳脚手架（读 UI 下传 cfg） | ✅ 参考源码，待原生工具链编译 + 真机 |
+| 三端原生壳脚手架（读 UI 下传 cfg） | ✅ 参考源码；安卓壳已能在 CI 上编出 APK，iOS/鸿蒙仍无壳工程 |
+| 安卓 debug APK（CI 出包） | ⚠ 流水线已写但**未真实运行过**；出的包 debug 签名、未上真机 |
+| iOS `.ipa` / 鸿蒙 `.hap` | ❌ 只能人工构建（付费账号签名 + NE 授权 / DevEco），见 [`BUILD.md`](BUILD.md) 第九节 |

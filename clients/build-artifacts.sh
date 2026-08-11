@@ -32,13 +32,23 @@ BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 # 源码有未提交改动时，构建出的包与任何 commit 都不对应——如实标成 dirty，
 # 让页面把它判成过期，而不是冒充某个干净版本。注入进来的值同样过这一关：
 # 注入的是「哪个 commit」，不是「工作区是干净的」这个保证。
-# ★先确认这里真是个 git 仓库：不是的话 `git diff` 以非零退出，`!` 会把它读成"有改动"，
+# ★先确认这里真是个 git 仓库：不是的话 git 命令以非零退出，会把"没有 .git"读成"有改动"，
 # 于是部署机（通常没有 .git）上注入的干净版本会被凭空标成 dirty。
-if [ -n "$SRC_REV" ] && [ "${SRC_REV%-dirty}" = "$SRC_REV" ] \
-   && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 \
-   && ! git -C "$ROOT" diff --quiet -- clients/; then
+#
+# ★判据是 `git status --porcelain -- clients/` 而**不是** `git diff --quiet -- clients/`：
+# 后者只比工作树与索引，**已 `git add` 但未提交的改动、以及新增的未跟踪文件全被判成干净**。
+# 而"改完先 add、构建验证一轮再提交"正是最常见的节奏——那一轮出的包会写上
+# sourceCommit=<上一个 commit> 且不带 -dirty，控制面 annotateProvenance 于是判定
+# 「与当前源码一致」，页面一片正常。方向恰好是"看起来是新的"，正是这套机制要消灭的谎。
+# porcelain 覆盖三种：已暂存（M /A ）、未暂存（ M）、未跟踪（??）；被 .gitignore 排除的
+# 构建产物（target/、node_modules/）本来就不出现在里面。
+clients_dirty() {
+  git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 || return 1
+  [ -n "$(git -C "$ROOT" status --porcelain -- clients/ 2>/dev/null)" ]
+}
+if [ -n "$SRC_REV" ] && [ "${SRC_REV%-dirty}" = "$SRC_REV" ] && clients_dirty; then
   SRC_REV="${SRC_REV}-dirty"
-  echo "⚠ clients/ 有未提交改动，溯源标记为 $SRC_REV"
+  echo "⚠ clients/ 有未提交改动（含已 add 未提交与未跟踪文件），溯源标记为 $SRC_REV"
 fi
 
 rm -rf "$OUT"; mkdir -p "$OUT"
@@ -110,14 +120,26 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 
 # ★占位文案要与 control/internal/api/downloads.go 的 placeholderManifest() **逐字一致**
 # （manifest 缺失时页面回落到那一份，两处不一致会让同一个平台在两种情况下说两种话）。
-# ★「构建中，敬请期待」只能用在**真的会被构建出来**的平台上。iOS 与鸿蒙不是：它们缺的
-# 不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 + Network Extension
-# 授权 / DevEco Studio 工具链）。写「敬请期待」等于给一个不会到来的版本许诺。
-# 理由见 clients/BUILD.md 第九节。
+# 有 Go 用例真的跑这个脚本、把生成的 manifest 与 placeholderManifest() 逐条比对，
+# 见 control/internal/api/downloads_script_test.go。
+# ★「构建中，敬请期待」只能用在**真的会被构建出来、且装了能用**的平台上。
+#   - iOS 与鸿蒙缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 +
+#     Network Extension 授权 / DevEco Studio 工具链）；
+#   - Windows 缺的是 wintun.dll（第三方二进制，本仓库不分发、也不在 CI 里从网上抓），
+#     加上 UAC 提权路径未实机验证——CI 出的包因此标 UNVERIFIED 且刻意不进下载中心。
+#     对用户来说重点不是"包能不能出"，是"能不能用"：写「敬请期待」等于让他一直等一个
+#     按现有决策不会下发的包，而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）
+#     恰恰是存在的，却被那句占位文案挡住了。
+# 写「敬请期待」等于给一个不会到来的版本许诺。理由见 clients/BUILD.md 第九节。
 clients = [
+    # ★缺 dmg 时的 note 不能留空：空着的话页面上 macOS 那一行什么都不说，而 manifest
+    # 整体缺失时同一行会显示「构建中，敬请期待」——同一个平台在两条路径上说两种话。
     entry("macos", "macOS 桌面客户端", os.environ["MAC_FILE"], os.environ["MAC_ARCH"],
+          note="" if os.environ["MAC_FILE"] else "构建中，敬请期待",
           rev=os.environ.get("MAC_REV", ""), built=os.environ.get("MAC_BUILT", "")),
-    entry("windows", "Windows 桌面客户端", "", note="构建中，敬请期待"),
+    entry("windows", "Windows 桌面客户端", "",
+          note="需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；"
+               "CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("linux", "Linux 桌面客户端", "", note="构建中，敬请期待"),
     entry("ios", "iOS 客户端", "",
           note="需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"),

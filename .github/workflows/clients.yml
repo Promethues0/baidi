@@ -221,6 +221,31 @@ jobs:
           if-no-files-found: error
 
       # ── Linux / Windows：只出 workflow artifact，不进下载中心 manifest ──
+      #
+      # ★但产物照样要带溯源。这两份包不经 build-artifacts.sh（不进 manifest.json），
+      # 于是 sourceCommit/builtAt 没有任何地方记录——下载的人拿到 msi/deb 与一份 README，
+      # 却不知道它出自哪个 commit、什么时候构建的。将来有人手工把它铺进 downloads/ 时
+      # 只能靠 `git log` 事后猜一个，而猜错的方向恰好是「看起来是新的」。
+      # 变量名与 build-artifacts.sh / control 的 clientSourceRev() 同名同义，
+      # 铺包的人可以直接 `source build-provenance.env` 再跑汇集脚本。
+      # （安卓那边同一条纪律的产物是 apk-provenance.env，见 clients-mobile.yml。）
+      - name: 写构建溯源（随 UNVERIFIED 包一起下发）
+        if: runner.os != 'macOS'
+        env:
+          SRC_REV: ${{ steps.rev.outputs.rev }}
+        run: |
+          BUNDLE=clients/desktop/src-tauri/target/release/bundle
+          mkdir -p "$BUNDLE"
+          BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          cat > "$BUNDLE/build-provenance.env" <<EOF
+          BAIDI_CLIENT_SRC_REV=$SRC_REV
+          BAIDI_CLIENT_BUILT_AT=$BUILT_AT
+          BAIDI_CLIENT_PLATFORM=$RUNNER_OS
+          BAIDI_CLIENT_VERIFIED=no
+          EOF
+          echo "→ 溯源：$SRC_REV @ $BUILT_AT（$RUNNER_OS）"
+          cat "$BUNDLE/build-provenance.env"
+
       - name: 写 Linux 说明（随包一起下发）
         if: runner.os == 'Linux'
         run: |
@@ -235,6 +260,12 @@ jobs:
              要覆盖老发行版，请在对应发行版上自行构建，见 clients/BUILD.md。
           3) 包未签名。
           TXT
+          # 溯源与包同行（同上：分开走就等于允许事后猜一个，而猜错的方向是"看起来是新的"）
+          {
+            echo
+            echo "构建溯源（机器可读的一份见同目录 build-provenance.env）："
+            sed 's/^/  /' clients/desktop/src-tauri/target/release/bundle/build-provenance.env
+          } >> clients/desktop/src-tauri/target/release/bundle/README-linux.txt
 
       - name: 上传产物（Linux）
         if: runner.os == 'Linux'
@@ -245,6 +276,7 @@ jobs:
             clients/desktop/src-tauri/target/release/bundle/deb/*.deb
             clients/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
             clients/desktop/src-tauri/target/release/bundle/README-linux.txt
+            clients/desktop/src-tauri/target/release/bundle/build-provenance.env
           if-no-files-found: error
 
       - name: 写 Windows 说明（随包一起下发）
@@ -268,8 +300,16 @@ jobs:
           没有在真实 Windows 上跑过。请按「未验证代码」对待。
 
           正因为如此，这个包**不进下载中心**（deploy/artifacts/downloads 的 manifest 里
-          Windows 仍是占位）——装了也连不上的包，比没有包更糟。
+          Windows 那一行照实说明缺 wintun.dll、产物标 UNVERIFIED、请联系管理员，
+          **不写「构建中，敬请期待」**——那等于让人一直等一个按现有决策不会下发的包）。
+          装了也连不上的包，比没有包更糟；但"正确的下一步"必须说出来。
           TXT
+          # 溯源与包同行，理由同 Linux 那一步
+          {
+            echo
+            echo "构建溯源（机器可读的一份见同目录 build-provenance.env）："
+            sed 's/^/  /' clients/desktop/src-tauri/target/release/bundle/build-provenance.env
+          } >> clients/desktop/src-tauri/target/release/bundle/README-windows.txt
 
       - name: 上传产物（Windows）
         if: runner.os == 'Windows'
@@ -280,4 +320,5 @@ jobs:
             clients/desktop/src-tauri/target/release/bundle/msi/*.msi
             clients/desktop/src-tauri/target/release/bundle/nsis/*.exe
             clients/desktop/src-tauri/target/release/bundle/README-windows.txt
+            clients/desktop/src-tauri/target/release/bundle/build-provenance.env
           if-no-files-found: error

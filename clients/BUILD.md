@@ -64,8 +64,8 @@ macOS 还多一步 `lipo`：`--target universal-apple-darwin` 时 Tauri 找的�
 | runner | 产物 | artifact 名 |
 |---|---|---|
 | `macos-latest` | universal `.dmg` + `manifest.json`（整个 `deploy/artifacts/downloads/`） | `baidi-desktop-macos-universal` |
-| `ubuntu-latest` | `.deb` + `.AppImage` + 说明 | `baidi-desktop-linux-x86_64-UNVERIFIED` |
-| `windows-latest` | `.msi` + NSIS `.exe` + 说明 | `baidi-desktop-windows-x86_64-UNVERIFIED` |
+| `ubuntu-latest` | `.deb` + `.AppImage` + 说明 + `build-provenance.env` | `baidi-desktop-linux-x86_64-UNVERIFIED` |
+| `windows-latest` | `.msi` + NSIS `.exe` + 说明 + `build-provenance.env` | `baidi-desktop-windows-x86_64-UNVERIFIED` |
 
 `fail-fast: false`：Windows 挂了不该连累 macOS 的包。
 
@@ -87,6 +87,16 @@ CI 里有**两道**保险，两道都要在：
 CI 里还有一步 `校验 manifest 真的带上了溯源`：manifest 生成成功、校验和也对，
 唯独 `sourceCommit` 空 —— 这种静默退化就是靠那一步挡住的。
 
+**Linux / Windows 的 UNVERIFIED 产物同样要带溯源**，虽然它们不进 `manifest.json`。
+`取 clients/ 子树 commit` 那一步在三个 runner 上都跑，但它的输出此前只有 macOS 分支消费 ——
+两份 UNVERIFIED 包里只有安装包和一份 README，下载的人无从知道它出自哪个 commit、
+什么时候构建。将来有人手工把它铺进 `downloads/` 时只能靠 `git log` 事后猜一个，
+而**猜错的方向恰好是「看起来是新的」**（给安卓建 `apk-provenance.env` 时写的就是这句，
+这条纪律现在回填到了桌面这条流水线）。
+产物里因此各带一份 `build-provenance.env`（`BAIDI_CLIENT_SRC_REV` / `BAIDI_CLIENT_BUILT_AT` /
+`BAIDI_CLIENT_PLATFORM` / `BAIDI_CLIENT_VERIFIED=no`，变量名与汇集脚本、控制面
+`clientSourceRev()` 同名同义，铺包的人可以直接 `source` 它），同样内容也追加进 README。
+
 `BAIDI_APK_SRC_REV`（安卓 APK 的溯源）**刻意没在这条流水线里设**：本流水线不构建 APK，
 干净的 checkout 里也没有 APK。此时把当前 commit 塞给它，等于替一个"将来某人放进来的、
 来路不明的包"预先背书 —— 那正是溯源机制要消灭的谎。将来真加了 APK 构建作业，
@@ -96,8 +106,15 @@ CI 里还有一步 `校验 manifest 真的带上了溯源`：manifest 生成成�
 
 `build-artifacts.sh` 目前只认两样东西：本机 tauri 产出的 `.dmg`，和 `mobile/native/android`
 下的 `.apk`。CI 出的 Linux/Windows 包**不会**自动进 `manifest.json`（那两个平台在
-manifest 里仍是占位）。要下发它们，得先解决下面第四、五节那两条真实约束 ——
-在那之前，让下载中心继续说「构建中」比给出一个装了也连不上的包诚实。
+manifest 里仍是占位）。要下发它们，得先解决下面第四、五节那两条真实约束。
+
+在那之前，占位文案要照实说**为什么**：
+- **Linux** 是「构建中，敬请期待」—— 包能出、数据面代码在那儿，缺的是一次实机验证，
+  这是真的会到来的东西；
+- **Windows 不是**。它缺的是我们不分发的 `wintun.dll`（见第四节），装了也起不来隧道。
+  占位文案因此写成「需自备 wintun.dll…请联系管理员」。用户看到的不是「包能不能出」，
+  是「能不能用」—— 对他说「敬请期待」等于让他一直等一个按现有决策不会下发的包，
+  而正确的下一步（自备 DLL / 找管理员要 UNVERIFIED 包）明明存在，却被那句话挡住了。
 
 ## 四、Windows：包能出，但少一个我们不分发的 DLL
 
@@ -142,7 +159,12 @@ Windows 包**未签名**，会触发 SmartScreen。CI 里没有配置任何签�
 - `build-sidecars.sh` 的四条分支在本机用假 `rustc`（伪造 host 三元组）**真跑过**：
   `x86_64-pc-windows-msvc` → PE32+ x86-64、`aarch64-pc-windows-msvc` → PE32+ Aarch64、
   `x86_64-unknown-linux-gnu` → ELF、未适配三元组 → 如实报错退出；
-- `build-artifacts.sh` 的溯源分支（注入 / 不注入 / 工作区脏 / 目标不是 git 仓）逐条跑过。
+- `build-artifacts.sh` 的溯源分支（注入 / 不注入 / 工作区脏 / 目标不是 git 仓）逐条跑过；
+  其中「工作区脏」与「占位文案与 `placeholderManifest()` 逐字一致」两条现在由
+  `control/internal/api/downloads_script_test.go` **真的执行这个脚本**来守
+  —— 它在临时 git 仓里构造「已 `git add` 未提交」「未跟踪新增」两种形态，
+  那正是旧判据 `git diff --quiet -- clients/` 判成干净、包因此冒充一个干净 commit 的场景；
+- 该用例还断言 `clients.yml` 的两份 UNVERIFIED 产物里确实带上了 `build-provenance.env`。
 
 也就是说：**构建脚本是验过的，runner 上的步骤编排没有。** 第一次真实运行大概率还要修，
 红了先看步骤名。
@@ -271,7 +293,20 @@ Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实
 |---|---|---|
 | iOS | 需企业签名 / TestFlight 分发，请联系管理员 | 需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员 |
 | 鸿蒙 | **构建中，敬请期待** | 需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员 |
+| Windows | **构建中，敬请期待** | 需自备 wintun.dll（第三方组件，本仓库不分发）才能建虚拟网卡，且 UAC 提权路径未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员 |
+| macOS（缺 dmg 时） | *（空着，什么都不说）* | 构建中，敬请期待（与 `placeholderManifest()` 同） |
 
 鸿蒙那句「构建中，敬请期待」是不对的：它暗示有一个正在进行的构建、等等就有 —— 而实际上
-没有任何流水线在构建它，也不会有。「敬请期待」只能用在**真的会被构建出来**的平台上
-（Windows/Linux 是那种情况：包能出，只是因为第四、五节的原因暂不下发）。
+没有任何流水线在构建它，也不会有。「敬请期待」只能用在**真的会被构建出来、且装了能用**的
+平台上。
+
+Windows 起初被豁免过一次，理由是「包能出，所以算数」—— 那是拿错了判据：
+**用户看到的不是「包能不能出」，是「能不能用」。** 它缺的 `wintun.dll` 我们不分发，
+CI 产物也刻意不进下载中心，那个包按现有决策不会下发；而它的正确下一步（自备 DLL、
+或找管理员要 UNVERIFIED 包）恰恰是存在的，只是被那句占位文案挡住了。Linux 不同：
+包能出、数据面代码也在，缺的只是一次实机验证，那是真会到来的东西，仍写「敬请期待」。
+
+macOS 那一行是同一条纪律的另一半：脚本在**缺 dmg** 时曾写 `note=""`，而 manifest 整体
+缺失时页面回落到 `placeholderManifest()` 的「构建中，敬请期待」—— 同一个平台在两条路径上
+说两种话（一句解释 vs 什么都不说）。两处文案的一致性现在由 Go 用例真跑一遍脚本来守
+（`control/internal/api/downloads_script_test.go`）。

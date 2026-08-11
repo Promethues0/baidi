@@ -32,7 +32,10 @@
                   <template v-if="recommended.arch"> · {{ recommended.arch }}</template>
                   · {{ fmtSize(recommended.size) }}
                 </template>
-                <template v-else>{{ recommended.note || '构建中，敬请期待' }}</template>
+                <!-- ★兜底文案刻意不是「构建中，敬请期待」：那句话只能用在真的会被构建出来、
+                     且装了能用的平台上（判据在后端 placeholderManifest / build-artifacts.sh 两处
+                     逐字一致的 note 里）。前端拿不到 note 时并不知道是哪一种，不该替它许诺。 -->
+                <template v-else>{{ recommended.note || '暂无安装包，请联系管理员' }}</template>
               </p>
               <button v-if="recommended.available" class="bd-hero__btn" @click="download(recommended)">
                 <icon-download /> 立即下载
@@ -48,7 +51,8 @@
                 <span class="bd-dtile__icon"><component :is="platformIcon(c.platform)" /></span>
                 <div>
                   <h3 class="bd-dtile__name">{{ c.label }}</h3>
-                  <p class="bd-dtile__arch">{{ c.available ? (c.arch || '') : (c.note || '构建中，敬请期待') }}</p>
+                  <!-- 同上：note 缺席时不替后端许诺一个可能不会到来的版本 -->
+                  <p class="bd-dtile__arch">{{ c.available ? (c.arch || '') : (c.note || '暂无安装包，请联系管理员') }}</p>
                 </div>
               </header>
               <template v-if="c.available">

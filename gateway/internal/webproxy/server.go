@@ -337,7 +337,8 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 	// **它不构成隔离**：Referer 可以被发起方用 referrerPolicy 抑制，Sec-Fetch-* 是浏览器
 	// 自愿加的。真正的应用间隔离只有"每个应用一个独立域名"（资源的 webEntry 覆盖）。
 	// 这条边界写在 docs/ARCHITECTURE.md 第七节，别再说"一个应用的会话凭据不能访问其它应用"。
-	if from, cross := CrossAppOrigin(r.Header.Get("Referer"), resID); cross {
+	if from, cross := CrossAppOrigin(r.Header.Get("Referer"), resID,
+		r.Header.Get("Sec-Fetch-Mode"), r.Header.Get("Sec-Fetch-Dest")); cross {
 		slog.Warn("L7 拒绝（跨应用发起的同源请求）", "src", ip, "user", sess.User,
 			"fromRes", from, "pathRes", resID)
 		writeNotice(w, http.StatusForbidden, "跨应用请求已拒绝",
@@ -432,8 +433,17 @@ func (s *Server) guardUpgraded(uc *upgradedConn, sess Session) {
 // CrossAppOrigin 判断一个请求是否由**另一个应用的页面**发起（纯函数，便于单测）。
 // 返回发起方资源 id 与是否跨应用。Referer 缺席/不可解析/不在 /app/ 下时不判跨应用——
 // 直接导航与从门户点过来都没有本站 Referer，按跨应用拦掉会把正常访问全拦死。
-func CrossAppOrigin(referer, resID string) (string, bool) {
+//
+// ★**顶层导航放行**：用户在 A 应用的页面里点一个指向 B 应用的链接是完全正常的业务，
+// 拦掉它就是把一个能用的系统改坏。判据取 Sec-Fetch-Mode/Dest 而不是 Referer 的形状——
+// 这两个头是**浏览器加的、页面脚本改不了**（fetch/XHR 的禁止修改头），
+// 所以攻击者没法把一次带凭据的后台读取伪装成一次导航；而它们缺席时（老浏览器、
+// curl）走保守分支：仍按跨应用拒。
+func CrossAppOrigin(referer, resID, fetchMode, fetchDest string) (string, bool) {
 	if strings.TrimSpace(referer) == "" {
+		return "", false
+	}
+	if strings.EqualFold(fetchMode, "navigate") && strings.EqualFold(fetchDest, "document") {
 		return "", false
 	}
 	u, err := url.Parse(referer)

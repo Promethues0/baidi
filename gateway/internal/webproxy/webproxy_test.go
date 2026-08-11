@@ -751,3 +751,27 @@ func TestUpgradedConnectionKilledOnAuthorizationLoss(t *testing.T) {
 		t.Fatal("★撤权后连接仍活着：长连接上没有逐请求鉴权的等价执行方")
 	}
 }
+
+// 跨应用判定的两侧：顶层导航放行、脚本发起的同源读取拒绝。
+//
+// ★判据必须是浏览器加的 Sec-Fetch-*（页面脚本改不了那两个头），不是 Referer 的形状——
+// 用 Referer 猜"这像不像一次点击"的话，攻击者把 fetch 的 Referer 改成什么都行。
+func TestCrossAppOriginAllowsTopLevelNavigation(t *testing.T) {
+	const ref = "https://gw:18444/app/oa/index.html"
+	if _, cross := CrossAppOrigin(ref, "git", "navigate", "document"); cross {
+		t.Fatal("★用户从 A 应用点链接跳到 B 应用是正常业务，不该被拦")
+	}
+	for name, hdr := range map[string][2]string{
+		"脚本 fetch":    {"cors", "empty"},
+		"子资源加载":       {"no-cors", "image"},
+		"缺 Sec-Fetch": {"", ""}, // 判不了就按跨应用拒（保守分支）
+	} {
+		if _, cross := CrossAppOrigin(ref, "git", hdr[0], hdr[1]); !cross {
+			t.Fatalf("★%s 必须判为跨应用", name)
+		}
+	}
+	// 同应用内一律不判跨应用（否则整站静态资源全挂）
+	if _, cross := CrossAppOrigin(ref, "oa", "cors", "empty"); cross {
+		t.Fatal("同应用内的请求不该被判跨应用")
+	}
+}

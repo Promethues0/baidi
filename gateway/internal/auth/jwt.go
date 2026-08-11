@@ -16,14 +16,24 @@ import (
 // 两份 Claims 是手抄的，字段/取值不同步会导致解析静默丢失、strict 校验全线拒绝。
 const UseKnock = "knock"
 
+// UseWeb 七层 Web 代理访问票据的用途标记（Claims.Use）。
+//
+// ★用途闸双向：SPA 敲门路径拒 use=web（见 spa.checkKnock），L7 路径拒 use=knock
+// （见 webproxy.VerifyTicket）。两条路径还各装一把独立公钥，故拿错票据在对面
+// 连签名都验不过——use 判断是纵深，不是唯一防线。
+const UseWeb = "web"
+
 type Claims struct {
 	Sub  string `json:"sub"`
 	Role string `json:"role"`
 	Name string `json:"name"`
 	Exp  int64  `json:"exp"`
 	Iat  int64  `json:"iat,omitempty"`
-	Jti  string `json:"jti,omitempty"` // 短时效敲门令牌的唯一 id，网关据此一次性去重
-	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；空=会话令牌/MFA 票据（strict 下拒绝）
+	Jti  string `json:"jti,omitempty"` // 短时效敲门/Web 票据的唯一 id，网关据此一次性去重
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；空=会话令牌/MFA 票据（strict 下拒绝）
+	// Res 票据绑定的受控资源 id（只有 Use=UseWeb 时有值）。网关据此把会话 Cookie
+	// 钉死在 (账号, 资源) 上——一个应用的 Cookie 换不到另一个应用。
+	Res string `json:"res,omitempty"`
 }
 
 var b64 = base64.RawURLEncoding

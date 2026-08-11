@@ -45,10 +45,18 @@ func (k keypair) publicPEM() []byte {
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
 }
 
+// ★七层 Web 代理接进来之后又多了一把 web 密钥（第三把），沿用同一条纪律：
+// 数据面上两条入场路径（UDP 敲门 / L7 票据）各验各的公钥，谁也验不过对方那张票。
+// 少了这一把、把 web 票据也用 knock 密钥签的话，两条路径就只剩 Claims.Use
+// 一个字符串判断在隔离——那正是阶段 3 花力气从"唯一防线"降级掉的东西。
+
 // Keys 持有签发/验证材料。legacy 为迁移期的 HS256 密钥。
 type Keys struct {
-	sess         keypair // 会话令牌 + MFA 票据
-	knock        keypair // 只签敲门令牌；其公钥是唯一分发给数据面的
+	sess  keypair // 会话令牌 + MFA 票据
+	knock keypair // 只签敲门令牌；其公钥分发给数据面的 SPA 监听
+	// web 只签七层 Web 代理的访问票据（Use=UseWeb）；其公钥分发给数据面的 L7 监听。
+	// 与 knock 分开是为了让「敲门路径拒 web 票据 / L7 路径拒敲门令牌」在密码学层就成立。
+	web          keypair
 	legacy       []byte
 	acceptLegacy bool
 }
@@ -61,12 +69,13 @@ func KidOf(pub ed25519.PublicKey) string {
 	return b64.EncodeToString(sum[:8])
 }
 
-// LoadOrCreateKeys 载入/生成两把 Ed25519 私钥（0600 原子写），
-// 并把各自公钥写到同名 .pub（0644）。knock 公钥即分发给网关的那份。
+// LoadOrCreateKeys 载入/生成三把 Ed25519 私钥（0600 原子写），
+// 并把各自公钥写到同名 .pub（0644）。knock 与 web 两把公钥是分发给网关的那份
+// （分别给 SPA 敲门监听与七层 Web 代理监听），sess 公钥**不分发**。
 //
 // legacy/acceptLegacy 控制迁移期是否接受存量 HS256 令牌：迁移期必须接受，
 // 否则升级瞬间所有在线会话（8h TTL）与网关自签的 role=gateway 令牌全部 401。
-func LoadOrCreateKeys(sessPath, knockPath string, legacy []byte, acceptLegacy bool) (*Keys, error) {
+func LoadOrCreateKeys(sessPath, knockPath, webPath string, legacy []byte, acceptLegacy bool) (*Keys, error) {
 	sess, err := loadKeypair(sessPath)
 	if err != nil {
 		return nil, fmt.Errorf("会话签名密钥: %w", err)
@@ -75,7 +84,11 @@ func LoadOrCreateKeys(sessPath, knockPath string, legacy []byte, acceptLegacy bo
 	if err != nil {
 		return nil, fmt.Errorf("敲门签名密钥: %w", err)
 	}
-	return &Keys{sess: sess, knock: knock, legacy: legacy, acceptLegacy: acceptLegacy}, nil
+	web, err := loadKeypair(webPath)
+	if err != nil {
+		return nil, fmt.Errorf("Web 票据签名密钥: %w", err)
+	}
+	return &Keys{sess: sess, knock: knock, web: web, legacy: legacy, acceptLegacy: acceptLegacy}, nil
 }
 
 func loadKeypair(path string) (keypair, error) {
@@ -93,7 +106,7 @@ func loadKeypair(path string) (keypair, error) {
 
 // NewTestKeys 生成一次性内存密钥对（测试用，不落盘）。
 func NewTestKeys(legacy []byte, acceptLegacy bool) *Keys {
-	return &Keys{sess: genKeypair(), knock: genKeypair(), legacy: legacy, acceptLegacy: acceptLegacy}
+	return &Keys{sess: genKeypair(), knock: genKeypair(), web: genKeypair(), legacy: legacy, acceptLegacy: acceptLegacy}
 }
 
 func genKeypair() keypair {
@@ -103,12 +116,16 @@ func genKeypair() keypair {
 
 func (k *Keys) SessKid() string  { return k.sess.kid }
 func (k *Keys) KnockKid() string { return k.knock.kid }
+func (k *Keys) WebKid() string   { return k.web.kid }
 
 // SessPublicPEM 会话签名公钥（control 自用/审计；**不分发给网关**）。
 func (k *Keys) SessPublicPEM() []byte { return k.sess.publicPEM() }
 
-// KnockPublicPEM 敲门签名公钥——这是唯一该分发给数据面的验证材料。
+// KnockPublicPEM 敲门签名公钥——分发给数据面的 SPA 敲门监听。
 func (k *Keys) KnockPublicPEM() []byte { return k.knock.publicPEM() }
+
+// WebPublicPEM 七层 Web 代理票据的验证公钥——分发给数据面的 L7 监听。
+func (k *Keys) WebPublicPEM() []byte { return k.web.publicPEM() }
 
 // AcceptsLegacy 报告是否仍接受存量 HS256 令牌（迁移窗口未关闭）。供 /diag 暴露真实姿态。
 func (k *Keys) AcceptsLegacy() bool { return k.acceptLegacy && len(k.legacy) > 0 }
@@ -117,12 +134,15 @@ func (k *Keys) AcceptsLegacy() bool { return k.acceptLegacy && len(k.legacy) > 0
 func (k *Keys) LegacyIs(s string) bool { return string(k.legacy) == s }
 
 // Sign 按令牌用途选密钥签发（alg=EdDSA，header 带 kid）；自动填充 Iat/Exp。
-// Use=knock 走 knock 密钥，其余（会话令牌、MFA 票据）走 sess 密钥——
+// Use=knock 走 knock 密钥、Use=web 走 web 密钥，其余（会话令牌、MFA 票据）走 sess 密钥——
 // 调用点无需关心选哪把，用途字段本身就是路由依据。
 func (k *Keys) Sign(c Claims, ttl time.Duration) string {
 	kp := k.sess
-	if c.Use == UseKnock {
+	switch c.Use {
+	case UseKnock:
 		kp = k.knock
+	case UseWeb:
+		kp = k.web
 	}
 	now := time.Now()
 	c.Iat = now.Unix()
@@ -135,11 +155,19 @@ func (k *Keys) Sign(c Claims, ttl time.Duration) string {
 
 // byKid 按 kid 定位公钥（两把密钥并存，也为将来轮换留位）。
 func (k *Keys) byKid(kid string) (ed25519.PublicKey, bool) {
+	// 空 kid 一律查不到。少了这一句，一个不带 kid 的 EdDSA 令牌会去匹配"某把尚未
+	// 装载的密钥"（零值 keypair 的 kid 也是空串），拿到一把 nil 公钥交给
+	// ed25519.Verify —— 那是 panic 而不是拒绝。
+	if kid == "" {
+		return nil, false
+	}
 	switch kid {
 	case k.sess.kid:
 		return k.sess.pub, true
 	case k.knock.kid:
 		return k.knock.pub, true
+	case k.web.kid:
+		return k.web.pub, true
 	}
 	return nil, false
 }

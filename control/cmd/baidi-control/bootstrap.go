@@ -54,7 +54,7 @@ func issueGatewayBundle(gwID, outDir string) error {
 	if err != nil {
 		return fmt.Errorf("内部 CA: %w", err)
 	}
-	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, nil, false)
+	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, cfg.JWTWebKeyPath, nil, false)
 	if err != nil {
 		return fmt.Errorf("签名密钥: %w", err)
 	}
@@ -88,7 +88,9 @@ func issueGatewayBundle(gwID, outDir string) error {
 		{"gw.crt.pem", []byte(iss.CertPEM), 0o644},
 		{"gw.key.pem", []byte(iss.KeyPEM), 0o600}, // 网关私钥
 		{"ca.crt.pem", ca.CertPEM(), 0o644},
-		{"knock.pub", keys.KnockPublicPEM(), 0o644}, // 只给 knock 公钥：会话令牌在数据面验不过
+		{"knock.pub", keys.KnockPublicPEM(), 0o644}, // SPA 敲门监听用；会话令牌在数据面验不过
+		// 七层 Web 代理监听用。与 knock.pub 分开签、分开发：拿错路径的票据在对面连签名都验不过。
+		{"web.pub", keys.WebPublicPEM(), 0o644},
 	}
 	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(outDir, f.name), f.data, f.perm); err != nil {
@@ -98,7 +100,7 @@ func issueGatewayBundle(gwID, outDir string) error {
 
 	slog.Info("网关身份材料已签发",
 		"gwid", gwID, "out", outDir, "指纹", iss.Fingerprint[:16]+"…",
-		"有效期至", iss.NotAfter.Format("2006-01-02"), "knockKid", keys.KnockKid())
-	fmt.Printf("✓ 网关 %s 的身份材料已写入 %s（gw.crt.pem / gw.key.pem / ca.crt.pem / knock.pub）\n", gwID, outDir)
+		"有效期至", iss.NotAfter.Format("2006-01-02"), "knockKid", keys.KnockKid(), "webKid", keys.WebKid())
+	fmt.Printf("✓ 网关 %s 的身份材料已写入 %s（gw.crt.pem / gw.key.pem / ca.crt.pem / knock.pub / web.pub）\n", gwID, outDir)
 	return nil
 }

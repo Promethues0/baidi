@@ -182,6 +182,7 @@ if [ "${WITH_GATEWAY:-0}" = "1" ]; then
     BAIDI_DB="$BD_PREFIX/data/baidi.db" \
     BAIDI_JWT_KEY="$BD_PREFIX/etc/keys/jwt-ed25519.pem" \
     BAIDI_JWT_KNOCK_KEY="$BD_PREFIX/etc/keys/jwt-ed25519-knock.pem" \
+    BAIDI_JWT_WEB_KEY="$BD_PREFIX/etc/keys/jwt-ed25519-web.pem" \
     BAIDI_PKI_DIR="$BD_PREFIX/etc/pki" \
     "$BD_PREFIX/bin/baidi-control" -issue-gateway-cert "$GW_ID" -out "$BD_PREFIX/etc/gwcerts" \
     || { echo "  ✗ 网关身份材料签发失败"; exit 1; }
@@ -191,6 +192,12 @@ if [ "${WITH_GATEWAY:-0}" = "1" ]; then
 # 白帝网关专属配置——只有验证材料，没有任何签发能力。
 # 令牌验证：只装 control 的**敲门**公钥；会话令牌用另一把密钥签，其 kid 在此查不到。
 BAIDI_GW_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/knock.pub
+# 七层 Web 代理（B/S 免客户端）的票据公钥。★监听默认**不开**：
+# 该端口必须对浏览器可达，不受 SPA 隐身保护，是一个真实的入站攻击面。
+# 要开就取消下面 BAIDI_GW_WEB 的注释，并**务必**在它前面放一层 HTTPS
+# （会话 Cookie 恒带 Secure，纯 HTTP 暴露时浏览器根本不会保存它）。
+BAIDI_GW_WEB_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/web.pub
+#BAIDI_GW_WEB=127.0.0.1:18444
 # 机器身份：mTLS 客户端证书（CN=$GW_ID），控制面据此认人并可即刻吊销
 BAIDI_GW_MTLS_CERT=$BD_PREFIX/etc/gwcerts/gw.crt.pem
 BAIDI_GW_MTLS_KEY=$BD_PREFIX/etc/gwcerts/gw.key.pem
@@ -261,12 +268,13 @@ if [ "${WITH_IPSEC:-0}" = "1" ]; then
     BAIDI_DB="$BD_PREFIX/data/baidi.db" \
     BAIDI_JWT_KEY="$BD_PREFIX/etc/keys/jwt-ed25519.pem" \
     BAIDI_JWT_KNOCK_KEY="$BD_PREFIX/etc/keys/jwt-ed25519-knock.pem" \
+    BAIDI_JWT_WEB_KEY="$BD_PREFIX/etc/keys/jwt-ed25519-web.pem" \
     BAIDI_PKI_DIR="$BD_PREFIX/etc/pki" \
     "$BD_PREFIX/bin/baidi-control" -issue-gateway-cert "$IPSEC_GW_ID" -out "$BD_PREFIX/etc/ipseccerts" \
     || { echo "  ✗ 站点组网网关身份材料签发失败"; exit 1; }
   # 顺手删掉敲门公钥：组网网关不验任何令牌（它的接口全靠 mTLS CN 认身份），
   # 留着只会让下一个人以为它参与敲门链路。
-  rm -f "$BD_PREFIX/etc/ipseccerts/knock.pub"
+  rm -f "$BD_PREFIX/etc/ipseccerts/knock.pub" "$BD_PREFIX/etc/ipseccerts/web.pub"
 
   # ④ 组网专属 env：只有身份材料路径，**没有任何密钥原文**。
   # PSK 不落盘也不进 env——进程运行时经 mTLS 按版本单取，只在内存里。

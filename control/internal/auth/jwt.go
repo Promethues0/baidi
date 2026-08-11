@@ -16,6 +16,16 @@ import (
 // 见 gateway/internal/spa.checkKnock——这是"长效会话令牌可直接敲门"旁路的根治判据。
 const UseKnock = "knock"
 
+// UseWeb 七层 Web 代理访问票据的用途标记（Claims.Use）。
+//
+// 浏览器做不了 SPA 敲门（那是带签名令牌的 UDP 包），所以 B/S 免客户端接入需要另一条
+// 「控制面签、数据面验」的入场路径。它与敲门令牌**同款纪律**：短时效（≤60s）、带 jti、
+// 一次性、且用 Res 字段把票据钉死在某一个资源上。
+//
+// ★用途闸必须双向：敲门路径拒 use=web，L7 路径拒 use=knock。二者还各用一把独立密钥
+// 签（见 Keys.web），所以拿错路径的票据在对面**连签名都验不过**——use 判断退化成纵深。
+const UseWeb = "web"
+
 // UsePwReset 首登强制改密的受限令牌用途标记（Claims.Use）。
 // 口令验证通过但 must_change_pw=1 时签发（15min），中间件只放行改密与查身份两个端点；
 // 它由 sess 密钥签出且 use≠knock，故既调不到业务 API，也从密码学与语义两层都敲不开门。
@@ -33,7 +43,13 @@ type Claims struct {
 	Exp  int64  `json:"exp"`           // 过期 Unix 秒
 	Iat  int64  `json:"iat,omitempty"` // 签发 Unix 秒
 	Jti  string `json:"jti,omitempty"` // 令牌唯一 id（短时效敲门令牌用，网关按它一次性去重）
-	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；空=会话令牌/MFA 票据
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；空=会话令牌/MFA 票据
+	// Res 票据绑定的受控资源 id（只有 Use=UseWeb 时有值）。
+	//
+	// ★它是「一张票只开一扇门」的载体：网关据此把 Cookie 绑到 (账号, 资源)，
+	// 一个应用的会话凭据换不到另一个应用。不带资源维度的票据等于一张万能通行证——
+	// 而 L7 端点是对浏览器可达的入站面，万能通行证的爆炸半径是全部已发布 Web 应用。
+	Res string `json:"res,omitempty"`
 }
 
 var b64 = base64.RawURLEncoding

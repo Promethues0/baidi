@@ -12,11 +12,13 @@ Environment=BAIDI_DOWNLOADS=@BD_PREFIX@/downloads
 Environment=BAIDI_ENV=prod
 # 公网来源（CORS）；同源经 nginx 反代时可留默认
 Environment=BAIDI_CORS_ORIGIN=@PUBLIC_ORIGIN@
-# 身份签名密钥：两把 Ed25519 按用途分签（首启自动生成 0600，公钥写同名 .pub）。
-# knock 公钥是唯一分发给数据面的验证材料——网关拿不到会话密钥的公钥，
-# 于是会话令牌在网关侧从密码学上就验不过。
+# 身份签名密钥：三把 Ed25519 按用途分签（首启自动生成 0600，公钥写同名 .pub）。
+# 分发给数据面的只有 knock 与 web 两把**公钥**（分别给 SPA 敲门监听与七层 Web 代理监听），
+# 会话密钥的公钥网关拿不到 —— 于是会话令牌在网关侧从密码学上就验不过。
+# knock 与 web 也彼此独立：拿错路径的票据在对面连签名都验不过，use 语义闸退化为纵深。
 Environment=BAIDI_JWT_KEY=@BD_PREFIX@/etc/keys/jwt-ed25519.pem
 Environment=BAIDI_JWT_KNOCK_KEY=@BD_PREFIX@/etc/keys/jwt-ed25519-knock.pem
+Environment=BAIDI_JWT_WEB_KEY=@BD_PREFIX@/etc/keys/jwt-ed25519-web.pem
 # 内部 CA（标准 X.509/P-256）：签发网关 mTLS 客户端证书
 Environment=BAIDI_PKI_DIR=@BD_PREFIX@/etc/pki
 # 网关接口的 mTLS 独立监听：/api/v1/gateways/* 只挂这里，明文口不再暴露该路由

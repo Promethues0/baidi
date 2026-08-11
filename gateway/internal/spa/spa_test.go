@@ -1,8 +1,11 @@
 package spa
 
 import (
+	"strings"
 	"testing"
 	"time"
+
+	"baidi.dev/gateway/internal/auth"
 )
 
 func TestDenyUser(t *testing.T) {
@@ -92,5 +95,30 @@ func TestRevokeUser(t *testing.T) {
 	}
 	if got := al.RevokeUser("li.fang"); len(got) != 0 {
 		t.Fatalf("重复撤销应为空，实际 %v", got)
+	}
+}
+
+// ★用途闸的**敲门这一侧**：七层 Web 代理的访问票据（use=web）绝不能敲开门。
+// 另一侧（L7 路径拒 use=knock）由 webproxy 包的用例守着——两条必须成对存在，
+// 少任一侧，一张票就能同时开两条入场路径，而两条路径的闸完全不同
+// （敲门那条有终端合规/设备准入，L7 那条没有）。
+//
+// 生产里它还有一层密码学隔离（两条路径各装一把公钥，web 票据在 SPA 侧连签名都验不过），
+// 这里单测的是语义闸本身：即便有朝一日两把公钥被误装成同一把，它也必须拦住。
+func TestCheckKnockRejectsWebTicket(t *testing.T) {
+	now := time.Now()
+	web := auth.Claims{Sub: "u", Role: "user", Name: "u", Jti: "j", Use: auth.UseWeb, Res: "oa",
+		Iat: now.Unix(), Exp: now.Add(60 * time.Second).Unix()}
+	if err := checkKnock(web, true, 5*time.Minute); err == nil {
+		t.Fatal("★Web 访问票据必须敲不开门")
+	} else if !strings.Contains(err.Error(), "非敲门令牌") {
+		t.Fatalf("应因用途不符被拒，得: %v", err)
+	}
+	// 对照组：同样的信封、同样的寿命，只把 use 换成 knock 就该通过——
+	// 证明上面那条拒绝确实来自用途闸，而不是别的字段不合格。
+	knock := web
+	knock.Use, knock.Res = auth.UseKnock, ""
+	if err := checkKnock(knock, true, 5*time.Minute); err != nil {
+		t.Fatalf("对照组敲门令牌应通过: %v", err)
 	}
 }

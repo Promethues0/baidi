@@ -31,7 +31,8 @@ type Config struct {
 	WebauthnRPID       string        // WebAuthn RP ID（可注册域名，如 vpn.example.com / localhost）
 	WebauthnOrigins    string        // WebAuthn 允许来源，逗号分隔（如 https://vpn.example.com）
 	JWTKeyPath         string        // 会话令牌 Ed25519 私钥 PEM（缺失则首启生成；公钥写同名 .pub）
-	JWTKnockKeyPath    string        // 敲门令牌 Ed25519 私钥 PEM；其 .pub 是唯一分发给网关的验证材料
+	JWTKnockKeyPath    string        // 敲门令牌 Ed25519 私钥 PEM；其 .pub 分发给网关的 SPA 敲门监听
+	JWTWebKeyPath      string        // 七层 Web 代理票据 Ed25519 私钥 PEM；其 .pub 分发给网关的 L7 监听
 	AcceptHS256        bool          // 是否接受存量 HS256 令牌（阶段4 起默认 false；=1 为过渡逃生舱）
 	PKIDir             string        // 内部 CA 目录（签发网关 mTLS 客户端证书）；空=禁用 mTLS
 	MTLSAddr           string        // 网关接口的 mTLS 监听地址（如 127.0.0.1:8092）；空=不监听
@@ -102,6 +103,8 @@ func Load() Config {
 		JWTKeyPath: env("BAIDI_JWT_KEY", "jwt-ed25519.pem"),
 		// 按用途分密钥：网关只装 knock 公钥，会话令牌在数据面从密码学上就验不过。
 		JWTKnockKeyPath: env("BAIDI_JWT_KNOCK_KEY", "jwt-ed25519-knock.pem"),
+		// 七层 Web 代理票据再分一把：L7 监听只装它的公钥，敲门令牌在那条路上同样验不过。
+		JWTWebKeyPath: env("BAIDI_JWT_WEB_KEY", "jwt-ed25519-web.pem"),
 		// 阶段 4 已收口：默认不再接受 HS256 存量令牌。逃生舱 BAIDI_ACCEPT_HS256=1
 		// 仅供「升级瞬间还有未过期的 8h 会话」时临时打开，存量过期后应立即关回。
 		AcceptHS256: envBool("BAIDI_ACCEPT_HS256", false),

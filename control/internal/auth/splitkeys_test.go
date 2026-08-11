@@ -74,3 +74,41 @@ func TestKeysAreIndependent(t *testing.T) {
 		t.Fatal("换 kid 后签名必须验不过")
 	}
 }
+
+// 七层 Web 代理票据走第三把密钥：Sign 按 Use 路由到 web，且**只**持 web 公钥的一方
+// 验不过敲门令牌、只持 knock 公钥的一方验不过 web 票据。
+//
+// ★这条性质是「两条数据面入场路径互不越界」的密码学底座。少了它，两条路径的隔离
+// 就只剩 Claims.Use 一个字符串判断——那正是阶段 3 花力气从"唯一防线"降级掉的东西。
+func TestWebTicketUsesItsOwnKey(t *testing.T) {
+	k := NewTestKeys(nil, false)
+	knock := k.Sign(Claims{Sub: "u", Role: "user", Name: "u", Use: UseKnock, Jti: "j"}, 90*time.Second)
+	web := k.Sign(Claims{Sub: "u", Role: "user", Name: "u", Use: UseWeb, Jti: "j", Res: "oa"}, time.Minute)
+
+	kidOfTok := func(tok string) string {
+		h, err := parseHeader(strings.Split(tok, ".")[0], "EdDSA")
+		if err != nil {
+			t.Fatalf("解析 header: %v", err)
+		}
+		return h.Kid
+	}
+	if got := kidOfTok(web); got != k.WebKid() {
+		t.Fatalf("Web 票据应用 web 密钥: %s", got)
+	}
+	if k.WebKid() == k.KnockKid() || k.WebKid() == k.SessKid() {
+		t.Fatal("三把密钥必须互不相同")
+	}
+
+	// 模拟只装了 web 公钥的 L7 监听 / 只装了 knock 公钥的 SPA 监听。
+	webOnly := &Keys{sess: k.web, knock: k.web, web: k.web}
+	knockOnly := &Keys{sess: k.knock, knock: k.knock, web: k.knock}
+	if _, err := webOnly.Verify(web); err != nil {
+		t.Fatalf("L7 侧应能验 web 票据: %v", err)
+	}
+	if _, err := webOnly.Verify(knock); err == nil {
+		t.Fatal("★只持 web 公钥时，敲门令牌必须验不过")
+	}
+	if _, err := knockOnly.Verify(web); err == nil {
+		t.Fatal("★只持 knock 公钥时，Web 票据必须验不过")
+	}
+}

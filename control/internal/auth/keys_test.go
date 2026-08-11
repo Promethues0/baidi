@@ -78,8 +78,9 @@ func TestLoadOrCreateKeysPersistence(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "sub", "jwt.pem")
 	kpath := filepath.Join(dir, "sub", "jwt-knock.pem")
+	wpath := filepath.Join(dir, "sub", "jwt-web.pem")
 
-	k1, err := LoadOrCreateKeys(path, kpath, nil, false)
+	k1, err := LoadOrCreateKeys(path, kpath, wpath, nil, false)
 	if err != nil {
 		t.Fatalf("首启应生成密钥: %v", err)
 	}
@@ -95,7 +96,7 @@ func TestLoadOrCreateKeysPersistence(t *testing.T) {
 		t.Fatalf("公钥应旁路落盘供分发: %v", err)
 	}
 
-	k2, err := LoadOrCreateKeys(path, kpath, nil, false)
+	k2, err := LoadOrCreateKeys(path, kpath, wpath, nil, false)
 	if err != nil {
 		t.Fatalf("二次载入应成功: %v", err)
 	}

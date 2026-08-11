@@ -203,9 +203,33 @@ export interface AdminAccount {
   roleKey: string; roleName: string; power: string;
   auth: string; twoFa: boolean; lastLogin: string; status: string;
 }
-export interface ClusterNode { name: string; ip: string; role: 'master' | 'backup' | 'center' | 'branch'; status: string }
-/** 集群未实现：deployed 恒 false、两个节点列表恒空（与 /diag 的 checkCluster 同口径）。 */
-export interface ClusterInfo { deployed: boolean; note: string; localNodes: ClusterNode[]; distNodes: ClusterNode[] }
+/* ── 控制面温备（standby.ClusterView，PRD 15.5 / FR-ARCH-03）──
+ *
+ * ★白帝的控制面是**温备不是双活**：SQLite 单写者，做不了多活。备机周期拉加密备份、
+ * 校验后落盘，不对外提供服务；切换由人工/脚本触发（promoteCmd 给的是真能跑的那条命令）。
+ * RPO = 同步间隔，必须原样显示——让人以为是零丢失比没有温备更危险。
+ * 三态：未配置备机（skip）/ 同步新鲜（pass）/ 落后或失败（warn），与 /diag checkCluster 同源。
+ */
+export type StandbyState = 'fresh' | 'stale' | 'never';
+export interface StandbyNodeView {
+  nodeId: string; addr: string; state: StandbyState;
+  /** 盘上那份落后多久；**-1 = 不可判定**（从未成功同步过），不是 0。 */
+  lagSeconds: number; lagText: string;
+  intervalSec: number; thresholdSec: number;
+  lastSyncAt: string; lastPullAt: string;
+  backupVersion: string; backupCreatedAt: string; backupSha256: string;
+  lastStatus: string; lastDetail: string;
+}
+export interface ClusterInfo {
+  mode: 'single' | 'warm-standby';
+  deployed: boolean;
+  status: 'pass' | 'warn' | 'skip';
+  summary: string; note: string; rpo: string;
+  staleAfterSec: number;
+  nodes: StandbyNodeView[];
+  boundaries: string[];
+  promoteCmd: string;
+}
 export interface SystemBundle { roles: AdminRole[]; admins: AdminAccount[]; cluster: ClusterInfo }
 
 /* ── 消息通道（store.NotifyChannel，PRD ch15.2）──

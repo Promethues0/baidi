@@ -455,16 +455,105 @@
       </a-form>
     </a-modal>
 
-    <!-- ============ 集群（未部署的诚实空态）============ -->
+    <!-- ============ 集群（控制面温备，PRD 15.5）============
+         三态全部来自 GET /api/v1/system 的 cluster 块（standby_nodes 真实台账），
+         与 /diag 的 checkCluster 同一个后端函数——这一页刻意**没有**降级演示数据：
+         编一台"同步正常"的备机，与真的备机在页面上无法区分，而这一页的存在意义
+         正是"切换那天手上到底有没有一份能用的备份"。 -->
     <div v-show="tab === 'cluster'">
-      <div class="bd-card bd-empty bd-empty--lg">
+      <!-- ① 未配置备机（单机形态）-->
+      <div v-if="!cluster.deployed" class="bd-card bd-empty bd-empty--lg">
         <icon-storage />
-        <div class="bd-empty__t">集群未部署</div>
-        <div class="bd-empty__d">{{ cluster.note || '白帝当前为单机形态（1 进程 + SQLite），无节点发现 / 选主 / 主备同步机制。' }}</div>
+        <div class="bd-empty__t">{{ cluster.summary || '未配置备机（当前为单机形态）' }}</div>
+        <div class="bd-empty__d">{{ cluster.note }}</div>
         <div class="bd-empty__d">
-          本版本没有 HA 能力；如需冗余请依赖外部手段（备份恢复 / 冷备），不要按「集群健康」规划容量。
-          运维体检（/diag）里这一项同样记为 <i class="bd-mono">skip</i>。
+          运维体检（/diag）里这一项同样记为
+          <i class="bd-mono">{{ cluster.status || 'skip' }}</i>——未部署的能力不参与健康分。
         </div>
+      </div>
+
+      <!-- ② / ③ 已配备机：新鲜 or 落后 -->
+      <template v-else>
+        <div class="bd-section-title">控制面温备 · 备机同步状态</div>
+        <div class="bd-cl__head" :class="cluster.status === 'pass' ? 'ok' : 'bad'">
+          <icon-check-circle-fill v-if="cluster.status === 'pass'" />
+          <icon-exclamation-circle-fill v-else />
+          <div>
+            <div class="bd-cl__sum">{{ cluster.summary }}</div>
+            <div class="bd-cl__note">{{ cluster.note }}</div>
+          </div>
+        </div>
+        <div class="bd-sep__note">
+          <icon-clock-circle />
+          <span><b>{{ cluster.rpo }}</b>　落后阈值：逐台取 max(全局 {{ Math.round(cluster.staleAfterSec / 60) }} 分钟, 3×该备机自报间隔)。</span>
+        </div>
+
+        <table class="bd-table">
+          <thead>
+            <tr>
+              <th>备机</th>
+              <th>状态</th>
+              <th>落后</th>
+              <th>同步间隔（RPO）</th>
+              <th>盘上那份备份</th>
+              <th>最近一轮</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="n in cluster.nodes" :key="n.nodeId">
+              <td>
+                <b>{{ n.nodeId }}</b>
+                <i class="bd-mono" style="display: block">{{ n.addr || '落点未报' }}</i>
+              </td>
+              <td><span class="bd-tg" :style="tagStyle(stateColor(n.state))">{{ stateText(n.state) }}</span></td>
+              <td>
+                <!-- lagSeconds < 0 = 不可判定（从未成功同步过）。绝不显示成"0 秒"——
+                     那是"刚刚同步过"的意思，与事实恰好相反。 -->
+                <span :style="{ color: n.state === 'fresh' ? 'var(--bd-t2)' : '#F53F3F' }">{{ n.lagText }}</span>
+                <i class="bd-hint" style="display: block">阈值 {{ Math.round(n.thresholdSec / 60) }} 分钟</i>
+              </td>
+              <td>
+                <span v-if="n.intervalSec > 0">{{ Math.round(n.intervalSec / 60) }} 分钟</span>
+                <span v-else class="bd-hint">尚未回报</span>
+              </td>
+              <td>
+                <span v-if="n.lastSyncAt">
+                  <i class="bd-mono" style="display: block">{{ n.lastSyncAt }} 落盘</i>
+                  <i class="bd-mono" style="display: block">版本 {{ n.backupVersion || '未知' }} · 生成于 {{ n.backupCreatedAt || '未知' }}</i>
+                  <i class="bd-mono bd-lastdetail">sha256 {{ (n.backupSha256 || '').slice(0, 16) || '—' }}…</i>
+                </span>
+                <span v-else class="bd-hint">
+                  从未成功同步——现在提升它只会得到一套空系统
+                  <i v-if="n.lastPullAt" class="bd-mono" style="display: block">但来拉过：{{ n.lastPullAt }}</i>
+                </span>
+              </td>
+              <td>
+                <span v-if="!n.lastStatus" class="bd-hint">从未回报</span>
+                <span v-else>
+                  <span class="bd-tg" :style="tagStyle(n.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                    {{ n.lastStatus === 'ok' ? '成功' : '失败' }}
+                  </span>
+                  <i v-if="n.lastDetail" class="bd-lastdetail">{{ n.lastDetail }}</i>
+                </span>
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </template>
+
+      <!-- 诚实边界 + 切换命令：两块都由后端下发，页面照抄不自己编 -->
+      <div class="bd-card bd-cl__box">
+        <div class="bd-cl__boxt">这套温备做到哪、没做哪</div>
+        <ul class="bd-cl__list">
+          <li v-for="(b, i) in cluster.boundaries" :key="i">{{ b }}</li>
+        </ul>
+        <div class="bd-cl__boxt" style="margin-top: 14px">切换（提升备机为主机）</div>
+        <div class="bd-hint" style="line-height: 1.8">
+          在<b>备机</b>上执行下面这条；它会先校验备份完整性再动手，<i class="bd-mono">--dry-run</i>
+          只校验与打印覆盖清单、不碰任何现网文件。切换前务必确认<b>老主机确已停机</b>——
+          两台同时跑等于两个控制面同时签发令牌、下发相反的策略，而现场没有任何一处会显示这件事。
+        </div>
+        <pre class="bd-cl__cmd">{{ cluster.promoteCmd }}</pre>
       </div>
     </div>
 
@@ -549,7 +638,13 @@ const saving = ref(false);
  * 最容易被误读成"已实现"的地方。现在拉不到就空着并显式报错。 */
 const roles = ref<AdminRole[]>([]);
 const admins = ref<AdminAccount[]>([]);
-const cluster = ref<ClusterInfo>({ deployed: false, note: '', localNodes: [], distNodes: [] });
+/* 集群 = 控制面温备（PRD 15.5）。初值刻意是「不可判定」而不是「未配置备机」：
+ * 后端还没答话时，说"没配备机"是在替它下结论——而这两件事下一步动作完全不同。 */
+const cluster = ref<ClusterInfo>({
+  mode: 'single', deployed: false, status: 'skip',
+  summary: '', note: '正在读取备机同步状态…', rpo: '—',
+  staleAfterSec: 900, nodes: [], boundaries: [], promoteCmd: '',
+});
 
 const filteredAdmins = computed(() => {
   const q = kw.value.trim().toLowerCase();
@@ -583,6 +678,19 @@ function statusText(status: string) {
     case 'locked': return '锁定';
     case 'idle': return '挂起';
     default: return status || '—';
+  }
+}
+/* 备机三态的配色与文案。fresh 之外一律红——「落后」与「从未同步」在切换那天
+ * 的后果是同一个：手上没有一份足够新的备份。 */
+function stateColor(state: string) {
+  return state === 'fresh' ? '#00B42A' : '#F53F3F';
+}
+function stateText(state: string) {
+  switch (state) {
+    case 'fresh': return '同步新鲜';
+    case 'stale': return '落后';
+    case 'never': return '从未成功同步';
+    default: return state || '—';
   }
 }
 function tagStyle(color: string) { return { color, background: color + '14', border: 'none' }; }
@@ -1123,6 +1231,29 @@ function removeRole(g: AdminRole) {
 .bd-lastdetail {
   display: block; max-width: 320px; font-size: 11.5px; color: var(--bd-t3);
   line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+
+/* 集群（控制面温备） */
+.bd-cl__head {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 14px 16px; border-radius: 8px; margin-bottom: 14px;
+}
+.bd-cl__head.ok { background: rgb(0 180 42 / 8%); }
+.bd-cl__head.bad { background: rgb(245 63 63 / 8%); }
+.bd-cl__head :deep(svg) { font-size: 17px; flex: none; margin-top: 1px; }
+.bd-cl__head.ok :deep(svg) { color: #00B42A; }
+.bd-cl__head.bad :deep(svg) { color: #F53F3F; }
+.bd-cl__sum { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-cl__note { font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; margin-top: 4px; }
+.bd-cl__box { margin-top: 16px; padding: 16px; }
+.bd-cl__boxt { font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 8px; }
+.bd-cl__list { margin: 0 0 0 18px; padding: 0; }
+.bd-cl__list li { font-size: 12.5px; color: var(--bd-t3); line-height: 1.9; }
+.bd-cl__cmd {
+  margin: 8px 0 0; padding: 10px 12px; border-radius: 7px;
+  background: var(--bd-fill-2); color: var(--bd-t2);
+  font-family: var(--bd-mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all;
 }
 
 /* 空态 */

@@ -161,7 +161,7 @@ const MOCK: DiagBundle = {
     { key: 'audit-disk', category: 'storage', name: '审计日志留存', status: 'pass', summary: '审计日志留存正常，磁盘水位健康', metric: '审计 2040 行 · 库文件 1.6MB · 磁盘余 212.3GB / 494.4GB（占用 57%）· 留存 180 天', hint: '' },
     { key: 'gateways', category: 'dataplane', name: '数据面网关在线', status: 'warn', summary: '尚无数据面网关注册（控制面可独立运行）', metric: '在线 0 / 注册 0', hint: '以 -control 指向本控制面启动 baidi-gateway 即自动注册' },
     { key: 'spa', category: 'stealth', name: 'SPA 服务隐身', status: 'warn', summary: '无网关经 mTLS 注册，隐身状态未知', metric: '在线 0 / 注册 0', hint: '以 -control + mTLS 证书启动 baidi-gateway，注册后此处才有事实可报' },
-    { key: 'cluster', category: 'cluster', name: '集群高可用', status: 'skip', summary: '集群未部署：白帝当前为单机形态，无节点发现/选主机制', metric: '单机 · 1 进程 + SQLite', hint: '本版本无 HA 能力；如需冗余请依赖外部手段（备份恢复/冷备），不要按\'集群健康\'规划容量' },
+    { key: 'cluster', category: 'cluster', name: '控制面温备（warm standby）', status: 'skip', summary: '未配置备机（当前为单机形态）', metric: '单机 · 1 进程 + SQLite', hint: '如需冗余：部署 baidi-standby 温备节点（周期拉加密备份），切换用 deploy/promote-standby.sh。温备不是双活，RPO = 同步间隔' },
     { key: 'authsrc', category: 'identity', name: '认证源配置', status: 'pass', summary: '已配置 1 个认证源（连通性以「测试连接」实测为准）', metric: '启用 1 / 配置 1', hint: '' },
     { key: 'posture', category: 'posture', name: '访问威胁压力', status: 'pass', summary: '访问态势平稳，拒绝/二次鉴权为策略正常拦截', metric: '拒绝 0 · 失败 0 · 二次鉴权 0 · 在线 —（无网关上报）', hint: '' },
     { key: 'secret', category: 'security', name: '密钥与传输安全', status: 'warn', summary: '令牌已切 Ed25519 非对称签名，但仍接受存量 HS256 令牌（升级兼容窗口）', metric: '迁移窗口开启', hint: '存量 8h 会话令牌全部自然过期后，置 BAIDI_ACCEPT_HS256=0 收口' }
@@ -202,7 +202,7 @@ const CAT: Record<DiagCategory, { label: string; icon: string }> = {
   storage: { label: '存储', icon: 'IconStorage' },
   dataplane: { label: '数据面', icon: 'IconLink' },
   stealth: { label: '服务隐身', icon: 'IconSafe' },
-  cluster: { label: '集群', icon: 'IconApps' },
+  cluster: { label: '温备', icon: 'IconApps' },
   identity: { label: '身份', icon: 'IconUserGroup' },
   posture: { label: '态势', icon: 'IconExclamationCircle' },
   security: { label: '密钥安全', icon: 'IconLock' }

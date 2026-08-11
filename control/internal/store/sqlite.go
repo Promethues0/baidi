@@ -19,7 +19,15 @@ import (
 // Writer 是控制中心的写接口（落库的可变实体）。SQLiteStore 实现之；
 // Memory 仅作只读种子，不实现 Writer。
 type Writer interface {
+	// CreateApp 发布应用。分类必须是 app_categories 里已存在的 key，否则 ErrUnknownAppCategory。
 	CreateApp(ctx context.Context, a App) (App, error)
+	// ── 应用分类字典（管理员可自建可修改）──
+	// 建：key 唯一 + 格式校验，builtin 恒 false（内置行只能由回填产生）。
+	// 改：只动 label 与 sort，内置分类同样可改；key 不可改（apps.category 按值引用它）。
+	// 删：内置拒删、分类下有应用拒删（ErrAppCategoryInUse，不做级联置空）。
+	CreateAppCategory(ctx context.Context, c AppCategoryDef) (AppCategoryDef, error)
+	UpdateAppCategory(ctx context.Context, key, label string, sort int) (AppCategoryDef, AppCategoryDef, error)
+	DeleteAppCategory(ctx context.Context, key string) error
 	// DecideApproval 设备绑定审批落库，**同事务**把关联设备置为 trusted / revoked。
 	// 返回被联动的设备（found=false = 该审批单没有关联设备，迁移前遗留的单子）。
 	DecideApproval(ctx context.Context, id, decision, reason, by string) (Device, bool, error)
@@ -175,6 +183,12 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err := s.backfillExternalUserOrg(context.Background()); err != nil {
 		return nil, err
 	}
+	// ★应用分类回填同样必须排在 seed() 之后，理由与 backfillOrgUnits 同款：
+	// 它除了建 4 个内置分类，还要把**库里 apps.category 已出现过、却不在内置清单里**
+	// 的历史值收养成真实行；全新库在 migrate 阶段 apps 还是空表，放那儿会静默空转。
+	if err := s.backfillAppCategories(context.Background()); err != nil {
+		return nil, err
+	}
 	return s, nil
 }
 
@@ -259,6 +273,14 @@ func (s *SQLiteStore) migrate() error {
 CREATE TABLE IF NOT EXISTS apps (
   id TEXT PRIMARY KEY, name TEXT, addr TEXT, mode TEXT, category TEXT, node TEXT,
   authed_users INTEGER, status TEXT, created_at TEXT, resource_id TEXT
+);
+-- 应用分类字典。改造前它是两个包级常量（catLabels/catOrder），管理员改不了也加不了。
+-- 内置四类由 backfillAppCategories 建成 builtin=1 的真实行（一次性标记，删了不复活）。
+-- apps.category 按值引用 "key"，刻意不建外键：那会让「先建应用再补分类」的历史数据
+-- 在迁移期整批插入失败，而引用完整性已由 CreateApp 的字典校验与删除守卫两头守住。
+CREATE TABLE IF NOT EXISTS app_categories (
+  "key" TEXT PRIMARY KEY, label TEXT NOT NULL, sort INTEGER NOT NULL DEFAULT 0,
+  builtin INTEGER NOT NULL DEFAULT 0, created_at TEXT
 );
 CREATE TABLE IF NOT EXISTS approvals (
   id TEXT PRIMARY KEY, usr TEXT, device TEXT, fingerprint TEXT, submitted_at TEXT,
@@ -711,6 +733,17 @@ func (s *SQLiteStore) backfillResourceSubjects() error {
 //     这是一次**安全性下降**，且没有任何报错，纯靠对比升级前后的页面才看得出来。
 //
 // 只动仍为空的行：管理员后来手工评估过的值一律不覆盖（与 backfillAppResourceID 同纪律）。
+//
+// ★下面那句 `category='finance'` 是**业务语义**而不是分类字典的用法，分类改成可编辑
+// 之后它仍然留着，理由与边界都在这里说清楚：
+//   - 它是一次性的**历史语义迁移**（sensBackfillMarker 守着，只跑一次），迁的是
+//     「改造前 finance 这个分类就等于高敏」这条已经作古的规则；
+//   - 迁完之后高敏的唯一判据是 resources.sensitivity，与分类**再无关系**——所以
+//     管理员现在把 finance 改名、甚至（在没有应用挂着时）连内置分类一起换掉，
+//     都不会静默关掉降权；
+//   - 反过来，若哪天有人想按「分类=某某」重新派生敏感度，那就是把这条耦合复活，
+//     而分类此刻已是管理员可改的自由数据——那等于把一条安全判据交给一个可编辑的
+//     显示字段。别这么做。
 func (s *SQLiteStore) backfillResourceSensitivity() error {
 	if _, err := s.db.Exec(
 		`UPDATE resources SET sensitivity=? WHERE COALESCE(sensitivity,'')=''`, SensitivityNormal); err != nil {
@@ -1215,10 +1248,11 @@ func (s *SQLiteStore) SetUserStatus(ctx context.Context, id, status string) erro
 
 func nowStr() string { return time.Now().Format("2006-01-02 15:04:05") }
 
-var catLabels = map[string]string{"office": "办公协同", "finance": "财务高敏", "dev": "研发运维", "global": "全网资源"}
-var catOrder = []string{"office", "finance", "dev", "global"}
-
 // Apps 覆盖：从库读取应用 + 动态聚合分类计数。
+//
+// ★分类栏由 app_categories 表构建。此前它来自两个包级常量（catLabels/catOrder），
+// 那两个常量已删除：分类既然能在页面上增删改，再留一份编译进二进制的清单，
+// 就是第二个真相来源（管理员改完库，筛选条仍按常量显示与排序）。
 func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,authed_users,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
 	if err != nil {
@@ -1235,15 +1269,35 @@ func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 		apps = append(apps, a)
 		counts[a.Category]++
 	}
-	cats := []AppCategory{{Key: "all", Label: "全部应用", Count: len(apps)}}
-	for _, k := range catOrder {
-		cats = append(cats, AppCategory{Key: k, Label: catLabels[k], Count: counts[k]})
+	defs, err := s.AppCategories(ctx)
+	if err != nil {
+		return AppBundle{}, err
+	}
+	cats := []AppCategory{{Key: AppCategoryAllKey, Label: AppCategoryAllLabel, Count: len(apps)}}
+	for _, d := range defs {
+		// 计数用**上面这批刚读到的应用**现算，而不是 defs 里那份子查询结果：
+		// 筛选条上的数字与表格里的行数必须出自同一次读取，否则并发写入时两者会对不上，
+		// 而那种不一致在页面上看起来像是筛选坏了。
+		cats = append(cats, AppCategory{Key: d.Key, Label: d.Label, Count: counts[d.Key]})
 	}
 	return AppBundle{Categories: cats, Apps: apps}, nil
 }
 
 // CreateApp 落库新发布的应用。
+//
+// ★分类必须是字典里真实存在的一行。不校验的后果是静默的：一个拼错（或已被删掉）的
+// category 会让这个应用在分类筛选条的任何一栏都不出现——只有「全部应用」看得到——
+// 而接口照回 201，管理员以为发布成功了。
 func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
+	a.Category = strings.TrimSpace(a.Category)
+	var n int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM app_categories WHERE "key"=?`, a.Category).Scan(&n); err != nil {
+		return App{}, err
+	}
+	if n == 0 {
+		return App{}, ErrUnknownAppCategory
+	}
 	a.ID = "app-" + uuid.NewString()[:8]
 	if a.Status == "" {
 		a.Status = "running"

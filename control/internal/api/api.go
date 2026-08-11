@@ -286,6 +286,13 @@ func (s *Server) Routes() http.Handler {
 	// 应用管理：分类 + 应用清单
 	mux.HandleFunc("GET /api/v1/apps", s.handleApps)
 
+	// 应用分类字典（可自建可修改；此前是编译进二进制的两个常量，管理员改不了）。
+	// 读=任意管理员（角色现算），写=PermSecurity——与 POST /apps 同权。
+	mux.HandleFunc("GET /api/v1/app-categories", s.handleAppCategories)
+	mux.HandleFunc("POST /api/v1/app-categories", s.handleCreateAppCategory)
+	mux.HandleFunc("PUT /api/v1/app-categories/{key}", s.handleUpdateAppCategory)
+	mux.HandleFunc("DELETE /api/v1/app-categories/{key}", s.handleDeleteAppCategory)
+
 	// 访问者目录：身份源 + 组织树 + 用户清单
 	mux.HandleFunc("GET /api/v1/users", s.handleUsers)
 
@@ -1371,7 +1378,15 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created, err := s.writer.CreateApp(r.Context(), a)
-	if err != nil {
+	switch {
+	case err == nil:
+	case errors.Is(err, store.ErrUnknownAppCategory):
+		// ★400 而不是默默落库：分类字典里没有的 key 会让这个应用在筛选条的
+		// 任何一栏都不出现（只有「全部应用」看得到），而接口若回 201，
+		// 管理员没有任何线索知道自己发布到了一个不存在的分类里。
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	default:
 		httpx.Error(w, http.StatusInternalServerError, "failed to create app")
 		return
 	}

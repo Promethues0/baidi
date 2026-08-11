@@ -9,6 +9,9 @@ type Store interface {
 	Overview(ctx context.Context) (Overview, error)
 	PolicyBundle(ctx context.Context) (PolicyBundle, error)
 	Apps(ctx context.Context) (AppBundle, error)
+	// AppCategories 应用分类字典（app_categories 表，含各分类下的应用数）。
+	// Apps() 的分类筛选条由它构建；管理台的分类维护弹窗也读它。
+	AppCategories(ctx context.Context) ([]AppCategoryDef, error)
 	Users(ctx context.Context) (UserDirBundle, error)
 	Devices(ctx context.Context) (DeviceBundle, error)
 	// DeviceByFingerprint 授信终端准入闸的取数点（api.deviceAdmissionGate）：

@@ -7,7 +7,8 @@
 //
 // 剖面把控制面独有的三份知识一次性下发给客户端，让客户端不必、也不允许自己猜：
 //
-//	① 网关落点     —— 从在线网关注册信息取真实 spa/proxy 地址（不再让用户手填）
+//	① 网关落点清单 —— 从网关注册信息取真实 spa/proxy 地址（不再让用户手填），
+//	                  **有序**下发全部落点供客户端故障转移（见 profileGateways）
 //	② 路由表       —— 需要被 utun 接管的网段（VIP 段 + 每个后端 /32）
 //	③ 资源映射表   —— "host:port → 资源 id"，即 baidi-tun 的 -resmap
 //	④ 分离式 DNS   —— 隧道内解析器 VIP + 分流域 + "FQDN → VIP" 记录表
@@ -67,16 +68,26 @@ const (
 // ClientProfile 是下发给终端客户端的接入剖面。字段全部为「客户端照做即可」的成品，
 // 不需要终端做任何策略推导——推导权留在控制面，终端只是执行器。
 type ClientProfile struct {
-	GeneratedAt string            `json:"generatedAt"`
-	User        string            `json:"user"`
-	Gateway     ProfileGateway    `json:"gateway"`
-	VIPCidr     string            `json:"vipCidr"` // VIP 网段
-	TunIP       string            `json:"tunIp"`   // utun 接口自身地址
-	Routes      []string          `json:"routes"`  // 需接管进隧道的网段（CIDR）
-	Apps        []ProfileApp      `json:"apps"`
-	Resmap      map[string]string `json:"resmap"` // "host:port" → 资源 id（即 baidi-tun 的 -resmap）
-	DNS         ProfileDNS        `json:"dns"`    // 隧道内分离式 DNS；Server 为空 = 无域名后端，客户端不必起解析器
-	Warnings    []string          `json:"warnings,omitempty"`
+	GeneratedAt string `json:"generatedAt"`
+	User        string `json:"user"`
+	// Gateway 首选落点，恒等于 Gateways[0]。
+	//
+	// ★它是**为旧客户端保留的兼容字段**，不是"另一份真相"：存量终端只读这一个对象，
+	// 改成只发 Gateways 会让它们在升级控制面的那一刻整体接不进来（读不到 gateway
+	// 就没有网关地址，症状是"升级后所有人都连不上"，且回滚前无法自愈）。
+	// 两个字段由同一份清单产出，不存在对不上的可能——见 buildProfile 的赋值处。
+	Gateway ProfileGateway `json:"gateway"`
+	// Gateways 全部网关落点，**已按「在线优先 → 网关 id 字典序」确定性排序**。
+	// 客户端按序尝试、失败切下一个（故障转移）。离线网关排在末尾但仍然下发
+	// （Online=false），理由见 profileGateways。
+	Gateways []ProfileGateway  `json:"gateways"`
+	VIPCidr  string            `json:"vipCidr"` // VIP 网段
+	TunIP    string            `json:"tunIp"`   // utun 接口自身地址
+	Routes   []string          `json:"routes"`  // 需接管进隧道的网段（CIDR）
+	Apps     []ProfileApp      `json:"apps"`
+	Resmap   map[string]string `json:"resmap"` // "host:port" → 资源 id（即 baidi-tun 的 -resmap）
+	DNS      ProfileDNS        `json:"dns"`    // 隧道内分离式 DNS；Server 为空 = 无域名后端，客户端不必起解析器
+	Warnings []string          `json:"warnings,omitempty"`
 }
 
 // ProfileDNS 客户端分离式 DNS（split-DNS）配置。
@@ -93,6 +104,10 @@ type ProfileDNS struct {
 // ProfileGateway 网关落点。取自网关自身的 mTLS 注册上报，而非管理员在终端手填——
 // 手填地址是"客户端连不通"的经典来源，也让网关迁移必须挨个改终端。
 type ProfileGateway struct {
+	// ID 网关注册 id（= mTLS 证书 CN）。故障转移时客户端要说清"现在用的是哪一台"，
+	// 只报 IP 的话，同一台机器上跑两个实例、或网关迁了地址，日志就对不上账了。
+	// 无网关注册的回退落点没有 id（空串）——那不是一台真实存在的网关。
+	ID        string `json:"id"`
 	Host      string `json:"host"`
 	SPAPort   string `json:"spaPort"`
 	ProxyPort string `json:"proxyPort"`
@@ -100,6 +115,11 @@ type ProfileGateway struct {
 	// 没有公共 CA 可依赖，客户端此前只能 InsecureSkipVerify——隧道加密但不认证，
 	// 中间人可无声接管。指纹由**控制面**下发（信任根是控制面，不是连接本身），
 	// 客户端据此做证书钉扎，把"加密"补成"加密 + 认证"。空=网关未上报，客户端应告警。
+	//
+	// ★指纹是**逐网关**的（每台网关各自启动期自签一张证书），故它必须挂在落点上而不是
+	// 挂在剖面上。共用一份的话，故障转移到第二台的那一刻钉扎必然失败，而症状是
+	// 「切过去就连不上」——极易被误判成第二台网关也坏了，进而把一次成功的容灾
+	// 排查成一次双机故障。
 	TunnelPin string `json:"tunnelPin"`
 	// Online 网关是否在心跳新鲜期内。false 表示以下地址是回退配置（环境变量兜底），
 	// 客户端仍可尝试接入，但应把"网关离线"显著提示给用户，而不是让接入静默失败。
@@ -336,10 +356,8 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 	}
 	sort.Strings(routes) // 稳定顺序：便于客户端 diff 出「路由表变了」并按需重配接口
 
-	gw, gwWarn := s.profileGateway()
-	if gwWarn != "" {
-		warnings = append(warnings, gwWarn)
-	}
+	gateways, gwWarns := s.profileGateways()
+	warnings = append(warnings, gwWarns...)
 	// ★降权告警**排在最前**：客户端「应用」页只 toast 第一条 warning，而"我为什么打不开
 	// 财务系统"是此刻用户最需要的答案，优先级高于任何配置缺口提示。
 	// 降权而用户不知情，就会退化成「明明有权限却打不开」——本项目反复警告的那种迷惑失败形态。
@@ -349,14 +367,18 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 	return ClientProfile{
 		GeneratedAt: time.Now().Format(time.RFC3339),
 		User:        user,
-		Gateway:     gw,
-		VIPCidr:     vipCidr,
-		TunIP:       envOr("BAIDI_CLIENT_TUN_IP", defaultTunIP),
-		Routes:      routes,
-		Apps:        out,
-		Resmap:      resmap,
-		DNS:         dnsPlan,
-		Warnings:    warnings,
+		// 单数字段恒取清单首项：两个字段一次赋值、同一来源，杜绝"列表说 A、单数说 B"
+		// 这种只有旧客户端才会撞上、且新客户端上完全看不出来的分歧。
+		// profileGateways 保证清单非空（无网关注册时给回退落点），故此处不必判空。
+		Gateway:  gateways[0],
+		Gateways: gateways,
+		VIPCidr:  vipCidr,
+		TunIP:    envOr("BAIDI_CLIENT_TUN_IP", defaultTunIP),
+		Routes:   routes,
+		Apps:     out,
+		Resmap:   resmap,
+		DNS:      dnsPlan,
+		Warnings: warnings,
 	}
 }
 
@@ -601,50 +623,99 @@ func validDNSName(s string) bool {
 	return true
 }
 
-// profileGateway 选取要下发的网关落点：优先取心跳最新鲜的在线网关（网关自己上报的
-// 真实地址），全部离线才回退环境变量。回退时带出告警，让「连不上」有明确归因。
-func (s *Server) profileGateway() (ProfileGateway, string) {
-	const fresh = 90 * time.Second // 网关心跳间隔远小于此；超出即视为掉线
+// profileGateways 组装下发给终端的**网关落点清单**（PRD FR-ARCH-03/04：多活 + 故障转移）。
+//
+// 此前这里只挑「心跳最新鲜的那一台」下发，于是一台网关挂掉 = 全部终端断，哪怕另有网关
+// 在线——剖面结构上根本装不下第二个落点。现在整张清单都发下去，客户端按序尝试。
+//
+// 三条硬约束，每一条都对应一种曾经踩过或必然会踩的失败形态：
+//
+//	① **排序必须确定性**。健康度相同时按网关 id 字典序，绝不按「心跳谁更新鲜」排——
+//	   两台都健康时，谁的心跳更新鲜每 15s 就换一次，客户端每次拉剖面都换首选落点，
+//	   表现为隧道莫名重连（旧实现选"最新鲜那台"正是这个毛病，只是单落点时看不出来）。
+//	② **离线网关排末尾但仍然下发**。不下发的话，控制面自己抖一下（心跳窗口边缘、
+//	   一次 GC 卡顿）就会让客户端丢掉一个其实可达的落点；而"控制面认为它离线"与
+//	   "终端连不上它"是两个视角，后者才是终端唯一关心的事实。
+//	③ **指纹逐网关**，见 ProfileGateway.TunnelPin 的说明。
+//
+// 一台网关都没注册时回退到环境变量配置的默认落点，并带出告警让「连不上」有明确归因。
+func (s *Server) profileGateways() ([]ProfileGateway, []string) {
+	now := time.Now()
 
 	s.mu.Lock()
-	var best GatewayInfo
-	var bestFP string
+	list := make([]ProfileGateway, 0, len(s.gateways))
 	for id, g := range s.gateways {
-		if g.LastSeen > best.LastSeen {
-			best, bestFP = g, s.gwTunnelFP[id]
-		}
-	}
-	s.mu.Unlock()
-
-	online := best.ID != "" && time.Since(time.Unix(best.LastSeen, 0)) < fresh
-	if online {
-		spaHost, spaPort := splitHostPortLoose(best.SPA)
-		_, proxyPort := splitHostPortLoose(best.Proxy)
+		spaHost, spaPort := splitHostPortLoose(g.SPA)
+		_, proxyPort := splitHostPortLoose(g.Proxy)
 		// 网关上报的可能是 0.0.0.0/:port 这类监听地址，对客户端没有意义。
 		// 这种情况回退到环境变量里配置的对外可达主机名。
 		if spaHost == "" || spaHost == "0.0.0.0" || spaHost == "::" {
 			spaHost = envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1")
 		}
-		return ProfileGateway{
-			Host: spaHost, SPAPort: orDefault(spaPort, "18201"), ProxyPort: orDefault(proxyPort, "18443"),
-			TunnelPin: bestFP, Online: true,
-		}, pinWarning(bestFP)
+		list = append(list, ProfileGateway{
+			ID: id, Host: spaHost,
+			SPAPort: orDefault(spaPort, "18201"), ProxyPort: orDefault(proxyPort, "18443"),
+			TunnelPin: s.gwTunnelFP[id], Online: gatewayFresh(g.LastSeen, now),
+		})
 	}
-	return ProfileGateway{
-		Host:      envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1"),
-		SPAPort:   envOr("BAIDI_CLIENT_GW_SPA_PORT", "18201"),
-		ProxyPort: envOr("BAIDI_CLIENT_GW_PROXY_PORT", "18443"),
-		Online:    false,
-	}, "没有网关在线上报，已回退到默认落点配置；若接入失败请先确认网关已注册到控制面"
+	s.mu.Unlock()
+
+	sort.Slice(list, func(i, j int) bool {
+		if list[i].Online != list[j].Online {
+			return list[i].Online // 在线优先
+		}
+		return list[i].ID < list[j].ID // 同健康度按 id 字典序：唯一的稳定序
+	})
+
+	if len(list) == 0 {
+		return []ProfileGateway{{
+			Host:      envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1"),
+			SPAPort:   envOr("BAIDI_CLIENT_GW_SPA_PORT", "18201"),
+			ProxyPort: envOr("BAIDI_CLIENT_GW_PROXY_PORT", "18443"),
+			Online:    false,
+		}}, []string{"没有网关在线上报，已回退到默认落点配置；若接入失败请先确认网关已注册到控制面"}
+	}
+	return list, gatewayWarnings(list)
 }
 
-// pinWarning 网关未上报隧道证书指纹时给出告警——客户端将无法钉扎证书，
-// 隧道退化为「加密但不认证」。这是必须被看见的降级，不能静默。
-func pinWarning(fp string) string {
-	if fp == "" {
-		return "网关未上报隧道证书指纹，客户端无法校验网关身份（隧道加密但不认证）；请升级网关版本"
+// gatewayWarnings 逐落点体检，把「能连上但打了折扣」的降级说清楚。
+//
+// 措辞按落点位置分开：首选落点缺指纹是**此刻**就在裸奔，备用落点缺指纹是**切过去那一刻**
+// 才裸奔——两者的紧急程度与运维动作不同，混成一句话会让人以为随便哪台升级一下就完事。
+func gatewayWarnings(list []ProfileGateway) []string {
+	var out []string
+	if len(list) > 0 && list[0].TunnelPin == "" {
+		out = append(out, "网关未上报隧道证书指纹，客户端无法校验网关身份（隧道加密但不认证）；请升级网关版本")
 	}
-	return ""
+	var blindSpares []string
+	for _, g := range list[1:] {
+		if g.TunnelPin == "" {
+			blindSpares = append(blindSpares, gatewayLabel(g))
+		}
+	}
+	if len(blindSpares) > 0 {
+		out = append(out, fmt.Sprintf("备用落点 %s 未上报隧道证书指纹：故障转移到它时隧道将退化为「加密但不认证」，请升级这些网关",
+			strings.Join(blindSpares, "、")))
+	}
+	online := 0
+	for _, g := range list {
+		if g.Online {
+			online++
+		}
+	}
+	if online == 0 {
+		out = append(out, fmt.Sprintf("已注册的 %d 台网关心跳全部超时（控制面视角），落点仍照常下发供客户端尝试；若接入失败请先确认网关进程与到控制面的 mTLS 链路",
+			len(list)))
+	}
+	return out
+}
+
+// gatewayLabel 落点的人话标识（id + 隧道口），供告警文案引用。
+func gatewayLabel(g ProfileGateway) string {
+	if g.ID == "" {
+		return net.JoinHostPort(g.Host, g.ProxyPort)
+	}
+	return fmt.Sprintf("%s(%s)", g.ID, net.JoinHostPort(g.Host, g.ProxyPort))
 }
 
 // authorizeRes 移到 subjects.go：它现在要吃组织/用户组的展开索引，

@@ -17,6 +17,18 @@ var bootTime = time.Now()
 // gatewayOnlineWindow 网关心跳新鲜度窗口：超过则视为离线。
 const gatewayOnlineWindow = 120 * time.Second
 
+// gatewayFresh 报告一次心跳是否仍在新鲜窗口内。判据（窗口大小 + 比较方向）以这里为准，
+// 其余按秒做减法的读端点共用同一个 gatewayOnlineWindow 常量。
+//
+// ★「在线」这件事同时决定三处本该同真同假的判断：网关页/诊断页上那台机器亮不亮、
+// 客户端剖面把它排在可用落点还是末尾备用、Web 入口愿不愿意指向它。各处各定一个窗口的
+// 后果是"控制台说在线、客户端剖面当它离线"——两边都不报错，而运维会照着控制台的绿灯
+// 去排查一条终端根本没在用的链路。**此前剖面就自带一个 90s 的窗口，而网关页是 120s。**
+// 同构由 TestGatewayOnlineIsomorphic_ProfileVsGatewayPage 钉住。
+func gatewayFresh(lastSeen int64, now time.Time) bool {
+	return now.Sub(time.Unix(lastSeen, 0)) <= gatewayOnlineWindow
+}
+
 // DiagItem 一项检查的明细行（可展开，如每台网关的在线态/会话数）。
 type DiagItem struct {
 	Label  string `json:"label"`

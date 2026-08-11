@@ -241,17 +241,20 @@ func TestBuildProfile_ActiveGrantUnlocksRouting(t *testing.T) {
 	}
 }
 
-// 网关全部离线时给出回退落点 + 明确告警，而不是返回空地址让客户端瞎试。
-func TestProfileGateway_OfflineFallsBackWithWarning(t *testing.T) {
+// 一台网关都没注册时给出回退落点 + 明确告警，而不是返回空清单让客户端瞎试。
+func TestProfileGateways_NoRegistrationFallsBackWithWarning(t *testing.T) {
 	s := newProfileServer(t)
-	gw, warn := s.profileGateway()
-	if gw.Online {
+	gws, warns := s.profileGateways()
+	if len(gws) != 1 {
+		t.Fatalf("回退落点须恰好一条，实得 %d 条", len(gws))
+	}
+	if gws[0].Online {
 		t.Fatal("无注册网关时不应标记在线")
 	}
-	if gw.SPAPort == "" || gw.ProxyPort == "" || gw.Host == "" {
-		t.Fatalf("回退落点须完整，实得 %+v", gw)
+	if gws[0].SPAPort == "" || gws[0].ProxyPort == "" || gws[0].Host == "" {
+		t.Fatalf("回退落点须完整，实得 %+v", gws[0])
 	}
-	if warn == "" {
+	if len(warns) == 0 {
 		t.Fatal("网关离线须带出告警")
 	}
 }

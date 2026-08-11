@@ -212,9 +212,14 @@ func (s *Server) webEntryBase(res store.Resource) (string, error) {
 	return fmt.Sprintf("%s://%s:%s", scheme, host, port), nil
 }
 
-// freshestGateway 取心跳最新鲜的在线网关。与 profileGateway 同一口径（90s 新鲜期）。
+// freshestGateway 取心跳最新鲜的在线网关，在线判据与网关页/客户端剖面共用 gatewayFresh。
+//
+// ★这里保留「最新鲜优先」而不是像剖面那样按 id 定序，是因为两者的用途不同：剖面要给
+// 终端一份**稳定**的落点顺序（抖一下就是隧道重连），而这里只是给浏览器算一个跳转地址，
+// 每次现算、无状态可抖。B/S 路径**没有故障转移**（浏览器只会收到一个 302），
+// 这条边界写在 docs/ARCHITECTURE.md 第七节。
 func (s *Server) freshestGateway() (GatewayInfo, bool) {
-	const fresh = 90 * time.Second
+	now := time.Now()
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var best GatewayInfo
@@ -223,7 +228,7 @@ func (s *Server) freshestGateway() (GatewayInfo, bool) {
 			best = g
 		}
 	}
-	return best, best.ID != "" && time.Since(time.Unix(best.LastSeen, 0)) < fresh
+	return best, best.ID != "" && gatewayFresh(best.LastSeen, now)
 }
 
 // webProxyStatus 门户用的一句话状态：七层入口此刻能不能用、不能用是为什么。

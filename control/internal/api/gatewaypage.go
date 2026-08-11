@@ -65,7 +65,7 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	now := time.Now().Unix()
+	now := time.Now()
 	window := int64(gatewayOnlineWindow / time.Second)
 
 	out := GatewayPageBundle{
@@ -79,7 +79,7 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 			ID: id, Proxy: g.Proxy, SPA: g.SPA, LastSeen: g.LastSeen, Uptime: g.Uptime,
 			Clients: g.Clients, Tunnels: g.Tunnels, Sessions: len(s.gwSess[id]), Version: g.Version,
 		}
-		n.Online = now-g.LastSeen <= window
+		n.Online = gatewayFresh(g.LastSeen, now)
 		if n.Online {
 			out.Online++
 			// ★会话总数只统计在线网关：心跳超时的网关那份 sessions 是过期快照，

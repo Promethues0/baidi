@@ -15,12 +15,28 @@ VER="$(python3 -c "import json;print(json.load(open('$HERE/desktop/package.json'
 # 看起来很权威，却不说这包是从哪份源码构建的。真实发生过的形态是包停在三周前、
 # 源码改了 11 次，而页面上一切正常。版本号帮不上忙（源码改了 package.json 没动）。
 # 记 clients/ **子树**的 commit：只改控制面就把所有包标成过期会让提示变噪音。
-SRC_REV="$(git -C "$ROOT" log -1 --format=%h -- clients/ 2>/dev/null || echo "")"
+#
+# 允许流水线用 BAIDI_CLIENT_SRC_REV 显式注入（与 control 侧 clientSourceRev() 同名同义）。
+# ★为什么必须有这个入口：CI 上 actions/checkout 默认是**深度 1 的浅克隆**，
+# 而 `git log -1 -- clients/` 是路径过滤的——本次提交没碰 clients/ 时它返回**空**，
+# 于是刚出炉的包被标成「无法判断新旧」，而构建日志里一切正常。
+# 对策二选一：checkout 时 fetch-depth: 0，或在这里注入。两条路 .github/workflows/clients.yml 都走了。
+if [ -n "${BAIDI_CLIENT_SRC_REV:-}" ]; then
+  SRC_REV="$BAIDI_CLIENT_SRC_REV"
+  echo "→ 溯源由 BAIDI_CLIENT_SRC_REV 注入：$SRC_REV"
+else
+  SRC_REV="$(git -C "$ROOT" log -1 --format=%h -- clients/ 2>/dev/null || echo "")"
+  [ -n "$SRC_REV" ] || echo "⚠ 取不到 clients/ 的 git 版本，manifest 将缺溯源信息（页面会报「无法判断新旧」）"
+fi
 BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-[ -n "$SRC_REV" ] || echo "⚠ 取不到 clients/ 的 git 版本，manifest 将缺溯源信息（页面会报「无法判断新旧」）"
 # 源码有未提交改动时，构建出的包与任何 commit 都不对应——如实标成 dirty，
-# 让页面把它判成过期，而不是冒充某个干净版本。
-if [ -n "$SRC_REV" ] && ! git -C "$ROOT" diff --quiet -- clients/; then
+# 让页面把它判成过期，而不是冒充某个干净版本。注入进来的值同样过这一关：
+# 注入的是「哪个 commit」，不是「工作区是干净的」这个保证。
+# ★先确认这里真是个 git 仓库：不是的话 `git diff` 以非零退出，`!` 会把它读成"有改动"，
+# 于是部署机（通常没有 .git）上注入的干净版本会被凭空标成 dirty。
+if [ -n "$SRC_REV" ] && [ "${SRC_REV%-dirty}" = "$SRC_REV" ] \
+   && git -C "$ROOT" rev-parse --git-dir >/dev/null 2>&1 \
+   && ! git -C "$ROOT" diff --quiet -- clients/; then
   SRC_REV="${SRC_REV}-dirty"
   echo "⚠ clients/ 有未提交改动，溯源标记为 $SRC_REV"
 fi

@@ -209,6 +209,17 @@ BAIDI_GW_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/knock.pub
 # （会话 Cookie 恒带 Secure，纯 HTTP 暴露时浏览器根本不会保存它）。
 BAIDI_GW_WEB_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/web.pub
 #BAIDI_GW_WEB=127.0.0.1:18444
+# ★开了 BAIDI_GW_WEB 就**必须**同时填这一行：前置 nginx 的地址（逗号分隔可多段）。
+# 只有来自这些网段的请求，其 X-Forwarded-For / -Proto / -Host 才被采信。
+# 不填的后果全是静默的：后端看到的客户端 IP 恒为 nginx 自己（按 IP 的风控、限速、
+# 审计定位全部失效，而不少内网应用还把 127.0.0.1 当免认证的本机来源），
+# 且 X-Forwarded-Proto 恒为 http —— 后端一旦开了 HTTPS 强制跳转，
+# 就会与网关的 Location 改写咬成无限重定向，而每一跳在两侧日志里都正常。
+#BAIDI_GW_WEB_TRUSTED_PROXIES=127.0.0.1
+# 对外主机名（如 oa.example.com:9443）。不填时网关**不下发** X-Forwarded-Host——
+# Host 头是客户端可控的，把它当真实值转发就是 Host header injection
+# （后端据它拼出的找回密码链接会指向攻击者的域名）。
+#BAIDI_GW_WEB_EXTERNAL_HOST=
 # 机器身份：mTLS 客户端证书（CN=$GW_ID），控制面据此认人并可即刻吊销
 BAIDI_GW_MTLS_CERT=$BD_PREFIX/etc/gwcerts/gw.crt.pem
 BAIDI_GW_MTLS_KEY=$BD_PREFIX/etc/gwcerts/gw.key.pem

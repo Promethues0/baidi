@@ -3,7 +3,9 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
+	"sync"
 	"testing"
 )
 
@@ -357,5 +359,64 @@ func TestAppsCategoriesComeFromTable(t *testing.T) {
 	// 筛选条条目数 = 1 个合成项 + 字典行数
 	if len(b.Categories) != 1+len(mustCats(t, s)) {
 		t.Fatalf("筛选条条目数与字典对不上: %+v", b.Categories)
+	}
+}
+
+// 「发布应用」与「删除分类」并发：两者绝不能同时成功。
+//
+// CreateApp 的分类校验与 INSERT 若分成两次自动提交，DeleteAppCategory 的写锁挡不住
+// 中间那道缝：A 校验通过（分类还在）→ B 删掉这个此刻确实空着的分类（守卫如实放行）
+// → A 的 INSERT 落地，库里就留下一个分类字典外的孤儿应用——它在筛选条的任何一栏都
+// 不出现，只有「全部应用」看得到，而接口回的是 201，且 apps 表没有改分类的入口，
+// 此后没有任何办法把它救回来。两边都在同一个 immediate 事务里时，结果只能二选一。
+func TestCreateAppAndDeleteCategoryAreMutuallyExclusive(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	const rounds = 24
+	for i := 0; i < rounds; i++ {
+		key := fmt.Sprintf("race-%d", i)
+		if _, err := s.CreateAppCategory(ctx, AppCategoryDef{Key: key, Label: "并发用例"}); err != nil {
+			t.Fatalf("建分类 %s: %v", key, err)
+		}
+		var wg sync.WaitGroup
+		var createErr, deleteErr error
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			_, createErr = s.CreateApp(ctx, App{Name: "并发应用", Addr: "10.9.0.1:80", Mode: "web", Category: key})
+		}()
+		go func() {
+			defer wg.Done()
+			deleteErr = s.DeleteAppCategory(ctx, key)
+		}()
+		wg.Wait()
+
+		if createErr == nil && deleteErr == nil {
+			t.Fatalf("第 %d 轮：发布与删分类同时成功了——库里已多出一个分类字典外的孤儿应用（category=%s）", i, key)
+		}
+		// 两者也不该同时失败（没有第三方在抢这把锁）：那说明锁等待被 busy_timeout 打断了，
+		// 用例本身就不再有说服力，得先修环境而不是当成通过。
+		if createErr != nil && deleteErr != nil {
+			t.Fatalf("第 %d 轮：两者都失败了 create=%v delete=%v", i, createErr, deleteErr)
+		}
+		if createErr != nil && !errors.Is(createErr, ErrUnknownAppCategory) {
+			t.Fatalf("第 %d 轮：分类先被删掉时，发布应回 ErrUnknownAppCategory，得到 %v", i, createErr)
+		}
+		var inUse ErrAppCategoryInUse
+		if deleteErr != nil && !errors.As(deleteErr, &inUse) {
+			t.Fatalf("第 %d 轮：应用先落库时，删分类应回 ErrAppCategoryInUse，得到 %v", i, deleteErr)
+		}
+	}
+
+	// 收口断言：无论每一轮是哪一边赢，库里都不该存在字典外的 category。
+	var orphans int
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM apps WHERE COALESCE(category,'')<>'' AND category NOT IN (SELECT "key" FROM app_categories)`).
+		Scan(&orphans); err != nil {
+		t.Fatalf("统计孤儿应用: %v", err)
+	}
+	if orphans != 0 {
+		t.Fatalf("库里出现 %d 个分类字典外的应用", orphans)
 	}
 }

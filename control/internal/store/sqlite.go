@@ -1295,10 +1295,21 @@ func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 // ★分类必须是字典里真实存在的一行。不校验的后果是静默的：一个拼错（或已被删掉）的
 // category 会让这个应用在分类筛选条的任何一栏都不出现——只有「全部应用」看得到——
 // 而接口照回 201，管理员以为发布成功了。
+//
+// ★校验与 INSERT 必须在**同一个事务**里（DSN 带 _txlock=immediate，起手即取写锁）。
+// 分两次自动提交的话，DeleteAppCategory 的那道「分类下还有应用就拒删」守卫挡不住
+// 这中间的缝：管理员 A 校验通过（此刻分类还在）→ 管理员 B 把这个空分类删掉（此刻确实
+// 一个应用都没挂着，守卫如实放行）→ 管理员 A 的 INSERT 落地。结果正是这套功能本来
+// 要消灭的那种孤儿应用，且 apps 表没有改分类的入口，此后没有任何办法把它救回来。
 func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 	a.Category = strings.TrimSpace(a.Category)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return App{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
 	var n int
-	if err := s.db.QueryRowContext(ctx,
+	if err := tx.QueryRowContext(ctx,
 		`SELECT COUNT(*) FROM app_categories WHERE "key"=?`, a.Category).Scan(&n); err != nil {
 		return App{}, err
 	}
@@ -1312,11 +1323,11 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 	if a.Node == "" {
 		a.Node = "华东出口"
 	}
-	if _, err := s.db.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
+	if _, err := tx.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
 		a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr(), a.ResourceID); err != nil {
 		return App{}, err
 	}
-	return a, nil
+	return a, tx.Commit()
 }
 
 // SavePolicyOverride upsert 用户策略覆盖。

@@ -6,6 +6,7 @@
  *    供 UI 联调；不接管系统流量。
  */
 import { config, session, profile, device } from './store';
+import type { ProfileGateway } from './api';
 
 export function tauriRuntime(): boolean {
   return typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
@@ -41,7 +42,43 @@ export interface TunView {
    * 同理还有：管理员新授了一个资源、JIT 审批刚通过、网关重启换了证书指纹。 */
   stale: boolean;
   staleReason: string;  // 差异说明（哪一项变了），人话
+  /** 当前用的是第几个网关落点（1 起）/ 共几个 / 它是谁 / 为什么是它。
+   *
+   * ★这四项**从 baidi-tun 的真实日志里解析**，不是按剖面现算的。落点会在运行期
+   * 因故障转移而改变，而剖面里的顺序只是"下次接入会先试谁"。现算的话，一次成功的
+   * 容灾在界面上完全看不出来——用户说「我明明连着但很慢」，现场没有任何线索指向
+   * 「你现在走的是备用那台异地网关」。 */
+  endpointIndex: number;
+  endpointTotal: number;
+  endpointId: string;
+  endpointReason: string;
   lines: string[];      // 最近日志尾巴
+}
+
+/** 一个网关落点在客户端侧的形态（就是 baidi-tun 的 -gateways 清单里的一行）。 */
+export interface TunEndpoint { id: string; spa: string; proxy: string; pin: string }
+
+/**
+ * 由剖面（缺剖面时由本机配置）排出**有序**的网关落点清单。
+ *
+ * ★顺序原样沿用控制面给的那份，客户端不重排也不过滤：只有控制面知道哪台在线、
+ * 该优先给谁；终端手里没有任何能推翻它的材料。离线的落点也照单收下——控制面
+ * 看不到心跳与终端连不上它是两回事，砍掉它等于在控制面抖动时自断一条可用退路。
+ */
+export function resolveEndpoints(): TunEndpoint[] {
+  const p = profile.data;
+  const list: ProfileGateway[] = p?.gateways?.length ? p.gateways : p?.gateway ? [p.gateway] : [];
+  if (!list.length) {
+    // 剖面拿不到：退回设置页里那份本机配置试一把（单落点、无钉扎）。
+    // 这条路径本身就是降级，接入页会同时显示 profile.error。
+    return [{ id: '', spa: `${config.gateway}:${config.spaPort}`, proxy: `${config.gateway}:${config.proxyPort}`, pin: '' }];
+  }
+  return list.map((g) => ({
+    id: g.id || '',
+    spa: `${g.host}:${g.spaPort}`,
+    proxy: `${g.host}:${g.proxyPort}`,
+    pin: g.tunnelPin || ''
+  }));
 }
 
 /**
@@ -53,7 +90,9 @@ export interface TunView {
  */
 export function resolveTunOpts() {
   const p = profile.data;
-  const gw = p?.gateway;
+  // 网关落点清单（多活 + 故障转移）：首项即首选，其余是按序尝试的备用。
+  const eps = resolveEndpoints();
+  const gw = eps[0];
   // routes 必须非空：一个网段都不接管的话，隧道会成功建立但没有任何流量进去，
   // 表现为「显示已接入、什么都访问不了」——正是此前最迷惑人的失败形态。
   const routes = p?.routes?.length ? p.routes : [config.route];
@@ -65,9 +104,14 @@ export function resolveTunOpts() {
   const dns = p?.dns;
   return {
     control: config.control.replace(/\/+$/, ''),
-    gateway: gw?.host || config.gateway,
-    spaPort: gw?.spaPort || config.spaPort,
-    proxyPort: gw?.proxyPort || config.proxyPort,
+    // 单落点三件套仍然下传：Rust 侧与 baidi-tun 的 -spa/-proxy/-pin 是旧入口，
+    // 保留它们让「装了新客户端、配的却是老 sidecar」不至于一步都走不动。
+    // 有 gateways 清单时 baidi-tun 以清单为准（见 loadGateways），不会两头打架。
+    gateway: hostOf(gw.spa),
+    spaPort: portOf(gw.spa),
+    proxyPort: portOf(gw.proxy),
+    // gateways 整份交给 Tauri 侧落盘（-gateways），与 resmap/dns-records 同一套写法。
+    gateways: JSON.stringify(eps),
     route: routes.join(','),
     ip: p?.tunIp || config.ip,
     gm: config.gm,
@@ -75,7 +119,7 @@ export function resolveTunOpts() {
     // 资源映射表整体交给 Tauri 侧落盘（-resmap）。空对象时传空串，让 Rust 侧
     // 清掉上一轮的遗留文件，避免换用户后仍按旧表路由。
     resmap: p?.resmap && Object.keys(p.resmap).length ? JSON.stringify(p.resmap) : '',
-    pin: gw?.tunnelPin || '',
+    pin: gw.pin,
     // 与 resmap 同一套写法：记录表整体交给 Tauri 侧落盘（-dns-records）。
     // 空串让 Rust 侧清掉上一轮的遗留文件，避免换用户/换策略后仍按旧记录作答。
     dnsListen: dns?.server?.trim() || '',
@@ -87,6 +131,16 @@ export function resolveTunOpts() {
     // 并带回原因，好过在这里兜底猜一个与台账对不上的值。
     device: device.id
   };
+}
+
+/** 拆 "host:port"（落点地址由控制面下发，形态可控，不做 IPv6 方括号解析）。 */
+function hostOf(addr: string): string {
+  const i = addr.lastIndexOf(':');
+  return i < 0 ? addr : addr.slice(0, i);
+}
+function portOf(addr: string): string {
+  const i = addr.lastIndexOf(':');
+  return i < 0 ? '' : addr.slice(i + 1);
 }
 
 /**
@@ -148,16 +202,20 @@ function parse(s: TunStatusRaw): TunView {
   // 直接现算当前剖面会把未钉扎的隧道显示成已钉扎，见 startedOpts 的注释。
   const eff = s.running && startedOpts ? startedOpts : resolveTunOpts();
   const { stale, staleReason } = staleAgainstProfile(s.running);
+  const ep = parseEndpoint(lines, s.running, eff);
   return {
     running: s.running,
     ready,
     dev,
     vip: eff.ip,
     route: eff.route,
-    gateway: `${eff.gateway}:${eff.proxyPort}`,
+    // 网关地址取**数据面此刻真正在用的那个落点**（故障转移后会变），日志里没有
+    // 落点行时才退回启动快照的首选落点。写死首选的话，切换过去之后接入信息会
+    // 一直显示那台已经挂掉的网关——排查时所有人都会去查错的那台机器。
+    gateway: ep.addr || `${eff.gateway}:${eff.proxyPort}`,
     cipher: config.gm
       ? '国密 TLCP（SM2 / SM4-GCM / SM3）'
-      : eff.pin
+      : ep.pin
         ? '通用 TLS 1.3 · 证书钉扎'
         : '通用 TLS 1.3（未钉扎：加密但不认证网关）',
     keepalive,
@@ -166,8 +224,66 @@ function parse(s: TunStatusRaw): TunView {
     deniedReason,
     stale,
     staleReason,
+    endpointIndex: ep.index,
+    endpointTotal: ep.total,
+    endpointId: ep.id,
+    endpointReason: ep.reason,
     lines: lines.slice(-8)
   };
+}
+
+/**
+ * 从 baidi-tun 日志里解析「当前在用第几个落点」。
+ *
+ * ★数据面每次选定/切换落点都会打一行结构固定的日志（见 gateway 的 picker.logCurrent）：
+ *   `... msg="网关落点切换" endpoint=2/3 id=gw-b addr=10.0.0.2:18443 reason="..."`
+ * 取**最后一条**即当前态。契约是双向的：那边改键名要同步改这里的正则，
+ * 否则接入页会静默退回「第 1 个落点」——而那恰恰是切换之后最不该显示的信息。
+ *
+ * 解析不到时（老 baidi-tun、日志还没打出来）退回启动快照：第 1 个 / 共 N 个。
+ * 这一步只影响展示，不影响数据面真实行为。
+ */
+function parseEndpoint(lines: string[], running: boolean, eff: ReturnType<typeof resolveTunOpts>) {
+  const total = countEndpoints(eff.gateways);
+  const fallback = { index: 1, total, id: '', addr: '', pin: eff.pin, reason: '' };
+  if (!running) return fallback;
+  const line = lines.filter((l) => /endpoint=\d+\/\d+/.test(l)).pop();
+  if (!line) return fallback;
+  const m = line.match(/endpoint=(\d+)\/(\d+)/);
+  if (!m) return fallback;
+  const index = Number(m[1]);
+  const id = (line.match(/\bid=("[^"]*"|\S+)/) || [])[1] || '';
+  const addr = (line.match(/\baddr=("[^"]*"|\S+)/) || [])[1] || '';
+  const reason = (line.match(/\breason=("[^"]*"|\S+)/) || [])[1] || '';
+  const eps = parseEndpointList(eff.gateways);
+  return {
+    index,
+    total: Number(m[2]) || total,
+    id: unquote(id),
+    addr: unquote(addr),
+    // 钉扎与否要看**这个落点**的指纹，不是首选落点的：切到一台没上报指纹的备用网关
+    // 之后仍显示「证书钉扎」，就等于把一次真实的降级藏了起来。
+    pin: eps[index - 1]?.pin ?? eff.pin,
+    reason: unquote(reason)
+  };
+}
+
+function parseEndpointList(raw: string): TunEndpoint[] {
+  if (!raw) return [];
+  try {
+    const v = JSON.parse(raw);
+    return Array.isArray(v) ? (v as TunEndpoint[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function countEndpoints(raw: string): number {
+  return parseEndpointList(raw).length || 1;
+}
+
+function unquote(s: string): string {
+  return s.startsWith('"') && s.endsWith('"') ? s.slice(1, -1) : s;
 }
 
 /**
@@ -186,6 +302,9 @@ function staleAgainstProfile(running: boolean): { stale: boolean; staleReason: s
   if (now.route !== startedOpts.route) diffs.push('接管网段');
   if (now.resmap !== startedOpts.resmap) diffs.push('资源映射');
   if (now.dnsRecords !== startedOpts.dnsRecords) diffs.push('隧道内 DNS 记录');
+  // 落点清单同样在拉起那一刻定死：管理员新加/下线一台网关后，运行中的隧道既不会
+  // 把新网关纳入故障转移备选，也不会知道某个备选已经不该用了——容灾余量变了却看不见。
+  if (now.gateways !== startedOpts.gateways) diffs.push('网关落点清单');
   if (!diffs.length) return { stale: false, staleReason: '' };
   return {
     stale: true,

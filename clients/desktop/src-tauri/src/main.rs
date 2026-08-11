@@ -22,6 +22,10 @@ const RESMAP: &str = "/tmp/baidi-resmap.json";
 /// 隧道内 DNS 记录表落盘路径（FQDN → VIP）。与 RESMAP 同一套写法：不含凭据，
 /// 但仍按 0600 写，避免同机其他用户顺手读走内网域名清单（那是一份现成的内网资产地图）。
 const DNSREC: &str = "/tmp/baidi-dns-records.json";
+/// 网关落点清单落盘路径（多活 + 故障转移，顺序即优先级）。与上面两份同一套写法。
+/// 内容是网关地址与隧道证书指纹——不是凭据（指纹是公开信息，钉扎的是对方身份），
+/// 但同样按 0600 写：整份清单就是一张"白帝网关都部署在哪"的地图。
+const GATEWAYS: &str = "/tmp/baidi-gateways.json";
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -41,9 +45,17 @@ struct TunOpts {
     #[serde(default)]
     resmap: String,
     // pin 网关隧道证书 SHA-256 指纹（hex）。非空则 baidi-tun 对通用 TLS 隧道做证书钉扎，
-    // 把「加密但不认证」补成「加密 + 认证」。
+    // 把「加密但不认证」补成「加密 + 认证」。这是**首选落点**那台的指纹（单落点旧入口）。
     #[serde(default)]
     pin: String,
+    // gateways 网关落点清单（JSON 数组字符串，顺序即优先级），落盘后经 -gateways
+    // 交给 root 数据面。一台网关挂掉时客户端切下一个，不再是"网关一挂全员断"。
+    //
+    // ★清单里每个落点各带**自己**的 pin：共用一份会让故障转移在钉扎那一步必然失败，
+    // 而症状是「切过去就连不上」，极易被误判成第二台网关也坏了。
+    // 空串 = 前端没算出任何落点（剖面与本机配置都没有），此时退回 -spa/-proxy/-pin。
+    #[serde(default)]
+    gateways: String,
     // ── 分离式 DNS（剖面 dns 段）──
     // 没有这三个字段时，域名后端（oa.corp.internal:8080）完全不被接管，流量直连内网
     // 且没有任何提示——「配了却不生效」里最难归因的一种。三者都为空 = 老行为。
@@ -132,6 +144,17 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
         // 两条路径的信任材料不同，不能混用，故只在非 -gm 时传 -pin。
         args.push("-pin".into());
         args.push(opts.pin.trim().into());
+    }
+    // 网关落点清单：写盘后经 -gateways 交给 root 数据面（顺序即优先级）。
+    // 与 resmap 同一套写法，包括「空就把上一轮的残留删掉」——留着会让这次接入
+    // 按上一个用户/上一份策略的落点做故障转移，切过去连的是一台不该连的网关。
+    if !opts.gateways.trim().is_empty() {
+        fs::write(GATEWAYS, opts.gateways.trim()).map_err(|e| format!("写网关落点清单失败：{e}"))?;
+        let _ = fs::set_permissions(GATEWAYS, fs::Permissions::from_mode(0o600));
+        args.push("-gateways".into());
+        args.push(GATEWAYS.into());
+    } else {
+        let _ = fs::remove_file(GATEWAYS);
     }
     // 资源映射表：写盘后经 -resmap 交给 root 数据面。控制面是这张表的唯一来源——
     // 客户端不自己推导「哪个地址属于哪个资源」，避免终端与网关对资源归属产生分歧。

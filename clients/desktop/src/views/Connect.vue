@@ -120,8 +120,24 @@
             <icon-exclamation-circle-fill />
             <span>{{ tun.staleReason }}</span>
           </div>
+          <!--
+            故障转移必须让用户知道。切换是静悄悄发生的（数据面自己换了落点），
+            不呈现的话用户只会感到「我明明连着但很慢」，而现场没有任何线索指向
+            「你现在走的是备用那台异地网关」——那正是最该被看见的一件事。
+          -->
+          <div v-if="switchedEndpoint" class="ck-pwarn">
+            <icon-exclamation-circle-fill />
+            <span>已故障转移到备用网关落点（第 {{ tun.endpointIndex }}/{{ tun.endpointTotal }} 个{{ tun.endpointId ? ' · ' + tun.endpointId : '' }}）：{{ tun.endpointReason }}。业务不中断，但链路可能更长；首选落点恢复后需断开重连才会切回。</span>
+          </div>
           <template v-if="stage === 'connected'">
-            <div class="ck-kv"><span>安全代理网关</span><b class="dk-mono">{{ tun.gateway }}</b></div>
+            <div class="ck-kv">
+              <span>安全代理网关</span>
+              <b class="dk-mono">{{ tun.gateway }}<template v-if="tun.endpointId"> · {{ tun.endpointId }}</template></b>
+            </div>
+            <div class="ck-kv">
+              <span>网关落点</span>
+              <b :class="{ ok: !switchedEndpoint }">第 {{ tun.endpointIndex }} / 共 {{ tun.endpointTotal }} 个{{ tun.endpointTotal > 1 ? '（失败自动切下一个）' : '（单落点，无容灾余量）' }}</b>
+            </div>
             <div class="ck-kv"><span>加密隧道</span><b class="ok">已建立 · {{ tun.cipher }}</b></div>
             <div class="ck-kv"><span>SPA 服务隐身</span><b class="ok">{{ tun.keepalive ? '敲门保活中 · 业务对外不可见' : '已敲门 · 业务对外不可见' }}</b></div>
             <div class="ck-kv"><span>虚拟网卡 / IP</span><b class="dk-mono">{{ tun.dev || 'utun' }} · {{ tun.vip }}</b></div>
@@ -193,12 +209,16 @@ const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
 const showLog = ref(false);
-const tun = ref<TunView>({ running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [] });
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', endpointIndex: 1, endpointTotal: 1, endpointId: '', endpointReason: '', lines: [] };
+const tun = ref<TunView>({ ...EMPTY_TUN });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
 // 控制面在剖面里下发的降级告警：网关未上报隧道证书指纹（隧道加密但不认证）、
 // 应用未关联受控资源（点开必然不走隧道）等。这些都是「配置齐全、就是不生效」
 // 的静默失效，控制面已经识别出来了，客户端不呈现等于白识别。
 const profileWarnings = computed(() => profile.data?.warnings ?? []);
+// 当前隧道是否已经不在首选落点上（= 发生过故障转移）。判据取数据面日志解析出的序号，
+// 而不是"剖面里第几个"——剖面随时会刷新，运行中的隧道用的是拉起那一刻的清单。
+const switchedEndpoint = computed(() => tun.value.running && tun.value.endpointIndex > 1);
 
 let pollTimer = 0;
 let pollGen = 0;         // 轮询代次：断开/重连后自增，令过期的在途轮询失效
@@ -206,7 +226,6 @@ let connectTO = 0;      // 接入超时计时器
 const connectTimedOut = ref(false);
 const denied = ref(false);            // 被控制面强制下线 / 账号禁用（不可自愈）
 const deniedReason = ref('');
-const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [] };
 function stepFromTun(v: TunView): number {
   if (v.ready) return STEPS.length;
   if (v.keepalive) return 3;
@@ -235,9 +254,15 @@ async function connect() {
   await loadProfile();
   const bad = validateConfig();
   if (bad) { err2.value = bad; return; }          // 接入前配置校验（端口/网段/URL）
-  if (profile.data && !profile.data.gateway.online) {
-    err2.value = '控制面显示没有网关在线：请先确认 baidi-gateway 已启动并注册到控制中心';
-    return; // fail-fast：网关离线时接入必然失败，早报错好过让用户等一轮超时
+  // fail-fast：**所有**落点都离线时接入必然失败，早报错好过让用户等一轮超时。
+  // ★判据是「有没有任意一个在线」而不是「首选在不在线」——首选那台掉线、备用还在时
+  // 客户端照样能接入（会自动切过去），此时拦住用户就是把一次本可成功的接入拒之门外。
+  const gws = profile.data?.gateways?.length ? profile.data.gateways : profile.data ? [profile.data.gateway] : [];
+  if (gws.length && !gws.some((g) => g.online)) {
+    err2.value = gws.length > 1
+      ? `控制面显示 ${gws.length} 个网关落点全部离线：请先确认 baidi-gateway 已启动并注册到控制中心`
+      : '控制面显示没有网关在线：请先确认 baidi-gateway 已启动并注册到控制中心';
+    return;
   }
   stage.value = 'connecting'; step.value = 0;
   try {
@@ -304,7 +329,7 @@ async function connectDev() {
   const r = await knock(session.token);
   if (!r.ok) { stage.value = 'idle'; err2.value = 'SPA 敲门失败：' + (r.detail || '网关不可达'); return; }
   step.value = 3; await sleep(300); step.value = STEPS.length;
-  tun.value = { running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', lines: [(r.detail || 'SPA 敲门成功')] };
+  tun.value = { ...EMPTY_TUN, running: true, ready: true, dev: 'utun(dev)', vip: '10.99.0.2', route: '10.99.0.0/24', gateway: '127.0.0.1:18443', cipher: '通用 TLS 1.3', lines: [(r.detail || 'SPA 敲门成功')] };
   stage.value = 'connected'; session.connected = true;
   Message.success('（联调）已敲门 · 真 utun 接管需打包运行');
 }

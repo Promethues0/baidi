@@ -51,10 +51,16 @@ export interface PortalAppsResp { apps: PortalTile[] }
  * 于是隧道建起来了、点开应用却完全不走隧道——这正是「连上了但没用」的根因。
  */
 export interface ProfileGateway {
+  /** 网关注册 id（= mTLS 证书 CN）。故障转移时要说清「现在用的是哪一台」，
+   *  只报 IP 的话，网关换了地址或同机多实例就对不上账。回退落点为空串。 */
+  id: string;
   host: string; spaPort: string; proxyPort: string;
-  /** 网关隧道证书 SHA-256 指纹：客户端据此钉扎，把「加密」补成「加密 + 认证」。 */
+  /** 该网关隧道证书的 SHA-256 指纹：客户端据此钉扎，把「加密」补成「加密 + 认证」。
+   *  ★指纹**逐网关**，不是全局一份——共用会让故障转移在钉扎那一步必然失败，
+   *  而症状是「切过去就连不上」，极易被误判成第二台网关也坏了。 */
   tunnelPin: string;
-  /** 网关是否在心跳新鲜期内。false = 以下地址是回退默认值，接入很可能失败。 */
+  /** 网关是否在心跳新鲜期内（控制面视角）。清单里离线的排在末尾但仍下发：
+   *  「控制面看不到心跳」与「终端连不上它」是两个独立事实。 */
   online: boolean;
 }
 export interface ProfileApp {
@@ -91,7 +97,11 @@ export interface ProfileDNS {
 export interface ClientProfile {
   generatedAt: string;
   user: string;
+  /** 首选落点，恒等于 gateways[0]。老控制面只发这一个字段，故它仍是兜底来源。 */
   gateway: ProfileGateway;
+  /** 全部网关落点，**顺序即优先级**（在线优先 → 网关 id 字典序，控制面已排好）。
+   *  客户端按序尝试、失败切下一个。可选：老控制面不下发，此时退回只用 gateway 单落点。 */
+  gateways?: ProfileGateway[];
   vipCidr: string;
   tunIp: string;
   routes: string[];              // 需接管进隧道的网段

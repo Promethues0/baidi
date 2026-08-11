@@ -93,7 +93,12 @@ func clientSourceRev() string {
 	if v := strings.TrimSpace(os.Getenv("BAIDI_CLIENT_SRC_REV")); v != "" {
 		return v
 	}
-	out, err := exec.Command("git", "-C", ".", "log", "-1", "--format=%h", "--", "clients/").Output()
+	// ★路径规格用 `:/clients/`（git 的**仓库根相对**语法）而不是 `clients/`：
+	// 后者相对进程 cwd 解析，而 control 通常跑在 control/ 目录下，那里没有 clients/，
+	// 于是恒返回空 → 每个包都被标成「无法判断新旧」。这个错法很隐蔽：
+	// 降级方向是安全的（不可判定而非假称最新），没人会报障，但整套溯源就此永久失效。
+	// 实测起真栈时正是这么发现的——单测里 annotateProvenance 是纯函数，测不到取数这一步。
+	out, err := exec.Command("git", "log", "-1", "--format=%h", "--", ":/clients/").Output()
 	if err != nil {
 		return ""
 	}

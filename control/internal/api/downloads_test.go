@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -247,4 +248,31 @@ func clone(m downloadsManifest) downloadsManifest {
 	out := downloadsManifest{Clients: make([]ClientDownload, len(m.Clients))}
 	copy(out.Clients, m.Clients)
 	return out
+}
+
+// clientSourceRev 必须能在**任意 cwd** 下取到版本。
+//
+// 回归背景：第一版用 `git -C "." log ... -- clients/`，路径规格相对进程 cwd 解析。
+// control 跑在 control/ 目录下，那里没有 clients/，于是恒返回空 → 每个包都被标成
+// 「无法判断新旧」。这个错法极隐蔽：降级方向是安全的（不可判定而非假称最新），
+// 没人会报障，但整套溯源就此永久失效。annotateProvenance 是纯函数测不到取数这一步，
+// 只有真的调一次 git 才发现——本用例就是那道闸。
+func TestClientSourceRevWorksFromAnyCwd(t *testing.T) {
+	t.Setenv("BAIDI_CLIENT_SRC_REV", "") // 排除环境变量覆盖，逼它真去问 git
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("无 git，跳过")
+	}
+	// 测试进程的 cwd 就是包目录 control/internal/api——正是出问题的那种位置
+	rev := clientSourceRev()
+	if rev == "" {
+		t.Fatal("在包目录下取不到 clients/ 的版本：路径规格多半又写成了相对 cwd 的形式")
+	}
+	if len(rev) < 7 || strings.ContainsAny(rev, " \n\t") {
+		t.Errorf("版本号形状不对：%q", rev)
+	}
+	// 环境变量覆盖仍要生效（部署机无 .git 时由流水线注入）
+	t.Setenv("BAIDI_CLIENT_SRC_REV", "deadbee")
+	if got := clientSourceRev(); got != "deadbee" {
+		t.Errorf("环境变量应优先，实际 %q", got)
+	}
 }

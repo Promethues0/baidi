@@ -719,6 +719,11 @@ onMounted(load);
 .bd-onode__n { font-size: 11px; color: var(--bd-t3); }
 .bd-onode__acts { display: none; position: absolute; right: 6px; top: 0; height: 36px; align-items: center; gap: 2px; background: var(--bd-fill-2); padding-left: 8px; border-radius: 0 7px 7px 0; }
 .bd-onode-row.sel .bd-onode__acts { background: var(--bd-primary-1); }
+/* 选中行的操作面板是**常驻**的（.sel），而它绝对定位、背景不透明，正好压在行尾的成员数上：
+   被选中的那个部门/用户组的人数会从此永远看不见。给节点按钮让出面板那点宽度
+   （8 + 22×3 + 2×2 + right 6 ≈ 84px），计数就落在面板左侧仍然可读。
+   hover / focus-within 不加这段：那两种是瞬时状态，加上去反而让计数左右跳。 */
+.bd-onode-row.sel .bd-onode { padding-right: 86px; }
 .bd-onode__act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; background: transparent; border-radius: 4px; font-size: 13px; color: var(--bd-t3); cursor: pointer; }
 .bd-onode__act:hover { color: var(--bd-primary); background: var(--bd-bg-1, #fff); }
 .bd-onode__act--danger:hover { color: var(--bd-danger); }

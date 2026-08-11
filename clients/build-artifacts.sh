@@ -131,6 +131,7 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 #     对用户来说重点不是"包能不能出"，是"能不能用"：写「敬请期待」等于让他一直等一个
 #     按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）恰恰是存在的，
 #     却被那句占位文案挡住了。
+#   - Linux 同处境（.deb/.AppImage 出得来，pkexec 提权与数据面未实机验证），同样不写那句。
 # 写「敬请期待」等于给一个不会到来的版本许诺。理由见 clients/BUILD.md 第九节。
 clients = [
     # ★缺 dmg 时的 note 不能留空：空着的话页面上 macOS 那一行什么都不说，而 manifest

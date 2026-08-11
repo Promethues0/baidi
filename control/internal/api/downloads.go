@@ -64,6 +64,7 @@ type downloadsManifest struct {
 // **Windows 也不是**：包在 CI 上出得来、组件也齐（wintun.dll 构建期从官方取件 + 哈希校验，
 // 随包装在 baidi-tun.exe 旁边），缺的是**实机验证**——UAC 提权、建卡、NRPT 分离式 DNS
 // 一次都没在真实 Windows 上跑过，产物因此标 UNVERIFIED 且刻意不进下载中心。
+// **Linux 同处境**（.deb/.AppImage 出得来，pkexec 提权与数据面未实机验证），同样不写那句。
 // 用户看到的不是「包能不能出」，是「能不能用」——对他写「敬请期待」等于让他
 // 一直等一个按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）
 // 明明存在，却被那句话挡住了。照实说，他才知道该找谁。理由见 clients/BUILD.md 第九节。

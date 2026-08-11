@@ -108,14 +108,19 @@ CI 里还有一步 `校验 manifest 真的带上了溯源`：manifest 生成成�
 下的 `.apk`。CI 出的 Linux/Windows 包**不会**自动进 `manifest.json`（那两个平台在
 manifest 里仍是占位）。要下发它们，得先解决下面第四、五节那两条真实约束。
 
-在那之前，占位文案要照实说**为什么**：
-- **Linux** 是「构建中，敬请期待」—— 包能出、数据面代码在那儿，缺的是一次实机验证，
-  这是真的会到来的东西；
-- **Windows 也不是**，但原因和以前不一样了：包里的组件现在是齐的（`wintun.dll` 随包分发，
-  见第四节），缺的是**实机验证** —— UAC 提权、建卡、NRPT 分离式 DNS 一次都没在真实
-  Windows 上跑过。占位文案因此写成「包内已含 wintun.dll…但未实机验证…请联系管理员」。
-  用户看到的不是「包能不能出」，是「能不能用」—— 对他说「敬请期待」等于让他一直等一个
-  按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）明明存在。
+在那之前，占位文案要照实说**为什么**。这两个平台**都不写「构建中，敬请期待」**：
+包不是"还在构建"，是构建出来了、按现有决策不下发。
+
+- **Linux**：「pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，
+  请联系管理员」；
+- **Windows**：「包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），
+  但 UAC 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员」。
+  ★这句的**理由**换过一次：`wintun.dll` 从"我们不分发、请用户自备"改成了随包分发（见第四节），
+  组件因此齐了，**剩下的差距只是实机验证** —— UAC 提权、建卡、NRPT 分离式 DNS 一次都没在
+  真实 Windows 上跑过。占位文案说的必须是**此刻**的缺口，不是历史上的那个。
+
+共同的判据是：用户看到的不是「包能不能出」，是「能不能用」—— 说「敬请期待」等于让他一直等一个
+按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）明明存在，却被那句话挡住了。
 
 ## 四、Windows：wintun.dll 随包分发（构建期取件 + 强校验）
 
@@ -124,15 +129,78 @@ manifest 里仍是占位）。要下发它们，得先解决下面第四、五�
 ### 从哪来：构建期取件，不入库
 
 `src-tauri/fetch-wintun.sh` 从官方 <https://www.wintun.net/> 下载 zip 并做 **SHA-256 强校验**
-（版本 / URL / 哈希三个常量挨在一起写在脚本顶部），按架构解出 DLL 与 `LICENSE.txt` 到
+（哈希的来历见下文「哈希从哪儿来」），按架构解出 DLL 与 `LICENSE.txt` 到
 `src-tauri/binaries/wintun/`。`build-sidecars.sh` 在 `GOOS=windows` 时自动调它。
 二进制**不进 git**：本仓库被 `gateway/baidi-tun` 那两个 13MB 历史产物坑过一次，
 入库之后没人再核对来源，clone 的人也无从判断它是不是官方那一份。
 
-许可依据：Wintun「Prebuilt Binaries License」第 3(d) 条允许「随只经 Permitted API 使用它的
-软件一同分发」，我们的 Go 绑定只调 `wintun.h` 导出的函数，落在这条例外里。附带义务三条：
-不得改动 DLL（原样解出）、不得移除版权声明（`LICENSE.txt` 随包装成 `wintun-LICENSE.txt`）、
-不得借 WireGuard/Wintun 的名号背书本产品（文案只做事实陈述）。
+### 凭什么能随包分发：许可第 3(d) 条的例外
+
+Wintun 的「Prebuilt Binaries License」（zip 里的 `wintun/LICENSE.txt`）默认**禁止**再分发 ——
+第 3 条 d 项禁止未经 WireGuard LLC 书面同意就 resell / redistribute / lease / rent /
+transfer / sublicense。但同一项留了一条例外，原文（英文）是：
+
+> …except insofar as the Software is distributed alongside other software that uses the
+> Software only via the Permitted API
+
+`baidi-tun` 的 Go 绑定只调用 `wintun.h` 导出的函数（即 Permitted API），DLL 也只随白帝客户端
+一同分发、不单独提供 —— 落在这条例外里，**分发是合法的，不需要另外去要书面许可**。
+
+附带义务三条，每条都有执行方（不是写在文档里就算数）：
+
+| 义务 | 出处 | 执行方 |
+|---|---|---|
+| 不得改动 DLL | 例外以「原样随附」为前提 | `fetch-wintun.sh` 从官方 zip **原样解出**：不改名、不加壳、不重签 |
+| 不得移除版权声明 | 第 3 条 c 项 | `LICENSE.txt` 与 DLL **同一步**解出（不会出现"DLL 换了、许可还是旧的"），打包成 `wintun-LICENSE.txt`；CI 打包前查它在不在、打包后查它进没进安装包 |
+| 不得借 WireGuard / Wintun 的名号背书本产品 | 第 3 条 e 项 | 文案只做事实陈述（「Windows 用 Wintun 建虚拟网卡」「到 wintun.net 取 DLL」），不写成合作 / 认证 / 推荐 |
+
+### 哈希从哪儿来
+
+`WINTUN_SHA256` **不是**"把下载下来的文件算一遍填进去" —— 那等于给任何一次被投毒的下载
+盖章，校验永远通过、永远没有意义。它是**官网公布值**：<https://www.wintun.net/> 的下载页
+逐版本列出 zip 的 SHA-256，本地取件后**人工逐字符比对**一致才写进脚本
+（`wintun-0.14.1.zip` = `07c2561…4ef51`，750540 字节；核实日期记在脚本顶部注释里）。
+
+三条取件路径 —— `BAIDI_WINTUN_ZIP` 指定的本地文件 / 缓存命中 / 现下 —— **都**过同一道校验，
+一条都不豁免：内网构建机上那份 zip 的来路，与网上下载的那份一样不可自证。缓存的判据是
+「文件在**且**哈希对」，只看在不在等于把一份被改过的缓存永久信下去。校验不过就退出，
+不重试也不降级：这个 DLL 会被以**管理员权限**加载进数据面进程。
+
+★下载地址只有 `https://www.wintun.net/builds/wintun-<版本>.zip` 这一条。
+旧文档里常见的 `git.zx2c4.com/wintun/builds/…` 现在是 **404**，别照抄。
+
+### 离线 / 内网构建：`BAIDI_WINTUN_ZIP`
+
+构建机不通外网时，在别处下好同一份 zip，用环境变量指过去（照样强校验，不是"跳过校验"的开关）：
+
+```bash
+cd clients/desktop
+BAIDI_WINTUN_ZIP=/data/pkgs/wintun-0.14.1.zip ./src-tauri/fetch-wintun.sh --arch amd64
+# 环境变量会被子进程继承，所以整条构建线也可以直接：
+BAIDI_WINTUN_ZIP=/data/pkgs/wintun-0.14.1.zip ./src-tauri/build-sidecars.sh
+```
+
+其余用法：`--arch amd64|arm64` 取单一架构（**打包必须指定单一架构**，脚本只在这种情况下产出
+打包配置引用的固定路径 `binaries/wintun/wintun.dll`）；`--arch all` 取全部，用于离线预取或检视，
+此时脚本会**主动删掉**固定路径上那份旧 DLL —— 留一份架构对不上的在那儿，包照样打得出、
+装得上，只在用户点「接入」那一刻报一句看不懂的加载失败。
+
+### 升级 wintun 版本时要同时改什么
+
+版本号在全仓**只有 `fetch-wintun.sh` 这一处**（其余地方都是示例文字），所以升级动作很小，
+但下面几步一步都不能省：
+
+1. 到 <https://www.wintun.net/> 取新版 zip，**人工比对官网公布的 SHA-256**；
+2. 改脚本顶部**挨在一起**的三个常量 `WINTUN_VERSION` / `WINTUN_URL` / `WINTUN_SHA256`
+   （刻意挨着写，「改了版本忘了改哈希」在视觉上无处可藏；真忘了也不会静默 ——
+   校验会当场拒绝，而不是把一个未知二进制放进安装包），外加只用于报错提示的 `WINTUN_ZIP_BYTES`，
+   并更新那句「核实日期」；
+3. **复核 zip 内部布局没变**：脚本按 `wintun/LICENSE.txt`、`wintun/bin/<amd64|arm64>/wintun.dll`
+   这两条固定成员路径取件。上游改了目录结构时，解包器可能回 0 却什么都没写 ——
+   脚本对空文件当失败处理，就是为这个；
+4. **重读一遍新版 `LICENSE.txt`**：本项目随包分发的合法性完全押在第 3(d) 条那句例外上，
+   上游改许可就是改结论。条款变了要先改这一节的说法，不是先升版本；
+5. 不需要动 `tauri.windows.conf.json`、CI 或 `.gitignore` —— 它们引用的都是与版本无关的路径。
 
 ### 放哪去：必须与 `baidi-tun.exe` **同目录**
 
@@ -337,6 +405,7 @@ Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实
 | iOS | 需企业签名 / TestFlight 分发，请联系管理员 | 需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员 |
 | 鸿蒙 | **构建中，敬请期待** | 需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员 |
 | Windows | **构建中，敬请期待** | 包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员 |
+| Linux | **构建中，敬请期待** | pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员 |
 | macOS（缺 dmg 时） | *（空着，什么都不说）* | 构建中，敬请期待（与 `placeholderManifest()` 同） |
 
 鸿蒙那句「构建中，敬请期待」是不对的：它暗示有一个正在进行的构建、等等就有 —— 而实际上
@@ -348,8 +417,12 @@ Windows 起初被豁免过一次，理由是「包能出，所以算数」——
 那个包按现有决策不会下发；而它的正确下一步（找管理员要 UNVERIFIED 包）恰恰是存在的，
 只是被那句占位文案挡住了。（这句话的**理由**后来变了一次：`wintun.dll` 从"我们不分发、
 请用户自备"改成了随包分发，见第四节；剩下的差距是实机验证。结论没变，措辞跟着改了——
-占位文案说的必须是**此刻**的真实缺口，不是历史上的那个。）Linux 不同：包能出、
-数据面代码也在，缺的只是一次实机验证，那是真会到来的东西，仍写「敬请期待」。
+占位文案说的必须是**此刻**的真实缺口，不是历史上的那个。）
+
+**Linux 后来也跟着改了**（起初被判成"不同"：包能出、数据面代码也在，缺的只是一次实机验证，
+所以"仍写敬请期待"）。那个判断是错的：Linux 与 Windows 是同一处境 —— CI 出得来 .deb/.AppImage、
+标 UNVERIFIED、刻意不下发，差的是实机验证而不是"还在构建"。**「敬请期待」许诺的是一个
+不会自己到来的版本**，而两个平台的正确下一步都是同一句「找管理员要 UNVERIFIED 包」。
 
 macOS 那一行是同一条纪律的另一半：脚本在**缺 dmg** 时曾写 `note=""`，而 manifest 整体
 缺失时页面回落到 `placeholderManifest()` 的「构建中，敬请期待」—— 同一个平台在两条路径上

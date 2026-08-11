@@ -754,8 +754,59 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 **不能声称**：
 
 - **Windows / Linux 分支从未在真机上跑过**。本机只装了 apple 目标（无 clippy、无交叉目标），验证方式是：解析逻辑在 macOS 上 `cargo test` 全绿，两条平台分发臂用临时改写 cfg 谓词的方式各做过一次 `cargo check`。命令输出样本是**按文档构造**的，不是抓来的真实输出。
-- **桌面客户端整体目前还不能在 Windows 上构建**：`main.rs` 的 `tunnel_start` 是 macOS 专属（`osascript` 提权 + `std::os::unix::fs::PermissionsExt`）。Linux 能编但拉不起数据面（同样是 osascript）。采集器分平台是**为后续补这两个平台的数据面做好准备**，不等于这两个平台现在可用。
+- ~~桌面客户端整体目前还不能在 Windows 上构建~~ **（已过时，改了）**：`tunnel_start` 曾经是 macOS 专属（写死 `osascript` + `std::os::unix::fs::PermissionsExt`），现在提权分平台收在 `elevate.rs`（macOS `osascript` / Linux `pkexec` / Windows UAC），unix 专属代码全部 `#[cfg(unix)]` 门控，Windows 的 `wintun.dll` 也随包分发了。**但"能构建"离"能用"还差一次实机验证** —— 见下一节。
 - 判据里有取舍：Windows 的 `sys_integrity` 是 Secure Boot（次选 Defender 篡改防护），Linux 的 `sys_integrity` 是 SELinux/AppArmor enforcing、`os_version` 比的是**内核** ≥ 5.10（发行版号各家规则不同，拿来比大小只会误判）。这些都不是行业统一定义，换环境需要重新校准。
+
+### ⚠️ Windows 桌面数据面（源码完整、组件齐了，但**从未在真 Windows 上跑过**）
+
+链路与 macOS 同构：Tauri 前端点「接入」→ `elevate.rs` 按平台生成提权计划（Windows 是
+UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sidecar `baidi-tun.exe` →
+它用 **Wintun** 建虚拟网卡、接管剖面下发的网段、逐流 SPA 敲门 + 隧道。
+
+**能声称**：
+
+- **源码实现完整，没有平台桩**。Windows 侧该有的三段都真写了：`baidi-tun` 的 wintun 引擎与
+  路由接管、NRPT 分离式 DNS 配置与清理（`gateway/cmd/baidi-tun/resolver_windows.go`）、
+  Rust 侧的 UAC 提权与断开（`clients/desktop/src-tauri/src/elevate.rs`）。此前那句
+  「桌面客户端整体还不能在 Windows 上构建」（`tunnel_start` 写死 `osascript` +
+  `PermissionsExt`）已不再成立：提权分平台收进 `elevate.rs`，unix 专属代码全部 `#[cfg(unix)]` 门控。
+- **sidecar 交叉编译通过**（本机 macOS 实测）：`CGO_ENABLED=0 GOOS=windows GOARCH=amd64|arm64
+  go build ./cmd/baidi-tun`（与 `./cmd/baidi-knock`）均产出 PE 可执行文件。
+- **`wintun.dll` 与其许可随包分发**，不再要求用户自备：`fetch-wintun.sh` 构建期从官方
+  <https://www.wintun.net/> 取件 + SHA-256 强校验（不入库），`tauri.windows.conf.json`
+  把 DLL 与 `wintun-LICENSE.txt` 装进安装根目录 —— 也就是 `baidi-tun.exe` 旁边，
+  那是 `LoadLibraryEx(APPLICATION_DIR|SYSTEM32)` 唯一会看的两处之一。
+  分发依据是 Wintun 预编译许可第 3(d) 条那句例外（随「只经 Permitted API 使用它的软件」
+  一同分发），义务（不改 DLL / 许可随包 / 不借其名号背书）逐条有执行方，见
+  [clients/BUILD.md 第四节](../clients/BUILD.md)。
+- **提权链与落位有单测顶着**（`cargo test` 60 条全绿，`elevate.rs` 占 37 条）。Windows 那批是
+  逐字断言，因为它们只在 Windows 上执行、在 mac 上永远走不到：launcher 必须是 `-NoNewWindow`
+  而不能与 `-WindowStyle Hidden` 混用（PowerShell 5.1 下混用等于数据面 100% 起不来）、
+  UAC 退出码必须经 `exit $p.ExitCode` 回传、参数按 `CommandLineToArgvW` 规则转义、
+  判活必须解析 `tasklist` 输出而不是看退出码（无匹配也回 0，会让托盘永远显示「已接入」）、
+  以及打包配置必须写成「映射形 + 目的地空串」（列表形会把 DLL 装进子目录）。
+- **弹 UAC 之前先自证**：`preflight_start` 查 wintun.dll 在不在（找不到就逐条列出实际找过的
+  绝对路径）、架构对不对（读 PE 头 machine 码），三态 —— 对→放行、错→当场拒并说清是架构问题、
+  **读不出/认不出→放行**（不可判定不塌缩成不合规，与 posture 同一条纪律）。
+- **CI 有落位断言**：打包前验 DLL/许可齐全且 PE machine 与 runner 三元组一致；打包后解析生成的
+  `installer.nsi`、并用 `msiexec /a` 摊开 MSI，断言 `wintun.dll` 与 `baidi-tun.exe` 父目录同一。
+
+**不能声称**：
+
+- **没有任何人在真实 Windows 上跑过这条链路**。建虚拟网卡、路由接管、NRPT 分域解析及其清理、
+  UAC 交互（同意/取消/超时）、卸载残留 —— 一次都没实测。上面那些断言证明的是**构造正确**
+  （命令行怎么拼、文件装到哪），不是**运行正确**。
+- **Rust/Tauri 侧甚至没有在 Windows 上编译过**。Tauri 桌面端不能从 macOS 交叉编译（GTK/WebKit
+  与 MSVC 工具链都不在），而 `.github/workflows/clients.yml` **从未在 GitHub Actions 上真实运行过**
+  （只过了 actionlint）。所以「Windows 包能出」目前仍是设计意图，不是观测结果。
+- **提权执行层是 PowerShell `Start-Process -Verb RunAs`，不是 `ShellExecuteW`**。选它是为了不引
+  Windows 专属 crate、让构造逻辑在 mac 上可测；代价是多一层 PowerShell 的行为差异（执行策略、
+  引号、编码），而这一层恰恰只能在真机上验。
+- **posture 采集的 Windows 分支同样未实机**（见上一节），**网关侧 Windows 的系统指标五项全部
+  不可判定**（见后面「网关设备状态采集」一节）—— 三处的 Windows 支持都停在同一道线上。
+- 因此 **CI 产物标 `UNVERIFIED`，刻意不进下载中心 manifest**。下载页的 Windows 占位文案照实说
+  「包内已含 wintun.dll…但 UAC 提权与数据面均未实机验证…请联系管理员」，两处文案
+  （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。
 
 ### ✅ 消息通道 SMTP / Webhook（真，但「短信」就是 webhook，别当短信网关用）
 

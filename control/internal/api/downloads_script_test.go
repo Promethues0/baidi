@@ -146,7 +146,9 @@ func TestBuildArtifactsPlaceholdersMatchServer(t *testing.T) {
 	}
 
 	// 「敬请期待」只能出现在真的会被构建出来、且装了能用的平台上。
-	for _, p := range []string{"ios", "harmony", "windows"} {
+	// ★linux 在这张名单里补得晚了一步：它与 windows 同处境（CI 出得来 .deb/.AppImage、
+	// 标 UNVERIFIED、刻意不下发），文案改过来了但没人守着，改回去不会有任何东西报警。
+	for _, p := range []string{"ios", "harmony", "windows", "linux"} {
 		if strings.Contains(got[p].Note, "敬请期待") {
 			t.Errorf("%s 的占位文案不该说「敬请期待」——那是给一个不会到来的版本许诺：%q", p, got[p].Note)
 		}

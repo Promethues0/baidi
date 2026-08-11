@@ -55,14 +55,21 @@ type downloadsManifest struct {
 }
 
 // placeholderManifest 六平台全占位：manifest 缺失/损坏时的兜底。
+//
+// ★占位文案要与 clients/build-artifacts.sh 里那份**逐字一致**（两处都得改）。
+// ★「构建中，敬请期待」只能用在**真的会被构建出来**的平台上。iOS 与鸿蒙不是——
+// 它们缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 +
+// Network Extension 授权 / DevEco Studio 工具链）。写「敬请期待」等于给一个
+// 不会到来的版本许诺，用户会一直等；照实说"只能人工构建、请联系管理员"，
+// 他知道下一步该找谁。理由见 clients/BUILD.md 第九节。
 func placeholderManifest() downloadsManifest {
 	return downloadsManifest{Clients: []ClientDownload{
 		{Platform: "macos", Label: "macOS 桌面客户端", Note: "构建中，敬请期待"},
 		{Platform: "windows", Label: "Windows 桌面客户端", Note: "构建中，敬请期待"},
 		{Platform: "linux", Label: "Linux 桌面客户端", Note: "构建中，敬请期待"},
-		{Platform: "ios", Label: "iOS 客户端", Note: "需企业签名 / TestFlight 分发，请联系管理员"},
+		{Platform: "ios", Label: "iOS 客户端", Note: "需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"},
 		{Platform: "android", Label: "Android 客户端", Note: "构建中，敬请期待"},
-		{Platform: "harmony", Label: "鸿蒙客户端", Note: "构建中，敬请期待"},
+		{Platform: "harmony", Label: "鸿蒙客户端", Note: "需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员"},
 	}}
 }
 

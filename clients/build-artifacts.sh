@@ -97,17 +97,25 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
             e["builtAt"] = built
     return e
 
+# ★占位文案要与 control/internal/api/downloads.go 的 placeholderManifest() **逐字一致**
+# （manifest 缺失时页面回落到那一份，两处不一致会让同一个平台在两种情况下说两种话）。
+# ★「构建中，敬请期待」只能用在**真的会被构建出来**的平台上。iOS 与鸿蒙不是：它们缺的
+# 不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 + Network Extension
+# 授权 / DevEco Studio 工具链）。写「敬请期待」等于给一个不会到来的版本许诺。
+# 理由见 clients/BUILD.md 第九节。
 clients = [
     entry("macos", "macOS 桌面客户端", os.environ["MAC_FILE"], os.environ["MAC_ARCH"],
           rev=os.environ.get("MAC_REV", ""), built=os.environ.get("MAC_BUILT", "")),
     entry("windows", "Windows 桌面客户端", "", note="构建中，敬请期待"),
     entry("linux", "Linux 桌面客户端", "", note="构建中，敬请期待"),
-    entry("ios", "iOS 客户端", "", note="需企业签名 / TestFlight 分发，请联系管理员"),
+    entry("ios", "iOS 客户端", "",
+          note="需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"),
     entry("android", "Android 客户端", os.environ["AND_FILE"],
           "armeabi-v7a / arm64-v8a / x86 / x86_64",
           "调试签名版，安装时需允许「未知来源应用」" if os.environ["AND_FILE"] else "构建中，敬请期待",
           rev=os.environ.get("AND_REV", ""), built=os.environ.get("AND_BUILT", "")),
-    entry("harmony", "鸿蒙客户端", "", note="构建中，敬请期待"),
+    entry("harmony", "鸿蒙客户端", "",
+          note="需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员"),
 ]
 with open(os.path.join(out, "manifest.json"), "w") as f:
     json.dump({"clients": clients}, f, ensure_ascii=False, indent=2)

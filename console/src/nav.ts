@@ -64,7 +64,8 @@ export const NAV: NavGroup[] = [
   {
     label: '系统',
     children: [
-      { title: '系统管理', path: '/system/manage', icon: 'IconSettings', done: true }
+      { title: '系统管理', path: '/system/manage', icon: 'IconSettings', done: true },
+      { title: '升级管理', path: '/system/upgrade', icon: 'IconUpload', done: true }
     ]
   }
 ];

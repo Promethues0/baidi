@@ -891,3 +891,32 @@ export interface NATBundle {
   /** 后端下发的风险提示（SPA 互斥 / 回程路由 / 带宽）。PRD 把它列为强需求，前端不得自行编写。 */
   warnings: string[];
 }
+
+/* ── 产品升级管理（PRD 第 4 章，internal/upgrade）──────────────────────── */
+
+/** 强制跳跃链路的一跳：低于 below 的版本必须先升到 next。版本号由管理员配，代码里不写死。 */
+export interface UpgradeHop { below: string; next: string }
+export interface UpgradeRules {
+  allowDowngrade: boolean;
+  requireComponentMatch: boolean;
+  hops: UpgradeHop[];
+}
+/** 一个平台的客户端灰度计划。version 为空=该平台无灰度，所有人拿 stable。 */
+export interface GrayPlan {
+  platform: string; version: string; percent: number;
+  accounts: string[]; groups: string[]; stable: string; note?: string;
+}
+export interface UpgradeBundle {
+  control: string;
+  /** 网关 id → 上报版本；空串=旧网关不上报（判定层会标「无法校验」，不是「一致」）。 */
+  gateways: Record<string, string>;
+  rules: UpgradeRules;
+  gray: GrayPlan[];
+  /** 后端下发的边界声明：哪些做了、哪些刻意不做。前端不得自行编写或省略。 */
+  boundaries: string[];
+}
+/** 升级包校验结论（POST /upgrade/check）。blocked 时 UI 必须禁用升级并显示 reasons。 */
+export interface UpgradeCheckResult {
+  blocked: boolean; reasons?: string[]; warnings?: string[];
+  nextHop?: string; manifest?: { version: string; component: string; notes?: string };
+}

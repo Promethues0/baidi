@@ -126,6 +126,9 @@ type SQLiteStore struct {
 	// auditKey 审计防篡改链的 HMAC-SM3 密钥（BAIDI_AUDIT_HMAC_KEY_FILE，首启自动生成 0600）。
 	// 落在 store 而非 config：migrate 回填与 RecordAudit 落库都要用它，密钥与链同生命周期。
 	auditKey []byte
+	// auditKeyPath 上面那把密钥的落盘路径（含默认推导的结果）。配置备份要按它取文件——
+	// 备份侧自己重读环境变量会漏掉默认路径这一整类部署，见 AuditKeyPath。
+	auditKeyPath string
 	// auditRetainDays 审计留存天数展示值。由 main 用「purge 循环真正消费的那份配置」注入
 	// （SetAuditRetentionDays）；0 = 未配置滚动清理。刻意不在 store 里重复读环境变量——
 	// 展示值必须来自数据面真正在用的那份，而不是又解析一遍可能不一致的副本。
@@ -142,6 +145,16 @@ type SQLiteStore struct {
 // （运维改用别的方式指定路径、或进程 cwd 变了），备份会**静默不含数据库**，
 // 而管理员以为自己有一份完整备份——这类错误只在真正需要恢复的那天才暴露。
 func (s *SQLiteStore) DBPath() string { return s.path }
+
+// AuditKeyPath 返回本 store 实际在用的审计链 HMAC 密钥文件路径。
+//
+// ★与 DBPath 同一条纪律，而且这里踩过一次：配置备份原先按
+// `os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE")` 收集这份密钥，而该变量**默认是空的**
+// （默认路径由 OpenSQLite 按库文件所在目录推导），于是标准部署导出的备份里
+// 根本没有审计链密钥。恢复后 control 会重新生成一把新的，结果是
+// **全链校验永久失败**——审计数据都在、每一条都验不过，而且只在有人点
+// 「审计链校验」的那天才发现。问 store 要，不自己重推。
+func (s *SQLiteStore) AuditKeyPath() string { return s.auditKeyPath }
 
 func OpenSQLite(path string) (*SQLiteStore, error) {
 	// _txlock=immediate：事务起手即取写锁，让「检查后写」类守卫（如对象删除前的引用复核）原子化，杜绝 TOCTOU。
@@ -162,7 +175,7 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 	if err != nil {
 		return nil, fmt.Errorf("审计链 HMAC 密钥: %w", err)
 	}
-	s := &SQLiteStore{Memory: NewMemory(), db: db, path: path, auditKey: auditKey}
+	s := &SQLiteStore{Memory: NewMemory(), db: db, path: path, auditKey: auditKey, auditKeyPath: keyPath}
 	if err := s.migrate(); err != nil {
 		return nil, err
 	}
@@ -580,7 +593,25 @@ CREATE TABLE IF NOT EXISTS audit_forward_queue (
   attempts INTEGER, next_at INTEGER, last_error TEXT, created_at TEXT
 );
 -- pump 的取批查询就是 (target_id, next_at<=now) ORDER BY id，积压计数也吃它
-CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(target_id, next_at, id);`)
+CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(target_id, next_at, id);
+
+-- ── 控制面温备（warm standby，PRD 15.5 / FR-ARCH-03）──
+-- 一行一台备机。node_id 的权威来源是**备机 mTLS 证书的 CN**（standby- 前缀），
+-- 不是请求体里自报的名字——自报的话，一台备机可以顶着另一台的名字回报"同步正常"。
+--
+-- ★两个时间列语义不同，都不能省：
+--   last_pull_at —— 主机观测到「它来拉过」，只证明字节发出去了；
+--   last_sync_at —— 备机回报「校验通过并落盘」，由主机按**服务端时间**写（不采信客户端时钟）。
+--   新鲜度只看后者。拿前者当判据，会把「准时来拉、每次校验都失败」显示成一台健康备机。
+-- ★两列都可为 NULL：NULL = 一次都没发生过，与 0（1970 年）不是一回事，也不补 0。
+-- ★新表无需回填（区别于补列迁移）：既有库此前没有温备这回事，空表 = "未配置备机"，
+--   恰好就是既有部署的真实形态。
+CREATE TABLE IF NOT EXISTS standby_nodes (
+  node_id TEXT PRIMARY KEY, addr TEXT, interval_sec INTEGER,
+  last_pull_at INTEGER, last_sync_at INTEGER,
+  backup_version TEXT, backup_created_at TEXT, backup_sha256 TEXT,
+  last_status TEXT, last_detail TEXT, updated_at INTEGER
+);`)
 	if err != nil {
 		return err
 	}

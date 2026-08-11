@@ -8,6 +8,7 @@ import (
 
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/standby"
 	"baidi.dev/control/internal/store"
 )
 
@@ -86,7 +87,7 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 		s.checkAuditDisk(ctx),
 		s.checkGateways(),
 		s.checkStealth(),
-		s.checkCluster(),
+		s.checkCluster(ctx),
 		s.checkAuthSources(ctx),
 		s.checkPosture(ctx),
 		s.checkSecurity(),
@@ -298,17 +299,47 @@ func (s *Server) checkStealth() DiagCheck {
 	return c
 }
 
-// checkCluster 集群高可用。白帝当前是单机形态：没有节点发现、没有选主、没有主备——
-// 这项检查从前读 Memory.System 种子拓扑输出"主备冗余就绪"，是给不存在的能力背书。
-// 现在如实标记 skip（能力未部署，不参与健康分），文案只说事实。
-func (s *Server) checkCluster() DiagCheck {
-	return DiagCheck{
-		Key: "cluster", Category: "cluster", Name: "集群高可用",
-		Status:  "skip",
-		Summary: "集群未部署：白帝当前为单机形态，无节点发现/选主机制",
-		Metric:  "单机 · 1 进程 + SQLite",
-		Hint:    "本版本无 HA 能力；如需冗余请依赖外部手段（备份恢复/冷备），不要按'集群健康'规划容量",
+// checkCluster 控制面温备（PRD 15.5 / FR-ARCH-03）。
+//
+// 这项检查从前读 Memory.System 种子拓扑输出"主备冗余就绪"，是给不存在的能力背书；
+// 上一轮改成恒定 skip「未部署」，诚实但也没有信息量。现在读真实台账：
+// **有备机且同步新鲜 = pass，落后超阈值 = warn 并说明落后多久，未配置 = skip**。
+//
+// ★判定与 System 页共用 clusterView，只有一处实现。此前两处各写死一段文案，
+// 那种形态下「改一处漏一处」不会有任何报错，只会让两个页面对同一件事给出不同答案。
+func (s *Server) checkCluster(ctx context.Context) DiagCheck {
+	v := s.clusterView(ctx)
+	c := DiagCheck{
+		Key: "cluster", Category: "cluster", Name: "控制面温备（warm standby）",
+		Status: v.Status, Summary: v.Summary,
 	}
+	if !v.Deployed {
+		c.Metric = "单机 · 1 进程 + SQLite"
+		c.Hint = "如需冗余：部署 baidi-standby 温备节点（周期拉加密备份），" +
+			"切换用 deploy/promote-standby.sh。温备不是双活，RPO = 同步间隔"
+		return c
+	}
+	fresh := 0
+	for _, n := range v.Nodes {
+		st := "warn"
+		if n.State == standby.StateFresh && n.LastStatus != "fail" {
+			st, fresh = "pass", fresh+1
+		}
+		c.Items = append(c.Items, DiagItem{
+			Label: n.NodeID,
+			Value: fmt.Sprintf("%s · 落后 %s（阈值 %s）· 备份生成于 %s",
+				orElse(n.Addr, "地址未报"), n.LagText,
+				humanizeDuration(time.Duration(n.ThresholdSec)*time.Second),
+				orElse(n.BackupCreatedAt, "—")),
+			Status: st,
+		})
+	}
+	c.Metric = fmt.Sprintf("温备 · 新鲜 %d / 备机 %d", fresh, len(v.Nodes))
+	if v.Status != "pass" {
+		c.Hint = "备机不新鲜时，切换只能恢复到上一次成功同步的那一刻（RPO = 同步间隔）；" +
+			"先查备机 baidi-standby 进程与它到主机 mTLS 口的连通"
+	}
+	return c
 }
 
 // checkAuthSources 盘点认证源配置。数据源改为 SQLite auth_sources 真实配置

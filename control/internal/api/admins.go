@@ -8,6 +8,7 @@ import (
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/standby"
 	"baidi.dev/control/internal/store"
 )
 
@@ -145,7 +146,16 @@ func adminStoreErr(w http.ResponseWriter, err error, fallback string) {
 	}
 }
 
-// handleSystem 系统管理页：角色（三权分立）+ 管理员账号 + 集群状态。
+// systemResp 系统管理页的响应：store 的角色/管理员 + api 现算的集群（温备）状态。
+//
+// 集群那块刻意不放回 store：它要用当前时间与落后阈值判定，而阈值是进程配置。
+// 嵌入 + 平级字段 = JSON 形状与从前完全一致（roles / admins / cluster），前端不必改读法。
+type systemResp struct {
+	store.SystemBundle
+	Cluster standby.ClusterView `json:"cluster"`
+}
+
+// handleSystem 系统管理页：角色（三权分立）+ 管理员账号 + 集群（温备）状态。
 //
 // 读放给任意管理员（审计管理员要能监督其余角色的权限分布），**写**一律 PermAdmins。
 func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
@@ -157,7 +167,9 @@ func (s *Server) handleSystem(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load system")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, b)
+	// 集群状态与 /diag checkCluster 读同一个 clusterView：两处口径不可能再分叉
+	// （此前是两段各自写死的「未部署」文案，改一处漏一处只会在页面上对不上）。
+	httpx.JSON(w, http.StatusOK, systemResp{SystemBundle: b, Cluster: s.clusterView(r.Context())})
 }
 
 // handleSaveAdminRole 新建/修改自定义角色（PermAdmins）。内置四角色拒改。

@@ -166,11 +166,15 @@ func BuiltinAdminRoles() []AdminRole {
 	}
 }
 
-// SystemBundle 系统管理页：管理员角色（三权分立）+ 管理员账号 + 集群状态。
+// SystemBundle 系统管理页：管理员角色（三权分立）+ 管理员账号。
+//
+// ★集群状态**不在这里**：它是「主机此刻怎么看备机」，判定要用当前时间与落后阈值，
+// 而 store 层既不该持有时钟口径也不该持有阈值配置。api.handleSystem 把
+// standby.ClusterView 与本 bundle 拼在同一份响应里下发（见 api/standby.go 的 clusterView），
+// /diag 的 checkCluster 读的是同一个函数——两处口径不可能再分叉。
 type SystemBundle struct {
-	Roles   []AdminRole    `json:"roles"`
-	Admins  []AdminAccount `json:"admins"`
-	Cluster ClusterInfo    `json:"cluster"`
+	Roles  []AdminRole    `json:"roles"`
+	Admins []AdminAccount `json:"admins"`
 }
 
 // AdminAccount 一名管理员（users 表里 role='admin' 的行 + 其 admin_role 归属）。
@@ -188,33 +192,7 @@ type AdminAccount struct {
 	Status    string `json:"status"` // active | disabled | locked | idle
 }
 
-// ClusterInfo 集群拓扑。
-//
-// ★白帝当前是**单机形态**：没有节点发现、没有选主、没有主备同步。此前这里返回三个
-// 编造的节点（"中心单元（华东）healthy"…），是在给不存在的能力背书。现在恒定
-// Deployed=false + 空节点列表，与 /diag 的 checkCluster（skip「集群未部署」）同口径。
-type ClusterInfo struct {
-	Deployed   bool          `json:"deployed"`
-	Note       string        `json:"note"`
-	LocalNodes []ClusterNode `json:"localNodes"`
-	DistNodes  []ClusterNode `json:"distNodes"`
-}
-
-// ClusterNode 一个集群节点。当前恒为空列表（见 ClusterInfo）；类型保留，
-// 是为了将来真做 HA 时前后端契约不必推倒重来。
-type ClusterNode struct {
-	Name   string `json:"name"`
-	IP     string `json:"ip"`
-	Role   string `json:"role"` // master | backup | center | branch
-	Status string `json:"status"`
-}
-
-// clusterNotDeployed 单机形态下的诚实回答（文案与 /diag checkCluster 一致）。
-func clusterNotDeployed() ClusterInfo {
-	return ClusterInfo{
-		Deployed:   false,
-		Note:       "集群未部署：白帝当前为单机形态（1 进程 + SQLite），无节点发现/选主/主备同步机制",
-		LocalNodes: []ClusterNode{},
-		DistNodes:  []ClusterNode{},
-	}
-}
+// ★曾经这里有一对 ClusterInfo / ClusterNode 类型与一个恒回「未部署」的构造函数。
+// 温备落地后，集群状态改由 standby.ClusterView 承载（真读 standby_nodes 表），
+// 这两个类型再留着就是第二份前后端契约——留一个"将来也许用得上"的空壳，
+// 下一个人会以为它才是真的那份。

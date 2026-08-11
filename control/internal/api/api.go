@@ -79,6 +79,15 @@ type Server struct {
 	// upgradeKeys 升级包发布公钥（BAIDI_UPGRADE_PUBKEY，base64，逗号分隔可多把供轮换）。
 	// 空 = 无法验签，VerifySignature 会**拒绝**而不是跳过（见那里的注释）。
 	upgradeKeys []ed25519.PublicKey
+	// sb 温备节点台账（PRD 15.5）。同 nat/upg：纯内存后端拿不到，集群视图如实回
+	// 「不可判定」而不是「未配置备机」——后者是另一件事（确实没配 vs 记不下来）。
+	sb store.StandbyStore
+	// standbyPass 温备同步用的备份加密口令（BAIDI_STANDBY_PASSPHRASE）。
+	// 空 = 同步端点一律 503：备份必须加密，没有口令就不产出（fail-closed）。
+	standbyPass string
+	// standbyStale 判「备机落后」的全局阈值（BAIDI_STANDBY_STALE_SECONDS）。
+	// 逐节点实际阈值 = max(它, 3×备机自报间隔) 并封顶，见 standby.Evaluate。
+	standbyStale time.Duration
 
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
@@ -103,6 +112,9 @@ type Server struct {
 	// 而现场唯一的痕迹是一条 slog。宁可沿用上一次已知的模式（多半正是 strict），
 	// 也不能让一次读失败把闸降到全局最宽的那一档。
 	deviceTrustModeSeen string
+	// standbyAudited 温备**成功**类审计的节流水位：key（节点 id / 节点 id|status）→ 上次落审计的
+	// Unix 秒。失败一条都不节流——「备机连续拉失败」正是这套机制唯一需要被看见的信号。
+	standbyAudited map[string]int64
 	// fwdDropReported / fwdDropReportAt 审计外送队列溢出转审计的节流水位：
 	// 出口 id → 已上报过的累计丢弃数 / 上次上报的 Unix 秒（见 reportForwardDrops）。
 	// 内存态、重启即失（最坏结果是重启后多记一条溢出告警，而那本来就该被看见）。
@@ -195,6 +207,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{},
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
+		standbyAudited:  map[string]int64{},
 		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{}}
 	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
 	var ls lockout.Store
@@ -208,6 +221,12 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	if v, ok := wr.(store.UpgradeStore); ok {
 		s.upg = v
 	}
+	if v, ok := wr.(store.StandbyStore); ok {
+		s.sb = v
+	}
+	// 温备（PRD 15.5）：口令与落后阈值都走 BAIDI_* 环境变量，与 postureStrict 同一条既有做法。
+	s.standbyPass = os.Getenv("BAIDI_STANDBY_PASSPHRASE")
+	s.standbyStale = standbyStaleFromEnv(os.Getenv("BAIDI_STANDBY_STALE_SECONDS"))
 	s.upgradeKeys = parseUpgradeKeys(os.Getenv("BAIDI_UPGRADE_PUBKEY"))
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
@@ -473,6 +492,12 @@ func (s *Server) Routes() http.Handler {
 		mux.HandleFunc("POST /api/v1/gateways/register", s.handleGatewayRegister)
 		mux.HandleFunc("GET /api/v1/gateways/policy", s.handleGatewayPolicy)
 	}
+	// ── 控制面温备（PRD 15.5）──
+	// 同步接口**只挂 mTLS 监听**（见 MTLSHandler）。明文口挂一个显式 403：
+	// 让"管理员令牌拉不走整套信任材料"这条纪律在明文口上有个说得清的答案，
+	// 而不是一个会被读成"路径写错了"的 404。
+	mux.HandleFunc("/api/v1/standby/", s.handleStandbyPlaintextDenied)
+
 	// 网关客户端证书：签发 / 清单 / 吊销（admin）
 	mux.HandleFunc("POST /api/v1/pki/gateway-certs", s.handleIssueGatewayCert)
 	mux.HandleFunc("GET /api/v1/pki/gateway-certs", s.handleGatewayCerts)

@@ -158,7 +158,7 @@ FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 	if err := rows.Err(); err != nil {
 		return SystemBundle{}, err
 	}
-	return SystemBundle{Roles: roles, Admins: admins, Cluster: clusterNotDeployed()}, nil
+	return SystemBundle{Roles: roles, Admins: admins}, nil
 }
 
 // SaveAdminRole 新建/修改**自定义**角色（内置四角色一律拒绝）。

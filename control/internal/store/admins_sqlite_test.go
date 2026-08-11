@@ -248,9 +248,9 @@ func TestSystemBundleComesFromDBNotSeed(t *testing.T) {
 	if a.TwoFA || a.Auth != "本地口令" {
 		t.Errorf("未注册 passkey 的账号不应显示已开启二次认证: %+v", a)
 	}
-	if b.Cluster.Deployed || len(b.Cluster.LocalNodes) != 0 || len(b.Cluster.DistNodes) != 0 {
-		t.Errorf("集群未实现，应回空/未部署，得到 %+v", b.Cluster)
-	}
+	// 集群状态已从 SystemBundle 移出（改由 api 层的 standby.ClusterView 承载，
+	// 真读 standby_nodes 表）：这里不再有可断言的集群字段，
+	// 三态断言在 api 包的 TestClusterViewThreeStates。
 
 	// 库里新增的管理员必须出现在响应里（种子是常量，不会随库变）
 	secondRoot(t, s)

@@ -78,7 +78,8 @@ func TestDiagStealthReportsRegisteredGateway(t *testing.T) {
 	}
 }
 
-// 集群检查：单机形态必须 skip + 如实文案，永远不再出现「主备冗余就绪」；skip 不进健康分分母。
+// 集群检查：没配备机时必须 skip + 如实文案，永远不再出现「主备冗余就绪」；skip 不进健康分分母。
+// （配了备机之后的 pass/warn 两态见 api/standby_test.go 的 TestDiagClusterMatchesSystemPage。）
 func TestDiagClusterSkipHonest(t *testing.T) {
 	h := newTestServer(t)
 	out := getDiag(t, h)
@@ -88,8 +89,11 @@ func TestDiagClusterSkipHonest(t *testing.T) {
 		t.Fatalf("cluster 应 skip, got %v", cl["status"])
 	}
 	sum := cl["summary"].(string)
-	if !strings.Contains(sum, "单机") || strings.Contains(sum, "主备冗余就绪") {
-		t.Fatalf("cluster 文案应承认单机形态, got %q", sum)
+	if !strings.Contains(sum, "未配置备机") || strings.Contains(sum, "主备冗余就绪") {
+		t.Fatalf("cluster 文案应承认没有备机, got %q", sum)
+	}
+	if !strings.Contains(cl["hint"].(string), "promote-standby.sh") {
+		t.Errorf("处置建议应给出真实存在的补救路径, got %q", cl["hint"])
 	}
 	if out["skip"].(float64) < 1 {
 		t.Fatalf("bundle 应统计 skip 项: %v", out["skip"])

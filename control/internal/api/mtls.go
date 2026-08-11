@@ -13,6 +13,7 @@ import (
 
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/pki"
+	"baidi.dev/control/internal/standby"
 	"baidi.dev/control/internal/store"
 )
 
@@ -38,23 +39,29 @@ func GatewayCN(ctx context.Context) string {
 // ipsecCNPrefix 站点组网网关（baidi-ipsec）的证书 CN 前缀约定。
 const ipsecCNPrefix = "ipsec-"
 
-// MTLSHandler 返回只服务网关接口的 handler，身份取自客户端证书。
+// standbyCNPrefix 温备节点（baidi-standby）的证书 CN 前缀约定（定义在 standby 包，这里只取用）。
+const standbyCNPrefix = standby.CNPrefix
+
+// MTLSHandler 返回只服务机器身份接口的 handler，身份取自客户端证书。
 //
-// ★两类数据面进程共用同一套 CA 与同一个 mTLS 端口，但**能调的接口不同**：
+// ★三类进程共用同一套 CA 与同一个 mTLS 端口，但**能调的接口不同**：
 //
-//	CN 非 ipsec-* （接入网关 baidi-gateway）→ register / policy
-//	CN =  ipsec-* （组网网关 baidi-ipsec）  → 只有 /api/v1/gateways/ipsec*
+//	CN 非 ipsec-/standby- （接入网关 baidi-gateway）→ register / policy
+//	CN =  ipsec-*         （组网网关 baidi-ipsec）  → 只有 /api/v1/gateways/ipsec*
+//	CN =  standby-*       （温备节点 baidi-standby）→ 只有 /api/v1/standby/*
 //
-// 分权的目标只有一个方向：一张只负责站点组网的证书**不该能读走全量资源授权策略**
-// （policy 里是「谁能访问哪个后端」的完整清单，等于一张授权地图）。反过来，
-// 接入网关调不到 ipsec 端点，是为了让 PSK 的出口尽可能窄。
+// 分权的目标是收窄各自的出口：一张只负责站点组网的证书**不该能读走全量资源授权策略**
+// （policy 里是「谁能访问哪个后端」的完整清单，等于一张授权地图）；一张备机证书
+// **更不该能调网关接口**——它能拉走的已经是整套信任材料了，再让它注册成一台网关、
+// 或读一份策略，只会让"这张证书到底能做什么"变得没人说得清。反过来，
+// 网关证书也绝不能拉备份：那等于把 CA 私钥发给被保护方。
 //
-// ★为什么组网侧用白名单（必须 ipsec-）、接入侧用黑名单（只要不是 ipsec-）：
+// ★为什么两个新角色用白名单（必须 ipsec-/standby-）、接入侧用黑名单（只要不是这两个前缀）：
 // 接入网关的 CN 就是部署时填的 GW_ID（deploy/config.env.example 里默认 gw-1，
 // 但它是**用户可改的**，现网可能是 beijing-idc-1 之类）。把接入侧也收成
 // `gw-` 白名单，会在升级的那一瞬间把所有 CN 不以 gw- 开头的现网网关全部踢下线，
-// 而安全收益为零——真正要挡的是「组网证书读授权策略」这一个方向，
-// 黑名单已经完整覆盖它。组网侧的 CN 是本轮新引入的，可以从一开始就要求前缀。
+// 而安全收益为零——真正要挡的是「组网/备机证书读授权策略」这一个方向，
+// 黑名单已经完整覆盖它。两个新前缀是后引入的，可以从一开始就要求。
 func (s *Server) MTLSHandler() http.Handler {
 	mux := http.NewServeMux()
 	mux.HandleFunc("POST /api/v1/gateways/register", accessCNet(s.handleGatewayRegister))
@@ -63,6 +70,9 @@ func (s *Server) MTLSHandler() http.Handler {
 	mux.HandleFunc("GET /api/v1/gateways/ipsec", ipsecCNOnly(s.handleGatewayIpsecSites))
 	mux.HandleFunc("GET /api/v1/gateways/ipsec/{id}/psk", ipsecCNOnly(s.handleGatewayIpsecPSK))
 	mux.HandleFunc("POST /api/v1/gateways/ipsec/status", ipsecCNOnly(s.handleGatewayIpsecStatus))
+	// 控制面温备：只有 standby-* 证书能调（PRD 15.5，见 api/standby.go）
+	mux.HandleFunc("GET "+standby.PathBackup, standbyCNOnly(s.handleStandbyBackup))
+	mux.HandleFunc("POST "+standby.PathStatus, standbyCNOnly(s.handleStandbyStatus))
 	// 与明文口的 httpx.BodyLimit(1<<20) 同口径：mTLS 监听在 main.go 里不走那条
 	// 中间件链，缺了这层则各 handler 的 MaxBytesReader 成为唯一防线（register 就漏过）。
 	return withCertCN(httpx.BodyLimit(1 << 20)(mux))
@@ -83,12 +93,34 @@ func ipsecCNOnly(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-// accessCNet 拒绝 CN 以 ipsec- 开头的客户端证书调用接入网关接口。
+// standbyCNOnly 只放行 CN 以 standby- 开头的客户端证书。
+func standbyCNOnly(next http.HandlerFunc) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		cn := GatewayCN(r.Context())
+		if !strings.HasPrefix(cn, standbyCNPrefix) {
+			httpx.Error(w, http.StatusForbidden,
+				"该接口只接受温备节点（证书 CN 需以 "+standbyCNPrefix+" 开头，本次为 "+orElse(cn, "空")+
+					"）：配置备份含 CA 私钥与全部凭据，网关证书不得拉取")
+			return
+		}
+		next(w, r)
+	}
+}
+
+// accessCNet 拒绝 CN 以 ipsec- / standby- 开头的客户端证书调用接入网关接口。
 func accessCNet(next http.HandlerFunc) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		if cn := GatewayCN(r.Context()); strings.HasPrefix(cn, ipsecCNPrefix) {
+		cn := GatewayCN(r.Context())
+		if strings.HasPrefix(cn, ipsecCNPrefix) {
 			httpx.Error(w, http.StatusForbidden,
 				"站点组网网关证书（CN "+cn+"）不能调用接入网关接口：一张只负责 IPSec 的证书不应能读全量资源授权策略")
+			return
+		}
+		if strings.HasPrefix(cn, standbyCNPrefix) {
+			// 备机不是数据面：让它注册成一台网关的话，网关页会多出一台永远不转发流量的
+			// "在线网关"，剖面还会把它当落点下发给客户端——终端会拨向一台什么都不听的机器。
+			httpx.Error(w, http.StatusForbidden,
+				"温备节点证书（CN "+cn+"）不能调用接入网关接口：备机不承载数据面，注册成网关会被剖面当作可用落点下发给终端")
 			return
 		}
 		next(w, r)

@@ -170,6 +170,10 @@ type GatewayInfo struct {
 	Tunnels  int    `json:"tunnels"` // 活跃隧道连接数
 	Uptime   int64  `json:"uptime"`  // 网关运行秒数
 	Version  string `json:"version"` // 网关上报的二进制版本（编译期注入）；旧网关不上报则为空，前端显示 "—"
+	// Web 七层 Web 代理的监听地址；空 = 这台网关没开（旧网关也是空）。
+	// 控制面据此拼浏览器该跳的入口 URL；为空就如实说"未开启"，绝不猜一个地址。
+	Web    string `json:"web"`
+	WebTLS bool   `json:"webTls"` // 该监听自身是否已是 HTTPS（决定入口 URL 的 scheme）
 }
 
 // GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
@@ -481,6 +485,9 @@ func (s *Server) Routes() http.Handler {
 	// ── 终端用户门户（B/S 免客户端）──
 	mux.HandleFunc("POST /api/v1/portal/login", s.handlePortalLogin)
 	mux.HandleFunc("GET /api/v1/portal/apps", s.handlePortalApps)
+	// 七层 Web 代理（B/S 免客户端）：门户点开 Web 应用时换一张短时效一次性访问票据。
+	// 需登录 + 按资源鉴权后才发；真实消费方是网关的 L7 监听（gateway/internal/webproxy）。
+	mux.HandleFunc("POST /api/v1/portal/web-ticket", s.handleWebTicket)
 	// 终端客户端接入剖面：网关落点 + 路由表 + 资源映射，一次下发，客户端照做即可接入。
 	// 这是「点开应用真的走隧道」的前提——此前客户端只能手填一个与业务地址无关的网段。
 	mux.HandleFunc("GET /api/v1/client/profile", s.handleClientProfile)
@@ -645,7 +652,11 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
 			Sensitivity: sens, Accessible: acc, ResourceID: a.ResourceID, Degraded: deg})
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"apps": tiles})
+	// 七层入口此刻能不能用，如实随磁贴一起下发：Web 磁贴的「访问」按钮要不要给点、
+	// 点不动时该说什么，都靠它。不下发的话用户只会拿到一个一闪而过的 503。
+	webReady, webNote := s.webProxyStatus()
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"apps": tiles, "webProxy": map[string]any{"ready": webReady, "note": webNote}})
 }
 
 func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
@@ -939,42 +950,8 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 		Device string `json:"device"`
 	}
 	_ = json.NewDecoder(http.MaxBytesReader(w, r.Body, 4<<10)).Decode(&kb)
-	if ri, banned := s.revokedActive(c.Name); banned {
-		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 在强制下线封禁期内（"+ri.Reason+"）", "deny")
-		httpx.Error(w, http.StatusForbidden, "已被强制下线，暂时无法接入")
+	if !s.entryGates(w, r, c.Name, "敲门令牌") {
 		return
-	}
-	// 账号状态门（永久闸，区别于上面的限时封禁）：禁用/锁定账号拒发，掐断 reknock 保活令牌来源
-	if u, blocked, err := s.blockedDirAccount(r.Context(), c.Name); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to check account status")
-		return
-	} else if blocked {
-		s.audit(r, "security", "拒发敲门令牌："+u.Account+" 账号已"+statusZh[u.Status], "deny")
-		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[u.Status]+"，无法接入")
-		return
-	}
-	// 终端环境闸（第三道）：最新判定 block 一直拦（不看新鲜度，直到被合规报告替换——防停报逃逸）；
-	// strict 模式下无新鲜报告也拒（fail-closed，生产开 BAIDI_POSTURE_ENFORCE=strict）。
-	if rep, found, err := s.store.PostureVerdict(r.Context(), c.Name); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to check posture")
-		return
-	} else if found && rep.Verdict == "block" {
-		s.audit(r, "security", "拒发敲门令牌："+c.Name+" 终端环境不合规（"+strings.Join(rep.Reasons, "、")+"）", "deny")
-		httpx.Error(w, http.StatusForbidden, "终端环境不合规："+strings.Join(rep.Reasons, "、"))
-		return
-	} else if s.postureStrict {
-		// strict 缺报/过期拒发。新鲜度须按「最新」报告判（不是上面 rep 那条跨设备最差——
-		// 一台旧设备的陈旧 degrade 行会把当前持续合规的用户永久拒之门外）。
-		fresh, found, err := s.store.PostureFreshest(r.Context(), c.Name)
-		if err != nil {
-			httpx.Error(w, http.StatusInternalServerError, "failed to check posture freshness")
-			return
-		}
-		if !found || time.Now().Unix()-fresh.TS > int64(postureFreshTTL.Seconds()) {
-			s.audit(r, "security", "拒发敲门令牌："+c.Name+" 无有效终端环境报告（strict）", "deny")
-			httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
-			return
-		}
 	}
 	// 授信终端闸（第四道）：这台设备是不是被允许接入。
 	// ★放在最后一道：前三道（封禁 / 账号状态 / 终端合规）都是**账号**维度的否决，
@@ -992,6 +969,63 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 		Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI(), Use: auth.UseKnock,
 	}, knockTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
+}
+
+// entryGates 是「这个账号此刻还能不能进数据面」的三道**账号维度**闸，
+// 由两条接入形态共用：敲门令牌（C/S 隧道）与 Web 访问票据（B/S 七层）。
+//
+//	① 强制下线封禁期  ② 目录账号被禁用/锁定  ③ 终端环境判定 block（strict 下缺报亦拒）
+//
+// ★共用同一段代码是硬要求。两条路各写一套的话，「已强制下线的人换浏览器还能进」
+// 这类洞会在某一次单边改动后无声出现，而管理台只显示其中一条路的状态。
+// 设备准入（第四道）**不在这里**：它需要客户端自报的终端指纹，而浏览器没有，
+// 见 handleKnockToken 尾部与 docs/ARCHITECTURE.md 的边界说明。
+//
+// label 只影响审计与错误文案（"拒发<label>：…"），判据完全一致。
+// 返回 false 时响应已写好，调用方直接 return。
+func (s *Server) entryGates(w http.ResponseWriter, r *http.Request, account, label string) bool {
+	if ri, banned := s.revokedActive(account); banned {
+		s.audit(r, "security", "拒发"+label+"："+account+" 在强制下线封禁期内（"+ri.Reason+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "已被强制下线，暂时无法接入")
+		return false
+	}
+	// 账号状态门（永久闸，区别于上面的限时封禁）：禁用/锁定账号拒发，掐断 reknock 保活令牌来源
+	if u, blocked, err := s.blockedDirAccount(r.Context(), account); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to check account status")
+		return false
+	} else if blocked {
+		s.audit(r, "security", "拒发"+label+"："+u.Account+" 账号已"+statusZh[u.Status], "deny")
+		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[u.Status]+"，无法接入")
+		return false
+	}
+	// 终端环境闸（第三道）：最新判定 block 一直拦（不看新鲜度，直到被合规报告替换——防停报逃逸）；
+	// strict 模式下无新鲜报告也拒（fail-closed，生产开 BAIDI_POSTURE_ENFORCE=strict）。
+	//
+	// ★strict + 浏览器接入是**互斥**的：浏览器上报不了 posture，于是 B/S 路径会被
+	// 一并拒绝。这是刻意的 fail-closed（"判不了"不等于"合规"），不是遗漏——
+	// 要 B/S 免客户端接入就不能同时开 strict，边界写在 docs/ARCHITECTURE.md 第七节。
+	if rep, found, err := s.store.PostureVerdict(r.Context(), account); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to check posture")
+		return false
+	} else if found && rep.Verdict == "block" {
+		s.audit(r, "security", "拒发"+label+"："+account+" 终端环境不合规（"+strings.Join(rep.Reasons, "、")+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "终端环境不合规："+strings.Join(rep.Reasons, "、"))
+		return false
+	} else if s.postureStrict {
+		// strict 缺报/过期拒发。新鲜度须按「最新」报告判（不是上面 rep 那条跨设备最差——
+		// 一台旧设备的陈旧 degrade 行会把当前持续合规的用户永久拒之门外）。
+		fresh, found, err := s.store.PostureFreshest(r.Context(), account)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to check posture freshness")
+			return false
+		}
+		if !found || time.Now().Unix()-fresh.TS > int64(postureFreshTTL.Seconds()) {
+			s.audit(r, "security", "拒发"+label+"："+account+" 无有效终端环境报告（strict）", "deny")
+			httpx.Error(w, http.StatusForbidden, "无有效终端环境报告，无法接入")
+			return false
+		}
+	}
+	return true
 }
 
 // revokedActive 报告某账号是否在强制下线封禁期内（懒清理过期条目）。按规范化账号匹配。
@@ -1029,8 +1063,12 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// Version / Events / Metrics 是新网关才上报的字段：旧网关缺省即零值，处理逻辑
 		// 对空值必须无感（version 空串照存、events 空切片零循环、metrics 为 nil 即不落点），
 		// 不得因缺字段报错。
-		Version string    `json:"version"` // 网关二进制版本（编译期注入）
-		Events  []gwEvent `json:"events"`  // 数据面回执：网关报告已实际执行的控制面指令
+		Version string `json:"version"` // 网关二进制版本（编译期注入）
+		// Web / WebTLS 七层 Web 代理落点。未开启的网关**连字段都不发**，
+		// 空串即"没开"，控制面据此如实回报而不是拼一个 http://host:/ 的坏地址。
+		Web    string    `json:"web"`
+		WebTLS bool      `json:"webTls"`
+		Events []gwEvent `json:"events"` // 数据面回执：网关报告已实际执行的控制面指令
 		// Metrics 宿主机设备状态采样。★是指针：nil（字段缺席）= 这台网关根本不上报指标
 		// （旧版本），与「上报了但一项都没采到」（非 nil 但各项为 nil）必须分得开——
 		// 前者去升级网关，后者去查这台机器为什么读不到 /proc。
@@ -1074,6 +1112,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
+		Web: b.Web, WebTLS: b.WebTLS,
 	}
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP
@@ -1360,6 +1399,18 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 		res.Sensitivity = store.SensitivityNormal
 	} else if !store.ValidSensitivity(res.Sensitivity) {
 		httpx.Error(w, http.StatusBadRequest, "sensitivity 取值须为 low|normal|high")
+		return
+	}
+	// 七层 Web 代理两项：后端协议 + 对外入口覆盖。空 = 由 store.NormalizeWebScheme
+	// 按端口推默认，给了值就必须合法——静默丢弃拼错的 "HTTPS "/"tls" 会让网关
+	// 拿 HTTP 去撞一个 TLS 端口，症状是浏览器上一个空白页，谁也想不到是协议猜错。
+	if res.WebScheme != "" && !strings.EqualFold(res.WebScheme, store.WebSchemeHTTP) &&
+		!strings.EqualFold(res.WebScheme, store.WebSchemeHTTPS) {
+		httpx.Error(w, http.StatusBadRequest, "webScheme 取值须为 http|https")
+		return
+	}
+	if err := validateWebEntry(res.WebEntry); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	// 对象库引用须指向真实对象（backend 仍是权威拨号目标，refs 仅供编辑器回填 + 反查）。

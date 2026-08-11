@@ -592,6 +592,13 @@ CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(tar
 		{"resources", "allow_orgs", "TEXT"},
 		// 资源敏感度（风险降权 disposal=degrade 的唯一判据）。回填见 backfillResourceSensitivity。
 		{"resources", "sensitivity", "TEXT"},
+		// 七层 Web 代理：内网后端协议（回填见 backfillResourceWebScheme）+ 对外入口基址覆盖。
+		// ★web_entry **刻意不回填**：空串就是"用网关默认落点"这个正确语义，
+		// 与既有部署行为逐字节一致（同 ipsec_sites.peer_nat_port 那条）。
+		// web_scheme 则必须回填——它是拨号参数，留 NULL 会让所有存量 HTTPS 内网应用
+		// 在七层路径上被当成 http 去撞，症状是空白页而不是报错。
+		{"resources", "web_scheme", "TEXT"},
+		{"resources", "web_entry", "TEXT"},
 		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
 		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
 		// 首登强制改密标志（回填见 backfillMustChangePw）。
@@ -652,6 +659,9 @@ CREATE INDEX IF NOT EXISTS idx_audit_fwd_queue_target ON audit_forward_queue(tar
 	// 认定高敏，而那条关联正是 apps.resource_id。顺序反了的话既有库里刚被补上的桥接还没生效，
 	// 全部资源会被回填成 normal——降权于是对财务系统静默失效。
 	if err := s.backfillResourceSensitivity(); err != nil {
+		return err
+	}
+	if err := s.backfillResourceWebScheme(); err != nil {
 		return err
 	}
 	if err := s.backfillMustChangePw(); err != nil {
@@ -794,6 +804,44 @@ func (s *SQLiteStore) backfillResourceSensitivity() error {
 
 // sensBackfillMarker settings 表里的一次性标记：finance→high 的语义迁移只做一次。
 const sensBackfillMarker = "resource.sensitivity.backfill.v1"
+
+// backfillResourceWebScheme 回填 resources.web_scheme（七层代理拨后端用的协议）。
+//
+// ★不带一次性标记，而是靠 `WHERE COALESCE(web_scheme,”)=”` 收敛：这一条回填
+// **永远不覆盖已有值**，所以重复执行是幂等的，也不会出现「管理员改成 http、
+// 重启又变回 https」那种最难自证的形态（那正是 sensBackfillMarker 存在的理由——
+// 那一条会覆盖既有值，这一条不会）。
+//
+// 推导规则不在 SQL 里写第二遍：逐行取出 backend 交给 store.NormalizeWebScheme，
+// 与保存落库、读侧兜底共用同一个函数。存量库里资源行是几十条量级，逐行更新的
+// 代价可以忽略，换来的是"猜协议"这件事全库只有一处定义。
+func (s *SQLiteStore) backfillResourceWebScheme() error {
+	rows, err := s.db.Query(`SELECT id,COALESCE(backend,'') FROM resources WHERE COALESCE(web_scheme,'')=''`)
+	if err != nil {
+		return err
+	}
+	type row struct{ id, backend string }
+	var pending []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.backend); err != nil {
+			rows.Close()
+			return err
+		}
+		pending = append(pending, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, r := range pending {
+		if _, err := s.db.Exec(`UPDATE resources SET web_scheme=? WHERE id=?`,
+			NormalizeWebScheme("", r.backend), r.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 // backfillMustChangePw 回填 users.must_change_pw：既有行一律补 0。
 //
@@ -995,7 +1043,8 @@ func (s *SQLiteStore) seed() error {
 // Resources 从库读受控资源清单（覆盖 Memory 种子）。
 func (s *SQLiteStore) Resources(ctx context.Context) ([]Resource, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id,name,backend,allow_roles,allow_users,
-COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(sensitivity,''),COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
+COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(sensitivity,''),
+COALESCE(web_scheme,''),COALESCE(web_entry,''),COALESCE(addr_ref,''),COALESCE(svc_ref,'') FROM resources ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -1004,7 +1053,8 @@ COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(sensitivity,''),COALE
 	for rows.Next() {
 		var r Resource
 		var roles, users, groups, orgs string
-		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &groups, &orgs, &r.Sensitivity, &r.AddrRef, &r.SvcRef); err != nil {
+		if err := rows.Scan(&r.ID, &r.Name, &r.Backend, &roles, &users, &groups, &orgs, &r.Sensitivity,
+			&r.WebScheme, &r.WebEntry, &r.AddrRef, &r.SvcRef); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(roles), &r.AllowRoles)
@@ -1014,6 +1064,7 @@ COALESCE(allow_groups,''),COALESCE(allow_orgs,''),COALESCE(sensitivity,''),COALE
 		// 回填保证库里不该有空值，这里仍收敛一次：读侧永远拿到三档之一，
 		// 免得每个消费方各自判空（判漏一处就是"未标注的资源被当成高敏/低敏"）。
 		r.Sensitivity = NormalizeSensitivity(r.Sensitivity)
+		r.WebScheme = NormalizeWebScheme(r.WebScheme, r.Backend)
 		out = append(out, r)
 	}
 	return out, rows.Err()
@@ -1025,15 +1076,17 @@ func (s *SQLiteStore) SaveResource(ctx context.Context, r Resource) error {
 	users, _ := json.Marshal(nonNil(r.AllowUsers))
 	groups, _ := json.Marshal(nonNil(r.AllowGroups))
 	orgs, _ := json.Marshal(nonNil(r.AllowOrgs))
-	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,allow_groups,allow_orgs,sensitivity,addr_ref,svc_ref,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?,?)
+	_, err := s.db.ExecContext(ctx, `INSERT INTO resources(id,name,backend,allow_roles,allow_users,allow_groups,allow_orgs,sensitivity,web_scheme,web_entry,addr_ref,svc_ref,updated_at)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET name=excluded.name, backend=excluded.backend,
   allow_roles=excluded.allow_roles, allow_users=excluded.allow_users,
   allow_groups=excluded.allow_groups, allow_orgs=excluded.allow_orgs,
   sensitivity=excluded.sensitivity,
+  web_scheme=excluded.web_scheme, web_entry=excluded.web_entry,
   addr_ref=excluded.addr_ref, svc_ref=excluded.svc_ref, updated_at=excluded.updated_at`,
 		r.ID, r.Name, r.Backend, string(roles), string(users), string(groups), string(orgs),
-		NormalizeSensitivity(r.Sensitivity), r.AddrRef, r.SvcRef, nowStr())
+		NormalizeSensitivity(r.Sensitivity), NormalizeWebScheme(r.WebScheme, r.Backend),
+		strings.TrimSpace(r.WebEntry), r.AddrRef, r.SvcRef, nowStr())
 	return err
 }
 

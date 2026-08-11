@@ -1,6 +1,9 @@
 package store
 
-import "context"
+import (
+	"context"
+	"strings"
+)
 
 // Resource 受 SPA 门控的后端资源 + 细粒度授权。
 // 网关数据面向控制面拉取后，据此做"目标前导→后端"路由与角色/用户鉴权（替代静态 resources.json）。
@@ -32,6 +35,20 @@ type Resource struct {
 	// 空值按 SensitivityNormal 处理（读侧 NormalizeSensitivity 兜底），
 	// 但库里的既有行由 backfillResourceSensitivity 显式回填，不留 NULL。
 	Sensitivity string `json:"sensitivity"`
+	// ── 七层 Web 代理（PRD 8.3.3，B/S 免客户端接入）──
+	//
+	// WebScheme 是**内网后端的协议**（http | https），网关七层代理据此拨号。
+	// ★它必须是一等字段而不是"按端口猜"：猜法在 8443/8080 这类端口上必然出错，
+	// 而症状是网关拿 HTTP 去撞一个 TLS 端口——浏览器上看到的是一个空白页或
+	// 乱码，日志里只有一条读失败，没人会想到是协议猜错了。
+	// L4 隧道路径完全不读它（隧道是字节透传，协议由两端自己谈）。
+	WebScheme string `json:"webScheme"`
+	// WebEntry 对外访问入口基址覆盖（如 https://oa.corp.example），空 = 用网关默认落点。
+	//
+	// 只影响**控制面发给浏览器的跳转地址**，不影响网关的路由（七层按 /app/<资源id>/
+	// 路径前缀分流，与域名无关）。用途是给某个应用配一条专属域名/split-horizon DNS。
+	// 校验见 api.validateWebEntry：必须是 http(s):// + 主机[:端口]，不带路径与查询。
+	WebEntry string `json:"webEntry"`
 	// 对象库引用（可选，仅控制面 / 编辑器用，绝不进数据面拨号路径）：
 	// 编辑时据此自动回填 backend，并支撑对象库「被引用」反查与删除守卫。
 	AddrRef string `json:"addrRef,omitempty"` // 地址对象 id → backend 主机
@@ -68,6 +85,37 @@ func NormalizeSensitivity(s string) string {
 // 两处各写 `res.Sensitivity == "high"` 迟早会有一处漏掉大小写/空值兜底。
 func (r Resource) HighSensitivity() bool {
 	return NormalizeSensitivity(r.Sensitivity) == SensitivityHigh
+}
+
+// Web 后端协议枚举。
+const (
+	WebSchemeHTTP  = "http"
+	WebSchemeHTTPS = "https"
+)
+
+// NormalizeWebScheme 把 web_scheme 收敛成 http|https。
+//
+// ★空值（旧库补列后的 NULL、以及没填这一项的保存请求）按 **backend 端口** 推一个默认：
+// 443/8443 → https，其余 → http。推导规则**只写在这一处**：迁移回填、保存落库、
+// 读侧兜底三条路都调它，否则三处各写一遍 CASE，改一处漏两处的结果是同一个资源
+// 在"刚保存"和"重启后"表现不同——那是最难自证的一类缺陷。
+//
+// 推导只是默认值不是判据：管理员在发布向导里显式选过的值一律优先，且落库后
+// 不再被任何回填覆盖（回填的 WHERE 只碰空值）。
+func NormalizeWebScheme(scheme, backend string) string {
+	switch strings.ToLower(strings.TrimSpace(scheme)) {
+	case WebSchemeHTTPS:
+		return WebSchemeHTTPS
+	case WebSchemeHTTP:
+		return WebSchemeHTTP
+	}
+	if i := strings.LastIndex(backend, ":"); i >= 0 {
+		switch strings.TrimSpace(backend[i+1:]) {
+		case "443", "8443":
+			return WebSchemeHTTPS
+		}
+	}
+	return WebSchemeHTTP
 }
 
 // Restricted 报告该资源是否设了访问限制（四个主体维度里任意一维非空）。

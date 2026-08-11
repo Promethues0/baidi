@@ -59,6 +59,13 @@ type gwResource struct {
 	// （四维全空 = 不限），删无可删；要靠允许集合表达"除了这几个人"就得把全体账号
 	// 枚举进去，那份名单会随目录变化而过期，且一旦漏算就是静默放行。
 	DenyUsers []string `json:"denyUsers,omitempty"`
+	// WebScheme 七层代理拨后端用的协议（http|https）。
+	//
+	// ★它是**拨号参数**，与上面几维的性质完全不同：网关必须知道内网应用是 http
+	// 还是 https 才连得上，而它无从推导。这不违反"数据面不做策略推导"——
+	// 判定（谁能访问、哪些资源是 Web 应用）仍全在控制面，这里只回答"怎么拨"，
+	// 与 Backend 同一档。
+	WebScheme string `json:"webScheme,omitempty"`
 }
 
 // expandForGateway 把控制面资源清单转成网关视图：组织/用户组主体展开成账号并进 AllowUsers，
@@ -86,6 +93,7 @@ func expandForGateway(rs []store.Resource, ix store.SubjectIndex, degraded []str
 		g := gwResource{
 			ID: r.ID, Name: r.Name, Backend: r.Backend,
 			AllowRoles: append([]string(nil), r.AllowRoles...), AllowUsers: users,
+			WebScheme: store.NormalizeWebScheme(r.WebScheme, r.Backend),
 		}
 		// 降权只摘高敏资源——这正是「降权而非全断」的落点：同一个降级用户，
 		// 普通资源的 DenyUsers 是空的，照常可访问。

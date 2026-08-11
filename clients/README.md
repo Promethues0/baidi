@@ -49,6 +49,10 @@ stopTunnel()
 
 ## 构建与测试
 
+> **Windows / Linux 的包本机出不来**：Tauri 桌面端不能交叉编译（GTK/WebKit 的 `pkg-config` 拒绝跨编译），
+> 只能在原生系统或 CI 上构建 —— 矩阵在 [`.github/workflows/clients.yml`](../.github/workflows/clients.yml)，
+> 前置条件、各平台真伪边界与签名现状见 [`BUILD.md`](BUILD.md)。
+
 ```bash
 # 桌面（macOS，需 Rust 工具链）
 cd desktop

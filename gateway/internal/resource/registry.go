@@ -27,6 +27,21 @@ type Resource struct {
 	// （两维皆空 = 不限），没有允许名单可收窄；要用允许名单表达"除了这几个人"就得
 	// 枚举全体账号，漏一个就是静默放行。
 	DenyUsers []string `json:"deny_users"`
+	// WebScheme 七层 Web 代理拨后端时用的协议（http | https）。空 = http。
+	//
+	// ★这是**拨号参数**而不是策略：网关必须知道内网应用是 http 还是 https 才连得上，
+	// 而它无从推导（按端口猜 443 会在 8443 上静默连错协议）。判定权仍全在控制面——
+	// 「哪些资源是 Web 应用、谁能访问」由控制面回答，这里只回答"怎么拨"。
+	// L4 隧道路径完全不读它。
+	WebScheme string `json:"web_scheme,omitempty"`
+}
+
+// DialScheme 返回七层代理拨后端用的协议，空值收敛到 http。
+func (r Resource) DialScheme() string {
+	if strings.EqualFold(strings.TrimSpace(r.WebScheme), "https") {
+		return "https"
+	}
+	return "http"
 }
 
 // Registry 资源注册表（并发安全）。

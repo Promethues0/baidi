@@ -31,7 +31,12 @@ type Client struct {
 	control    string
 	gwID       string
 	proxy, spa string
-	mtls       bool // 已装载客户端证书：身份走 TLS
+	// web 七层 Web 代理的监听地址（未开启则为空）与它自身是否已终结 TLS。
+	// 控制面据此拼出浏览器该跳的入口 URL；不开启就连字段都不上报，
+	// 控制面于是能如实回「本网关未开启七层 Web 代理」而不是给一个连不上的地址。
+	web    string
+	webTLS bool
+	mtls   bool // 已装载客户端证书：身份走 TLS
 	// tunnelFP 本网关隧道 TLS/TLCP 证书的 SHA-256 指纹（hex）。随注册心跳上报，
 	// 由控制面转发给客户端做证书钉扎——网关证书自签，客户端没有别的途径确认对端身份。
 	tunnelFP string
@@ -65,6 +70,9 @@ func (c *Client) SetTunnelFP(fp string) { c.tunnelFP = fp }
 
 // SetVersion 设置随注册心跳上报的网关版本号。
 func (c *Client) SetVersion(v string) { c.version = v }
+
+// SetWeb 登记七层 Web 代理的监听地址（空=未开启，不上报该字段）。
+func (c *Client) SetWeb(addr string, tlsOn bool) { c.web, c.webTLS = addr, tlsOn }
 
 // SetMetrics 装上宿主机设备状态采样源；不调用即不上报（向后兼容：报文里无 metrics 字段）。
 func (c *Client) SetMetrics(fn func() sysstat.Sample) { c.metrics = fn }
@@ -232,6 +240,13 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 		"version":  c.version,
 		"events":   evs,
 	}
+	// 七层 Web 代理落点：未开启就连键都不加。★不能上报空串——控制面区分
+	// 「旧网关不认识这个字段」与「新网关明确说没开」没有意义，但**给一个空地址**
+	// 会让入口 URL 拼成 http://host:/…，浏览器打开是一个莫名其妙的错误。
+	if c.web != "" {
+		payload["web"] = c.web
+		payload["webTls"] = c.webTLS
+	}
 	// 设备状态：每次心跳采一次（差分指标的间隔 = 上报间隔）。采不到的单项由
 	// Sample 的 omitempty 自然缺席，绝不补 0；整个采样源缺席时连 metrics 键都不加。
 	if c.metrics != nil {
@@ -265,6 +280,8 @@ type resourceDTO struct {
 	// DenyUsers 控制面算好的否决名单（终端风险降权对高敏资源的收缩）。
 	// 旧控制面不下发这个字段 → 空切片 → 行为与改造前逐字节一致（向后兼容）。
 	DenyUsers []string `json:"denyUsers"`
+	// WebScheme 七层代理拨后端用的协议（http|https）。空 = http（旧控制面即此形态）。
+	WebScheme string `json:"webScheme"`
 }
 
 // Revoked 控制面下发的一条强制下线封禁（封禁期内拒绝敲门，并撤窗/切断该账号隧道）。
@@ -295,7 +312,8 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 	out := make([]resource.Resource, 0, len(r.Resources))
 	for _, d := range r.Resources {
 		out = append(out, resource.Resource{ID: d.ID, Backend: d.Backend,
-			AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers, DenyUsers: d.DenyUsers})
+			AllowRoles: d.AllowRoles, AllowUsers: d.AllowUsers, DenyUsers: d.DenyUsers,
+			WebScheme: d.WebScheme})
 	}
 	// NAT 策略与资源策略同一次响应取回，单独暴露给调用方（main 决定灌不灌内核）。
 	// ★旧控制面不带 nat 字段时这里是 nil，与「本网关无 NAT 策略」的空数组**语义不同**：

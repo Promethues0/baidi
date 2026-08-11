@@ -33,6 +33,7 @@ import (
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/spa"
 	"baidi.dev/gateway/internal/sysstat"
+	"baidi.dev/gateway/internal/webproxy"
 )
 
 // version 网关版本号，编译期注入：go build -ldflags "-X main.version=v0.x.y"。
@@ -72,6 +73,22 @@ func main() {
 			"★启用后命中 NAT 的流量绕过 SPA 隐身，且网关以路由设备形态工作")
 	natDry := flag.Bool("nat-dryrun", false,
 		"只生成 NAT 规则集并打印，不灌内核（无 root 时核对规则用）")
+	// ── 七层 Web 代理（PRD 8.3.3，B/S 免客户端接入）──
+	// 默认关闭：它是一个**入站攻击面**，且与 SPA 隐身天然互斥（见下方启动告警）。
+	webAddr := flag.String("web", env("BAIDI_GW_WEB", ""),
+		"七层 Web 代理监听地址（如 :18444）；空=不开启。★该端口必须对浏览器可达，"+
+			"不受 SPA 隐身保护——开启即等于在网关上公开一个入站 HTTP 面")
+	webPub := flag.String("web-jwt-pubkey", env("BAIDI_GW_WEB_JWT_PUBKEY", ""),
+		"control 的**Web 票据**公钥 PEM 路径（部署期分发的 <web 私钥>.pub），逗号分隔可装多把供轮换。"+
+			"与敲门公钥分开装：拿错路径的票据在对面连签名都验不过")
+	webCert := flag.String("web-cert", env("BAIDI_GW_WEB_CERT", ""),
+		"七层监听的 TLS 证书 PEM；与 -web-key 同时给则直接跑 HTTPS，否则明文（须前置 nginx 终结 TLS）")
+	webKey := flag.String("web-key", env("BAIDI_GW_WEB_KEY", ""), "七层监听的 TLS 私钥 PEM")
+	webSessTTL := flag.Duration("web-session-ttl", 15*time.Minute,
+		"七层会话 Cookie 寿命（不做滑动续期；到期回门户重新点开应用）")
+	webTicketTTL := flag.Duration("web-ticket-max-ttl", 2*time.Minute,
+		"Web 访问票据寿命上界（纵深防御；须 ≥ control 的 webTicketTTL=60s）")
+	webMaxBody := flag.Int64("web-max-body", 64<<20, "七层代理单次响应体上界（字节）")
 	flag.Parse()
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
@@ -93,6 +110,27 @@ func main() {
 	if !verifier.HasPublicKey() {
 		slog.Warn("⚠ 未配置 control 公钥（-jwt-pubkey）：无法校验 EdDSA 令牌，" +
 			"只能吃 HS256 存量令牌；请分发 control 的 <knock 私钥>.pub")
+	}
+	// 七层 Web 代理的验证材料必须**另装一把**，且缺了就拒绝启动——起一个每张票都验不过
+	// 的 L7 监听，只会让人以为"功能开了但业务连不上"，而真正的原因是没分发公钥。
+	var webVerifier *auth.Verifier
+	if *webAddr != "" {
+		if *webPub == "" {
+			log.Fatal("拒绝启动：开了 -web 就必须配 -web-jwt-pubkey（control 的 <BAIDI_JWT_WEB_KEY>.pub）。" +
+				"它与敲门公钥是两把不同的密钥，不能互相顶替")
+		}
+		// ★这里刻意不传 legacy/acceptHS256：七层是本轮新增的入站面，没有任何存量令牌
+		// 需要兼容，也就没有理由给它开 HS256 逃生舱。
+		webVerifier, err = auth.NewVerifier(*webPub, nil, false)
+		if err != nil {
+			log.Fatalf("载入 Web 票据公钥失败: %v", err)
+		}
+		if (*webCert == "") != (*webKey == "") {
+			log.Fatal("拒绝启动：-web-cert 与 -web-key 必须成对给出")
+		}
+		slog.Warn("⚠ 七层 Web 代理已开启：该端口对浏览器可达，**不受 SPA 隐身保护**。"+
+			"它是一个入站攻击面，请只在需要 B/S 免客户端接入时开启，并置于 HTTPS 之后",
+			"addr", *webAddr, "tls", *webCert != "")
 	}
 	slog.Info("baidi-gateway 启动", "version", version, "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
 		"ttl", ttl.String(), "strictKnock", *strictKnock,
@@ -157,6 +195,9 @@ func main() {
 		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
 		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
 		cp.SetVersion(version)   // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		// 七层落点随心跳上报：控制面据此拼出浏览器该跳的入口 URL。没开就不上报，
+		// 控制面于是能对门户如实回「本网关未开启七层 Web 代理」，而不是发一张跳不通的票。
+		cp.SetWeb(*webAddr, *webCert != "" && *webKey != "")
 		// 宿主机设备状态（PRD ch5 FR-MON-01）随心跳上报。采样源交给 cplane 在每次
 		// Register 里调一次——CPU 与吞吐是差分指标，采样节奏必须与上报节奏一致。
 		// 首次心跳里这两项必然缺席（还没有第二个采样点），控制面按不可判定落 NULL。
@@ -312,6 +353,28 @@ func main() {
 			}
 		}()
 		slog.Info("内核态隐身：默认 DROP + 动态放行集合", "backend", darkfw.Backend(), "set", darkfw.Table)
+	}
+
+	// 七层 Web 代理：与 L4 隧道**共用同一份资源注册表与放行表**，于是同一个资源
+	// 在两条接入形态下的后端与授权完全一致，不存在第二套判定。
+	if *webAddr != "" {
+		sessKey, kerr := webproxy.NewSessionKey()
+		if kerr != nil {
+			log.Fatalf("生成 Web 会话签名密钥失败: %v", kerr)
+		}
+		ws, werr := webproxy.New(webproxy.Config{
+			Verifier: webVerifier, Registry: reg, Allow: al, SessionKey: sessKey,
+			TicketMaxTTL: *webTicketTTL, SessionTTL: *webSessTTL, MaxBodyBytes: *webMaxBody,
+			TLSTerminated: *webCert != "" && *webKey != "",
+		})
+		if werr != nil {
+			log.Fatalf("七层 Web 代理装配失败: %v", werr)
+		}
+		go func() {
+			if err := ws.Serve(*webAddr, *webCert, *webKey); err != nil {
+				log.Fatalf("七层 Web 代理监听失败: %v", err)
+			}
+		}()
 	}
 
 	go func() {

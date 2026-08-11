@@ -39,18 +39,51 @@
       <!-- 左栏：组织架构 / 用户组 -->
       <div class="bd-card bd-otree">
         <div class="bd-seg">
-          <button class="bd-seg__b" :class="{ on: mode === 'org' }" @click="mode = 'org'">组织架构</button>
-          <button class="bd-seg__b" :class="{ on: mode === 'group' }" @click="mode = 'group'">用户组</button>
+          <button class="bd-seg__b" :class="{ on: mode === 'org' }" :aria-pressed="mode === 'org'"
+            @click="mode = 'org'">组织架构</button>
+          <button class="bd-seg__b" :class="{ on: mode === 'group' }" :aria-pressed="mode === 'group'"
+            @click="mode = 'group'">用户组</button>
+        </div>
+
+        <!-- 常驻操作条：作用于当前选中的节点。
+             增删改此前只挂在 .bd-onode-row:hover 上——触屏与键盘用户完全够不着，
+             鼠标用户也得靠猜。这条不依赖 hover 的入口才是这三个操作的主暴露面，
+             行内按钮降级为熟手的快捷方式。 -->
+        <div class="bd-otree__bar">
+          <span class="bd-otree__cur" :title="scopeTitle">{{ scopeTitle }}</span>
+          <template v-if="mode === 'org'">
+            <button type="button" class="bd-iconbtn" :disabled="!curOrgNode"
+              :title="orgActHint('新建子部门')" :aria-label="orgActHint('新建子部门')"
+              @click="newSubOrg"><icon-plus /></button>
+            <button type="button" class="bd-iconbtn" :disabled="!curOrgNode"
+              :title="orgActHint('重命名 / 改上级')" :aria-label="orgActHint('重命名 / 改上级')"
+              @click="editCurOrg"><icon-edit /></button>
+            <button type="button" class="bd-iconbtn bd-iconbtn--danger" :disabled="!curOrgNode"
+              :title="orgActHint('删除')" :aria-label="orgActHint('删除')"
+              @click="removeCurOrg"><icon-delete /></button>
+          </template>
+          <template v-else>
+            <button type="button" class="bd-iconbtn" :disabled="curGroup?.kind !== 'static'"
+              :title="memberActHint" :aria-label="memberActHint"
+              @click="editCurMembers"><icon-user-add /></button>
+            <button type="button" class="bd-iconbtn" :disabled="!curGroup"
+              :title="groupActHint('编辑用户组')" :aria-label="groupActHint('编辑用户组')"
+              @click="editCurGroup"><icon-edit /></button>
+            <button type="button" class="bd-iconbtn bd-iconbtn--danger" :disabled="!curGroup"
+              :title="groupActHint('删除')" :aria-label="groupActHint('删除')"
+              @click="removeCurGroup"><icon-delete /></button>
+          </template>
         </div>
 
         <!-- 组织树 -->
         <template v-if="mode === 'org'">
-          <button class="bd-onode" :class="{ on: org === '' }" @click="org = ''">
+          <div v-if="!curOrgNode" class="bd-otree__tip">选中下方任一部门，上方按钮即作用于它。</div>
+          <button class="bd-onode" :class="{ on: org === '' }" :aria-pressed="org === ''" @click="org = ''">
             <icon-apps class="bd-onode__ic" /><span class="bd-onode__t">全部用户</span>
             <span class="bd-onode__n">{{ users.length }}</span>
           </button>
-          <div v-for="n in flatOrg" :key="n.key" class="bd-onode-row">
-            <button class="bd-onode" :class="{ on: org === n.key }"
+          <div v-for="n in flatOrg" :key="n.key" class="bd-onode-row" :class="{ sel: org === n.key }">
+            <button class="bd-onode" :class="{ on: org === n.key }" :aria-pressed="org === n.key"
               :style="{ paddingLeft: 10 + n.depth * 14 + 'px' }" @click="org = n.key">
               <icon-folder v-if="n.children && n.children.length" class="bd-onode__ic" />
               <icon-user-group v-else class="bd-onode__ic" />
@@ -58,9 +91,12 @@
               <span class="bd-onode__n">{{ n.members }}</span>
             </button>
             <span class="bd-onode__acts">
-              <icon-plus title="新建子部门" @click.stop="openOrg(null, n.key)" />
-              <icon-edit title="重命名 / 改上级" @click.stop="openOrg(n.key)" />
-              <icon-delete title="删除" @click.stop="removeOrg(n.key, n.title)" />
+              <button type="button" class="bd-onode__act" :title="`在「${n.title}」下新建子部门`"
+                :aria-label="`在「${n.title}」下新建子部门`" @click.stop="openOrg(null, n.key)"><icon-plus /></button>
+              <button type="button" class="bd-onode__act" :title="`重命名「${n.title}」/ 改上级`"
+                :aria-label="`重命名「${n.title}」或修改上级`" @click.stop="openOrg(n.key)"><icon-edit /></button>
+              <button type="button" class="bd-onode__act bd-onode__act--danger" :title="`删除「${n.title}」`"
+                :aria-label="`删除组织「${n.title}」`" @click.stop="askRemoveOrg(n.key, n.title)"><icon-delete /></button>
             </span>
           </div>
           <button class="bd-onode bd-onode--add" @click="openOrg(null, '')"><icon-plus />新建顶级组织</button>
@@ -69,20 +105,26 @@
 
         <!-- 用户组 -->
         <template v-else>
-          <button class="bd-onode" :class="{ on: groupSel === '' }" @click="groupSel = ''">
+          <div v-if="!curGroup" class="bd-otree__tip">选中下方任一用户组，上方按钮即作用于它。</div>
+          <button class="bd-onode" :class="{ on: groupSel === '' }" :aria-pressed="groupSel === ''"
+            @click="groupSel = ''">
             <icon-apps class="bd-onode__ic" /><span class="bd-onode__t">全部用户</span>
             <span class="bd-onode__n">{{ users.length }}</span>
           </button>
-          <div v-for="g in groups" :key="g.id" class="bd-onode-row">
-            <button class="bd-onode" :class="{ on: groupSel === g.id }" @click="groupSel = g.id">
+          <div v-for="g in groups" :key="g.id" class="bd-onode-row" :class="{ sel: groupSel === g.id }">
+            <button class="bd-onode" :class="{ on: groupSel === g.id }" :aria-pressed="groupSel === g.id"
+              @click="groupSel = g.id">
               <icon-user-group class="bd-onode__ic" />
               <span class="bd-onode__t">{{ g.name }}<em v-if="g.kind === 'role'" class="bd-kindtag">角色派生</em></span>
               <span class="bd-onode__n">{{ g.members }}</span>
             </button>
             <span class="bd-onode__acts">
-              <icon-user-add v-if="g.kind === 'static'" title="编辑成员" @click.stop="openMembers(g)" />
-              <icon-edit title="编辑用户组" @click.stop="openGroup(g)" />
-              <icon-delete title="删除" @click.stop="removeGroup(g)" />
+              <button v-if="g.kind === 'static'" type="button" class="bd-onode__act" :title="`编辑「${g.name}」的成员`"
+                :aria-label="`编辑用户组「${g.name}」的成员`" @click.stop="openMembers(g)"><icon-user-add /></button>
+              <button type="button" class="bd-onode__act" :title="`编辑用户组「${g.name}」`"
+                :aria-label="`编辑用户组「${g.name}」`" @click.stop="openGroup(g)"><icon-edit /></button>
+              <button type="button" class="bd-onode__act bd-onode__act--danger" :title="`删除「${g.name}」`"
+                :aria-label="`删除用户组「${g.name}」`" @click.stop="askRemoveGroup(g)"><icon-delete /></button>
             </span>
           </div>
           <button class="bd-onode bd-onode--add" @click="openGroup(null)"><icon-plus />新建用户组</button>
@@ -286,7 +328,7 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
-import { Message } from '@arco-design/web-vue';
+import { Message, Modal } from '@arco-design/web-vue';
 import { api, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers } from '@/lib/api';
 
 const live = ref(false);
@@ -345,6 +387,29 @@ const shown = computed(() => {
   return users.value.filter((u) => keys.has(u.orgKey));
 });
 function groupName(id: string) { return groups.value.find((g) => g.id === id)?.name ?? id; }
+
+// ── 常驻操作条：当前选中的节点 + 三个操作的可达入口 ──
+const curOrgNode = computed(() => flatOrg.value.find((n) => n.key === org.value) ?? null);
+const curGroup = computed(() => groups.value.find((g) => g.id === groupSel.value) ?? null);
+/** 按钮的 title/aria-label：选中了就说清作用在谁身上，没选中就说清怎么才能用（禁用态必须自解释）。 */
+function orgActHint(act: string) {
+  return curOrgNode.value ? `${act}：${curOrgNode.value.title}` : `${act}（先在下方选中一个部门）`;
+}
+function groupActHint(act: string) {
+  return curGroup.value ? `${act}：${curGroup.value.name}` : `${act}（先在下方选中一个用户组）`;
+}
+const memberActHint = computed(() => {
+  const g = curGroup.value;
+  if (!g) return '编辑成员（先在下方选中一个用户组）';
+  if (g.kind === 'role') return `「${g.name}」是角色派生组，成员由用户角色决定，不能直接编辑`;
+  return `编辑成员：${g.name}`;
+});
+function newSubOrg() { if (curOrgNode.value) openOrg(null, curOrgNode.value.key); }
+function editCurOrg() { if (curOrgNode.value) openOrg(curOrgNode.value.key); }
+function removeCurOrg() { if (curOrgNode.value) askRemoveOrg(curOrgNode.value.key, curOrgNode.value.title); }
+function editCurMembers() { if (curGroup.value?.kind === 'static') openMembers(curGroup.value); }
+function editCurGroup() { if (curGroup.value) openGroup(curGroup.value); }
+function removeCurGroup() { if (curGroup.value) askRemoveGroup(curGroup.value); }
 
 const agg = computed(() => {
   const u = users.value;
@@ -430,13 +495,26 @@ async function saveOrg() {
   } catch (e) { Message.error(reason(e, '保存组织失败')); }
   finally { orgSaving.value = false; }
 }
+// 删除入口现在常驻可见（不再要求先 hover），误触的代价比以前高，所以补一道确认。
+function askRemoveOrg(key: string, title: string) {
+  Modal.confirm({
+    title: '删除组织',
+    content: `确认删除组织「${title}」？若它下面还有子部门或成员，后端会拒绝删除并说明原因。`,
+    okText: '删除', cancelText: '取消', okButtonProps: { status: 'danger' },
+    onOk: () => removeOrg(key, title)
+  });
+}
 async function removeOrg(key: string, title: string) {
   try {
     await api(`/orgs/${key}`, { method: 'DELETE' });
     Message.success(`已删除组织「${title}」`);
     if (org.value === key) org.value = '';
     await load();
-  } catch (e) { Message.error(reason(e, '删除失败：该组织可能仍有子部门或成员')); }
+  } catch (e) {
+    // 后端守卫的原话（"该组织下还有用户，请先把用户移到其他组织"）是唯一能指导下一步动作的
+    // 信息，用 Modal 留在屏幕上，别被 3 秒的 toast 带走。
+    Modal.warning({ title: '组织未删除', content: detail(e, '删除失败，请检查权限或后端连接') });
+  }
 }
 
 // ── 用户组增删改 + 成员 ──
@@ -463,13 +541,23 @@ async function saveGroup() {
   } catch (e) { Message.error(reason(e, '保存失败：组名可能与已有组重复')); }
   finally { groupSaving.value = false; }
 }
+function askRemoveGroup(g: GroupWithMembers) {
+  Modal.confirm({
+    title: '删除用户组',
+    content: `确认删除用户组「${g.name}」？该组的成员关系会一并清除（用户账号本身不受影响）。`,
+    okText: '删除', cancelText: '取消', okButtonProps: { status: 'danger' },
+    onOk: () => removeGroup(g)
+  });
+}
 async function removeGroup(g: GroupWithMembers) {
   try {
     await api(`/groups/${g.id}`, { method: 'DELETE' });
     Message.success(`已删除用户组「${g.name}」`);
     if (groupSel.value === g.id) groupSel.value = '';
     await load();
-  } catch (e) { Message.error(reason(e, '删除失败')); }
+  } catch (e) {
+    Modal.warning({ title: '用户组未删除', content: detail(e, '删除失败，请检查权限或后端连接') });
+  }
 }
 
 const memberOpen = ref(false);
@@ -499,6 +587,11 @@ async function saveMembers() {
 function reason(e: unknown, fallback: string) {
   const msg = e instanceof Error ? e.message : '';
   return msg ? `${fallback}（${msg}）` : fallback;
+}
+/** 只取后端原话（守卫消息本身已经是完整的一句话），拿不到才退回兜底文案。 */
+function detail(e: unknown, fallback: string) {
+  const msg = e instanceof Error ? e.message : '';
+  return msg || fallback;
 }
 
 async function load() {
@@ -607,7 +700,11 @@ onMounted(load);
 .bd-seg__b.on { background: var(--bd-bg-1, #fff); color: var(--bd-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .07); }
 
 .bd-onode-row { position: relative; }
-.bd-onode-row:hover .bd-onode__acts { display: flex; }
+/* hover 只是增强：选中行常驻显示，键盘 Tab 到行内任一按钮（含节点本身）也显示。
+   少了后两条，触屏与键盘用户就永远看不到这三个操作。 */
+.bd-onode-row:hover .bd-onode__acts,
+.bd-onode-row:focus-within .bd-onode__acts,
+.bd-onode-row.sel .bd-onode__acts { display: flex; }
 .bd-onode { width: 100%; display: flex; align-items: center; gap: 8px; height: 36px; padding-right: 10px; border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--bd-t2); }
 .bd-onode:hover { background: var(--bd-fill-2); }
 .bd-onode.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 500; }
@@ -615,9 +712,21 @@ onMounted(load);
 .bd-onode__ic { font-size: 15px; flex: none; }
 .bd-onode__t { flex: 1; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .bd-onode__n { font-size: 11px; color: var(--bd-t3); }
-.bd-onode__acts { display: none; position: absolute; right: 6px; top: 0; height: 36px; align-items: center; gap: 8px; background: var(--bd-fill-2); padding-left: 8px; border-radius: 0 7px 7px 0; }
-.bd-onode__acts > * { font-size: 13px; color: var(--bd-t3); cursor: pointer; }
-.bd-onode__acts > *:hover { color: var(--bd-primary); }
+.bd-onode__acts { display: none; position: absolute; right: 6px; top: 0; height: 36px; align-items: center; gap: 2px; background: var(--bd-fill-2); padding-left: 8px; border-radius: 0 7px 7px 0; }
+.bd-onode-row.sel .bd-onode__acts { background: var(--bd-primary-1); }
+.bd-onode__act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; background: transparent; border-radius: 4px; font-size: 13px; color: var(--bd-t3); cursor: pointer; }
+.bd-onode__act:hover { color: var(--bd-primary); background: var(--bd-bg-1, #fff); }
+.bd-onode__act--danger:hover { color: var(--bd-danger); }
+.bd-onode__act:focus-visible, .bd-iconbtn:focus-visible, .bd-onode:focus-visible, .bd-seg__b:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 1px; }
+
+/* 常驻操作条 */
+.bd-otree__bar { display: flex; align-items: center; gap: 2px; padding: 3px 4px 3px 9px; margin-bottom: 6px; background: var(--bd-fill-1); border-radius: 7px; }
+.bd-otree__cur { flex: 1; min-width: 0; font-size: 12px; color: var(--bd-t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-otree__tip { font-size: 11.5px; color: var(--bd-t4); line-height: 1.6; padding: 0 4px 6px; }
+.bd-iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; background: transparent; border-radius: 5px; font-size: 14px; color: var(--bd-t2); cursor: pointer; }
+.bd-iconbtn:hover:not([disabled]) { background: var(--bd-bg-1, #fff); color: var(--bd-primary); }
+.bd-iconbtn--danger:hover:not([disabled]) { color: var(--bd-danger); }
+.bd-iconbtn[disabled] { color: var(--bd-t4); cursor: not-allowed; }
 .bd-kindtag { font-style: normal; font-size: 10px; color: #722ED1; background: #722ED114; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
 
 .bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }

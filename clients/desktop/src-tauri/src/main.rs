@@ -1,31 +1,55 @@
 // 白帝安全接入桌面客户端 · Tauri 壳。
 //   - shell 插件：按需 sidecar 调 baidi-knock 发起真实 SPA 敲门（dev/轻量路径）。
-//   - 自定义命令 tunnel_*：以管理员权限拉起 baidi-tun 数据面引擎，真正用 utun 接管
-//     受保护网段流量 → 逐流 SPA 敲门 → 加密隧道 → 网关。需 root：经 osascript 授权。
+//   - 自定义命令 tunnel_*：以管理员权限拉起 baidi-tun 数据面引擎，真正用 TUN 接管
+//     受保护网段流量 → 逐流 SPA 敲门 → 加密隧道 → 网关。需管理员权限：
+//     macOS 走 osascript、Linux 走 pkexec(polkit)、Windows 走 UAC 提升，
+//     三条路的**构造**都在 elevate.rs 里（纯函数 + 单测），这里只负责落盘与 spawn。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use std::fs;
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, Output};
+use std::sync::OnceLock;
 use tauri::{Emitter, Manager};
 
+mod elevate;
 mod posture;
 
-const LOG: &str = "/tmp/baidi-tun.log";
-const PID: &str = "/tmp/baidi-tun.pid";
-const LAUNCH: &str = "/tmp/baidi-tun-launch.sh";
-/// 资源映射表落盘路径。控制面接入剖面里的 resmap（"host:port" → 资源 id）经此文件交给
-/// root 权限的 baidi-tun（-resmap）。不含凭据，只是路由提示；仍按 0600 写，避免同机
-/// 其他用户顺手读走内网拓扑。root 进程读 0600 的他人文件不受限。
-const RESMAP: &str = "/tmp/baidi-resmap.json";
-/// 隧道内 DNS 记录表落盘路径（FQDN → VIP）。与 RESMAP 同一套写法：不含凭据，
-/// 但仍按 0600 写，避免同机其他用户顺手读走内网域名清单（那是一份现成的内网资产地图）。
-const DNSREC: &str = "/tmp/baidi-dns-records.json";
-/// 网关落点清单落盘路径（多活 + 故障转移，顺序即优先级）。与上面两份同一套写法。
-/// 内容是网关地址与隧道证书指纹——不是凭据（指纹是公开信息，钉扎的是对方身份），
-/// 但同样按 0600 写：整份清单就是一张"白帝网关都部署在哪"的地图。
-const GATEWAYS: &str = "/tmp/baidi-gateways.json";
+use elevate::{Elevator, Paths, Platform, StartReq};
+
+/// 运行期落盘的那几份文件（日志 / pid / launcher 脚本 / resmap / DNS 记录 / 落点清单）。
+///
+/// ★目录取 `std::env::temp_dir()` 而不是写死 `/tmp`：Windows 上根本没有 `/tmp`
+/// （真去创建的话就是 `C:\tmp`——一个**任何用户都能写**的目录，而我们要往里放含会话令牌的
+/// launcher 脚本）。temp_dir() 在三个平台上给的都是每用户私有目录：
+/// macOS `/var/folders/…/T`（0700）、Linux `$TMPDIR` 或 `/tmp`、Windows `%LOCALAPPDATA%\Temp`。
+///
+/// 这几份文件都不含凭据（除了短暂存在的 launcher 脚本），但都按「仅本人可读」收紧——
+/// resmap 与 DNS 记录合起来就是一张现成的内网资产地图，落点清单是一张"网关都部署在哪"的地图。
+/// root 进程读它们不受限。
+fn paths() -> &'static Paths {
+    static P: OnceLock<Paths> = OnceLock::new();
+    P.get_or_init(|| elevate::paths_in(&std::env::temp_dir().to_string_lossy(), Platform::host()))
+}
+
+/// 把刚落盘的临时文件收紧到「仅本人可读」。
+///
+/// 这是本文件里**唯一**的 `#[cfg]`：`PermissionsExt` 是 unix-only 的 trait，没有跨平台写法。
+///
+/// ★Windows 侧如实说明：那边没有 0600 的等价物，权限模型是 ACL。我们**不做 ACL 编程**，
+/// 这些文件的保护就退化成 `%LOCALAPPDATA%\Temp` 的目录继承 ACL——本人 + SYSTEM +
+/// Administrators 可读。也就是说 **Windows 上的保护弱于 unix**：本机管理员组的其他账号能读到
+/// launcher 脚本里那段会话令牌（它只在提权那几百毫秒内存在，用后即删，但窗口不是零）。
+/// 写在这里是为了别让人以为三个平台一样严。
+#[cfg(unix)]
+fn harden(path: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+}
+#[cfg(not(unix))]
+fn harden(_path: &str) {
+    // 见上：Windows 无 0600 等价物，依赖 %TEMP% 的继承 ACL，保护弱于 unix。
+}
 
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -79,22 +103,27 @@ struct TunOpts {
     device: String,
 }
 
-/// 定位随 app 打包的 baidi-tun。确定性顺序：同名 → 当前架构三元组名 → 排序后首个 baidi-tun*。
+/// 定位随 app 打包的 baidi-tun。确定性顺序：同名 → 当前平台/架构三元组名 → 排序后首个 baidi-tun*。
+/// 候选清单分平台（Windows 那份带 `.exe`），构造与断言都在 elevate::sidecar_candidates。
 fn find_tun() -> Result<PathBuf, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let dir = exe.parent().ok_or_else(|| "无法定位程序目录".to_string())?;
-    let arch = if cfg!(target_arch = "aarch64") { "aarch64" } else { "x86_64" };
-    for name in [String::from("baidi-tun"), format!("baidi-tun-{arch}-apple-darwin")] {
+    for name in elevate::sidecar_candidates(Platform::host(), std::env::consts::ARCH) {
         let p = dir.join(&name);
         if p.exists() {
             return Ok(p);
         }
     }
-    // 兜底：排序后取首个（避免 read_dir 顺序不确定）
+    // 兜底：排序后取首个（避免 read_dir 顺序不确定）。
+    // Windows 上额外要求 .exe——否则 pdb/日志之类的同前缀文件会被当成引擎拉起。
     if let Ok(rd) = fs::read_dir(dir) {
         let mut hits: Vec<PathBuf> = rd
             .flatten()
-            .filter(|e| e.file_name().to_string_lossy().starts_with("baidi-tun"))
+            .filter(|e| {
+                let n = e.file_name().to_string_lossy().to_string();
+                n.starts_with("baidi-tun")
+                    && (!Platform::host().is_windows() || n.to_ascii_lowercase().ends_with(".exe"))
+            })
             .map(|e| e.path())
             .collect();
         hits.sort();
@@ -105,23 +134,32 @@ fn find_tun() -> Result<PathBuf, String> {
     Err(format!("未找到数据面引擎 baidi-tun（{}）", dir.display()))
 }
 
-/// POSIX shell 单引号转义。
-fn sq(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-fn is_cancel(stderr: &str) -> bool {
-    stderr.contains("-128") || stderr.contains("User canceled") || stderr.contains("用户已取消")
+/// 真正 spawn 提权器的那一层。**全模块唯一会执行外部程序的地方**，且它连 cfg 都不需要：
+/// `plan_start` 在 Linux 上永远不会吐出 `Osascript`，走不到的分支自然不会执行。
+/// 这样三个平台的分支在**任何**主机上都被编译，写错了本机就报。
+fn run_elevator(e: &Elevator) -> std::io::Result<Output> {
+    match e {
+        Elevator::Osascript { apple } => Command::new("osascript").arg("-e").arg(apple).output(),
+        // pkexec 收 argv，中间没有 shell：脚本路径含空格/中文也不会被切开。
+        Elevator::Pkexec { program, args } => Command::new(program).args(args).output(),
+        Elevator::WindowsRunas { file, parameters } => Command::new("powershell")
+            .args(["-NoProfile", "-NonInteractive", "-Command"])
+            .arg(elevate::ps_runas_command(file, parameters))
+            .output(),
+    }
 }
 
 /// 以管理员权限拉起 baidi-tun。要点：
-///  - launcher 脚本落纯 ASCII /tmp（0600），osascript 只跑该脚本路径（规避中文 .app 路径 + token 转义）；
-///  - `exec </dev/null >/dev/null 2>&1` 先断开脚本自身与 osascript 管道 → do shell script 立即返回，
-///    不会因后台 baidi-tun 常驻持有 fd 而卡死（会冻结 UI）；
-///  - token 经 BAIDI_TOKEN 环境变量传入，不进 ps 进程参数；脚本用后即删。
+///  - **先做平台前置检查再谈提权**：Windows 上缺 wintun.dll 时当场说清楚，绝不先弹一个
+///    UAC 框再在建网卡那步失败（见 elevate::preflight_start）；
+///  - launcher 脚本落 temp_dir()（unix 0600），提权器只跑该脚本路径（规避中文 .app 路径 + token 转义）；
+///  - unix 侧 `exec </dev/null >/dev/null 2>&1` 先断开脚本自身与提权器的管道 →
+///    osascript / pkexec 立即返回，不会因后台 baidi-tun 常驻持有 fd 而卡死（会冻结 UI）；
+///  - token 经 BAIDI_TOKEN 环境变量传入，不进进程参数；脚本用后即删。
 #[tauri::command]
 fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     let tun = find_tun()?;
+    let p = paths();
     let spa = format!("{}:{}", opts.gateway, opts.spa_port);
     let proxy = format!("{}:{}", opts.gateway, opts.proxy_port);
     let mut args: Vec<String> = vec![
@@ -149,24 +187,24 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     // 与 resmap 同一套写法，包括「空就把上一轮的残留删掉」——留着会让这次接入
     // 按上一个用户/上一份策略的落点做故障转移，切过去连的是一台不该连的网关。
     if !opts.gateways.trim().is_empty() {
-        fs::write(GATEWAYS, opts.gateways.trim()).map_err(|e| format!("写网关落点清单失败：{e}"))?;
-        let _ = fs::set_permissions(GATEWAYS, fs::Permissions::from_mode(0o600));
+        fs::write(&p.gateways, opts.gateways.trim()).map_err(|e| format!("写网关落点清单失败：{e}"))?;
+        harden(&p.gateways);
         args.push("-gateways".into());
-        args.push(GATEWAYS.into());
+        args.push(p.gateways.clone());
     } else {
-        let _ = fs::remove_file(GATEWAYS);
+        let _ = fs::remove_file(&p.gateways);
     }
     // 资源映射表：写盘后经 -resmap 交给 root 数据面。控制面是这张表的唯一来源——
     // 客户端不自己推导「哪个地址属于哪个资源」，避免终端与网关对资源归属产生分歧。
     if !opts.resmap.trim().is_empty() {
-        fs::write(RESMAP, opts.resmap.trim()).map_err(|e| format!("写资源映射表失败：{e}"))?;
-        let _ = fs::set_permissions(RESMAP, fs::Permissions::from_mode(0o600));
+        fs::write(&p.resmap, opts.resmap.trim()).map_err(|e| format!("写资源映射表失败：{e}"))?;
+        harden(&p.resmap);
         args.push("-resmap".into());
-        args.push(RESMAP.into());
+        args.push(p.resmap.clone());
     } else {
         // 上一轮遗留的映射表必须清掉：否则换用户/换策略后仍会按旧表路由，
         // 表现为「明明改了权限，客户端还能连到老资源」。
-        let _ = fs::remove_file(RESMAP);
+        let _ = fs::remove_file(&p.resmap);
     }
     // 分离式 DNS：记录表落盘后经 -dns-records 交给 root 数据面，与 resmap 同一套写法。
     // 只有 -dns-listen 非空才接线；否则连记录表都不写，并把上一轮的残留删掉——
@@ -179,40 +217,43 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
             args.push(opts.dns_domains.trim().into());
         }
         if !opts.dns_records.trim().is_empty() {
-            fs::write(DNSREC, opts.dns_records.trim()).map_err(|e| format!("写 DNS 记录表失败：{e}"))?;
-            let _ = fs::set_permissions(DNSREC, fs::Permissions::from_mode(0o600));
+            fs::write(&p.dnsrec, opts.dns_records.trim()).map_err(|e| format!("写 DNS 记录表失败：{e}"))?;
+            harden(&p.dnsrec);
             args.push("-dns-records".into());
-            args.push(DNSREC.into());
+            args.push(p.dnsrec.clone());
         } else {
-            let _ = fs::remove_file(DNSREC);
+            let _ = fs::remove_file(&p.dnsrec);
         }
     } else {
-        let _ = fs::remove_file(DNSREC);
+        let _ = fs::remove_file(&p.dnsrec);
     }
-    let argline = args.iter().map(|a| sq(a)).collect::<Vec<_>>().join(" ");
-    let script = format!(
-        "#!/bin/bash\n\
-         rm -f {log} {pid}\n\
-         export BAIDI_TOKEN={tok}\n\
-         exec </dev/null >/dev/null 2>&1\n\
-         {tun} {args} >{log} 2>&1 </dev/null &\n\
-         echo $! >{pid}\n",
-        log = LOG, pid = PID, tok = sq(&opts.token), tun = sq(&tun.to_string_lossy()), args = argline,
-    );
-    fs::write(LAUNCH, script).map_err(|e| e.to_string())?;
-    // 0600：仅所有者可读（token 短暂落盘）
-    let _ = fs::set_permissions(LAUNCH, fs::Permissions::from_mode(0o600));
 
-    let apple = format!(
-        "do shell script \"/bin/bash {}\" with administrator privileges",
-        LAUNCH
+    let plat = Platform::host();
+    // ★前置检查在提权之前：Windows 缺 wintun.dll 时这里直接把话说完，
+    // 不会出现「输了管理员口令 → 网卡建不出来 → 一句看不懂的英文错误」。
+    let tun_dir = tun.parent().map(|d| d.to_string_lossy().to_string()).unwrap_or_default();
+    let sysroot = std::env::var("SystemRoot").unwrap_or_else(|_| String::from("C:\\Windows"));
+    elevate::preflight_start(plat, &elevate::RealProbe, &tun_dir, &sysroot)?;
+    let elevator = elevate::resolve_elevator(plat, &elevate::RealProbe)?;
+
+    // 提权进程拿到的是一份全新的最小环境（pkexec 会主动清空），要什么必须点名。
+    let env = vec![(String::from("BAIDI_TOKEN"), opts.token.clone())];
+    let plan = elevate::plan_start(
+        plat,
+        &StartReq { tun: &tun.to_string_lossy(), args: &args, env: &env, paths: p, elevator: &elevator },
     );
-    let out = Command::new("osascript").arg("-e").arg(&apple).output();
-    let _ = fs::remove_file(LAUNCH); // 用后即删，缩小 token 落盘窗口
-    let out = out.map_err(|e| e.to_string())?;
+    if let Some(sc) = &plan.script {
+        fs::write(&sc.path, &sc.content).map_err(|e| e.to_string())?;
+        harden(&sc.path); // 仅所有者可读（token 短暂落盘）；Windows 上退化为继承 ACL，见 harden
+    }
+    let out = run_elevator(&plan.elevator);
+    if let Some(sc) = &plan.script {
+        let _ = fs::remove_file(&sc.path); // 用后即删，缩小 token 落盘窗口
+    }
+    let out = out.map_err(|e| format!("无法调起提权程序（{elevator}）：{e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        if is_cancel(&err) {
+        if elevate::is_cancel(plat, out.status.code(), &err) {
             return Err("已取消管理员授权".into());
         }
         return Err(format!("启动数据面失败：{}", err.trim()));
@@ -272,25 +313,33 @@ fn last_endpoint_line(log: &str) -> String {
         .to_string()
 }
 
-/// 按 pid 判活（ps -p，避免 kill -0 对 root 进程 EPERM 误判）。供状态查询与托盘轮询共用。
+/// 读 pid 文件（非纯数字一律当"没有"，见 elevate::sanitize_pid）。
+fn read_pid() -> Option<String> {
+    elevate::sanitize_pid(&fs::read_to_string(&paths().pid).unwrap_or_default())
+}
+
+/// 按 pid 判活。供状态查询与托盘轮询共用。
+///
+/// unix 用 `ps -p`（不用 `kill -0`：对 root 进程会 EPERM 误判成"已退出"）；
+/// Windows 用 `tasklist` 并**解析输出**——那边没有匹配进程时退出码照样是 0，
+/// 只看退出码的话托盘会永远显示「已接入」。两边的解析都在 elevate 里被单测钉住。
 fn tun_running() -> bool {
-    let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
-    if pid.is_empty() {
-        return false;
-    }
-    Command::new("ps")
-        .args(["-p", &pid, "-o", "pid="])
+    let plat = Platform::host();
+    let Some(pid) = read_pid() else { return false };
+    let (prog, args) = elevate::running_probe(plat, &pid);
+    Command::new(prog)
+        .args(args)
         .output()
-        .map(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+        .map(|o| o.status.success() && elevate::parse_running(plat, &pid, &String::from_utf8_lossy(&o.stdout)))
         .unwrap_or(false)
 }
 
 /// 读 pid + 日志，回最近日志供前端解析真实状态。
 #[tauri::command]
 fn tunnel_status() -> TunStatus {
-    let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
+    let pid = read_pid().unwrap_or_default();
     let running = tun_running();
-    let full = fs::read_to_string(LOG).unwrap_or_default();
+    let full = fs::read_to_string(&paths().log).unwrap_or_default();
     TunStatus {
         running,
         pid,
@@ -299,33 +348,37 @@ fn tunnel_status() -> TunStatus {
     }
 }
 
-/// 断开：以管理员权限 kill 掉 root 数据面进程（utun/路由随进程退出回收），清理临时文件。
+/// 断开：以管理员权限 kill 掉 root 数据面进程（TUN/路由随进程退出回收），清理临时文件。
 ///
-/// ★这里必须是 `kill`（SIGTERM）而不是 `kill -9`：baidi-tun 收到 SIGTERM 才会去收回
-/// 它写进系统的解析器配置（/etc/resolver/<域名>）。被 -9 打掉的话配置会留在系统里，
+/// ★unix 上必须是 `kill`（SIGTERM）而不是 `kill -9`：baidi-tun 收到 SIGTERM 才会去收回
+/// 它写进系统的解析器配置（/etc/resolver/<域名>、resolvectl）。被 -9 打掉的话配置会留在系统里，
 /// 把该域名指向一个已经不存在的 VIP——症状是「断开客户端后这个域名永久解析失败」，
 /// 用户根本不会联想到是客户端留下的。（真被 -9 打掉时，靠 baidi-tun 下次启动时扫描回收。）
+/// Windows 上**没有 SIGTERM 可发**，只能 TerminateProcess，因此那边恒等于走"下次启动扫描回收"
+/// 这条兜底——细节与后果写在 elevate::windows_stop_script 上。
 #[tauri::command]
 fn tunnel_stop() -> Result<(), String> {
-    let _ = fs::remove_file(LAUNCH);
-    let _ = fs::remove_file(RESMAP); // 断开即清映射表，不给下一轮留下陈旧路由
-    let _ = fs::remove_file(DNSREC); // 同理：陈旧的 DNS 记录表会让下轮解析到已下线的地址
-    let pid = fs::read_to_string(PID).unwrap_or_default().trim().to_string();
-    if pid.is_empty() {
-        return Ok(());
+    let p = paths();
+    let _ = fs::remove_file(&p.launch);
+    let _ = fs::remove_file(&p.resmap); // 断开即清映射表，不给下一轮留下陈旧路由
+    let _ = fs::remove_file(&p.dnsrec); // 同理：陈旧的 DNS 记录表会让下轮解析到已下线的地址
+    let Some(pid) = read_pid() else { return Ok(()) };
+
+    let plat = Platform::host();
+    let elevator = elevate::resolve_elevator(plat, &elevate::RealProbe)?;
+    let plan = elevate::with_elevator(elevate::plan_stop(plat, &pid, p), &elevator);
+    if let Some(sc) = &plan.script {
+        fs::write(&sc.path, &sc.content).map_err(|e| e.to_string())?;
+        harden(&sc.path);
     }
-    let apple = format!(
-        "do shell script \"kill {} 2>/dev/null; rm -f {} 2>/dev/null; true\" with administrator privileges",
-        pid, PID
-    );
-    let out = Command::new("osascript")
-        .arg("-e")
-        .arg(&apple)
-        .output()
-        .map_err(|e| e.to_string())?;
+    let out = run_elevator(&plan.elevator);
+    if let Some(sc) = &plan.script {
+        let _ = fs::remove_file(&sc.path);
+    }
+    let out = out.map_err(|e| format!("无法调起提权程序（{elevator}）：{e}"))?;
     if !out.status.success() {
         let err = String::from_utf8_lossy(&out.stderr);
-        if is_cancel(&err) {
+        if elevate::is_cancel(plat, out.status.code(), &err) {
             return Err("已取消管理员授权".into());
         }
         return Err(format!("断开失败：{}", err.trim()));

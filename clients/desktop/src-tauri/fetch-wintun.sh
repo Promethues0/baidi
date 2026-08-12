@@ -34,7 +34,7 @@
 #   而这句话会随安装包发到用户手里（README-windows.txt）。
 #
 # ── 产物落位（本脚本只负责取件与暂存）───────────────────────────────────────
-#   binaries/wintun/LICENSE.txt                          ← 许可原文，随包分发
+#   binaries/wintun/wintun-LICENSE.txt                   ← 许可原文，随包分发（改名理由见解件那段）
 #   binaries/wintun/<rust 三元组>/wintun.dll             ← 按架构分放，互不覆盖
 #   binaries/wintun/wintun.dll                           ← 只在选定**单一**架构时产出：
 #   binaries/wintun/wintun.dll.triple                    ←   打包配置引用的固定路径 + 它是哪个架构
@@ -259,8 +259,17 @@ mkdir -p "$STAGE_DIR"
 
 # 许可原文：我们自愿随包附上（不是许可条款的要求，出处见顶部注释）。它和 DLL 一起解，
 # 就不会出现「DLL 更新了、许可还是旧版本」或者「打包时漏了它」。
-extract_member "$ZIP" "wintun/LICENSE.txt" "$STAGE_DIR/LICENSE.txt"
-echo "==> 许可：$STAGE_DIR/LICENSE.txt（$(file_bytes "$STAGE_DIR/LICENSE.txt") 字节，随安装包一起附上）"
+#
+# ★**在这里就改名**，而不是靠 tauri `bundle.resources` 的「源路径 → 目标路径」重命名。
+#   实测（CI 首次跑通落位断言时抓到）：那个重命名**只有 NSIS 遵守，MSI 直接忽略、
+#   沿用源文件名**。同一份配置、两个打包器两种结果，而且两边都不报错：
+#     nsis 安装出来 → wintun-LICENSE.txt        （对）
+#     msi  安装出来 → LICENSE.txt               （错，且看不出来）
+#   后果不是"少个文件"：应用目录里躺一个叫 LICENSE.txt 的文件、紧挨着 baidi-desktop.exe，
+#   用户会当成白帝自己的许可 —— 而改这个名字的全部目的就是避免这个误认。
+#   源文件一开始就叫对名字，两个打包器的分歧就绕开了，不用押在谁的实现上。
+extract_member "$ZIP" "wintun/LICENSE.txt" "$STAGE_DIR/wintun-LICENSE.txt"
+echo "==> 许可：$STAGE_DIR/wintun-LICENSE.txt（$(file_bytes "$STAGE_DIR/wintun-LICENSE.txt") 字节，随安装包一起附上）"
 
 echo "==> DLL（从官方 zip 原样解出，不做任何加工）"
 for a in "${ARCHES[@]}"; do

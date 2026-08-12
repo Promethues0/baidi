@@ -129,8 +129,9 @@ manifest 里仍是占位）。要下发它们，得先解决下面第四、五�
 ### 从哪来：构建期取件，不入库
 
 `src-tauri/fetch-wintun.sh` 从官方 <https://www.wintun.net/> 下载 zip 并做 **SHA-256 强校验**
-（哈希的来历见下文「哈希从哪儿来」），按架构解出 DLL 与 `LICENSE.txt` 到
-`src-tauri/binaries/wintun/`。`build-sidecars.sh` 在 `GOOS=windows` 时自动调它。
+（哈希的来历见下文「哈希从哪儿来」），按架构解出 DLL 到 `src-tauri/binaries/wintun/`，
+许可原文解成同目录的 `wintun-LICENSE.txt`（**在取件这一步就改名**，理由见下文
+「许可为什么不靠 resources 重命名」）。`build-sidecars.sh` 在 `GOOS=windows` 时自动调它。
 二进制**不进 git**：本仓库被 `gateway/baidi-tun` 那两个 13MB 历史产物坑过一次，
 入库之后没人再核对来源，clone 的人也无从判断它是不是官方那一份。
 
@@ -219,7 +220,7 @@ wintun 用 `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRAR
 `tauri.conf.json`；放主配置里会让 macOS/Linux 构建因找不到这两个文件而失败）：
 
 ```json
-"resources": { "binaries/wintun/wintun.dll": "", "binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt" }
+"resources": { "binaries/wintun/wintun.dll": "", "binaries/wintun/wintun-LICENSE.txt": "" }
 ```
 
 **必须是这种「映射形 + 目的地空串」的写法**，理由是失败形态：写成列表形
@@ -227,6 +228,28 @@ wintun 用 `LoadLibraryEx(..., LOAD_LIBRARY_SEARCH_APPLICATION_DIR | LOAD_LIBRAR
 DLL 会装到 `<安装目录>\binaries\wintun\wintun.dll` —— 包照样打得出、装得上、文件也确实在，
 只有用户点「接入」那一刻加载失败。空串是 Tauri 里「放到资源根目录、保留原文件名」的
 唯一写法（`tauri-utils/src/resources.rs`），而 Windows 上资源根目录就是安装目录本身。
+
+#### 许可为什么不靠 resources 重命名
+
+两个键的目的地都是空串，**不是风格统一，是被咬过一次**。
+
+原先写的是 `"binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt"`，指望 Tauri 按
+「源路径 → 目标路径」改名。CI 第一次真正跑通落位断言时，`msiexec /a` 摊开的文件树是：
+
+```
+\PFiles\白帝安全接入客户端\baidi-tun.exe
+\PFiles\白帝安全接入客户端\wintun.dll          ← 同目录，对
+\PFiles\白帝安全接入客户端\LICENSE.txt         ← 名字没改
+```
+
+**那条重命名只有 NSIS 遵守，MSI 直接忽略、沿用源文件名。** 同一份配置、两个打包器
+两种结果，而且两边都不报错、构建全绿。后果不是"少个文件"：装完之后应用目录里躺着
+一个叫 `LICENSE.txt` 的文件、紧挨着 `baidi-desktop.exe`，用户会把它当成白帝自己的
+许可——而改这个名字的全部目的就是避免这个误认。
+
+修法是让**源文件一开始就叫对名字**（`fetch-wintun.sh` 解件时直接写成
+`wintun-LICENSE.txt`），两个打包器的行为分歧就绕开了，不用押在谁的实现上。
+`src/elevate.rs` 里有断言钉住这一点，并明确拒绝退回「靠映射改名」的写法。
 
 externalBin 与 resources 在 Windows 上落到同一处，这一点是查过打包器源码的：
 NSIS 模板在 `Section Install` 里先 `SetOutPath $INSTDIR`，随后 resources 与 binaries 都用

@@ -16,7 +16,7 @@
     },
     "resources": {
       "binaries/wintun/wintun.dll": "",
-      "binaries/wintun/LICENSE.txt": "wintun-LICENSE.txt"
+      "binaries/wintun/wintun-LICENSE.txt": ""
     }
   }
 }

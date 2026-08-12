@@ -94,7 +94,7 @@ fail() { echo "✗ $*" >&2; exit 1; }
 
 # 许可原文缺席不是小事：README-windows.txt 与 BUILD.md 都对外说了「许可原文随包附上」，
 # 少了它，发出去的包与我们自己的说明不符。（这是我们自愿的承诺，不是许可条款的要求。）
-[ -s "$STAGE/LICENSE.txt" ] || fail "缺 $STAGE/LICENSE.txt —— 我们承诺许可原文随包附上，它必须与 DLL 同时在场。"
+[ -s "$STAGE/wintun-LICENSE.txt" ] || fail "缺 $STAGE/wintun-LICENSE.txt —— 我们承诺许可原文随包附上，它必须与 DLL 同时在场。"
 
 [ -s "$STAGE/wintun.dll.triple" ] || fail "缺 $STAGE/wintun.dll.triple。
   取件脚本在产出固定位 wintun.dll 时会一并写下它是哪个架构；只有 DLL 没有这条记录，

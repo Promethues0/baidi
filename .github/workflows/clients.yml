@@ -300,7 +300,7 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $stage = 'clients/desktop/src-tauri/binaries/wintun'
-          foreach ($f in @('wintun.dll', 'LICENSE.txt')) {
+          foreach ($f in @('wintun.dll', 'wintun-LICENSE.txt')) {
             if (-not (Test-Path "$stage/$f")) {
               # 许可缺席不是小事：不是因为 Wintun 的许可强制附带（它没有这一条 ——
               # 3(c) 管的是"不得从 DLL 里剥掉版权注记"），而是因为**我们对外说了会附**
@@ -332,7 +332,7 @@ jobs:
             Write-Host ("✗ wintun.dll 架构错配：DLL machine=0x{0:x4}，runner 三元组 {1} 需要 0x{2:x4}" -f $machine, $triple, $want)
             exit 1
           }
-          Write-Host ("✓ wintun.dll machine=0x{0:x4}（{1}），许可 {2} 字节" -f $machine, $triple, (Get-Item "$stage/LICENSE.txt").Length)
+          Write-Host ("✓ wintun.dll machine=0x{0:x4}（{1}），许可 {2} 字节" -f $machine, $triple, (Get-Item "$stage/wintun-LICENSE.txt").Length)
 
       - name: 前端依赖
         working-directory: clients/desktop

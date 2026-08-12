@@ -1403,16 +1403,38 @@ mod tests {
             "目的地必须是空串——那是 Tauri 里「放到安装根目录、保留原文件名」的唯一写法：{res}"
         );
         // 许可原文随包附上（我们自愿的做法，不是许可条款的硬性要求——出处见下面那条测试），
-        // 改名是为了不与本产品的许可混淆。
+        // 叫 wintun-LICENSE.txt 是为了不与本产品的许可混淆。
+        //
+        // ★**改名必须发生在取件那一步，不能用映射形的「源 → 目标」重命名。**
+        //   实测（CI 首次跑通落位断言时由 msi 摊开的文件树抓到）：那个重命名
+        //   **只有 NSIS 遵守，MSI 直接忽略、沿用源文件名**。同一份配置、两个打包器
+        //   两种结果，且两边都不报错：
+        //       nsis → <安装目录>\wintun-LICENSE.txt   （对）
+        //       msi  → <安装目录>\LICENSE.txt          （错）
+        //   后果不是"少个文件"：应用目录里躺一个叫 LICENSE.txt 的文件、紧挨着
+        //   baidi-desktop.exe，用户会当成白帝自己的许可——而改名的全部目的就是避免这个误认。
+        //   所以这里钉的是「目的地为空串」：两个键都用同一条无歧义的语义
+        //   （放安装根目录、保留原文件名），谁的实现都绕不开。
         assert_eq!(
-            res["binaries/wintun/LICENSE.txt"].as_str(),
-            Some("wintun-LICENSE.txt"),
-            "许可原文要随包附上：{res}"
+            res["binaries/wintun/wintun-LICENSE.txt"].as_str(),
+            Some(""),
+            "许可原文要随包附上，且必须靠**源文件名**而不是映射重命名——msi 忽略重命名：{res}"
+        );
+        assert!(
+            res.get("binaries/wintun/LICENSE.txt").is_none(),
+            "别退回「源叫 LICENSE.txt、靠映射改名」的写法：nsis 会照做而 msi 不会，\
+             两个安装器装出不同的文件名，且都不报错：{res}"
         );
         // 源路径要与取件脚本的暂存位一致（那边改了这边不改 = 构建期 ResourcePathNotFound）。
+        let fetch = include_str!("../fetch-wintun.sh");
         assert!(
-            include_str!("../fetch-wintun.sh").contains(r#"STAGE_DIR="$HERE/binaries/wintun""#),
+            fetch.contains(r#"STAGE_DIR="$HERE/binaries/wintun""#),
             "取件脚本的暂存目录变了，打包配置要跟着改"
+        );
+        // 取件脚本必须真的把它解成这个名字——上面那条只说了"配置里写的是什么"。
+        assert!(
+            fetch.contains(r#""$STAGE_DIR/wintun-LICENSE.txt""#),
+            "fetch-wintun.sh 得把许可解成 wintun-LICENSE.txt，否则打包期 ResourcePathNotFound"
         );
     }
 
@@ -1664,7 +1686,7 @@ mod tests {
                 ("wintun.dll", &dll),
                 ("x86_64-pc-windows-msvc/wintun.dll", &dll),
                 ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n"),
-                ("LICENSE.txt", b"Prebuilt Binaries License"),
+                ("wintun-LICENSE.txt", b"Prebuilt Binaries License"),
             ],
         );
         let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
@@ -1688,7 +1710,7 @@ mod tests {
             &[
                 ("wintun.dll", &造_pe(PE_MACHINE_ARM64)),
                 ("wintun.dll.triple", b"aarch64-pc-windows-msvc\n"),
-                ("LICENSE.txt", b"Prebuilt Binaries License"),
+                ("wintun-LICENSE.txt", b"Prebuilt Binaries License"),
             ],
         );
         let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
@@ -1708,7 +1730,7 @@ mod tests {
             "no-triple",
             &[
                 ("wintun.dll", &造_pe(PE_MACHINE_AMD64)),
-                ("LICENSE.txt", b"Prebuilt Binaries License"),
+                ("wintun-LICENSE.txt", b"Prebuilt Binaries License"),
             ],
         );
         let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
@@ -1729,7 +1751,7 @@ mod tests {
                 ("wintun.dll", b"\x4d\x5a\xde\xad\xbe\xef"),
                 ("x86_64-pc-windows-msvc/wintun.dll", &造_pe(PE_MACHINE_AMD64)),
                 ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n"),
-                ("LICENSE.txt", b"Prebuilt Binaries License"),
+                ("wintun-LICENSE.txt", b"Prebuilt Binaries License"),
             ],
         );
         let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
@@ -1750,7 +1772,7 @@ mod tests {
         );
         let (ok, out) = 跑暂存区复核(&d, "x86_64-pc-windows-msvc");
         assert!(!ok, "缺许可原文必须拒绝：{out}");
-        assert!(out.contains("LICENSE.txt"), "{out}");
+        assert!(out.contains("wintun-LICENSE.txt"), "{out}");
     }
 
     /// 非 Windows 目标上这套暂存区根本不存在，复核必须安静跳过——否则 mac/Linux 的

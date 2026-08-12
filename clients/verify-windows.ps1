@@ -39,7 +39,9 @@
     阶段 C 用：baidi-control 地址，如 https://10.0.0.5:8090
 
 .PARAMETER ReportPath
-    结果写到哪个文件（默认桌面 baidi-windows-verify.txt）。把这份文件回传即可。
+    结果写到哪个文件。留空（默认）时自动依次尝试：真实桌面（含 OneDrive 重定向后的）
+    → 用户目录 → 脚本所在目录 → %TEMP%，第一个写得进去的就用它，并回读确认后才报路径。
+    **报告全文同时会整段打在屏幕上**——文件写不出时直接复制那段回传即可，不会丢结论。
 
 .EXAMPLE
     # 最常用：装完先跑阶段 A（普通权限即可）
@@ -54,7 +56,10 @@ param(
     [ValidateSet('A', 'B', 'C', 'All')][string]$Stage = 'A',
     [string]$InstallDir = '',
     [string]$Control = '',
-    [string]$ReportPath = "$env:USERPROFILE\Desktop\baidi-windows-verify.txt"
+    # 留空表示"自动挑一个写得进去的位置"（见 Write-Report）。
+    # ★刻意不再写死 "$env:USERPROFILE\Desktop"：OneDrive 接管桌面之后那个目录**可能根本不存在**，
+    #   而原先的写法在写失败之后照样打印"报告已写入"——脚本声称成功、实际什么都没留下。
+    [string]$ReportPath = ''
 )
 
 $ErrorActionPreference = 'Continue'   # 单条检查失败不中止整轮：一次跑完拿到全貌比早退更有用
@@ -268,35 +273,82 @@ Write-Host '白帝 Windows 客户端实机验证' -ForegroundColor White
 Write-Host ("主机 {0} / {1} / PowerShell {2}" -f $env:COMPUTERNAME,
     (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption, $PSVersionTable.PSVersion)
 
-switch ($Stage) {
-    'A'   { Invoke-StageA }
-    'B'   { Invoke-StageB }
-    'C'   { Invoke-StageC }
-    'All' { Invoke-StageA; Invoke-StageB; Invoke-StageC }
+function Write-Report {
+    $pass = ($script:Results | Where-Object Verdict -eq 'PASS').Count
+    $fail = ($script:Results | Where-Object Verdict -eq 'FAIL').Count
+    $unk  = ($script:Results | Where-Object Verdict -eq 'UNKNOWN').Count
+    $skip = ($script:Results | Where-Object Verdict -eq 'SKIP').Count
+
+    Write-Host ("`n结果：通过 {0} · 失败 {1} · 不可判定 {2} · 跳过 {3}" -f $pass, $fail, $unk, $skip) `
+        -ForegroundColor $(if ($fail -gt 0) { 'Red' } else { 'Green' })
+
+    $report = @()
+    $report += "白帝 Windows 客户端实机验证报告"
+    $report += "时间   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    $report += "主机   : $env:COMPUTERNAME"
+    $report += "系统   : $((Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)"
+    $report += "架构   : $env:PROCESSOR_ARCHITECTURE"
+    $report += "阶段   : $Stage"
+    $report += "汇总   : 通过 $pass · 失败 $fail · 不可判定 $unk · 跳过 $skip"
+    $report += ''
+    foreach ($r in $script:Results) {
+        $report += ("[{0}] {1} {2}" -f $r.Verdict.PadRight(7), $r.Id, $r.Name)
+        if ($r.Detail) { $report += "         $($r.Detail)" }
+    }
+    $text = $report -join "`r`n"
+
+    # ★先打屏，再落盘。落盘可能因为各种原因失败（桌面被 OneDrive 重定向、目录只读、
+    #   路径含奇怪字符…），而报告内容本身是这次运行**唯一**的产出——
+    #   把它锁在一个可能写不出的文件里，等于让最该被看到的东西最容易丢。
+    #   屏幕上这一份任何情况下都在，可以直接复制回传。
+    Write-Host ''
+    Write-Host '════════ 报告全文（文件没写出来时，直接复制这段回传即可）════════' -ForegroundColor Cyan
+    Write-Host $text
+    Write-Host '════════════════════════════════════════════════════════════' -ForegroundColor Cyan
+
+    # 候选落点依次试。[Environment]::GetFolderPath('Desktop') 会正确返回 OneDrive
+    # 重定向之后的真实桌面，`$env:USERPROFILE\Desktop` 不会。
+    $candidates = @()
+    if ($ReportPath) { $candidates += $ReportPath }
+    else {
+        $desktop = [Environment]::GetFolderPath('Desktop')
+        if ($desktop) { $candidates += (Join-Path $desktop 'baidi-windows-verify.txt') }
+        $candidates += (Join-Path $env:USERPROFILE 'baidi-windows-verify.txt')
+        if ($PSScriptRoot) { $candidates += (Join-Path $PSScriptRoot 'baidi-windows-verify.txt') }
+        $candidates += (Join-Path $env:TEMP 'baidi-windows-verify.txt')
+    }
+
+    foreach ($c in $candidates) {
+        try {
+            $parent = Split-Path -Parent $c
+            if ($parent -and -not (Test-Path $parent)) { continue }
+            Set-Content -Path $c -Value $text -Encoding UTF8 -ErrorAction Stop
+            # ★回读确认：写没写成不能靠"没抛异常"来判断。原先那版就是无条件打印
+            #   "报告已写入"，桌面被重定向时它照样这么说。
+            $fi = Get-Item -LiteralPath $c -ErrorAction Stop
+            if ($fi.Length -gt 0) {
+                Write-Host "报告已写入：$($fi.FullName)（$($fi.Length) 字节）" -ForegroundColor Cyan
+                Write-Host '把这个文件回传即可（里面没有任何凭据，只有路径、架构与状态）。' -ForegroundColor DarkGray
+                return
+            }
+        } catch { }
+    }
+    Write-Host "✗ 报告文件没能写到任何位置，试过：" -ForegroundColor Yellow
+    foreach ($c in $candidates) { Write-Host "    $c" -ForegroundColor DarkGray }
+    Write-Host "  不影响结论——上面那段「报告全文」就是完整内容，复制回传即可。" -ForegroundColor Yellow
 }
 
-# ── 报告 ──
-$pass = ($script:Results | Where-Object Verdict -eq 'PASS').Count
-$fail = ($script:Results | Where-Object Verdict -eq 'FAIL').Count
-$unk  = ($script:Results | Where-Object Verdict -eq 'UNKNOWN').Count
-$skip = ($script:Results | Where-Object Verdict -eq 'SKIP').Count
-
-Write-Host ("`n结果：通过 {0} · 失败 {1} · 不可判定 {2} · 跳过 {3}" -f $pass, $fail, $unk, $skip) `
-    -ForegroundColor $(if ($fail -gt 0) { 'Red' } else { 'Green' })
-
-$report = @()
-$report += "白帝 Windows 客户端实机验证报告"
-$report += "时间   : $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-$report += "主机   : $env:COMPUTERNAME"
-$report += "系统   : $((Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption)"
-$report += "架构   : $env:PROCESSOR_ARCHITECTURE"
-$report += "阶段   : $Stage"
-$report += "汇总   : 通过 $pass · 失败 $fail · 不可判定 $unk · 跳过 $skip"
-$report += ''
-foreach ($r in $script:Results) {
-    $report += ("[{0}] {1} {2}" -f $r.Verdict.PadRight(7), $r.Id, $r.Name)
-    if ($r.Detail) { $report += "         $($r.Detail)" }
+# ★包进 try/finally：某一阶段抛出终止性错误时，**已经跑出来的那部分结论照样要留下**。
+#   验证脚本最该留下记录的时刻，恰恰是它自己出问题的时候。
+try {
+    switch ($Stage) {
+        'A'   { Invoke-StageA }
+        'B'   { Invoke-StageB }
+        'C'   { Invoke-StageC }
+        'All' { Invoke-StageA; Invoke-StageB; Invoke-StageC }
+    }
+} catch {
+    Add-Result 'XX' '脚本自身异常' 'FAIL' ("$($_.Exception.Message)  @ $($_.InvocationInfo.PositionMessage -replace '\r?\n',' ')")
+} finally {
+    Write-Report
 }
-$report -join "`r`n" | Set-Content -Path $ReportPath -Encoding UTF8
-Write-Host "报告已写入：$ReportPath" -ForegroundColor Cyan
-Write-Host '把这个文件回传即可（里面没有任何凭据，只有路径、架构与状态）。' -ForegroundColor DarkGray

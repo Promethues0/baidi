@@ -130,6 +130,22 @@ jobs:
           [ "$bad" = 0 ] && echo "✓ 全部 shell 脚本语法通过"
           exit "$bad"
 
+      - name: PowerShell 脚本语法（clients/verify-windows.ps1 是要发给用户跑的）
+        shell: pwsh
+        run: |
+          # ★这个文件是**交付物**：用户下载 UNVERIFIED 包之后照着 BUILD.md 第十节跑它，
+          #   全 PASS 才是把 UNVERIFIED 摘掉的唯一途径。而它是在 macOS 上写的，
+          #   开发机没有 pwsh —— 在此之前**没有任何东西验证过它能不能解析**。
+          #   一个语法错误的验证脚本，症状是用户跑完什么都没有，而我们以为他没跑。
+          $errs = $null
+          $null = [System.Management.Automation.Language.Parser]::ParseFile(
+                    (Resolve-Path 'clients/verify-windows.ps1'), [ref]$null, [ref]$errs)
+          if ($errs -and $errs.Count) {
+            foreach ($e in $errs) { Write-Host "✗ $($e.Extent.StartLineNumber): $($e.Message)" }
+            exit 1
+          }
+          Write-Host '✓ verify-windows.ps1 语法通过'
+
       - name: Tauri 打包配置：图标声明齐全且文件真的在
         run: |
           # `bundle.icon` 默认是**空列表**，不是"自动扫 icons/ 目录"。icons/ 里 19 个图标
@@ -350,6 +366,36 @@ jobs:
             exit 1
           }
           Write-Host ("✓ wintun.dll machine=0x{0:x4}（{1}），许可 {2} 字节" -f $machine, $triple, (Get-Item "$stage/wintun-LICENSE.txt").Length)
+
+      - name: 冒烟跑一次 verify-windows.ps1（断言它真的写得出报告）
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          # ★回归背景：用户在自己的 Windows 上跑完，**桌面上没有 baidi-windows-verify.txt**。
+          #   原因是脚本把报告写死在 `$env:USERPROFILE\Desktop`，而 OneDrive 接管桌面之后
+          #   那个目录可能根本不存在；`Set-Content` 失败了，下一行却**无条件**打印
+          #   "报告已写入：…" —— 脚本声称成功、实际什么都没留下。
+          #   这里跑的是**自动挑落点**那条路径（不传 -ReportPath），也就是出问题的那条。
+          #
+          # runner 上没装白帝，A0 会判 FAIL —— 那是对的，本步骤不看结论对错，
+          # 只看两件事：脚本跑得完、报告真的落了盘。
+          $out = & powershell -ExecutionPolicy Bypass -File clients/verify-windows.ps1 -Stage A 2>&1 |
+                 Out-String
+          Write-Host $out
+          if ($out -notmatch '报告全文') {
+            Write-Host '✗ 没有把报告全文打到屏幕上 —— 文件写不出时用户就彻底拿不到结论了'; exit 1
+          }
+          $m = [regex]::Match($out, '报告已写入：([^（\r\n]+)')
+          if (-not $m.Success) {
+            Write-Host '✗ 脚本没能把报告写到任何位置（它自己也这么说了）'; exit 1
+          }
+          $path = $m.Groups[1].Value.Trim()
+          if (-not (Test-Path -LiteralPath $path)) {
+            Write-Host "✗ 脚本说写到了 $path，但那里没有文件 —— 正是要拦的那种「声称成功」"; exit 1
+          }
+          $len = (Get-Item -LiteralPath $path).Length
+          if ($len -le 0) { Write-Host "✗ $path 是空文件"; exit 1 }
+          Write-Host "✓ 报告真的落盘：$path（$len 字节）"
 
       - name: 前端依赖
         working-directory: clients/desktop

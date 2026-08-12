@@ -498,3 +498,79 @@ macOS 那一行是同一条纪律的另一半：脚本在**缺 dmg** 时曾写 `
 缺失时页面回落到 `placeholderManifest()` 的「构建中，敬请期待」—— 同一个平台在两条路径上
 说两种话（一句解释 vs 什么都不说）。两处文案的一致性现在由 Go 用例真跑一遍脚本来守
 （`control/internal/api/downloads_script_test.go`）。
+
+## 十、Windows 实机验证（把 UNVERIFIED 摘掉的唯一途径）
+
+Windows 这条链路至今**从未在真实 Windows 上跑过**：包出得来、wintun.dll 与许可随包、
+提权链有单测，但**建虚拟网卡、UAC 交互、NRPT 分离式 DNS 一次都没实测**。
+产物因此标 UNVERIFIED 且不进下载中心——这不是保守，是那几条确实没有证据。
+
+`clients/verify-windows.ps1` 就是用来把这些逐条变成「已验证」或「确认坏了」的。
+**它不修任何东西，只观察并如实报告**，最后写一份纯文本报告（不含任何凭据，
+只有路径、架构与状态），回传即可。
+
+### 10.1 在 Windows 上出包
+
+GitHub Actions 的 windows runner 能出（见第三节），但要**本机出包**：
+
+```powershell
+# 前置（一次性）
+#   1. Visual Studio Build Tools 2022 + "使用 C++ 的桌面开发" 工作负载（MSVC 链接器）
+#   2. rustup（https://rustup.rs），默认 x86_64-pc-windows-msvc 工具链
+#   3. Node.js 20+
+#   4. Go 1.26+
+#   5. Git for Windows（build-sidecars.sh 要 Git Bash 跑）
+
+cd clients\desktop\src-tauri
+# 取 wintun.dll（官方取件 + SHA-256 强校验）并编 Go sidecar。用 Git Bash：
+& "C:\Program Files\Git\bin\bash.exe" -lc "./build-sidecars.sh"
+
+cd ..
+npm ci
+npm run tauri:build
+# 产物：src-tauri\target\release\bundle\{msi,nsis}\
+```
+
+出包失败的话，把完整报错贴回来——**第一次在真 Windows 上跑，大概率要修几轮**，
+这本身就是有价值的信息。
+
+### 10.2 三个阶段怎么跑
+
+**阶段 A｜打包落位**（装完即可，普通权限，不改动系统任何状态）
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\clients\verify-windows.ps1
+```
+
+这一阶段最值钱的是 **A2**：wintun.dll 是否真的落在 `baidi-tun.exe` 同目录。
+该结论此前**只由打包器源码推断**（读 tauri-bundler 的 NSIS/MSI 模板），从未实测。
+wintun 用 `LoadLibraryEx(APPLICATION_DIR|SYSTEM32)`，只看**进程自身 exe 所在目录**
+与 System32——放错一层子目录，包照样装得上，只在点「接入」那一刻炸。
+
+A1 验的是安装目录是否在 Program Files。若落在 `%LOCALAPPDATA%`，说明
+`installMode: perMachine` 没生效——那个目录普通用户可写，而里面的 exe/dll
+随后会被 UAC 提权加载，是一条本地提权路径。
+
+**阶段 B｜提权与建卡**（需要管理员，会真的建网卡，跑完自动清理）
+
+```powershell
+# 右键「以管理员身份运行」PowerShell
+powershell -ExecutionPolicy Bypass -File .\clients\verify-windows.ps1 -Stage B
+```
+
+B1 刻意用一个必然连不通的网关地址（`127.0.0.1:1`），只让它走到建卡那一步——
+**建卡失败与连不上网关是两种完全不同的错误**，混在一起测就无从归因。
+
+**阶段 C｜完整链路**（需要可达的 baidi-control 与 baidi-gateway）
+
+目前只能人工走：用客户端登录并点「接入」，然后
+`Get-DnsClientNrptRule` 看分流规则在不在，断开后再看是否回收。
+脚本会把这几步列成待办，不会假装自动验过。
+
+### 10.3 结果怎么用
+
+- **全 PASS** → Windows 就可以从 UNVERIFIED 转正：占位文案改成可用、
+  产物进下载中心。这是唯一正当的转正依据。
+- **有 FAIL** → 把报告回传，按 Id 逐条修。失败比不测有价值得多。
+- **UNKNOWN** → 脚本读不出（如 PE 头损坏、System32 里有别的软件装的 wintun）。
+  按不可判定处理，**不当成通过**。

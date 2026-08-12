@@ -47,7 +47,7 @@ trap cleanup EXIT
 mkdir -p "$WORK"
 
 # ★自检必须跑在**独立的库与密钥材料**上：BAIDI_DB / BAIDI_PKI_DIR / 两把签名密钥
-# 全部指向 $WORK。否则自检会改写使用者 control/baidi.db 里的演示资源后端
+# 全部指向 ${WORK}。否则自检会改写使用者 control/baidi.db 里的演示资源后端
 # （下面要把 oa/git 指向本机端口才能观测路由），把人家的演示环境搞坏。
 export BAIDI_DB="$WORK/e2e.db"
 export BAIDI_PKI_DIR="$WORK/pki"
@@ -64,14 +64,14 @@ preflight_port UDP "$SPA_PORT"   "SPA 敲门"  || RC=1
 preflight_port TCP "$BE1_PORT"   "后端 A"    || RC=1
 preflight_port TCP "$BE2_PORT"   "后端 B"    || RC=1
 [ $RC -ne 0 ] && exit 1
-echo "   ✓ 端口可用（spa=$SPA_PORT proxy=$PROXY_PORT 后端=$BE1_PORT/$BE2_PORT）"
+echo "   ✓ 端口可用（spa=$SPA_PORT proxy=$PROXY_PORT 后端=$BE1_PORT/${BE2_PORT}）"
 
 echo "==> 构建（预编译，避免每步 go run 重复编译拖慢自检）"
 ( cd "$HERE" && go build -o "$WORK/baidi-gateway" ./cmd/baidi-gateway ) || exit 1
 ( cd "$HERE" && go build -o "$WORK/baidi-e2e" ./cmd/baidi-e2e ) || exit 1
 ( cd "$ROOT/control" && go build -o "$WORK/baidi-control" ./cmd/baidi-control ) || exit 1
 
-echo "==> 起控制面（独立库 $BAIDI_DB；含网关 mTLS 口）"
+echo "==> 起控制面（独立库 ${BAIDI_DB}；含网关 mTLS 口）"
 pkill -f "$WORK/baidi-control" 2>/dev/null; sleep 0.5
 rm -f "$BAIDI_DB"   # 每次自检从干净种子起步，结果可复现
 ( cd "$WORK" && nohup "$WORK/baidi-control" >"$WORK/control.log" 2>&1 & )

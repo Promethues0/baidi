@@ -24,14 +24,14 @@ case "$TRIPLE" in
   aarch64-*linux*)      GOOS=linux  GOARCH=arm64 ;;
   x86_64-pc-windows-*)  GOOS=windows GOARCH=amd64 EXT=.exe ;;
   aarch64-pc-windows-*) GOOS=windows GOARCH=arm64 EXT=.exe ;;
-  *) echo "✗ 未适配的三元组 $TRIPLE，请手动设置 GOOS/GOARCH"; exit 1 ;;
+  *) echo "✗ 未适配的三元组 ${TRIPLE}，请手动设置 GOOS/GOARCH"; exit 1 ;;
 esac
 
 mkdir -p "$HERE/binaries"
-echo "==> 编译 baidi-knock（$GOOS/$GOARCH）"
+echo "==> 编译 baidi-knock（$GOOS/${GOARCH}）"
 ( cd "$GW" && CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags='-s -w' \
     -o "$HERE/binaries/baidi-knock-$TRIPLE$EXT" ./cmd/baidi-knock )
-echo "==> 编译 baidi-tun（$GOOS/$GOARCH，utun/tun/wintun 数据面引擎）"
+echo "==> 编译 baidi-tun（$GOOS/${GOARCH}，utun/tun/wintun 数据面引擎）"
 ( cd "$GW" && CGO_ENABLED=0 GOOS=$GOOS GOARCH=$GOARCH go build -trimpath -ldflags='-s -w' \
     -o "$HERE/binaries/baidi-tun-$TRIPLE$EXT" ./cmd/baidi-tun )
 chmod +x "$HERE/binaries/"*
@@ -40,7 +40,7 @@ chmod +x "$HERE/binaries/"*
 # 入库之后没人再核对来源），改为构建期从官方取件 + SHA-256 强校验，逻辑全在 fetch-wintun.sh。
 # 这里只是把它接进 Windows 这条构建线；离线/内网构建、排障时那个脚本可以单独跑。
 if [ "$GOOS" = "windows" ]; then
-  echo "==> 取 wintun.dll（$GOARCH，官方 zip + 哈希强校验）"
+  echo "==> 取 wintun.dll（${GOARCH}，官方 zip + 哈希强校验）"
   "$HERE/fetch-wintun.sh" --arch "$GOARCH"
   # ★取完立刻复核一次固定位的架构。看着像多余（上一行刚按 GOARCH 取的），但它拦的是
   #   "暂存区在此之前被手工动过"：取件脚本只在**单一架构**时才写固定位，别的路径
@@ -58,7 +58,7 @@ if [[ "$TRIPLE" == *apple-darwin ]]; then
       aarch64-apple-darwin) OGOARCH=arm64 ;;
       x86_64-apple-darwin)  OGOARCH=amd64 ;;
     esac
-    echo "==> 交叉编译 sidecar（darwin/$OGOARCH → $OTHER）"
+    echo "==> 交叉编译 sidecar（darwin/$OGOARCH → ${OTHER}）"
     ( cd "$GW" && CGO_ENABLED=0 GOOS=darwin GOARCH=$OGOARCH go build -trimpath -ldflags='-s -w' \
         -o "$HERE/binaries/baidi-knock-$OTHER" ./cmd/baidi-knock )
     ( cd "$GW" && CGO_ENABLED=0 GOOS=darwin GOARCH=$OGOARCH go build -trimpath -ldflags='-s -w' \

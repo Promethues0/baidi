@@ -59,7 +59,7 @@ fi
 # IPSec 站点 PSK 的主密钥**文件路径**（control 用它 AES-256-GCM 加密 PSK 落库）。
 # 与 WITH_IPSEC 无关：只要管理员在控制台上给站点设了 PSK，control 就会用到它，
 # 哪怕这台机不跑 baidi-ipsec。
-# ★不钉这一项的话默认值是相对路径 ipsec-psk.key，会落在 WorkingDirectory（$BD_PREFIX）根下，
+# ★不钉这一项的话默认值是相对路径 ipsec-psk.key，会落在 WorkingDirectory（${BD_PREFIX}）根下，
 #   与 etc/keys 里其它私钥不在一处。备份清单漏掉它的后果是：库还原了、所有 PSK 解不开，
 #   而报错是「authentication failed」——看起来像两端 PSK 配错了，不像密钥丢了。
 # 幂等追加：已有该项就一个字节都不动（重装时改路径 = 存量 PSK 全部解不开）。
@@ -91,7 +91,7 @@ if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
       -keyout "$BD_PREFIX/etc/tls/server.key" -out "$BD_PREFIX/etc/tls/server.crt" \
       -subj "/CN=baidi" -addext "subjectAltName=$san" >/dev/null 2>&1 )
   chmod 0700 "$BD_PREFIX/etc/tls"; chmod 0600 "$BD_PREFIX/etc/tls/server.key"; chmod 0644 "$BD_PREFIX/etc/tls/server.crt"
-  echo "==> 已生成自签 TLS 证书（SAN=$san，私钥 0600）"
+  echo "==> 已生成自签 TLS 证书（SAN=${san}，私钥 0600）"
 fi
 
 chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX"
@@ -220,7 +220,7 @@ BAIDI_GW_WEB_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/web.pub
 # Host 头是客户端可控的，把它当真实值转发就是 Host header injection
 # （后端据它拼出的找回密码链接会指向攻击者的域名）。
 #BAIDI_GW_WEB_EXTERNAL_HOST=
-# 机器身份：mTLS 客户端证书（CN=$GW_ID），控制面据此认人并可即刻吊销
+# 机器身份：mTLS 客户端证书（CN=${GW_ID}），控制面据此认人并可即刻吊销
 BAIDI_GW_MTLS_CERT=$BD_PREFIX/etc/gwcerts/gw.crt.pem
 BAIDI_GW_MTLS_KEY=$BD_PREFIX/etc/gwcerts/gw.key.pem
 BAIDI_GW_MTLS_CA=$BD_PREFIX/etc/gwcerts/ca.crt.pem
@@ -233,7 +233,7 @@ GWENV
   systemctl enable --now baidi-gateway
   systemctl restart baidi-gateway
   sleep 1
-  systemctl is-active --quiet baidi-gateway && echo "  ✓ baidi-gateway 已起：SPA :18201/udp + 国密 TLCP 代理 :18443/tcp（mTLS 身份 CN=$GW_ID，经 :${MTLS_PORT} 拉策略，后端=control:${CONTROL_PORT}）" \
+  systemctl is-active --quiet baidi-gateway && echo "  ✓ baidi-gateway 已起：SPA :18201/udp + 国密 TLCP 代理 :18443/tcp（mTLS 身份 CN=${GW_ID}，经 :${MTLS_PORT} 拉策略，后端=control:${CONTROL_PORT}）" \
     || { echo "  ✗ baidi-gateway 启动失败，看日志："; journalctl -u baidi-gateway --no-pager -n 12; }
 fi
 
@@ -285,7 +285,7 @@ if [ "${WITH_IPSEC:-0}" = "1" ]; then
   # 离线签发写的是固定文件名（gw.crt.pem/gw.key.pem/…），共用目录 = 后签的那张
   # 直接覆盖前一张：两个进程会拿着同一个 CN 的证书互相顶，控制面按 CN 分权后
   # 一定有一方全程 403。这一条是纯粹的踩坑预防，别为了少个目录合并。
-  echo "==> 签发站点组网网关身份材料（mTLS 客户端证书 CN=$IPSEC_GW_ID）"
+  echo "==> 签发站点组网网关身份材料（mTLS 客户端证书 CN=${IPSEC_GW_ID}）"
   as_bd env \
     BAIDI_DB="$BD_PREFIX/data/baidi.db" \
     BAIDI_JWT_KEY="$BD_PREFIX/etc/keys/jwt-ed25519.pem" \
@@ -320,7 +320,7 @@ IPSECENV
   systemctl restart baidi-ipsec
   sleep 1
   if systemctl is-active --quiet baidi-ipsec; then
-    echo "  ✓ baidi-ipsec 已起：IKE :${IKE_PORT}/udp + NAT-T :${NATT_PORT}/udp（mTLS 身份 CN=$IPSEC_GW_ID，经 :${MTLS_PORT} 拉站点配置）"
+    echo "  ✓ baidi-ipsec 已起：IKE :${IKE_PORT}/udp + NAT-T :${NATT_PORT}/udp（mTLS 身份 CN=${IPSEC_GW_ID}，经 :${MTLS_PORT} 拉站点配置）"
     echo "  ★控制台上建站点时，「所属网关」必须逐字符填 $IPSEC_GW_ID"
     echo "    控制面按 gateway_id == 证书 CN 精确过滤下发；填错拉到的是**空站点列表而不是错误**，"
     echo "    站点会安静地永远 down、日志里一条协商记录都没有。"

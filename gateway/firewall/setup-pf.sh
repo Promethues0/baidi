@@ -14,7 +14,7 @@ pfctl -e 2>/dev/null || true
 echo "anchor \"$ANCHOR\"" | pfctl -f -
 pfctl -a "$ANCHOR" -f "$DIR/baidi-pf.conf"
 
-echo "✓ 已加载 anchor $ANCHOR：默认 DROP 18443，仅放行 <baidi_allowed>"
+echo "✓ 已加载 anchor ${ANCHOR}：默认 DROP 18443，仅放行 <baidi_allowed>"
 echo "  查看规则：   sudo pfctl -a $ANCHOR -sr"
 echo "  查看放行表： sudo pfctl -a $ANCHOR -t baidi_allowed -T show"
 echo "  现在以 root 启动网关： sudo baidi-gateway -pf -gm -proxy :18443 -spa :18201 -backend 127.0.0.1:19999"

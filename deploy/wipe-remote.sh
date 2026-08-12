@@ -35,7 +35,7 @@ rm -f /etc/nginx/sites-enabled/* /etc/nginx/conf.d/* 2>/dev/null || true
 #   ② 本轮若换了 mTLS 证书，旧进程会拿着已吊销的证书反复被控制面拒，日志刷屏难定位。
 for svc in baidi-ipsec baidi-gateway; do
   if systemctl is-active --quiet "$svc" 2>/dev/null; then
-    echo "==> 停 $svc（白帝数据面，install 会重装拉起）"
+    echo "==> 停 ${svc}（白帝数据面，install 会重装拉起）"
     systemctl stop "$svc" 2>/dev/null || true
   fi
 done
@@ -71,5 +71,5 @@ for p in 500 4500; do
 done
 
 echo "==================== 完成 ===================="
-echo "✓ 原业务已停 + nginx 站点已清空（备份在 $BK）；80/443 已释放，白帝可独占部署。"
+echo "✓ 原业务已停 + nginx 站点已清空（备份在 ${BK}）；80/443 已释放，白帝可独占部署。"
 echo "  数据/应用目录(如 /var/www、/opt/* 非 baidi)未删除——如需彻底铲除，确认后人工 rm。"

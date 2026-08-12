@@ -43,9 +43,28 @@ done
 # ── 目标三元组：显式参数 > Tauri 注入的目标环境 > rustc host ────────────────
 # ★优先 TAURI_ENV_*（beforeBundleCommand 里 Tauri 会设）而不是 rustc host：交叉打包时
 #   host 是构建机、不是产物架构，按 host 判会把一次真实的错配放过去。
+#
+# ★平台后缀必须按平台真的映射，不能套一个模板。原先写的是
+#   TRIPLE="${TAURI_ENV_ARCH}-pc-${TAURI_ENV_PLATFORM}-msvc"
+# 于是 Linux 构建日志里赫然出现 `x86_64-pc-linux-msvc` 这个**不存在的三元组**。
+# 结论碰巧是对的（不含 windows → 跳过），但判据是编出来的：Tauri 哪天把平台值
+# 从 `windows` 改成别的写法，这里就会在**真正的 Windows 构建**上安静地跳过检查，
+# 而日志看起来与今天一模一样。所以「是不是 Windows」直接问 TAURI_ENV_PLATFORM，
+# 不再从拼出来的字符串里回捞。
 if [ -z "$TRIPLE" ]; then
   if [ -n "${TAURI_ENV_PLATFORM:-}" ] && [ -n "${TAURI_ENV_ARCH:-}" ]; then
-    TRIPLE="${TAURI_ENV_ARCH}-pc-${TAURI_ENV_PLATFORM}-msvc"
+    case "$TAURI_ENV_PLATFORM" in
+      windows)      TRIPLE="${TAURI_ENV_ARCH}-pc-windows-msvc" ;;
+      darwin|macos) TRIPLE="${TAURI_ENV_ARCH}-apple-darwin" ;;
+      linux)        TRIPLE="${TAURI_ENV_ARCH}-unknown-linux-gnu" ;;
+      android)      TRIPLE="${TAURI_ENV_ARCH}-linux-android" ;;
+      ios)          TRIPLE="${TAURI_ENV_ARCH}-apple-ios" ;;
+      # 认不出的平台**不许静悄悄当成非 Windows**——那正是这道检查失去执行方的方式。
+      *) echo "✗ 认不出 TAURI_ENV_PLATFORM=${TAURI_ENV_PLATFORM}。不敢替它判断是否 Windows：" >&2
+         echo "  猜错的方向是「跳过检查」，而那会让一次真实的架构错配直接进包。" >&2
+         echo "  请在本脚本的平台映射里补上它，或显式传 --triple。" >&2
+         exit 1 ;;
+    esac
   elif command -v rustc >/dev/null 2>&1; then
     TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
   else
@@ -64,7 +83,7 @@ if ! is_windows "$TRIPLE"; then
   exit 0
 fi
 
-echo "==> 复核 wintun 暂存区：$STAGE（目标 $TRIPLE）"
+echo "==> 复核 wintun 暂存区：${STAGE}（目标 ${TRIPLE}）"
 
 fail() { echo "✗ $*" >&2; exit 1; }
 
@@ -100,10 +119,10 @@ BY_ARCH="$STAGE/$GOT/wintun.dll"
 if [ -f "$BY_ARCH" ]; then
   if ! cmp -s "$BY_ARCH" "$STAGE/wintun.dll"; then
     fail "固定位 $STAGE/wintun.dll 与 $BY_ARCH 内容不一致。
-  .triple 说它是 $GOT，但它与该架构原样解出的那份对不上 —— 取件之后被改过或被覆盖过。
+  .triple 说它是 ${GOT}，但它与该架构原样解出的那份对不上 —— 取件之后被改过或被覆盖过。
   别猜，重跑一次取件：$HERE/fetch-wintun.sh --arch $(triple_arch "$TRIPLE")"
   fi
   echo "    ✓ 与 $GOT/wintun.dll 逐字节一致"
 fi
 
-echo "✓ wintun 暂存区就绪：$GOT，许可原文在场"
+echo "✓ wintun 暂存区就绪：${GOT}，许可原文在场"

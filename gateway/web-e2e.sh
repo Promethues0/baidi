@@ -72,7 +72,7 @@ preflight_port TCP 8092 "网关 mTLS"   || RC=1
 preflight_port TCP "$WEB_PORT" "七层 Web 代理" || RC=1
 preflight_port TCP "$BE_PORT"  "业务后端"      || RC=1
 [ $RC -ne 0 ] && exit 1
-echo "   ✓ 端口可用（web=$WEB_PORT 后端=$BE_PORT）"
+echo "   ✓ 端口可用（web=$WEB_PORT 后端=${BE_PORT}）"
 
 echo "==> 构建"
 ( cd "$HERE" && go build -o "$WORK/baidi-gateway" ./cmd/baidi-gateway ) || exit 1
@@ -115,7 +115,7 @@ class H(BaseHTTPRequestHandler):
 HTTPServer(("127.0.0.1", int(sys.argv[1])), H).serve_forever()
 PY
 
-echo "==> 起控制面（独立库 $BAIDI_DB）"
+echo "==> 起控制面（独立库 ${BAIDI_DB}）"
 pkill -f "$WORK/baidi-control" 2>/dev/null; sleep 0.5
 rm -f "$BAIDI_DB"
 ( cd "$WORK" && nohup "$WORK/baidi-control" >"$WORK/control.log" 2>&1 & )
@@ -130,7 +130,7 @@ echo "==> 起业务后端"
 nohup python3 "$WORK/backend.py" "$BE_PORT" >/dev/null 2>&1 &
 sleep 1
 curl -s --max-time 2 "http://127.0.0.1:$BE_PORT/" | grep -q BAIDI-BACKEND || { echo "   ✗ 后端未就绪"; exit 1; }
-echo "   ✓ 后端就绪（127.0.0.1:$BE_PORT）"
+echo "   ✓ 后端就绪（127.0.0.1:${BE_PORT}）"
 
 echo "==> 签发网关 mTLS 客户端证书"
 ADMIN=$(curl -s -X POST "$CONTROL/api/v1/auth/login" -H 'Content-Type: application/json' \
@@ -194,7 +194,7 @@ echo "════════ 七层 Web 代理自检 ════════"
 echo "① 未带票据 / 伪造票据直连 L7"
 c1=$(code "$WEB/app/oa/")
 c2=$(code "$WEB/__baidi/enter?t=not-a-real-ticket")
-if [ "$c1" = "401" ] && [ "$c2" = "401" ]; then ok "裸访问与伪造票据都被拒（$c1/$c2）"
+if [ "$c1" = "401" ] && [ "$c2" = "401" ]; then ok "裸访问与伪造票据都被拒（$c1/${c2}）"
 else bad "应各回 401，实得 $c1/$c2"; fi
 
 echo "② 票据换会话 Cookie"
@@ -235,7 +235,7 @@ if [ -z "$gotxff" ]; then
 elif echo "$gotxff" | grep -q '1\.2\.3\.4'; then
   bad "★伪造的来源头透传到后端了：$gotxff"
 elif echo "$gotxff" | grep -q '127\.0\.0\.1' && echo "$gotxff" | grep -q 'admin'; then
-  ok "后端看到的是真实对端 + 网关验过的账号（$gotxff）"
+  ok "后端看到的是真实对端 + 网关验过的账号（${gotxff}）"
 else
   bad "剥掉了但没按真实对端重写：$gotxff"
 fi
@@ -250,9 +250,9 @@ else
   # 反向再验一次，确保 403 来自"绑定不符"而不是"这个账号没权限"
   c2=$(code -H "Cookie: baidi_web=$FCK" "$WEB/app/finance/")
   if [ "$c" = "403" ] && [ "$c2" != "403" ]; then
-    ok "财务应用的 Cookie 开不了 OA（403），开财务本身正常（$c2）"
+    ok "财务应用的 Cookie 开不了 OA（403），开财务本身正常（${c2}）"
   else
-    bad "跨应用隔离不成立：用财务 Cookie 开 OA=$c，开财务=$c2"
+    bad "跨应用隔离不成立：用财务 Cookie 开 OA=${c}，开财务=$c2"
   fi
 fi
 
@@ -266,7 +266,7 @@ else
   if [ "$first" = "302" ] && [ "$again" = "401" ]; then
     ok "首次换票 302、重放同一张票 401（jti 去重真有执行方）"
   else
-    bad "★票据不是一次性的：首次=$first 重放=$again（票据会进浏览器历史与 nginx access.log）"
+    bad "★票据不是一次性的：首次=$first 重放=${again}（票据会进浏览器历史与 nginx access.log）"
   fi
 fi
 
@@ -280,7 +280,7 @@ elif echo "$got" | grep -q 'baidi_web'; then
 elif echo "$got" | grep -q 'evil.example.com'; then
   bad "★客户端可控的 Host 被当作真实值下发（Host header injection）：$got"
 elif echo "$got" | grep -q 'biz=keep'; then
-  ok "业务 Cookie 原样转发、网关自己的不转发、Host 不冒充真实值（$got）"
+  ok "业务 Cookie 原样转发、网关自己的不转发、Host 不冒充真实值（${got}）"
 else
   bad "业务自己的 Cookie 被误删了：$got"
 fi
@@ -294,7 +294,7 @@ else
   c2=$(code -X POST -H "Authorization: Bearer $WTOK" -H 'Content-Type: application/json' \
         -d '{"appId":"a1"}' "$CONTROL/api/v1/portal/web-ticket")
   if [ "$c" = "403" ] && [ "$c2" = "403" ]; then
-    ok "票据调控制面 API 与自我续签都被拒（$c/$c2）"
+    ok "票据调控制面 API 与自我续签都被拒（$c/${c2}）"
   else
     bad "★一张 60s 资源票等价于全量 API 会话：/users=$c 续签=$c2"
   fi
@@ -307,11 +307,11 @@ c=$(code -H "Cookie: baidi_web=$CK" "$WEB/app/oa/")
 if [ "$c" = "403" ]; then
   ok "撤权后同一 Cookie 立即被拒（逐请求重新鉴权，不是只在建会话时判一次）"
 else
-  bad "★撤权后仍能访问（HTTP $c）——说明没有逐请求鉴权"
+  bad "★撤权后仍能访问（HTTP ${c}）——说明没有逐请求鉴权"
 fi
 
 echo ""
-echo "════════ 结果：通过 $PASS，失败 $FAIL ════════"
+echo "════════ 结果：通过 ${PASS}，失败 $FAIL ════════"
 if [ $FAIL -ne 0 ]; then
   echo "日志：$WORK/{control,gateway}.log"
   exit 1

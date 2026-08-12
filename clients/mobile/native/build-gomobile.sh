@@ -32,7 +32,7 @@ DRYRUN="${BAIDI_GOMOBILE_DRYRUN:-0}"
 
 case "$TARGET" in
   all|android|ios) ;;
-  *) echo "✗ 未知目标：$TARGET（可选 all|android|ios）" >&2; exit 2 ;;
+  *) echo "✗ 未知目标：${TARGET}（可选 all|android|ios）" >&2; exit 2 ;;
 esac
 
 # ── 薄薄一层"真正执行"：dry-run 时只打印。上面的一切都是纯构造。 ──
@@ -65,19 +65,19 @@ resolve_gomobile() {
 #   被它拦下来，比让 gomobile 自己报那句很清楚的 "no Android NDK found" 更糟。
 ensure_ndk() {
   if [ -n "${ANDROID_NDK_HOME:-}" ] && [ -d "${ANDROID_NDK_HOME}" ]; then
-    echo "→ NDK：$ANDROID_NDK_HOME（ANDROID_NDK_HOME）"
+    echo "→ NDK：${ANDROID_NDK_HOME}（ANDROID_NDK_HOME）"
     return 0
   fi
   if [ -n "${ANDROID_NDK_ROOT:-}" ] && [ -d "${ANDROID_NDK_ROOT}" ]; then
     export ANDROID_NDK_HOME="$ANDROID_NDK_ROOT"
-    echo "→ NDK：$ANDROID_NDK_HOME（ANDROID_NDK_ROOT）"
+    echo "→ NDK：${ANDROID_NDK_HOME}（ANDROID_NDK_ROOT）"
     return 0
   fi
   local sdk="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-}}"
   if [ -n "$sdk" ]; then
     if [ -d "$sdk/ndk-bundle" ]; then
       export ANDROID_NDK_HOME="$sdk/ndk-bundle"
-      echo "→ NDK：$ANDROID_NDK_HOME（\$ANDROID_HOME/ndk-bundle）"
+      echo "→ NDK：${ANDROID_NDK_HOME}（\$ANDROID_HOME/ndk-bundle）"
       return 0
     fi
     # $ANDROID_HOME/ndk/<版本>：装了多个版本时取**版本序**最大的那个。
@@ -87,7 +87,7 @@ ensure_ndk() {
     latest="$(find "$sdk/ndk" -mindepth 1 -maxdepth 1 -type d -exec basename {} \; 2>/dev/null | sort -V | tail -n 1 || true)"
     if [ -n "$latest" ] && [ -d "$sdk/ndk/$latest" ]; then
       export ANDROID_NDK_HOME="$sdk/ndk/$latest"
-      echo "→ NDK：$ANDROID_NDK_HOME（\$ANDROID_HOME/ndk/$latest）"
+      echo "→ NDK：${ANDROID_NDK_HOME}（\$ANDROID_HOME/ndk/${latest}）"
       return 0
     fi
   fi
@@ -131,7 +131,7 @@ if [ -z "$GOMOBILE" ]; then
 fi
 echo "→ gomobile：$GOMOBILE"
 if [ "$DRYRUN" = "1" ]; then
-  echo "→ 目标：$TARGET（DRY-RUN，不真跑）"
+  echo "→ 目标：${TARGET}（DRY-RUN，不真跑）"
 else
   echo "→ 目标：$TARGET"
 fi

@@ -276,7 +276,7 @@ if [ "${#ARCHES[@]}" -eq 1 ]; then
   triple="$(arch_triple "${ARCHES[0]}")"
   cp "$STAGE_DIR/$triple/wintun.dll" "$STAGE_DIR/wintun.dll"
   printf '%s\n' "$triple" > "$STAGE_DIR/wintun.dll.triple"
-  echo "==> 打包暂存位：$STAGE_DIR/wintun.dll（$triple）"
+  echo "==> 打包暂存位：$STAGE_DIR/wintun.dll（${triple}）"
 else
   # ★多架构时**主动删掉**固定位，而不是留着上一次那份。
   #   留一份架构对不上的 DLL 在那里，打包不会报错、安装包也装得上，

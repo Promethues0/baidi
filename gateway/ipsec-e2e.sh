@@ -9,7 +9,7 @@
 #   · 数据面用 gVisor netstack 而不是 TUN（建卡才需要 root，而那一段恰恰是整条链路里
 #     最不需要验证的——协商与加解密都在它之上）。
 #
-# 数据隔离：BAIDI_DB / BAIDI_PKI_DIR / 两把 JWT 密钥 / PSK 主密钥全部指向 $WORK，
+# 数据隔离：BAIDI_DB / BAIDI_PKI_DIR / 两把 JWT 密钥 / PSK 主密钥全部指向 ${WORK}，
 # **绝不碰使用者的 control/baidi.db**。
 set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -64,14 +64,14 @@ preflight_port UDP "$NATT_A" "站点A NAT-T" || RC=1
 preflight_port UDP "$IKE_B"  "站点B IKE"   || RC=1
 preflight_port UDP "$NATT_B" "站点B NAT-T" || RC=1
 [ $RC -ne 0 ] && exit 1
-echo "   ✓ 端口可用（A: $IKE_A/$NATT_A  B: $IKE_B/$NATT_B）"
+echo "   ✓ 端口可用（A: $IKE_A/$NATT_A  B: $IKE_B/${NATT_B}）"
 
 echo "==> 构建（预编译；用 go run 会让每一步都重新编译，之前因此被误判成卡死）"
 ( cd "$ROOT/control" && go build -o "$WORK/baidi-control" ./cmd/baidi-control ) || exit 1
 ( cd "$HERE" && go build -o "$WORK/baidi-ipsec" ./cmd/baidi-ipsec ) || exit 1
 ( cd "$HERE" && go build -o "$WORK/baidi-ipsec-e2e" ./cmd/baidi-ipsec-e2e ) || exit 1
 
-echo "==> 起控制面（独立库 $BAIDI_DB）"
+echo "==> 起控制面（独立库 ${BAIDI_DB}）"
 pkill -f "$WORK/baidi-control" 2>/dev/null; sleep 0.5
 rm -f "$BAIDI_DB"   # 每次从干净种子起步，结果可复现
 ( cd "$WORK" && nohup "$WORK/baidi-control" >"$WORK/control.log" 2>&1 & )

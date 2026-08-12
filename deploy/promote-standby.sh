@@ -61,8 +61,8 @@ die() { echo "promote-standby: $*" >&2; exit 1; }
 # ── ① 前置检查 ──
 say "前置检查"
 [ -n "${BAIDI_STANDBY_PASSPHRASE:-}" ] || die "缺少 BAIDI_STANDBY_PASSPHRASE（备份是加密的，没有口令连校验都做不了）"
-[ -f "$BAK" ] || die "找不到备份 $BAK：这台备机从未成功同步过，提升它只会得到一套空系统"
-[ -x "$BIN" ] || die "找不到可执行的 baidi-standby（$BIN）；用 --bin 指定"
+[ -f "$BAK" ] || die "找不到备份 ${BAK}：这台备机从未成功同步过，提升它只会得到一套空系统"
+[ -x "$BIN" ] || die "找不到可执行的 baidi-standby（${BIN}）；用 --bin 指定"
 
 if "$BIN" -status -dir "$DIR" > "$STAGE/status.json" 2>"$STAGE/status.err"; then
   echo "    本地同步状态："
@@ -125,7 +125,7 @@ say "停 $SERVICE"
 systemctl stop "$SERVICE" || true
 
 SNAP="$PREFIX/var/pre-promote-$(date +%Y%m%d-%H%M%S)"
-say "把现有材料快照到 $SNAP（切换失败时能原样退回去）"
+say "把现有材料快照到 ${SNAP}（切换失败时能原样退回去）"
 mkdir -p "$SNAP"
 for p in "$PREFIX/data" "$PREFIX/etc/pki" "$PREFIX/etc/keys"; do
   [ -e "$p" ] && cp -a "$p" "$SNAP/" || true
@@ -152,7 +152,7 @@ for _ in 1 2 3 4 5 6 7 8 9 10; do
   if curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null 2>&1; then ok=1; break; fi
   sleep 1
 done
-[ "$ok" = "1" ] || die "服务起来了但 /healthz 不通。快照在 $SNAP，可原样拷回后 systemctl start $SERVICE 退回去"
+[ "$ok" = "1" ] || die "服务起来了但 /healthz 不通。快照在 ${SNAP}，可原样拷回后 systemctl start $SERVICE 退回去"
 
 cat <<EOF
 ✓ 提升完成。接下来必须人工确认的三件事（脚本替不了）：

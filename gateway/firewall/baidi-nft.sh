@@ -16,7 +16,7 @@ setup)
   nft add rule inet baidi input udp dport "$SPA_PORT" accept                                  # SPA 敲门口可达
   nft add rule inet baidi input tcp dport "$PROXY_PORT" ip saddr @baidi_allowed accept        # 已授权 → 放行
   nft add rule inet baidi input tcp dport "$PROXY_PORT" drop                                   # 其余 → 默认 DROP(无 RST)
-  echo "✓ nftables 隐身已加载：默认 DROP $PROXY_PORT，仅放行 @baidi_allowed"
+  echo "✓ nftables 隐身已加载：默认 DROP ${PROXY_PORT}，仅放行 @baidi_allowed"
   echo "  查看： nft list table inet baidi"
   echo "  以 root 启动网关： baidi-gateway -pf -gm -proxy :$PROXY_PORT -spa :$SPA_PORT -backend 127.0.0.1:19999"
   ;;

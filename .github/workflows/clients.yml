@@ -130,6 +130,36 @@ jobs:
           [ "$bad" = 0 ] && echo "✓ 全部 shell 脚本语法通过"
           exit "$bad"
 
+      - name: PowerShell 脚本必须带 UTF-8 BOM（否则 Windows PowerShell 5.1 读成乱码）
+        run: |
+          # ★这条是 CI 抓到的一个「交付物从出生起就没能运行过」的缺陷。
+          #   Windows PowerShell 5.1 读 .ps1 时，**没有 BOM 就按系统 ANSI 代码页解码**
+          #   （英文机 CP1252、中文机 CP936），而本项目的脚本全是 UTF-8 中文注释。
+          #   实测报错原文：
+          #       L175: Unexpected token 'â€” åŠ è½½æ—¶ä¼šå¤±è´¥ï¼Œ…' in expression or statement.
+          #   `â€”` 正是 `—`(E2 80 94) 被按 CP1252 解出来的样子。乱码里一旦出现引号，
+          #   字符串就提前终止，从那里一路崩到文件尾。
+          #   ★失败形态是**脚本压根不执行**——用户看到一屏红字，桌面上什么都没有，
+          #     而我们这边看起来像"他没跑"或"报告没写出来"，方向完全错。
+          #   pwsh 7 无 BOM 也按 UTF-8 读，所以在 macOS/Linux 上怎么试都是好的。
+          python3 - <<'PY'
+          import subprocess, pathlib, sys
+          bad = []
+          for f in subprocess.run(["git", "ls-files", "*.ps1"],
+                                  capture_output=True, text=True).stdout.split():
+              d = pathlib.Path(f).read_bytes()
+              if not any(b > 127 for b in d):
+                  continue          # 纯 ASCII 的怎么解码都一样，不强制
+              if not d.startswith(b"\xef\xbb\xbf"):
+                  bad.append(f)
+          if bad:
+              print("✗ 下列 .ps1 含非 ASCII 却没有 UTF-8 BOM，Windows PowerShell 5.1 会解析失败：")
+              for f in bad:
+                  print(f"    {f}")
+              sys.exit(1)
+          print("✓ 所有含中文的 .ps1 都带 UTF-8 BOM")
+          PY
+
       - name: PowerShell 脚本语法（clients/verify-windows.ps1 是要发给用户跑的）
         shell: pwsh
         run: |

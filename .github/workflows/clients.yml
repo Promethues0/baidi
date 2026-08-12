@@ -388,21 +388,6 @@ jobs:
         working-directory: clients/desktop
         run: npm run tauri:build -- --bundles msi --verbose
 
-      # 失败时把打包器**真正生成的那几份中间文件**捞出来。日志会被折行、会被截断，
-      # 而 main.wxs / installer.nsi 是安装器将来照做的那份指令原文，
-      # 拿它比在日志里辨认引号里的字符串可靠得多。
-      - name: 打包中间产物（仅失败时，用于定位）
-        if: runner.os == 'Windows' && failure()
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows-bundle-diagnostics
-          if-no-files-found: warn
-          retention-days: 7
-          path: |
-            clients/desktop/src-tauri/target/release/wix/**/*.wxs
-            clients/desktop/src-tauri/target/release/wix/**/*.wxl
-            clients/desktop/src-tauri/target/release/nsis/**/installer.nsi
-
       # ★这一步是本条流水线里最该存在的断言，理由是失败形态：
       #   wintun.dll 没进包、或者进了包但落在子目录（`bundle.resources` 写成列表形就会
       #   保留 `binaries/wintun/` 这层目录），**包照样打得出、装得上、装完文件也确实在**，
@@ -424,6 +409,25 @@ jobs:
           $root = 'clients/desktop/src-tauri/target'
           $fail = $false
 
+          # ★诊断同时写进 job summary（运行页正面那块），不只写日志。
+          #   理由很实际：Actions 的日志对**未登录访客一律不可见**（页面只显示
+          #   "Sign in to view logs"），而 job summary 跟着运行页一起公开。
+          #   这一步是整条流水线里最容易需要人隔着屏幕帮忙看的一步，
+          #   把结论放在需要最少权限就能看到的地方，是它自己的一部分职责。
+          function Note($m) {
+            Write-Host $m
+            if ($env:GITHUB_STEP_SUMMARY) { $m | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+          }
+          function Block($title, $body) {
+            Write-Host $body
+            if ($env:GITHUB_STEP_SUMMARY) {
+              "`n<details><summary>$title</summary>`n`n``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+              $body | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+              "```````n</details>" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
+            }
+          }
+          Note "## Windows 安装包落位断言"
+
           # ── NSIS ──
           # 常规落点是 target/release/nsis/<arch>/installer.nsi；兜底再全量找一遍，
           # 免得 bundler 换了目录结构时把"落点变了"报成"断言失败"（两者的下一步完全不同）。
@@ -434,7 +438,7 @@ jobs:
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }
           if (-not $nsi) {
-            Write-Host "✗ 找不到生成的 installer.nsi（tauri-bundler 落点变了？）"; exit 1
+            Note "✗ 找不到生成的 installer.nsi（tauri-bundler 落点变了？）"; exit 1
           }
           Write-Host "→ NSIS 脚本：$($nsi.FullName)"
           $txt = Get-Content -Raw -LiteralPath $nsi.FullName
@@ -446,16 +450,20 @@ jobs:
           #   RequestExecutionLevel admin 与 $PROGRAMFILES64 落点），配置里写没写与真生成出什么是两回事。
           if ($txt -notmatch '(?m)^!define INSTALLMODE "perMachine"\s*$') {
             $mode = [regex]::Match($txt, '(?m)^!define INSTALLMODE "(.*)"').Groups[1].Value
-            Write-Host "✗ NSIS 安装模式是 '$mode'，必须是 perMachine —— 否则装进用户可写目录，"
-            Write-Host "  而里面的 wintun.dll / baidi-tun.exe 会被提权加载。改 tauri.windows.conf.json 的 bundle.windows.nsis.installMode。"
+            Note "✗ NSIS 安装模式是 '$mode'，必须是 perMachine —— 否则装进用户可写目录，"
+            Note "  而里面的 wintun.dll / baidi-tun.exe 会被提权加载。改 tauri.windows.conf.json 的 bundle.windows.nsis.installMode。"
             exit 1
           }
           Write-Host "  ✓ NSIS installMode=perMachine（装进 Program Files，需管理员）"
           $m = [regex]::Match($txt, '(?ms)^Section Install\b.*?^SectionEnd')
-          if (-not $m.Success) { Write-Host "✗ installer.nsi 里找不到 Section Install"; exit 1 }
+          if (-not $m.Success) {
+            Note "✗ installer.nsi 里找不到 Section Install"
+            Block "installer.nsi 全文" $txt
+            exit 1
+          }
           $sec = $m.Value
           if ($sec -notmatch '(?m)^\s*SetOutPath \$INSTDIR\s*$') {
-            Write-Host "✗ Section Install 里没有 SetOutPath `$INSTDIR —— 相对 oname 的落点不再可推断"; $fail = $true
+            Note "✗ Section Install 里没有 SetOutPath `$INSTDIR —— 相对 oname 的落点不再可推断"; $fail = $true
           }
           foreach ($n in @('wintun.dll', 'wintun-LICENSE.txt', 'baidi-tun.exe', 'baidi-knock.exe')) {
             # oname 必须是**纯文件名**：带上目录（如 binaries\wintun\wintun.dll）就等于装进子目录，
@@ -463,18 +471,18 @@ jobs:
             if ($sec -match [regex]::Escape("/oname=$n`"")) {
               Write-Host "  ✓ $n → `$INSTDIR"
             } else {
-              Write-Host "  ✗ installer.nsi 的 Section Install 里没有 /oname=$n（漏装，或落进了子目录）"
+              Note "  ✗ installer.nsi 的 Section Install 里没有 /oname=$n（漏装，或落进了子目录）"
               $fail = $true
             }
           }
           if ($fail) {
-            Write-Host "--- Section Install 原文 ---"; Write-Host $sec; exit 1
+            Block "Section Install 原文" $sec; exit 1
           }
 
           # ── MSI ──
           $msi = Get-ChildItem -Path "$root/release/bundle/msi" -Filter '*.msi' -ErrorAction SilentlyContinue |
                  Select-Object -First 1
-          if (-not $msi) { Write-Host "✗ 找不到 msi 产物"; exit 1 }
+          if (-not $msi) { Note "✗ 找不到 msi 产物"; exit 1 }
           $dest = Join-Path $env:RUNNER_TEMP 'baidi-msi-admin'
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -482,24 +490,45 @@ jobs:
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
                  '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$dest`"")
           if ($p.ExitCode -ne 0) {
-            Write-Host "✗ msiexec /a 失败，退出码 $($p.ExitCode)（无法验证 msi 里的落位）"; exit 1
+            Note "✗ msiexec /a 失败，退出码 $($p.ExitCode)（无法验证 msi 里的落位）"; exit 1
           }
           $dll = Get-ChildItem -Path $dest -Recurse -Filter 'wintun.dll' | Select-Object -First 1
           $tun = Get-ChildItem -Path $dest -Recurse -Filter 'baidi-tun.exe' | Select-Object -First 1
           $lic = Get-ChildItem -Path $dest -Recurse -Filter 'wintun-LICENSE.txt' | Select-Object -First 1
-          if (-not $dll) { Write-Host "✗ msi 里没有 wintun.dll"; $fail = $true }
-          if (-not $tun) { Write-Host "✗ msi 里没有 baidi-tun.exe"; $fail = $true }
-          if (-not $lic) { Write-Host "✗ msi 里没有 wintun-LICENSE.txt（我们承诺许可原文随包附上）"; $fail = $true }
-          if ($fail) { Get-ChildItem -Recurse $dest | Select-Object FullName | Out-Host; exit 1 }
+          if (-not $dll) { Note "✗ msi 里没有 wintun.dll"; $fail = $true }
+          if (-not $tun) { Note "✗ msi 里没有 baidi-tun.exe"; $fail = $true }
+          if (-not $lic) { Note "✗ msi 里没有 wintun-LICENSE.txt（我们承诺许可原文随包附上）"; $fail = $true }
+          if ($fail) {
+            Block "msi 摊开后的文件树" ((Get-ChildItem -Recurse $dest | ForEach-Object { $_.FullName.Replace($dest, '') }) -join "`n")
+            exit 1
+          }
           if ($dll.DirectoryName -ne $tun.DirectoryName) {
-            Write-Host "✗ msi 里 wintun.dll 与 baidi-tun.exe 不同目录 —— 装完点「接入」会失败："
-            Write-Host "    wintun.dll   : $($dll.FullName)"
-            Write-Host "    baidi-tun.exe: $($tun.FullName)"
-            Write-Host "  （wintun 只看进程自身 exe 目录与 System32，放在别处等于没放）"
+            Note "✗ msi 里 wintun.dll 与 baidi-tun.exe 不同目录 —— 装完点「接入」会失败："
+            Note "    wintun.dll   : $($dll.FullName)"
+            Note "    baidi-tun.exe: $($tun.FullName)"
+            Note "  （wintun 只看进程自身 exe 目录与 System32，放在别处等于没放）"
             exit 1
           }
           Write-Host "✓ msi：wintun.dll 与 baidi-tun.exe 同在 $($tun.DirectoryName)"
           Write-Host "✓ msi：许可随包 $($lic.FullName)"
+          Note "✓ nsis 与 msi 两侧落位都正确：wintun.dll 与 baidi-tun.exe 同目录，许可原文随包。"
+
+      # ★放在断言**之后**：`failure()` 只在「此前已经有步骤失败」时为真。夹在打包与断言
+      #   之间的话，打包成功、断言失败的那一轮它会被跳过——而那恰恰是最需要它的一轮
+      #   （首次真跑就正是这个形态：msi/nsis 都打出来了，挂在落位断言上，什么都没留下）。
+      #   日志会折行会截断，而 main.wxs / installer.nsi 是安装器将来照做的那份指令原文。
+      - name: Windows 失败诊断件（打包中间产物，仅失败时）
+        if: runner.os == 'Windows' && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            clients/desktop/src-tauri/target/release/wix/**/*.wxs
+            clients/desktop/src-tauri/target/release/wix/**/*.wxl
+            clients/desktop/src-tauri/target/release/nsis/**/installer.nsi
+
 
       # ── macOS：汇集进下载中心的产物目录，并注入构建溯源 ──
       - name: 汇集产物 + 生成 manifest（注入 BAIDI_CLIENT_SRC_REV）

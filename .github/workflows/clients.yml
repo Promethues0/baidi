@@ -24,17 +24,34 @@
 #               「发起加载的进程自身 exe 目录」与 System32），落错地方的症状是包照样
 #               打得出、装得上，只在用户点「接入」那一刻失败——下面两步断言就是为它设的。
 #
-# ★本文件未在 GitHub Actions 上真实运行过（本机无法运行 Actions）。语法过 actionlint，
-#   但「runner 上是否真的能出包」尚待第一次真实运行验证；红了先看步骤名，别怀疑构建脚本。
+# ★2026-08-12：本文件已在 GitHub Actions 上真实跑通，三条腿都产出了安装包
+#   （macOS universal dmg / Linux deb+AppImage / Windows msi+nsis）。**用了五轮**，
+#   而且每一轮红的都是真 bug，没有一次是"环境玄学"——记在这里，因为它们都是
+#   「本机怎么跑都对、只在 runner 上错」的形态，下次改这个文件前值得先读一遍：
+#     1. build-sidecars.sh 在 UTF-8 locale 下 `GOARCH<ef>: unbound variable`
+#        —— macOS 自带 bash 3.2 会把紧跟 $VAR 的全角字符首字节吞进变量名。
+#        本机跑得通只是因为本地 shell 没设 UTF-8 locale，runner 设了。
+#     2. `bundle.icon` 从头到尾没声明 —— icons/ 里 19 个图标全都在、全都 tracked，
+#        但 Tauri 的默认是空列表而不是"自动扫目录"。Windows 缺 .ico、AppImage 缺方形图标。
+#        **macOS 不报错，只是发出去一个没图标的 app**：三个平台里只有两个会告诉你。
+#     3. 中文 productName 撞 MSI 单字节码页（LGHT0311）—— 见 src-tauri/wix/en-US.wxl。
+#     4. `--bundles msi,nsis` 里 msi 先跑且失败即中止，NSIS 那半前三轮一次都没执行过。
+#     5. `bundle.resources` 的「源 → 目标」重命名**只有 NSIS 遵守，MSI 忽略** —— 见
+#        clients/BUILD.md「许可为什么不靠 resources 重命名」。这条是落位断言抓到的。
+#   前两类现在有 preflight job 拦着（几秒，不烧编译）。
+#
+# ★仍然不能说的：包能出 ≠ 装了能用。Linux 与 Windows 的**实机验证一次都没做过**，
+#   产物照旧标 UNVERIFIED、不进下载中心。macOS 那份本机装起来跑过（进程存活、
+#   sidecar 齐、dmg 挂载正常），但也仅此而已 —— 隧道链路不在这条流水线的验证范围里。
 
 name: 客户端安装包
 
 on:
   workflow_dispatch:
   push:
-    # feat/** 也触发：这条流水线**从未在 Actions 上真实跑过**，
-    # 只在 main 上触发意味着第一次真实运行必须发生在合并之后——
-    # 那时若它是坏的，坏的是主干。特性分支先跑通再合，才是正确顺序。
+    # feat/** 也触发：首次真实运行必须发生在合并**之前**，否则它若是坏的，坏的是主干。
+    # 事后看这个决定是对的：第一次跑三条腿全红、零产物，修了五轮才全绿（清单见文件头）。
+    # 那五轮如果发生在 main 上，就是主干红了五轮。
     branches: [main, 'feat/**']
     paths:
       - 'clients/**'

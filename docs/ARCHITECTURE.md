@@ -815,9 +815,13 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 - **没有任何人在真实 Windows 上跑过这条链路**。建虚拟网卡、路由接管、NRPT 分域解析及其清理、
   UAC 交互（同意/取消/超时）、卸载残留 —— 一次都没实测。上面那些断言证明的是**构造正确**
   （命令行怎么拼、文件装到哪），不是**运行正确**。
-- **Rust/Tauri 侧甚至没有在 Windows 上编译过**。Tauri 桌面端不能从 macOS 交叉编译（GTK/WebKit
-  与 MSVC 工具链都不在），而 `.github/workflows/clients.yml` **从未在 GitHub Actions 上真实运行过**
-  （只过了 actionlint）。所以「Windows 包能出」目前仍是设计意图，不是观测结果。
+- ~~**Rust/Tauri 侧甚至没有在 Windows 上编译过**~~ —— 2026-08-12 起这条**不再成立**：
+  `.github/workflows/clients.yml` 已在 GitHub Actions 上跑通，windows-latest 上完成 release
+  编译并产出 `.msi` 与 NSIS `.exe`（`baidi-desktop-windows-x86_64-UNVERIFIED`）。
+  同一轮里 CI 的落位断言用 `msiexec /a` 摊开 MSI，观测到
+  `wintun.dll` 与 `baidi-tun.exe` 确实在同一个目录 —— 所以「Windows 包能出、DLL 落位对」
+  现在是**观测结果**而不再是设计意图。仍**不能**因此推出上面第一条被推翻：
+  编译得出、装得进，与建卡/路由/DNS 跑得通，是两件事。
 - **提权执行层是 PowerShell `Start-Process -Verb RunAs`，不是 `ShellExecuteW`**。选它是为了不引
   Windows 专属 crate、让构造逻辑在 mac 上可测；代价是多一层 PowerShell 的行为差异（执行策略、
   引号、编码），而这一层恰恰只能在真机上验。

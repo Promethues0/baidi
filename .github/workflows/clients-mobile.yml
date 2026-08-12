@@ -12,10 +12,15 @@
 #   与其挂两个永远失败（或永远 skip）的 job 把"没有能力"伪装成"这次没跑"，不如一个都不写，
 #   把原因写在 clients/BUILD.md 第九节，并让下载中心的占位文案照实说。
 #
-# ★本文件未在 GitHub Actions 上真实运行过（本机没有 Java 运行时、没设 ANDROID_HOME、
-#   gomobile 也跑不起来）。已在本机验证的只有 build-gomobile.sh 的命令构造与落点
-#   （BAIDI_GOMOBILE_DRYRUN=1，四条 NDK 探测分支 + 三个 target + 非法 target 逐条跑过）。
-#   runner 上的步骤编排尚待第一次真实运行验证；红了先看步骤名。
+# ★2026-08-12：本文件已在 GitHub Actions 上真实跑通，**首次运行即绿**，产出
+#   baidi-mobile-android-debug-UNVERIFIED（31.3 MB APK），全部步骤无跳过。
+#   （对照组：桌面那条流水线同一天首跑三条腿全红，修了五轮。）
+#   本机能验的只有 build-gomobile.sh 的命令构造与落点（BAIDI_GOMOBILE_DRYRUN=1，
+#   四条 NDK 探测分支 + 三个 target + 非法 target 逐条跑过）——本机没有 Java 运行时、
+#   没设 ANDROID_HOME、gomobile 也跑不起来。
+#
+# ★APK 出得来 ≠ 装了能用：**从没在真机或模拟器上装过**，VpnService 建卡、
+#   隧道链路一次都没实测。产物标 UNVERIFIED，不进下载中心。
 
 name: 移动客户端安装包
 
@@ -27,9 +32,8 @@ on:
         required: false
         default: ''
   push:
-    # feat/** 也触发：这条流水线**从未在 Actions 上真实跑过**，
-    # 只在 main 上触发意味着第一次真实运行必须发生在合并之后——
-    # 那时若它是坏的，坏的是主干。特性分支先跑通再合，才是正确顺序。
+    # feat/** 也触发：首次真实运行必须发生在合并**之前**，否则它若是坏的，坏的是主干。
+    # 这条首跑即绿，但同一天桌面那条全红——事前无从知道是哪种，所以这个顺序不是多余的。
     branches: [main, 'feat/**']
     paths:
       - 'clients/mobile/**'

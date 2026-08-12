@@ -372,29 +372,68 @@ jobs:
         shell: pwsh
         run: |
           # ★回归背景：用户在自己的 Windows 上跑完，**桌面上没有 baidi-windows-verify.txt**。
-          #   原因是脚本把报告写死在 `$env:USERPROFILE\Desktop`，而 OneDrive 接管桌面之后
-          #   那个目录可能根本不存在；`Set-Content` 失败了，下一行却**无条件**打印
-          #   "报告已写入：…" —— 脚本声称成功、实际什么都没留下。
-          #   这里跑的是**自动挑落点**那条路径（不传 -ReportPath），也就是出问题的那条。
+          #   脚本把报告写死在 `$env:USERPROFILE\Desktop`，OneDrive 接管桌面之后那个目录
+          #   可能根本不存在；Set-Content 失败了，下一行却**无条件**打印"报告已写入：…"。
+          #   这里跑的正是出问题的那条路径（不传 -ReportPath，让它自动挑落点）。
           #
-          # runner 上没装白帝，A0 会判 FAIL —— 那是对的，本步骤不看结论对错，
-          # 只看两件事：脚本跑得完、报告真的落了盘。
-          $out = & powershell -ExecutionPolicy Bypass -File clients/verify-windows.ps1 -Stage A 2>&1 |
-                 Out-String
+          # runner 上没装白帝，A0 会判 FAIL —— 那是对的。本步骤不看结论对错，只看两件事：
+          # 脚本跑得完、报告真的落了盘。
+          $ErrorActionPreference = 'Continue'
+          $script = 'clients/verify-windows.ps1'
+
+          function Fail($why, $body) {
+            $m = "$why`n`n--- 原文 ---`n$body"
+            if ($m.Length -gt 3200) { $m = $m.Substring(0, 3200) + "`n…（截断）" }
+            # ::error:: 注解是**未登录也读得到**的唯一通道（日志与 job summary 都要登录）。
+            Write-Host ("::error title=verify-windows.ps1 冒烟失败::" +
+                        ($m -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'))
+            exit 1
+          }
+
+          # ① 先用 **Windows PowerShell 5.1 的解析器**过一遍：预检那道用的是 ubuntu 上的
+          #    pwsh 7，两者语法不完全同源，而用户手上跑的就是 5.1。
+          #    检查脚本写成临时文件再调用，不用 here-string —— PowerShell 的 '@ 终止符
+          #    必须顶格，那在 YAML 块标量里就是破坏缩进（这一步第一版就是这么写坏的）。
+          $chk = Join-Path $env:RUNNER_TEMP 'parse-check.ps1'
+          @(
+            '$errs = $null'
+            '$p = (Resolve-Path $args[0]).Path'
+            '$null = [System.Management.Automation.Language.Parser]::ParseFile($p, [ref]$null, [ref]$errs)'
+            'if ($errs -and $errs.Count) {'
+            '  foreach ($e in $errs) { Write-Output ("L{0}: {1}" -f $e.Extent.StartLineNumber, $e.Message) }'
+            '  exit 1'
+            '}'
+            'Write-Output "PARSE-OK"'
+          ) | Set-Content -Path $chk -Encoding UTF8
+          $syn = & powershell -NoProfile -ExecutionPolicy Bypass -File $chk $script 2>&1 | Out-String
+          if ($syn -notmatch 'PARSE-OK') { Fail 'verify-windows.ps1 在 Windows PowerShell 5.1 下解析失败' $syn }
+          Write-Host '✓ Windows PowerShell 5.1 解析通过'
+
+          # ② 真跑。输出编码钉成 UTF-8：不钉的话中文经 powershell.exe → 管道会按 OEM
+          #    代码页解码成乱码。断言本身只认 ASCII 标记，钉编码是为了失败时贴出的诊断可读。
+          $prev = [Console]::OutputEncoding
+          [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
+          $out = & powershell -NoProfile -ExecutionPolicy Bypass -File $script -Stage A 2>&1 | Out-String
+          [Console]::OutputEncoding = $prev
           Write-Host $out
-          if ($out -notmatch '报告全文') {
-            Write-Host '✗ 没有把报告全文打到屏幕上 —— 文件写不出时用户就彻底拿不到结论了'; exit 1
+
+          # ③ 断言全部只认 **ASCII 标记**（脚本里 BAIDI-REPORT-* 那几行）。
+          #    契约不建立在中文提示语上：那几行要穿过 powershell.exe → 管道 → 调用方
+          #    好几层编码边界，中文在任一层被转错就整段匹配不上，而那时看起来像"脚本没跑"。
+          if ($out -notmatch 'BAIDI-REPORT-BEGIN') {
+            Fail '没有把报告全文打到屏幕上：文件写不出时用户就彻底拿不到结论了' $out
           }
-          $m = [regex]::Match($out, '报告已写入：([^（\r\n]+)')
-          if (-not $m.Success) {
-            Write-Host '✗ 脚本没能把报告写到任何位置（它自己也这么说了）'; exit 1
+          if ($out -match 'BAIDI-REPORT-WRITE-FAILED') {
+            Fail '脚本试完全部候选落点都没写出报告（它自己也这么说了）' $out
           }
+          $m = [regex]::Match($out, 'BAIDI-REPORT-PATH=(.+)')
+          if (-not $m.Success) { Fail '既没说写成功也没说写失败 —— Write-Report 的落盘分支没走到' $out }
           $path = $m.Groups[1].Value.Trim()
           if (-not (Test-Path -LiteralPath $path)) {
-            Write-Host "✗ 脚本说写到了 $path，但那里没有文件 —— 正是要拦的那种「声称成功」"; exit 1
+            Fail "脚本说写到了 [$path]，但那里没有文件 —— 正是要拦的那种「声称成功」" $out
           }
           $len = (Get-Item -LiteralPath $path).Length
-          if ($len -le 0) { Write-Host "✗ $path 是空文件"; exit 1 }
+          if ($len -le 0) { Fail "[$path] 是空文件" $out }
           Write-Host "✓ 报告真的落盘：$path（$len 字节）"
 
       - name: 前端依赖

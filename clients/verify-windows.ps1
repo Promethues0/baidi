@@ -301,10 +301,16 @@ function Write-Report {
     #   路径含奇怪字符…），而报告内容本身是这次运行**唯一**的产出——
     #   把它锁在一个可能写不出的文件里，等于让最该被看到的东西最容易丢。
     #   屏幕上这一份任何情况下都在，可以直接复制回传。
+    # BAIDI-REPORT-BEGIN/END 与下面的 BAIDI-REPORT-PATH 是**纯 ASCII 机器标记**。
+    # 给自动化用的契约不能建立在中文提示语上：这几行会穿过
+    # powershell.exe → 管道 → 调用方 好几层编码边界，中文在任一层被转错就整段匹配不上，
+    # 而那时看起来会像"脚本没跑"，与真的没跑无法区分。人看中文，机器看标记。
     Write-Host ''
+    Write-Host 'BAIDI-REPORT-BEGIN'
     Write-Host '════════ 报告全文（文件没写出来时，直接复制这段回传即可）════════' -ForegroundColor Cyan
     Write-Host $text
     Write-Host '════════════════════════════════════════════════════════════' -ForegroundColor Cyan
+    Write-Host 'BAIDI-REPORT-END'
 
     # 候选落点依次试。[Environment]::GetFolderPath('Desktop') 会正确返回 OneDrive
     # 重定向之后的真实桌面，`$env:USERPROFILE\Desktop` 不会。
@@ -328,6 +334,7 @@ function Write-Report {
             $fi = Get-Item -LiteralPath $c -ErrorAction Stop
             if ($fi.Length -gt 0) {
                 Write-Host "报告已写入：$($fi.FullName)（$($fi.Length) 字节）" -ForegroundColor Cyan
+                Write-Host "BAIDI-REPORT-PATH=$($fi.FullName)"
                 Write-Host '把这个文件回传即可（里面没有任何凭据，只有路径、架构与状态）。' -ForegroundColor DarkGray
                 return
             }
@@ -336,6 +343,7 @@ function Write-Report {
     Write-Host "✗ 报告文件没能写到任何位置，试过：" -ForegroundColor Yellow
     foreach ($c in $candidates) { Write-Host "    $c" -ForegroundColor DarkGray }
     Write-Host "  不影响结论——上面那段「报告全文」就是完整内容，复制回传即可。" -ForegroundColor Yellow
+    Write-Host 'BAIDI-REPORT-WRITE-FAILED'
 }
 
 # ★包进 try/finally：某一阶段抛出终止性错误时，**已经跑出来的那部分结论照样要留下**。

@@ -139,6 +139,46 @@ jobs:
           print(f"✓ 图标声明齐全：{icons}")
           PY
 
+      - name: Tauri 打包配置：非 ASCII 产品名必须配得下的 MSI 码页
+        run: |
+          # productName 是「白帝安全接入客户端」，全非 ASCII。tauri 把它原样注入 main.wxs
+          # 十几处，而缺省 MSI 数据库是单字节码页 → light.exe 报 LGHT0311。
+          # 规则钉在成因上：产品名是纯 ASCII 时这条自动不适用。
+          # src-tauri/src/elevate.rs 有同义 Rust 断言，判据独立（那边 include_str! 解析）。
+          python3 - <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path("clients/desktop/src-tauri")
+          name = json.loads((root / "tauri.conf.json").read_text())["productName"]
+          if name.isascii():
+              print(f"✓ productName「{name}」是纯 ASCII，缺省码页够用"); sys.exit(0)
+          win = json.loads((root / "tauri.windows.conf.json").read_text())
+          wix = win["bundle"]["windows"].get("wix", {})
+          langs = wix.get("language")
+          errs = []
+          if not isinstance(langs, dict) or not langs:
+              errs.append(f"productName「{name}」含非 ASCII，必须配 bundle.windows.wix.language "
+                          "指向声明了 CJK 码页的 .wxl（否则 LGHT0311；msi 又是先跑的那个，"
+                          "它一挂 NSIS 根本不会执行）")
+          for culture, cfg in (langs or {}).items():
+              p = root / (cfg or {}).get("localePath", "")
+              if not p.is_file():
+                  errs.append(f"{culture} 的 localePath 指向 {p}，盘上没有"); continue
+              t = p.read_text()
+              cp = t.split('Codepage="')[1].split('"')[0] if 'Codepage="' in t else None
+              if cp not in ("936", "950", "932", "949"):
+                  errs.append(f"{p} 的 Codepage={cp} 装不下 CJK（要 936=GBK 这类多字节页；"
+                              "65001 在 WiX 3 上会转成 LGHT0313）")
+              if "</WixLocalization>" not in t:
+                  errs.append(f"{p} 不能写成自闭合标签 —— tauri 靠替换 </WixLocalization> "
+                              "注入缺省字符串，没有锚点会静默失败，最后炸在 LGHT0102")
+          if len(str(wix.get("upgradeCode", ""))) != 36:
+              errs.append("wix.upgradeCode 必须钉固定 GUID：缺省值随 productName 派生，"
+                          "改名会让老用户机上并存两份而不是升级")
+          if errs:
+              print("✗ " + "\n✗ ".join(errs)); sys.exit(1)
+          print(f"✓ 非 ASCII 产品名「{name}」的 MSI 码页已配妥")
+          PY
+
   desktop:
     name: ${{ matrix.label }}
     needs: preflight
@@ -328,10 +368,40 @@ jobs:
         working-directory: clients/desktop/src-tauri
         run: cargo test --release
 
-      - name: 打包（Windows · msi + nsis）
+      # ★拆成两步、NSIS 在前，理由与 Linux 那边 deb/AppImage 拆开完全同源：
+      #   `--bundles msi,nsis` 里 **msi 先跑**（两者 priority 都是 0，稳定排序，前者失败
+      #   直接中止整个 bundle 流程）。于是首跑那轮死在 msi 的 `Couldn't find a .ico icon`
+      #   时，NSIS 那半**一次都没被执行过**——日志里连 `Verifying NSIS package` 都没有，
+      #   而当时看起来就像"Windows 打包坏了"。两个安装器是两套独立实现，一个坏不代表
+      #   另一个坏，合成一步会让这件事在日志里无法区分。
+      #   第二步用 `!cancelled()` 而不是默认条件：默认下前一步一失败后面全跳过，
+      #   那就永远只能看到先跑那个的错，一轮修一个。
+      # ★`--verbose`：WiX 的错误在非 verbose 下会被折叠成一句 `error running light.exe`，
+      #   带编号的原文（LGHT0311 之类）只在 verbose 里出现——而编号才是能直接定位的东西。
+      - name: 打包（Windows · NSIS）
         if: runner.os == 'Windows'
         working-directory: clients/desktop
-        run: npm run tauri:build -- --bundles msi,nsis
+        run: npm run tauri:build -- --bundles nsis --verbose
+
+      - name: 打包（Windows · MSI）
+        if: runner.os == 'Windows' && !cancelled()
+        working-directory: clients/desktop
+        run: npm run tauri:build -- --bundles msi --verbose
+
+      # 失败时把打包器**真正生成的那几份中间文件**捞出来。日志会被折行、会被截断，
+      # 而 main.wxs / installer.nsi 是安装器将来照做的那份指令原文，
+      # 拿它比在日志里辨认引号里的字符串可靠得多。
+      - name: 打包中间产物（仅失败时，用于定位）
+        if: runner.os == 'Windows' && failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-bundle-diagnostics
+          if-no-files-found: warn
+          retention-days: 7
+          path: |
+            clients/desktop/src-tauri/target/release/wix/**/*.wxs
+            clients/desktop/src-tauri/target/release/wix/**/*.wxl
+            clients/desktop/src-tauri/target/release/nsis/**/installer.nsi
 
       # ★这一步是本条流水线里最该存在的断言，理由是失败形态：
       #   wintun.dll 没进包、或者进了包但落在子目录（`bundle.resources` 写成列表形就会

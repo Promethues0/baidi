@@ -414,12 +414,30 @@ jobs:
           #   "Sign in to view logs"），而 job summary 跟着运行页一起公开。
           #   这一步是整条流水线里最容易需要人隔着屏幕帮忙看的一步，
           #   把结论放在需要最少权限就能看到的地方，是它自己的一部分职责。
+          $diag = [System.Collections.Generic.List[string]]::new()
           function Note($m) {
             Write-Host $m
+            $diag.Add($m) | Out-Null
             if ($env:GITHUB_STEP_SUMMARY) { $m | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY }
+          }
+          # ★Die 用 `::error::` **工作流注解**吐结论，而不只是写日志。
+          #   实测：Actions 的日志与 job summary 对未登录访客都不可见，而注解经
+          #   check-runs API 公开可读。这一步天生是"最需要隔着屏幕请人帮忙看"的一步
+          #   （它判的是一个只有装完点「接入」才会暴露的静默失效），
+          #   把结论放在需要最少权限就能看到的通道上，是它自己职责的一部分。
+          function Die() {
+            $t = ($diag -join "`n")
+            if ($t.Length -gt 3200) {
+              $t = $t.Substring(0, 3200) + "`n…（已截断，完整内容见 job summary 与 windows-bundle-diagnostics 产物）"
+            }
+            $t = $t -replace '%', '%25' -replace "`r", '' -replace "`n", '%0A'
+            Write-Host "::error title=Windows 安装包落位断言失败::$t"
+            exit 1
           }
           function Block($title, $body) {
             Write-Host $body
+            $diag.Add("--- $title ---") | Out-Null
+            $diag.Add($body) | Out-Null
             if ($env:GITHUB_STEP_SUMMARY) {
               "`n<details><summary>$title</summary>`n`n``````" | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
               $body | Out-File -Append -Encoding utf8 $env:GITHUB_STEP_SUMMARY
@@ -438,7 +456,7 @@ jobs:
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }
           if (-not $nsi) {
-            Note "✗ 找不到生成的 installer.nsi（tauri-bundler 落点变了？）"; exit 1
+            Note "✗ 找不到生成的 installer.nsi（tauri-bundler 落点变了？）"; Die
           }
           Write-Host "→ NSIS 脚本：$($nsi.FullName)"
           $txt = Get-Content -Raw -LiteralPath $nsi.FullName
@@ -452,14 +470,14 @@ jobs:
             $mode = [regex]::Match($txt, '(?m)^!define INSTALLMODE "(.*)"').Groups[1].Value
             Note "✗ NSIS 安装模式是 '$mode'，必须是 perMachine —— 否则装进用户可写目录，"
             Note "  而里面的 wintun.dll / baidi-tun.exe 会被提权加载。改 tauri.windows.conf.json 的 bundle.windows.nsis.installMode。"
-            exit 1
+            Die
           }
           Write-Host "  ✓ NSIS installMode=perMachine（装进 Program Files，需管理员）"
           $m = [regex]::Match($txt, '(?ms)^Section Install\b.*?^SectionEnd')
           if (-not $m.Success) {
             Note "✗ installer.nsi 里找不到 Section Install"
             Block "installer.nsi 全文" $txt
-            exit 1
+            Die
           }
           $sec = $m.Value
           if ($sec -notmatch '(?m)^\s*SetOutPath \$INSTDIR\s*$') {
@@ -476,13 +494,13 @@ jobs:
             }
           }
           if ($fail) {
-            Block "Section Install 原文" $sec; exit 1
+            Block "Section Install 原文" $sec; Die
           }
 
           # ── MSI ──
           $msi = Get-ChildItem -Path "$root/release/bundle/msi" -Filter '*.msi' -ErrorAction SilentlyContinue |
                  Select-Object -First 1
-          if (-not $msi) { Note "✗ 找不到 msi 产物"; exit 1 }
+          if (-not $msi) { Note "✗ 找不到 msi 产物"; Die }
           $dest = Join-Path $env:RUNNER_TEMP 'baidi-msi-admin'
           if (Test-Path $dest) { Remove-Item -Recurse -Force $dest }
           New-Item -ItemType Directory -Force -Path $dest | Out-Null
@@ -490,7 +508,7 @@ jobs:
           $p = Start-Process msiexec.exe -Wait -PassThru -ArgumentList @(
                  '/a', "`"$($msi.FullName)`"", '/qn', "TARGETDIR=`"$dest`"")
           if ($p.ExitCode -ne 0) {
-            Note "✗ msiexec /a 失败，退出码 $($p.ExitCode)（无法验证 msi 里的落位）"; exit 1
+            Note "✗ msiexec /a 失败，退出码 $($p.ExitCode)（无法验证 msi 里的落位）"; Die
           }
           $dll = Get-ChildItem -Path $dest -Recurse -Filter 'wintun.dll' | Select-Object -First 1
           $tun = Get-ChildItem -Path $dest -Recurse -Filter 'baidi-tun.exe' | Select-Object -First 1
@@ -500,14 +518,14 @@ jobs:
           if (-not $lic) { Note "✗ msi 里没有 wintun-LICENSE.txt（我们承诺许可原文随包附上）"; $fail = $true }
           if ($fail) {
             Block "msi 摊开后的文件树" ((Get-ChildItem -Recurse $dest | ForEach-Object { $_.FullName.Replace($dest, '') }) -join "`n")
-            exit 1
+            Die
           }
           if ($dll.DirectoryName -ne $tun.DirectoryName) {
             Note "✗ msi 里 wintun.dll 与 baidi-tun.exe 不同目录 —— 装完点「接入」会失败："
             Note "    wintun.dll   : $($dll.FullName)"
             Note "    baidi-tun.exe: $($tun.FullName)"
             Note "  （wintun 只看进程自身 exe 目录与 System32，放在别处等于没放）"
-            exit 1
+            Die
           }
           Write-Host "✓ msi：wintun.dll 与 baidi-tun.exe 同在 $($tun.DirectoryName)"
           Write-Host "✓ msi：许可随包 $($lic.FullName)"

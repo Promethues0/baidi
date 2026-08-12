@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  这个文件存在的唯一理由是给 MSI 数据库指定一个装得下中文的码页。
+
+  productName 是「白帝安全接入客户端」，全部为非 ASCII。tauri-bundler 会把它原样注入
+  main.wxs 的 Product/@Name、快捷方式名、Directory/@Name、注册表键等十几处，而 tauri
+  自带的 main.wxs 没有 Product/@Codepage、它自动生成的 locale.wxl 也没有 Codepage
+  属性。缺省下 MSI 数据库落成单字节码页（en-US 那套是 1252），写字符串表时
+  light.exe 报：
+
+      error LGHT0311 : A string was provided with characters that are not available
+      in the specified database code page '1252'.
+
+  936 = GBK，覆盖简体中文。**刻意不用 65001（UTF-8）**：Windows Installer 对 UTF-8
+  码页的支持依赖较新的 msi.dll，WiX 3 上会转成 LGHT0313，换来的是另一个同样难查的错。
+
+  ★Culture 保持 en-US 而不是改成 zh-CN：Culture 决定的是产物文件名后缀
+  （…_x64_en-US.msi → …_zh-CN.msi）与安装界面语言，与本文件要解决的码页问题无关。
+  改它会在没有必要的地方引入变量——CI 里那几处按 *.msi 通配虽然接得住，但产物名是
+  对外可见的东西，不该被一次内部修复顺手改掉。码页与界面语言在 WiX 里本来就是两件事。
+
+  ★★绝对不要写成自闭合的 <WixLocalization ... />。
+  tauri-bundler 是用字符串替换 "</WixLocalization>" 的方式把它自己那批缺省字符串
+  （TauriLanguage / TauriCodepage 等）注进来的。写成自闭合的话没有可替换的锚点，
+  注入**静默失效**——文件合法、构建不报这一条，最后炸在一句风马牛不相及的
+  LGHT0102（找不到本地化字符串）上。src/elevate.rs 里有断言钉着这一点。
+-->
+<WixLocalization Culture="en-US" Codepage="936"
+                 xmlns="http://schemas.microsoft.com/wix/2006/localization">
+</WixLocalization>

@@ -1495,6 +1495,81 @@ mod tests {
         );
     }
 
+    /// ★把规则钉在**成因**上而不是钉在"配置里得有这么一行"：
+    /// productName 只要含非 ASCII，MSI 就必须有一个装得下它的数据库码页。
+    ///
+    /// 回归背景：`productName = "白帝安全接入客户端"` 全是中文，tauri 会把它原样注入
+    /// main.wxs 十几处（Product/@Name、快捷方式、Directory/@Name、注册表键…），而
+    /// tauri 自带的 main.wxs 无 `Product/@Codepage`、它自动生成的 locale.wxl 也无
+    /// `Codepage` —— 数据库落成单字节码页，light.exe 报 LGHT0311。
+    ///
+    /// 反过来，将来若有人把 productName 改成纯 ASCII，这条断言自动不再要求 wxl —— 规则
+    /// 跟着成因走，不会变成一条没人记得为什么存在的教条。
+    #[test]
+    fn 非_ascii_产品名必须配一个装得下它的_msi_码页() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("配置得是合法 JSON");
+        let name = conf["productName"].as_str().expect("productName 必填");
+        if name.is_ascii() {
+            return; // 纯 ASCII 产品名用缺省码页就够，不需要 wxl
+        }
+
+        let win: serde_json::Value = serde_json::from_str(include_str!("../tauri.windows.conf.json"))
+            .expect("Windows 专属配置得是合法 JSON");
+        let langs = win["bundle"]["windows"]["wix"]["language"].as_object().unwrap_or_else(|| {
+            panic!(
+                "productName「{name}」含非 ASCII，必须配 bundle.windows.wix.language 指向一个\
+                 声明了 CJK 码页的 .wxl —— 否则 light.exe 报 LGHT0311，而 msi 是 --bundles \
+                 msi,nsis 里**先跑**的那个，它一挂 NSIS 根本不会被执行"
+            )
+        });
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let mut 查过 = 0;
+        for (culture, cfg) in langs {
+            let rel = cfg["localePath"]
+                .as_str()
+                .unwrap_or_else(|| panic!("{culture} 缺 localePath"));
+            let wxl = std::fs::read_to_string(root.join(rel))
+                .unwrap_or_else(|e| panic!("读不到 localePath 指的 {rel}：{e}"));
+
+            // 码页必须能装下 CJK。1252/1033 这类单字节页正是 LGHT0311 的来源；
+            // 65001(UTF-8) 在 WiX 3 上会换成 LGHT0313，一样不行。
+            let cp = wxl
+                .split("Codepage=\"")
+                .nth(1)
+                .and_then(|s| s.split('"').next())
+                .unwrap_or_else(|| panic!("{rel} 没有声明 Codepage —— 那正是缺省行为，等于没配"));
+            assert!(
+                matches!(cp, "936" | "950" | "932" | "949"),
+                "{rel} 的 Codepage={cp} 装不下 {name} 里的字符（要 936=GBK 这类多字节页；\
+                 65001 在 WiX 3 上会转成 LGHT0313）"
+            );
+
+            // ★自闭合是这里唯一的**静默**失效：tauri-bundler 靠字符串替换
+            // "</WixLocalization>" 把自己那批缺省字符串注进来，没有闭合标签就没有锚点，
+            // 注入无声失败，最后炸在一句风马牛不相及的 LGHT0102 上。
+            assert!(
+                wxl.contains("</WixLocalization>"),
+                "{rel} 必须写成成对标签，不能自闭合 —— tauri 要往 </WixLocalization> 前面\
+                 注入缺省字符串，没有这个锚点会静默注入失败"
+            );
+            查过 += 1;
+        }
+        assert!(查过 > 0, "wix.language 是空的，等于没配");
+
+        // UpgradeCode 缺省是由 `<productName>.exe.app.x64` 派生的 UUIDv5（见 tauri 文档）。
+        // 也就是说**改产品名会顺带换掉 UpgradeCode**，Windows 会把新版当成另一个产品，
+        // 用户机上留下两份并存。钉死它，改名就只是改名。
+        let uc = win["bundle"]["windows"]["wix"]["upgradeCode"].as_str().unwrap_or("");
+        assert_eq!(
+            uc.len(),
+            36,
+            "wix.upgradeCode 必须钉一个固定 GUID（现值 {uc:?}）：缺省值随 productName 派生，\
+             哪天改了产品名，老用户机上会多出一份并存安装而不是升级"
+        );
+    }
+
     /// ★这条守的不是代码，是**我们替第三方许可作的事实陈述**。
     ///
     /// 回归背景：四处文案（`fetch-wintun.sh`、`clients/BUILD.md` 的义务表、CI 注释，以及

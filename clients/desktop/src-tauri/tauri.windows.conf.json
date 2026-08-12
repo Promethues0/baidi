@@ -4,6 +4,14 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine"
+      },
+      "wix": {
+        "language": {
+          "en-US": {
+            "localePath": "wix/en-US.wxl"
+          }
+        },
+        "upgradeCode": "a57b8be0-696e-5557-bdb7-97a57dd81cc6"
       }
     },
     "resources": {

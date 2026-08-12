@@ -32,7 +32,10 @@ name: 客户端安装包
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    # feat/** 也触发：这条流水线**从未在 Actions 上真实跑过**，
+    # 只在 main 上触发意味着第一次真实运行必须发生在合并之后——
+    # 那时若它是坏的，坏的是主干。特性分支先跑通再合，才是正确顺序。
+    branches: [main, 'feat/**']
     paths:
       - 'clients/**'
       - 'gateway/cmd/baidi-tun/**'

@@ -197,22 +197,33 @@ function Invoke-StageA {
     # A3b 包架构 vs **本机**架构。
     #
     # ★A3 只问"dll 与 exe 互相一致吗"，两个都是 x64 就判 PASS —— 在一台 ARM64 机器上
-    #   它照样 PASS，读的人会以为一切就绪。但 wintun 的**驱动是分架构的**：x64 的
-    #   wintun.dll 在 ARM64 内核上装不出网卡。用户态部分能靠 x64 模拟跑起来，
-    #   偏偏最关键的建卡那一步不能 —— 于是 A 段全绿、B 段莫名其妙地失败。
-    #   这条把"这台机器根本验不了这个包"提前说清楚，而不是让人跑到 B 段再撞墙。
+    #   它照样 PASS，读的人会以为「架构这块没问题」。所以要单独把本机架构说出来。
+    #
+    # ★判 UNKNOWN 而不是 FAIL，理由是查证之后的事实：**不匹配不等于用不了**。
+    #   解开官方 wintun-0.14.1.zip 逐个解析 PE 资源树可见，amd64 那份 wintun.dll
+    #   内嵌了 WINTUN.SYS(x64) **与 WINTUN-ARM64.SYS(arm64)** 两套驱动、
+    #   WINTUN-ARM64.INF/.CAT，以及一个原生 arm64 的 SETUPAPIHOST-ARM64.DLL；
+    #   DLL 里还有 IsWow64Process2 / Sysnative\\rundll32.exe / [Wintun.NTARM64] 这些字符串。
+    #   也就是说它会查本机 native machine，是 ARM64 就装 ARM64 那份 .sys，
+    #   并起一个原生 rundll32 去完成安装——**这是上游显式设计的跨架构通路**。
+    #   所以「x64 包在 ARM64 上一定建不了卡」是没有依据的说法，不许写进来。
+    #   能说的只有：这条通路是 2021 年写的，我们没有任何 ARM64 实机证据。
+    #   —— 判 FAIL 会让人不去跑阶段 B（而它很可能是能跑通的），
+    #      判 PASS 又等于替一条没验过的路径背书。UNKNOWN 才是这里唯一诚实的结论。
     $osArch = $env:PROCESSOR_ARCHITECTURE     # AMD64 / ARM64 / x86
     $pkgM   = if (Test-Path $tun) { Get-PeMachine $tun } else { $null }
     $pkgArch = switch ($pkgM) { 0x8664 { 'AMD64' } 0xAA64 { 'ARM64' } 0x14C { 'x86' } default { $null } }
     if ($null -eq $pkgArch) {
-        Add-Result 'A3b' '包架构与本机架构匹配' 'UNKNOWN' "读不出 baidi-tun.exe 的 PE 头，本机是 $osArch"
+        Add-Result 'A3b' '包架构与本机架构' 'UNKNOWN' "读不出 baidi-tun.exe 的 PE 头，本机是 $osArch"
     } elseif ($pkgArch -eq $osArch) {
-        Add-Result 'A3b' '包架构与本机架构匹配' 'PASS' "均为 $osArch"
+        Add-Result 'A3b' '包架构与本机架构' 'PASS' "均为 $osArch，无模拟层"
     } else {
-        Add-Result 'A3b' '包架构与本机架构匹配' 'FAIL' `
-            ("包是 {0}，本机是 {1}。用户态部分可能靠模拟跑起来，但 **wintun 的驱动是分架构的**，" -f $pkgArch, $osArch) + `
-            "建卡（阶段 B）在这个组合下会失败，且报错不会提架构。这台机器需要 $osArch 的包才验得了数据面；" + `
-            "阶段 A 关于落位/许可的结论仍然有效，关于「装了能用」的结论**不能**从这一轮外推。"
+        Add-Result 'A3b' '包架构与本机架构' 'UNKNOWN' `
+            ("包是 {0}，本机是 {1} —— 整个客户端跑在模拟层上。" -f $pkgArch, $osArch) + `
+            "这**不代表用不了**：官方 wintun.dll(amd64) 内嵌了 arm64 驱动与原生 arm64 的 SetupAPI 宿主，" + `
+            "上游为这个组合准备了完整通路。但那条通路我们没有任何实机证据（wintun 0.14.1 是 2021 年的）。" + `
+            "结论：阶段 A 关于落位/许可的结论与架构无关、照常有效；阶段 B 值得照跑，" + `
+            "**万一失败，这条是第一个该怀疑的地方**，届时请改用原生 $osArch 包复测再下结论。"
     }
 
     # A4 许可义务：wintun 许可第 3(c) 条不得移除版权声明，我们承诺随包附许可原文

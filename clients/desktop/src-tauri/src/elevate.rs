@@ -1449,6 +1449,52 @@ mod tests {
         );
     }
 
+    /// ★回归背景（首次真跑 CI 时三条腿里两条挂在这上面）：`icons/` 里 19 个图标一应俱全、
+    /// 全都 tracked 在 git 里，而 `tauri.conf.json` 的 `bundle` 段**从头到尾没写过 `icon`**。
+    /// Tauri 的 `bundle.icon` 默认是空列表，不是"自动扫 icons/ 目录"，于是：
+    ///   - Windows：`failed to bundle project: Couldn't find a .ico icon`
+    ///   - Linux AppImage：`couldn't find a square icon to use as AppImage icon`（panic，退出码 134）
+    /// 本机 `npm run tauri:build` 从没打过这两个目标，所以这个洞一直没人碰到。
+    ///
+    /// 这条断言把三件事一起钉住，缺一都会让某个平台在打包最后一步才炸：
+    ///   1. 列表非空；
+    ///   2. 列表里每个文件**盘上真的存在**（写了个错路径与没写，报错时机完全一样）；
+    ///   3. 至少一个 `.ico`（msi/nsis 的硬要求）+ 至少一个方形 PNG（AppImage 的硬要求）。
+    #[test]
+    fn 打包图标必须声明齐全且文件真的在() {
+        let conf: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).expect("配置得是合法 JSON");
+        let icons = conf["bundle"]["icon"]
+            .as_array()
+            .expect("bundle.icon 必须是数组——缺了它 Windows 与 AppImage 都会在打包最后一步失败");
+        assert!(!icons.is_empty(), "bundle.icon 不能为空列表");
+
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        for i in icons {
+            let rel = i.as_str().expect("图标项应为字符串");
+            assert!(
+                root.join(rel).is_file(),
+                "bundle.icon 里列的 {rel} 在盘上不存在——打包时才报错，与根本没声明同样致命"
+            );
+        }
+        let names: Vec<&str> = icons.iter().filter_map(|i| i.as_str()).collect();
+        assert!(
+            names.iter().any(|n| n.ends_with(".ico")),
+            "必须含一个 .ico：msi 与 nsis 都只认它，缺了就是 `Couldn't find a .ico icon`：{names:?}"
+        );
+        // AppImage 要的是"方形"，判据是 `<n>x<n>.png` 这种命名（linuxdeploy 按尺寸挑）。
+        assert!(
+            names.iter().any(|n| {
+                std::path::Path::new(n)
+                    .file_stem()
+                    .and_then(|s| s.to_str())
+                    .and_then(|s| s.split_once('x'))
+                    .is_some_and(|(w, h)| !w.is_empty() && w == h.trim_end_matches("@2x"))
+            }),
+            "必须含一个方形 PNG（如 128x128.png）：AppImage 找不到会直接 panic：{names:?}"
+        );
+    }
+
     /// ★这条守的不是代码，是**我们替第三方许可作的事实陈述**。
     ///
     /// 回归背景：四处文案（`fetch-wintun.sh`、`clients/BUILD.md` 的义务表、CI 注释，以及

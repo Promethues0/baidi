@@ -58,8 +58,90 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── 预检：几秒钟内拦掉「要等五分钟才炸在最后一步」的那几类错 ──────────────
+  #
+  # ★这个 job 是首次真跑 CI 的直接产物。那一轮三条腿全红、零产物，三个失败点是：
+  #   macOS  → build-sidecars.sh 在 UTF-8 locale 下 `GOARCH�: unbound variable`
+  #   Windows→ 打包最后一步 `Couldn't find a .ico icon`
+  #   Linux  → AppImage 打包 panic `couldn't find a square icon`（退出码 134）
+  # 三条都是**静态可判定**的，却各自烧掉了一整轮编译（Windows 那条是 5 分 24 秒的
+  # release 编译之后才报）。更糟的是它们互相遮挡：修好一个才看得见下一个。
+  # 下面两项检查合起来只要几秒，且当时能同时报出全部三条。
+  preflight:
+    name: 预检（静态可判定的错，别烧一轮编译）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: shell 脚本：变量名后紧跟全角字符必须用 ${} 包起来
+        run: |
+          # macOS 自带 bash 3.2，在 UTF-8 locale 下会把紧跟 `$VAR` 的全角字符（`）`、`，`…）
+          # 的**首字节吞进变量名**，于是查的是 `GOARCH\xef` 这个不存在的变量。
+          # 精确复现：
+          #   LC_ALL=en_US.UTF-8 bash -c 'set -u; A=1; echo "（$A）"'  → A�: unbound variable
+          #   LC_ALL=C           bash -c 'set -u; A=1; echo "（$A）"'  → （1）
+          # 本项目所有提示语都是中文，这个写法遍地都是（当时全仓 52 处）。
+          # ★`set -u` 让它当场炸是运气好：没开 `set -u` 的脚本里，它**静默展开成空串**——
+          #   `rm -rf "$PREFIX/x"` 这类地方错成什么样不用多说。
+          # 扫全仓而不只是 clients/：gateway/*.sh 与 deploy/*.sh 同样有人在 mac 上跑。
+          python3 - <<'PY'
+          import re, subprocess, pathlib, sys
+          VENDORED = {"clients/mobile/native/android/gradlew"}  # 第三方文件，不归我们管
+          pat = re.compile(rb'\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])')
+          hits = []
+          for f in subprocess.run(["git", "ls-files", "*.sh", "*.bash"],
+                                  capture_output=True, text=True).stdout.split():
+              if f in VENDORED:
+                  continue
+              for i, line in enumerate(pathlib.Path(f).read_bytes().split(b"\n"), 1):
+                  for m in pat.finditer(line):
+                      hits.append(f"{f}:{i}\t${m.group(1).decode()}"
+                                  f"  →  {line.decode('utf-8','replace').strip()[:100]}")
+          if hits:
+              print("✗ 下列位置的 $变量 后面紧跟非 ASCII 字符，请改成 ${变量}：")
+              print("\n".join("  " + h for h in hits))
+              sys.exit(1)
+          print("✓ 无裸 $变量 紧邻全角字符")
+          PY
+
+      - name: shell 脚本：语法自检
+        run: |
+          bad=0
+          for f in $(git ls-files '*.sh'); do
+            bash -n "$f" || { echo "✗ ${f} 语法错误"; bad=1; }
+          done
+          [ "$bad" = 0 ] && echo "✓ 全部 shell 脚本语法通过"
+          exit "$bad"
+
+      - name: Tauri 打包配置：图标声明齐全且文件真的在
+        run: |
+          # `bundle.icon` 默认是**空列表**，不是"自动扫 icons/ 目录"。icons/ 里 19 个图标
+          # 一应俱全、全都 tracked，而配置里没写 icon —— Windows 与 AppImage 就都会在
+          # 打包最后一步失败。src-tauri/src/elevate.rs 里有一条同义的 Rust 断言；
+          # 两个执行方判据独立（那边 include_str! 解析、这边直接查盘），刻意不合并。
+          python3 - <<'PY'
+          import json, pathlib, sys
+          root = pathlib.Path("clients/desktop/src-tauri")
+          icons = json.loads((root / "tauri.conf.json").read_text())["bundle"].get("icon", [])
+          errs = []
+          if not icons:
+              errs.append("bundle.icon 为空或缺失")
+          errs += [f"bundle.icon 列了 {p} 但盘上没有" for p in icons if not (root / p).is_file()]
+          if not any(p.endswith(".ico") for p in icons):
+              errs.append("缺 .ico —— msi 与 nsis 都只认它")
+          def square(p):
+              s = pathlib.Path(p).stem.removesuffix("@2x").split("x")
+              return len(s) == 2 and s[0] and s[0] == s[1]
+          if not any(square(p) for p in icons):
+              errs.append("缺方形 PNG（如 128x128.png）—— AppImage 找不到会直接 panic")
+          if errs:
+              print("✗ " + "\n✗ ".join(errs)); sys.exit(1)
+          print(f"✓ 图标声明齐全：{icons}")
+          PY
+
   desktop:
     name: ${{ matrix.label }}
+    needs: preflight
     runs-on: ${{ matrix.os }}
     strategy:
       # 一个平台挂掉不该连累另外两个：Windows 还没实机验证过，别让它拖着 macOS 的包不出。
@@ -232,6 +314,19 @@ jobs:
         if: runner.os == 'Linux'
         working-directory: clients/desktop
         run: npm run tauri:build -- --bundles appimage
+
+      - name: Rust 单测（打包配置那批守卫此前在 CI 上一次都没跑过）
+        # src-tauri 有 70 个单测，其中好几条守的正是**打包配置**：wintun 必须用映射形
+        # 落到安装根目录、NSIS 必须 perMachine、图标必须齐全、许可义务出处不许张冠李戴。
+        # 它们此前只有"开发者本地记得跑"这一个执行方——而 CI 是唯一每次都跑的地方。
+        #
+        # 放在打包**之后**而不是之前，是为了能用 --release 复用刚编好的依赖（dev profile
+        # 要把 tauri 整棵依赖树重编一遍，几分钟全花在关键路径上）。代价是它拦不住本轮，
+        # 只能报出来；真正要"拦在编译前"的那几类已经由上面的 preflight job 承担。
+        # 只在 Linux 上跑一份：这些断言读的都是配置文件与纯函数，三平台跑出来是同一个结果。
+        if: runner.os == 'Linux'
+        working-directory: clients/desktop/src-tauri
+        run: cargo test --release
 
       - name: 打包（Windows · msi + nsis）
         if: runner.os == 'Windows'

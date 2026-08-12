@@ -108,15 +108,31 @@ function Resolve-InstallDir {
     $candidates = @()
     foreach ($hive in @('HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*',
                         'HKCU:\SOFTWARE\Microsoft\Windows\CurrentVersion\Uninstall\*')) {
-        Get-ItemProperty $hive -ErrorAction SilentlyContinue |
+        # ★这里**不能**在 ForEach-Object 里写 `$candidates += …`：PowerShell 里
+        #   向脚本块内的变量赋值会在该块的作用域**新建一个局部变量**，外层那个纹丝不动。
+        #   症状是注册表里明明有卸载项、却永远走不到那条候选——静默，且只在"装过但装在
+        #   非常规目录"时才暴露。改成把管道结果收下来再并进去。
+        $found = @(Get-ItemProperty $hive -ErrorAction SilentlyContinue |
             Where-Object { $_.DisplayName -like '*白帝*' -or $_.DisplayName -like '*baidi*' } |
-            ForEach-Object { if ($_.InstallLocation) { $candidates += $_.InstallLocation } }
+            ForEach-Object { $_.InstallLocation })
+        $candidates += $found
     }
     $candidates += "$env:ProgramFiles\白帝安全接入客户端"
     $candidates += "${env:ProgramFiles(x86)}\白帝安全接入客户端"
+    $candidates += "${env:ProgramW6432}\白帝安全接入客户端"      # ARM64 机上 x64 应用的落点
     $candidates += "$env:LOCALAPPDATA\白帝安全接入客户端"   # 若这条命中，A1 就该判 FAIL
     foreach ($c in $candidates) {
-        if ($c -and (Test-Path (Join-Path $c 'baidi-tun.exe'))) { return $c }
+        # ★用 [IO.Path]::Combine 而不是 Join-Path。Join-Path 是带 provider 的 cmdlet：
+        #   参数不合它意时它**什么都不输出**（而不是抛错），下游 Test-Path 于是收到 $null，
+        #   报一句"无法将参数绑定到参数 Path，因为该参数是空值"——错误指向 Test-Path，
+        #   真凶却是 Join-Path，非常难认。实机第一次跑就栽在这上面（A0 直接把整个阶段 A 带崩）。
+        #   Combine 是纯字符串拼接，不碰 provider、不查驱动器，拼不出来就抛，抛了这里接住。
+        # ★空白项要跳过：环境变量缺失时插值出来的是 "\白帝安全接入客户端" 这种半截路径。
+        if ([string]::IsNullOrWhiteSpace($c)) { continue }
+        try {
+            $p = [System.IO.Path]::Combine($c.Trim(), 'baidi-tun.exe')
+        } catch { continue }
+        if ($p -and (Test-Path -LiteralPath $p)) { return $c.Trim() }
     }
     return ''
 }
@@ -176,6 +192,27 @@ function Invoke-StageA {
         }
     } else {
         Add-Result 'A3' 'DLL 与 exe 架构一致' 'SKIP' '缺 DLL 或 exe'
+    }
+
+    # A3b 包架构 vs **本机**架构。
+    #
+    # ★A3 只问"dll 与 exe 互相一致吗"，两个都是 x64 就判 PASS —— 在一台 ARM64 机器上
+    #   它照样 PASS，读的人会以为一切就绪。但 wintun 的**驱动是分架构的**：x64 的
+    #   wintun.dll 在 ARM64 内核上装不出网卡。用户态部分能靠 x64 模拟跑起来，
+    #   偏偏最关键的建卡那一步不能 —— 于是 A 段全绿、B 段莫名其妙地失败。
+    #   这条把"这台机器根本验不了这个包"提前说清楚，而不是让人跑到 B 段再撞墙。
+    $osArch = $env:PROCESSOR_ARCHITECTURE     # AMD64 / ARM64 / x86
+    $pkgM   = if (Test-Path $tun) { Get-PeMachine $tun } else { $null }
+    $pkgArch = switch ($pkgM) { 0x8664 { 'AMD64' } 0xAA64 { 'ARM64' } 0x14C { 'x86' } default { $null } }
+    if ($null -eq $pkgArch) {
+        Add-Result 'A3b' '包架构与本机架构匹配' 'UNKNOWN' "读不出 baidi-tun.exe 的 PE 头，本机是 $osArch"
+    } elseif ($pkgArch -eq $osArch) {
+        Add-Result 'A3b' '包架构与本机架构匹配' 'PASS' "均为 $osArch"
+    } else {
+        Add-Result 'A3b' '包架构与本机架构匹配' 'FAIL' `
+            ("包是 {0}，本机是 {1}。用户态部分可能靠模拟跑起来，但 **wintun 的驱动是分架构的**，" -f $pkgArch, $osArch) + `
+            "建卡（阶段 B）在这个组合下会失败，且报错不会提架构。这台机器需要 $osArch 的包才验得了数据面；" + `
+            "阶段 A 关于落位/许可的结论仍然有效，关于「装了能用」的结论**不能**从这一轮外推。"
     }
 
     # A4 许可义务：wintun 许可第 3(c) 条不得移除版权声明，我们承诺随包附许可原文

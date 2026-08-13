@@ -373,6 +373,7 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		s.mustChangeLogin(w, r, wu.cred)
 		return
 	}
+	s.noteLoginSuccess(r.Context(), account)
 	s.auditAs(r, account, "auth", "passkey 二次认证通过，登录成功", "ok")
 	tok := s.keys.Sign(auth.Claims{Sub: wu.cred.Account, Role: wu.cred.Role, Name: wu.cred.Account, Jti: auth.RandJTI()}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{

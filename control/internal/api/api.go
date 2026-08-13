@@ -149,6 +149,26 @@ var pwStrengthZh = map[string]string{auth.PwWeak: "弱", auth.PwStrong: "强", a
 // accountBlocked 报告目录状态是否禁止接入（禁用/锁定拒登录、拒发敲门令牌）。
 func accountBlocked(status string) bool { return status == "disabled" || status == "locked" }
 
+// lastLoginWriter TouchLastLogin 的可选实现（SQLiteStore 有；Memory 种子没有——
+// 演示数据的"最后登录"本来就是编的，不值得为它造一个假写入）。
+type lastLoginWriter interface {
+	TouchLastLogin(ctx context.Context, account string) error
+}
+
+// noteLoginSuccess 登录成功的统一记账：刷 users.last_login。
+// 失败只记日志绝不影响登录——观测字段的写失败不该把人挡在门外。
+// 四个调用点：门户口令登录、管理台口令登录、passkey 断言完成、首登受限令牌
+// （受限态也是一次成功认证，闲置判定该把它算作活跃）。
+func (s *Server) noteLoginSuccess(ctx context.Context, account string) {
+	w, ok := s.writer.(lastLoginWriter)
+	if !ok {
+		return
+	}
+	if err := w.TouchLastLogin(ctx, account); err != nil {
+		slog.Warn("last_login 刷新失败（不影响本次登录）", "account", account, "err", err.Error())
+	}
+}
+
 // lookupDirUser 按谓词查目录用户。store 读失败时返回 error——调用方须 fail-closed，
 // 不得把"查不到状态"当"状态正常"放行。
 func (s *Server) lookupDirUser(ctx context.Context, match func(store.DirUser) bool) (store.DirUser, bool, error) {
@@ -612,6 +632,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		s.mustChangeLogin(w, r, cred)
 		return
 	}
+	s.noteLoginSuccess(r.Context(), cred.Account)
 	s.auditAs(r, cred.Account, "auth", "终端用户登录成功", "ok")
 	// 令牌 Name=账号（数据面网关按 claims.Name 做放行/封禁匹配，必须是规范账号，不能放显示名）；
 	// 显示名单独经响应体 displayName 回给前端。
@@ -946,6 +967,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 		s.mustChangeLogin(w, r, cred)
 		return
 	}
+	s.noteLoginSuccess(r.Context(), cred.Account)
 	s.auditAs(r, cred.Name, "auth", "管理员登录成功", "ok")
 	// Name=账号（同门户：数据面身份匹配用规范账号）；显示名走 displayName。
 	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: "admin", Name: cred.Account}, tokenTTL)
@@ -957,6 +979,7 @@ func (s *Server) handleAdminLogin(w http.ResponseWriter, r *http.Request) {
 // 与 GET /auth/me，业务端点与 /knock-token 一律 403——受限态碰不到数据面。
 // 审计记的是事实：认证确已通过，只是令牌被降级。
 func (s *Server) mustChangeLogin(w http.ResponseWriter, r *http.Request, cred store.Credential) {
+	s.noteLoginSuccess(r.Context(), cred.Account) // 受限态也是一次成功认证，闲置判定算活跃
 	s.auditAs(r, cred.Account, "auth", "登录认证通过，但初始口令未修改，签发受限改密令牌", "ok")
 	tok := s.keys.Sign(auth.Claims{
 		Sub: cred.Account, Role: cred.Role, Name: cred.Account,
@@ -1717,12 +1740,59 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePerm(w, r, store.PermAudit) {
 		return
 	}
+	// 带任一检索参数 → 走 SearchAudit（同一响应结构里以 search 段返回，首屏聚合不变）。
+	qs := r.URL.Query()
+	q := store.AuditQuery{
+		Category: qs.Get("category"), Actor: qs.Get("actor"), SrcIP: qs.Get("srcIp"),
+		Keyword: qs.Get("q"), From: qs.Get("from"), To: qs.Get("to"),
+		Limit: atoiDefault(qs.Get("limit"), 0), Offset: atoiDefault(qs.Get("offset"), 0),
+	}
+	searching := q.Category != "" || q.Actor != "" || q.SrcIP != "" || q.Keyword != "" || q.From != "" || q.To != "" ||
+		qs.Get("limit") != "" || qs.Get("offset") != ""
+	if searching {
+		if q.Category != "" && !map[string]bool{"access": true, "auth": true, "admin": true,
+			"security": true, "dataplane": true, "system": true}[q.Category] {
+			httpx.Error(w, http.StatusBadRequest, "未知的审计类别："+q.Category)
+			return
+		}
+		as, ok := s.store.(auditSearcher)
+		if !ok {
+			// Memory 种子只有 8 条演示日志，装一个"检索"是在演示一个假能力。
+			httpx.Error(w, http.StatusNotImplemented, "当前存储后端不支持审计检索（内存种子模式）")
+			return
+		}
+		logs, total, err := as.SearchAudit(r.Context(), q)
+		if err != nil {
+			httpx.Error(w, http.StatusInternalServerError, "审计检索失败")
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{"logs": logs, "total": total,
+			"limit": q.Limit, "offset": q.Offset})
+		return
+	}
 	b, err := s.store.Audit(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load audit")
 		return
 	}
 	httpx.JSON(w, http.StatusOK, b)
+}
+
+// auditSearcher 审计在线检索能力（SQLiteStore 实现）。
+type auditSearcher interface {
+	SearchAudit(ctx context.Context, q store.AuditQuery) ([]store.AuditEntry, int, error)
+}
+
+// atoiDefault 解析非负整数，解析不了回缺省值。
+func atoiDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil || n < 0 {
+		return def
+	}
+	return n
 }
 
 // handleGateway 已搬到 gatewaypage.go：它现在按 mTLS 注册心跳的真实网关构建，

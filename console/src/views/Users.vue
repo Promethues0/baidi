@@ -120,7 +120,7 @@
             <button class="bd-onode" :class="{ on: groupSel === g.id }" :aria-pressed="groupSel === g.id"
               @click="groupSel = g.id">
               <icon-user-group class="bd-onode__ic" />
-              <span class="bd-onode__t">{{ g.name }}<em v-if="g.kind === 'role'" class="bd-kindtag">角色派生</em></span>
+              <span class="bd-onode__t">{{ g.name }}<em v-if="g.kind === 'role'" class="bd-kindtag">角色派生</em><em v-else-if="g.kind === 'external'" class="bd-kindtag bd-kindtag--ext">外部目录</em></span>
               <span class="bd-onode__n">{{ g.members }}</span>
             </button>
             <span class="bd-onode__acts">
@@ -407,6 +407,7 @@ const memberActHint = computed(() => {
   const g = curGroup.value;
   if (!g) return '编辑成员（先在下方选中一个用户组）';
   if (g.kind === 'role') return `「${g.name}」是角色派生组，成员由用户角色决定，不能直接编辑`;
+  if (g.kind === 'external') return `「${g.name}」来自外部目录（LDAP/OIDC），成员在每次外部登录时由认证源刷新——手工改动会被下次登录冲掉，故不可编辑`;
   return `编辑成员：${g.name}`;
 });
 function newSubOrg() { if (curOrgNode.value) openOrg(null, curOrgNode.value.key); }
@@ -528,6 +529,12 @@ const groupSaving = ref(false);
 const groupForm = reactive<{ id: string; name: string; kind: 'static' | 'role'; description: string }>(
   { id: '', name: '', kind: 'static', description: '' });
 function openGroup(g: GroupWithMembers | null) {
+  // 外部目录组连编辑抽屉都不该打开：后端两条写路径都会拒（改了也会被下次登录冲掉），
+  // 这里在入口就说清，而不是让人填完表单吃一个 409。
+  if (g?.kind === 'external') {
+    Message.info(`「${g.name}」来自外部目录，由认证源按登录刷新，不可编辑`);
+    return;
+  }
   if (g) { groupForm.id = g.id; groupForm.name = g.name; groupForm.kind = g.kind; groupForm.description = g.description; }
   else { groupForm.id = ''; groupForm.name = ''; groupForm.kind = 'static'; groupForm.description = ''; }
   groupOpen.value = true;
@@ -769,4 +776,5 @@ onMounted(load);
 .bd-uform__f :deep(.arco-input-wrapper), .bd-uform__f :deep(.arco-select-view) { width: 100%; }
 .bd-uform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .bd-uform__foot .bd-btn[disabled] { opacity: .6; cursor: not-allowed; }
+.bd-kindtag--ext { color: #0FC6C2; background: #0FC6C214; }
 </style>

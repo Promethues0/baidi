@@ -697,6 +697,9 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// 不回填的后果是升级后既有管理员全部无角色 → requirePerm fail-closed 403，
 		// 而"给自己分配角色"本身也要管理员权限，等于把所有人锁在门外。
 		{"users", "admin_role", "TEXT"},
+		// email（wave7 行动 2）：外部认证源带回的邮箱。既有行回填空串 = "未知"
+		// （无从推断历史邮箱，猜一个更糟）；本地账号暂无采集入口，恒空是如实的。
+		{"users", "email", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -724,6 +727,9 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		return err
 	}
 	if err := s.backfillMustChangePw(); err != nil {
+		return err
+	}
+	if err := s.backfillUserEmail(); err != nil {
 		return err
 	}
 	if err := s.backfillAuditChain(); err != nil {
@@ -900,6 +906,13 @@ func (s *SQLiteStore) backfillResourceWebScheme() error {
 		}
 	}
 	return nil
+}
+
+// backfillUserEmail 回填 users.email：补列后 NULL → 空串（语义"未知"）。
+// 历史行的邮箱无从推断；外部账号下次登录会由认证源刷上真值。
+func (s *SQLiteStore) backfillUserEmail() error {
+	_, err := s.db.Exec(`UPDATE users SET email='' WHERE email IS NULL`)
+	return err
 }
 
 // backfillMustChangePw 回填 users.must_change_pw：既有行一律补 0。
@@ -1170,9 +1183,9 @@ func (s *SQLiteStore) insertUser(u DirUser) error {
 	if u.PwStrength == "" {
 		u.PwStrength = auth.PwUnknown
 	}
-	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength,admin_role)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength, u.AdminRole)
+	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength,admin_role,email)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength, u.AdminRole, u.Email)
 	return err
 }
 
@@ -1231,7 +1244,7 @@ func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
 	// 把所有管理员都当成普通用户，那道闸会静默失效（不报错、不留痕）。
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id,u.name,u.account,u.org,u.org_key,u.device,u.ip,u.auth,u.last_login,u.online,u.status,u.risk,u.roles,
-       COALESCE(u.org_id,''), COALESCE(o.name,''), COALESCE(u.role,'user')
+       COALESCE(u.org_id,''), COALESCE(o.name,''), COALESCE(u.role,'user'), COALESCE(u.email,'')
 FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 	if err != nil {
 		return UserDirBundle{}, err
@@ -1243,7 +1256,7 @@ FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 		var online int
 		var roles, orgName string
 		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin,
-			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName, &u.Role); err != nil {
+			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName, &u.Role, &u.Email); err != nil {
 			return UserDirBundle{}, err
 		}
 		u.Online = online == 1

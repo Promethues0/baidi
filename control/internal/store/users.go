@@ -71,6 +71,8 @@ type DirUser struct {
 	// 只有 bcrypt 哈希，判不出强度，只能消费这个在设密码那一刻落下的标记。
 	// 不序列化：它是判定材料，不是目录展示字段（管理台另有专门口径展示）。
 	PwStrength string `json:"-"`
+	// Email 外部认证源带回的邮箱（本地账号暂无采集入口，恒空=未知）。
+	Email string `json:"email"`
 	// AdminRole 管理员角色 key（admin_roles."key"，三权分立），非管理员为空。
 	// **刻意不序列化**：能从 POST /api/v1/users 的请求体里塞进来的话，
 	// 持 security 权的管理员就能凭"新建用户"给自己造一个超管——提权只需一次请求。

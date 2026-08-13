@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"strings"
 
@@ -191,6 +193,15 @@ func (s *SQLiteStore) BindExternalUser(ctx context.Context, sourceID string, ext
 	if c, ok, err := s.UserBySubject(ctx, sourceID, ext.Subject); err != nil {
 		return Credential{}, err
 	} else if ok {
+		// ★已绑定不再提前返回（wave7 行动 2）：外部身份的组/邮箱/显示名每次登录刷新。
+		// 此前这里直接 return，采集侧（LDAP GroupAttr / OIDC groups claim）拿到的组
+		// 到这儿就被扔掉——「按 AD 安全组授权」整条链因此断在最后一跳。
+		if err := s.refreshExternalProfile(ctx, sourceID, c.Account, ext); err != nil {
+			return Credential{}, err
+		}
+		if n := strings.TrimSpace(ext.DisplayName); n != "" && n != c.Name {
+			c.Name = n
+		}
 		return c, nil
 	}
 
@@ -277,7 +288,117 @@ ON CONFLICT(source_id,subject) DO UPDATE SET user_id=excluded.user_id, username=
 	if err := tx.Commit(); err != nil {
 		return Credential{}, err
 	}
+	// 组/邮箱刷新放在建号事务之后：账号已可登录，组同步失败不该把建号一起回滚
+	// （下次登录会重试）；失败如实上抛让登录链路记日志。
+	if err := s.refreshExternalProfile(ctx, sourceID, account, ext); err != nil {
+		return Credential{}, err
+	}
 	return Credential{ID: id, Name: name, Account: account, Role: "user", Status: "active", PassHash: ""}, nil
+}
+
+// extGroupID 外部组的确定性 id：gext-<源 id 清洗>-<sha256(组名小写) 前 10 位>。
+//
+// ★确定性是硬要求：资源授权/认证策略按组 id 引用，id 抖动等于每次登录都把
+// 既有授权指向一个不存在的旧组。源 id 编进前缀，成员刷新时才能只清"本源"的组
+// ——两个源同名组必须是两个组（A 源的 "admins" 不该继承 B 源 "admins" 的授权）。
+func extGroupID(sourceID, name string) string {
+	clean := strings.Map(func(r rune) rune {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '-' || r == '_' {
+			return r
+		}
+		return '-'
+	}, strings.ToLower(sourceID))
+	sum := sha256.Sum256([]byte(strings.ToLower(strings.TrimSpace(name))))
+	return "gext-" + clean + "-" + hex.EncodeToString(sum[:])[:10]
+}
+
+// refreshExternalProfile 按认证源本次返回的身份，刷新该账号的邮箱/显示名与外部组。
+//
+// 组同步的口径：**该账号在本源名下的外部组 = 本次返回的清单，逐次收敛**。
+//   - 组行 kind=external，页面只读（SaveUserGroup/SetGroupMembers 有守卫）；
+//   - 清理范围严格限定 (account, 本源前缀)：不碰 static/role 组，也不碰别的源的外部组
+//     ——LDAP 与 OIDC 双源并存时互相冲成员是最难查的一种抖动；
+//   - 组改名 = 新 id：旧组自然失去该成员，空组留着（可能仍被授权引用；
+//     fail-closed 方向，管理员可见可删）。
+func (s *SQLiteStore) refreshExternalProfile(ctx context.Context, sourceID, account string, ext ExternalIdentity) error {
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	acct := strings.ToLower(strings.TrimSpace(account))
+
+	// 邮箱/显示名：认证源是外部账号这两项的权威（本地改了也会被下次登录纠正——
+	// 这正是"权威在外部"的含义，不是缺陷）。空值不覆盖：源没给不等于要清掉。
+	if e := strings.ToLower(strings.TrimSpace(ext.Email)); e != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET email=? WHERE lower(trim(account))=?`, e, acct); err != nil {
+			return err
+		}
+	}
+	if n := strings.TrimSpace(ext.DisplayName); n != "" {
+		if _, err := tx.ExecContext(ctx, `UPDATE users SET name=? WHERE lower(trim(account))=?`, n, acct); err != nil {
+			return err
+		}
+	}
+
+	// 目标组集合：确保组行存在（INSERT OR IGNORE——名字/描述以首建为准，改名走新 id）。
+	prefix := extGroupID(sourceID, "") // "gext-<src>-" + hash("")[:10]，仅取前缀部分
+	prefix = prefix[:len(prefix)-10]
+	desired := map[string]bool{}
+	for _, g := range ext.Groups {
+		g = strings.TrimSpace(g)
+		if g == "" {
+			continue
+		}
+		gid := extGroupID(sourceID, g)
+		desired[gid] = true
+		if _, err := tx.ExecContext(ctx, `INSERT OR IGNORE INTO user_groups(id,name,kind,description,created_at)
+VALUES(?,?,?,?,?)`, gid, g, GroupKindExternal,
+			"外部目录组（来源 "+sourceID+"）· 成员由该源按登录刷新，不可手工编辑", nowStr()); err != nil {
+			return err
+		}
+	}
+
+	// 现有集合（仅本源前缀下的外部组）。
+	rows, err := tx.QueryContext(ctx, `
+SELECT gm.group_id FROM user_group_members gm
+JOIN user_groups g ON g.id = gm.group_id
+WHERE gm.account=? AND g.kind=? AND g.id LIKE ? ESCAPE '\'`,
+		acct, GroupKindExternal, strings.ReplaceAll(prefix, "_", `\_`)+"%")
+	if err != nil {
+		return err
+	}
+	current := map[string]bool{}
+	for rows.Next() {
+		var gid string
+		if err := rows.Scan(&gid); err != nil {
+			rows.Close()
+			return err
+		}
+		current[gid] = true
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+
+	for gid := range current {
+		if !desired[gid] {
+			if _, err := tx.ExecContext(ctx,
+				`DELETE FROM user_group_members WHERE group_id=? AND account=?`, gid, acct); err != nil {
+				return err
+			}
+		}
+	}
+	for gid := range desired {
+		if !current[gid] {
+			if _, err := tx.ExecContext(ctx,
+				`INSERT OR IGNORE INTO user_group_members(group_id,account) VALUES(?,?)`, gid, acct); err != nil {
+				return err
+			}
+		}
+	}
+	return tx.Commit()
 }
 
 // externalOrgUnitID 外部目录账号的组织归属 id。

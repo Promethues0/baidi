@@ -10,7 +10,7 @@
 | 3 | 系统架构与总体设计 | ➖ | 控制面/数据面分离原则不变；**网关横向扩展 + 客户端故障转移（FR-ARCH-03/04）已真实现**：剖面下发有序落点清单（在线优先→id 字典序，离线也下发）、指纹逐网关、客户端按序切换且切换在接入页可见，单数 `gateway` 字段保留供旧客户端。**控制面自身的多活/选主不做**（SQLite 单写者，双写会静默丢配置）；控制面侧改为**温备已真实现**（`baidi-standby` 周期拉加密备份 → 校验 → 落盘 → 回报，主机侧 mTLS `standby-` 前缀分权，系统页/`/diag` 三态真判定，切换脚本 `deploy/promote-standby.sh` 且干跑有用例跑）——RPO = 同步间隔、切换需人工触发、不做自动选主（两节点无仲裁必然脑裂），**就近选择与负载均衡刻意不做**（没有地理/时延数据；心跳指标无调度语义，按 CPU 选最闲会把所有新连接一起打到同一台）；边界见 docs/ARCHITECTURE.md 第七节 |
 | 4 | 产品升级管理 | ➖ | 升级前校验（版本序/禁降级/强制链路/组件一致性/包签名）、加密配置备份、**客户端灰度真跑通**；服务端换二进制仍由部署脚本执行，集群升级编排未做（集群本就没部署） |
 | 5 | 监控中心 | ✅ | `MonitorDashboard` 安全监控大屏 |
-| 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups` |
+| 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups`；**外部目录组映射已真**（LDAP memberOf / OIDC groups → kind=external 用户组，按登录逐次收敛、双源隔离、页面只读，直接进 `SubjectIndex` 供资源授权与认证策略引用）；目录全量同步为 L 级延后项（见 docs/charter/wave7.md D 组） |
 | 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver` |
 | 8 | 应用管理（资源发布） | ➖ | 隧道应用发布/资源鉴权/JIT 审批已真实现；**七层 Web 代理（8.3.3）已真实现**（控制面签 use=web 短时效一次性票据 → 网关 L7 验票换会话 Cookie → 逐请求重新鉴权 → 反代；XFF 按真实对端重写、Location/Set-Cookie 作用域改写、`web-e2e.sh` 九条断言，含票据重放、跨应用 Cookie、撤权后立即失效三条反例）。仍不做：**HTML 正文绝对链接改写**（无底洞，如实标边界）、**DLP/水印/禁复制打印下载**（属 ch11 UEM，整章不做）、**SSO 免认证代填**；L7 端口不受 SPA 隐身保护，边界见 docs/ARCHITECTURE.md 第七节 |
 | 9 | 终端管理 | ✅ | `IdentityDevices` + `IdentityCompliance`（终端合规基线 = 设备 posture，属身份/设备信任，**保留**） |

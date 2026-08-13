@@ -30,7 +30,7 @@
 - 为什么值得：协议客户端 30 用例全绿、探测通过、配置页齐全，却没有任何用户能经它登录——本项目最忌的 config-only 静默失效的教科书案例；且 D 组的登出/回验洞要先「有人能登」才有意义。
 - 注意：回调路径同样要过 `secondFactor`（passkey 强制断言排在策略前的既有纪律不许被新入口绕过）。
 
-**2. 外部身份组/属性消费（C 组）— M**
+**2. 外部身份组/属性消费（C 组）— M ✅ 已落地**
 - 做什么：`BindExternalUser` 消费 `ext.Groups`——upsert 为外部来源用户组（建议加 `kind=external`，只读、按登录刷新）并接进既有 `SubjectIndex`；落 `ext.Email`；**去掉「已绑定即提前返回」**，改为每次登录刷新组与属性。
 - 改哪里：`control/internal/store/authsrc_sqlite.go`（BindExternalUser）、`store/orgs.go`（GroupKind 枚举）、users 表补 email 列+回填。
 - 为什么值得：「按 AD 安全组授权应用/差异化 MFA」是企业接目录后的第一个真实诉求；采集侧（GroupAttr/EmailAttr）与承接侧（allow_groups/ScopeGroups/SubjectIndex）全部现成，只缺中间一行消费——全清单杠杆最高的一条。

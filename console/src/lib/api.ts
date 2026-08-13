@@ -109,7 +109,7 @@ export interface Org {
 }
 /** 用户组（store.UserGroup）。kind=static 显式成员；kind=role 按用户展示角色派生（成员只读）。 */
 export interface UserGroup {
-  id: string; name: string; kind: 'static' | 'role';
+  id: string; name: string; kind: 'static' | 'role' | 'external';
   description: string; createdAt: string; members: number;
 }
 /** GET /groups 的一行：用户组 + 它当前的成员账号。 */

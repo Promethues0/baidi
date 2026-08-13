@@ -39,6 +39,8 @@ var (
 	ErrGroupExists = errors.New("同名用户组已存在")
 	// ErrGroupDerived 角色组的成员由用户展示角色派生，不接受显式成员写入。
 	ErrGroupDerived = errors.New("角色组的成员由用户角色派生，不能直接编辑成员")
+	// ErrGroupExternal 外部目录组按登录刷新，不接受手工编辑（改了也会被下次登录冲掉）。
+	ErrGroupExternal = errors.New("外部目录组由认证源按登录刷新，不能手工编辑或改名")
 	// ErrUnknownAccount 成员清单里有库中不存在的账号。
 	// ★不静默丢弃：拼错一个账号就少一个人有权限，而界面上看不出任何异常。
 	ErrUnknownAccount = errors.New("成员账号在用户目录中不存在")
@@ -65,6 +67,11 @@ var (
 const (
 	GroupKindStatic = "static"
 	GroupKindRole   = "role"
+	// GroupKindExternal 外部目录派生组（wave7 行动 2）：成员由该账号每次外部登录时
+	// 按认证源返回的组清单刷新（BindExternalUser）。★ValidGroupKind 刻意不含它：
+	// 该类组不可经 API 创建/改名/改成员——手工编辑会在下一次登录被静默冲掉，
+	// 那种"改了又变回去"比直接拒绝难查得多。
+	GroupKindExternal = "external"
 )
 
 // ValidGroupKind 报告 kind 取值是否合法。

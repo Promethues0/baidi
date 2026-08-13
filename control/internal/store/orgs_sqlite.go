@@ -367,9 +367,12 @@ func (s *SQLiteStore) SaveUserGroup(ctx context.Context, g UserGroup) (UserGroup
 		g.ID = "grp-" + uuid.NewString()[:8]
 		g.CreatedAt = nowStr()
 	} else {
-		var created string
-		switch err := tx.QueryRowContext(ctx, `SELECT COALESCE(created_at,'') FROM user_groups WHERE id=?`, g.ID).Scan(&created); err {
+		var created, curKind string
+		switch err := tx.QueryRowContext(ctx, `SELECT COALESCE(created_at,''), COALESCE(kind,'') FROM user_groups WHERE id=?`, g.ID).Scan(&created, &curKind); err {
 		case nil:
+			if curKind == GroupKindExternal {
+				return UserGroup{}, ErrGroupExternal
+			}
 			g.CreatedAt = created
 		case sql.ErrNoRows:
 			g.CreatedAt = nowStr()
@@ -485,6 +488,9 @@ func (s *SQLiteStore) SetGroupMembers(ctx context.Context, groupID string, accou
 	}
 	if kind == GroupKindRole {
 		return ErrGroupDerived
+	}
+	if kind == GroupKindExternal {
+		return ErrGroupExternal
 	}
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {

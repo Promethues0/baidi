@@ -58,14 +58,20 @@
     <!-- 日志表 -->
     <div class="bd-tablecard">
       <div class="bd-toolbar">
-        <!-- 类别筛选 pill -->
+        <!-- 类别筛选 pill：已连控制面时是**服务端检索条件**（全表 WHERE），
+             不再只是对最近 200 条的前端过滤 -->
         <div class="bd-pillrow">
-          <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key">{{ f.label }}</span>
+          <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch()">{{ f.label }}</span>
         </div>
         <div style="flex: 1" />
-        <!-- 时间快选 pill -->
+        <!-- 检索：账号精确（查证据链要精确，模糊会把 li 匹配到 alice）+ 事件关键词 -->
+        <a-input v-model="q.actor" size="small" style="width: 140px" placeholder="账号（精确）"
+          allow-clear @press-enter="runSearch" @clear="runSearch" />
+        <a-input v-model="q.kw" size="small" style="width: 170px" placeholder="事件关键词 / 回车检索"
+          allow-clear @press-enter="runSearch" @clear="runSearch" />
+        <!-- 时间快选 pill：此前是装饰件（没接进任何过滤逻辑），现为服务端时间窗 -->
         <div class="bd-pillrow">
-          <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key">{{ t.label }}</span>
+          <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch()">{{ t.label }}</span>
         </div>
       </div>
       <table class="bd-table">
@@ -84,7 +90,10 @@
           <tr v-if="!shownLogs.length"><td colspan="6" style="text-align: center; color: var(--bd-t3); padding: 40px 0">当前筛选无匹配日志</td></tr>
         </tbody>
       </table>
-      <div class="bd-pager">共 {{ shownLogs.length }} 条记录 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</div>
+      <div class="bd-pager">
+        <template v-if="searchTotal >= 0">全表命中 {{ searchTotal }} 条，显示前 {{ shownLogs.length }} 条 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</template>
+        <template v-else>共 {{ shownLogs.length }} 条记录（最近 200 条快照）· 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</template>
+      </div>
     </div>
 
     <!-- 导出（真实调用 GET /api/v1/audit/export，流式 CSV 附件）。
@@ -188,9 +197,44 @@ const catFilters = [
 const timeFilters = [{ key: 'today', label: '今天' }, { key: '7d', label: '7 天' }, { key: '30d', label: '30 天' }];
 const catSel = ref('all');
 const timeSel = ref('today');
-const shownLogs = computed<AuditEntry[]>(() =>
-  catSel.value === 'all' ? bundle.value.logs : bundle.value.logs.filter((l) => l.category === catSel.value)
-);
+/* 服务端检索态：results 非 null 时表格显示它（全表 WHERE 的结果），
+ * 否则回落到首屏快照（最近 200 条）的前端过滤。未连控制面时永远走后者——
+ * mock 数据上装一个"全表检索"是在演示假能力。 */
+const q = reactive({ actor: '', kw: '' });
+const searchResults = ref<AuditEntry[] | null>(null);
+const searchTotal = ref(-1);
+const shownLogs = computed<AuditEntry[]>(() => {
+  if (searchResults.value) return searchResults.value;
+  return catSel.value === 'all' ? bundle.value.logs : bundle.value.logs.filter((l) => l.category === catSel.value);
+});
+
+function sinceOf(key: string): string {
+  const d = new Date();
+  if (key === '7d') d.setDate(d.getDate() - 6);
+  else if (key === '30d') d.setDate(d.getDate() - 29);
+  // today：就是今天
+  return d.toISOString().slice(0, 10);
+}
+
+async function runSearch() {
+  if (!live.value) { searchResults.value = null; searchTotal.value = -1; return; }
+  // 全默认（全部类别 + 今天 + 无关键词）退回首屏快照：别让"什么都没筛"看起来像检索过
+  const idle = catSel.value === 'all' && timeSel.value === 'today' && !q.actor.trim() && !q.kw.trim();
+  if (idle) { searchResults.value = null; searchTotal.value = -1; return; }
+  const qs = new URLSearchParams();
+  if (catSel.value !== 'all') qs.set('category', catSel.value);
+  if (q.actor.trim()) qs.set('actor', q.actor.trim());
+  if (q.kw.trim()) qs.set('q', q.kw.trim());
+  qs.set('from', sinceOf(timeSel.value));
+  qs.set('limit', '200');
+  try {
+    const r = await api<{ logs: AuditEntry[]; total: number }>(`/audit?${qs.toString()}`);
+    searchResults.value = r.logs;
+    searchTotal.value = r.total;
+  } catch {
+    Message.error('审计检索失败（需已连 baidi-control）');
+  }
+}
 
 function catMeta(c: AuditEntry['category']) {
   // 未知分类兜底：后端新增分类时页面稳定降级（原样显示 key），而不是 undefined.color 崩掉整页

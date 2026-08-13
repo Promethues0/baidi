@@ -79,6 +79,9 @@ type Server struct {
 	// upgradeKeys 升级包发布公钥（BAIDI_UPGRADE_PUBKEY，base64，逗号分隔可多把供轮换）。
 	// 空 = 无法验签，VerifySignature 会**拒绝**而不是跳过（见那里的注释）。
 	upgradeKeys []ed25519.PublicKey
+	// licenseKeys License 发行公钥（BAIDI_LICENSE_PUBKEY）。与 upgradeKeys 是两个信任域，
+	// 刻意不共用一个变量/环境变量：升级发布方与 License 发行方不必是同一把钥匙的主人。
+	licenseKeys []ed25519.PublicKey
 	// sb 温备节点台账（PRD 15.5）。同 nat/upg：纯内存后端拿不到，集群视图如实回
 	// 「不可判定」而不是「未配置备机」——后者是另一件事（确实没配 vs 记不下来）。
 	sb store.StandbyStore
@@ -233,6 +236,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	s.standbyPass = os.Getenv("BAIDI_STANDBY_PASSPHRASE")
 	s.standbyStale = standbyStaleFromEnv(os.Getenv("BAIDI_STANDBY_STALE_SECONDS"))
 	s.upgradeKeys = parseUpgradeKeys(os.Getenv("BAIDI_UPGRADE_PUBKEY"))
+	s.licenseKeys = parseLicenseKeys(os.Getenv("BAIDI_LICENSE_PUBKEY"))
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
@@ -356,6 +360,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /api/v1/audit/export", s.handleAuditExport)
 	mux.HandleFunc("GET /api/v1/audit/report", s.handleOpsReport)
+	mux.HandleFunc("GET /api/v1/license", s.handleLicense)
+	mux.HandleFunc("POST /api/v1/license", s.handleImportLicense)
 	// 审计日志外送（PRD ch16 + ch21.6）：RFC 5424 syslog over TCP/TLS + 通用 HTTP JSON。
 	// 归 PermSystem 一权（理由见 auditforward.go 顶部）。真实消费方 = 后台投递循环
 	// StartAuditForwardLoop，队列在 audit_forward_queue，发送成功才出队。
@@ -719,6 +725,12 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	u.PassHash = hash
+	// License 用户席位闸（demo 模式恒放行；判定与理由见 licenseAdmit）。
+	if reason, ok := s.licenseAdmit(r, "user"); !ok {
+		s.audit(r, "admin", "新增用户「"+u.Account+"」被 License 拒绝："+reason, "fail")
+		httpx.Error(w, http.StatusConflict, reason)
+		return
+	}
 	// ★这条路只建**普通用户**：DirUser.Role 是可从请求体解出来的字段，放任它带 "admin"
 	// 就意味着持 security 权的管理员一次请求即可给自己造一个管理员账号——三权分立
 	// 立刻失效，且列表上看不出异常。管理员的建立与角色分派唯一入口是

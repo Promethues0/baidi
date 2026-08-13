@@ -164,6 +164,19 @@ export interface DiskStat { usedPct: number; totalGB: number; retainDays: number
 export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
 
+/* ── License（GET/POST /api/v1/license）──
+ * mode: demo=未导入（容量不限，如实标注）| licensed | expired | invalid。
+ * usage 里 -1 = 读不出（不可判定，渲染成 —，绝不当 0）。 */
+export interface LicenseInfo {
+  mode: 'demo' | 'licensed' | 'expired' | 'invalid';
+  reason: string;
+  keysConfigured: boolean;
+  canImport: boolean;
+  boundaries: string[];
+  manifest?: { product: string; licensee: string; issuedAt: string; expiresAt: string; maxUsers: number; maxGateways: number };
+  usage: { users: number; gateways: number; maxUsers: number; maxGateways: number; overUsers: boolean; overGateways: boolean };
+}
+
 /* ── 运营报表（GET /api/v1/audit/report → store.OpsReport）──
  * 全部字段是对 audit_log / alerts 的 SQL 聚合；权限归 audit（聚合并不脱敏）。 */
 export interface OpsDay { date: string; authOk: number; authFail: number; accessAllow: number; accessDeny: number; adminOps: number; security: number; total: number }

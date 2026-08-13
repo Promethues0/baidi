@@ -23,6 +23,7 @@ cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build   # �
 cd clients/desktop && ./src-tauri/build-sidecars.sh --target aarch64-pc-windows-msvc   # 交叉出别的架构（CI 的 Windows ARM64 腿走这条）
 cd clients/mobile && npm run dev     # :5295
 cd control && go run ./cmd/baidi-standby -h   # 控制面温备节点（拉加密备份/校验/落盘，不提供服务）
+cd control && go run ./cmd/baidi-license -h   # License 发行 CLI（发行方离线用；私钥绝不进控制面机器）
 cd deploy && cp config.env.example config.env && ./deploy.sh   # 一键部署
 BAIDI_STANDBY_PASSPHRASE=… deploy/promote-standby.sh --dry-run  # 提升备机为主机（干跑：只校验+打印清单）
 ```

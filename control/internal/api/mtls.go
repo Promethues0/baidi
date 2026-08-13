@@ -204,6 +204,15 @@ func (s *Server) handleIssueGatewayCert(w http.ResponseWriter, r *http.Request) 
 				"备机证书请在主机上离线签发：baidi-control -issue-gateway-cert standby-1 -out <目录>")
 		return
 	}
+	// License 网关席位闸：只对**新 gatewayId** 计席位——同 id 换证不占新席位
+	// （计数口径是未吊销证书的去重 gatewayId，见 licenseUsage）。
+	if !s.gatewayHasCert(r, b.GatewayID) {
+		if reason, ok := s.licenseAdmit(r, "gateway"); !ok {
+			s.audit(r, "admin", "签发网关证书「"+b.GatewayID+"」被 License 拒绝："+reason, "fail")
+			httpx.Error(w, http.StatusConflict, reason)
+			return
+		}
+	}
 	iss, err := s.ca.IssueClient(b.GatewayID)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "签发失败")
@@ -301,4 +310,19 @@ func min(a, b int) int {
 		return a
 	}
 	return b
+}
+
+// gatewayHasCert 该 gatewayId 是否已有未吊销证书（有则本次签发是换证，不占新席位）。
+// 读失败按"没有"处理：方向是多过一次容量闸（更严），而不是放行。
+func (s *Server) gatewayHasCert(r *http.Request, gwID string) bool {
+	certs, err := s.store.GatewayCerts(r.Context())
+	if err != nil {
+		return false
+	}
+	for _, c := range certs {
+		if !c.Revoked && c.GatewayID == gwID {
+			return true
+		}
+	}
+	return false
 }

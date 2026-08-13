@@ -16,6 +16,7 @@
       <span class="bd-tab" :class="{ on: tab === 'notify' }" @click="tab = 'notify'">消息通道</span>
       <span class="bd-tab" :class="{ on: tab === 'forward' }" @click="tab = 'forward'">日志外送</span>
       <span class="bd-tab" :class="{ on: tab === 'cluster' }" @click="tab = 'cluster'">集群</span>
+      <span class="bd-tab" :class="{ on: tab === 'license' }" @click="tab = 'license'">License</span>
     </div>
 
     <!-- ============ 管理员与三权分立 ============ -->
@@ -460,6 +461,64 @@
          与 /diag 的 checkCluster 同一个后端函数——这一页刻意**没有**降级演示数据：
          编一台"同步正常"的备机，与真的备机在页面上无法区分，而这一页的存在意义
          正是"切换那天手上到底有没有一份能用的备份"。 -->
+    <div v-show="tab === 'license'">
+      <div class="bd-section-title">License · 容量与有效期</div>
+
+      <!-- 状态行：demo 是正常形态（研究/演示项目），不当成缺陷渲染 -->
+      <div class="bd-card" style="padding: 16px 18px; margin-bottom: 12px">
+        <div style="display: flex; align-items: center; gap: 10px">
+          <a-tag :color="licModeColor" bordered>{{ licModeLabel }}</a-tag>
+          <span v-if="lic?.manifest" style="color: var(--bd-t2)">
+            {{ lic.manifest.licensee }} · 到期 <b>{{ lic.manifest.expiresAt }}</b>
+          </span>
+          <span v-if="lic?.reason" style="color: var(--bd-danger); font-size: 13px">{{ lic.reason }}</span>
+        </div>
+        <!-- 席位：-1 = 读不出（显示 —，绝不显示 0）；超限亮红 -->
+        <div v-if="lic" class="lic-usage">
+          <div class="lic-usage__item">
+            <span>用户席位</span>
+            <b :style="lic.usage.overUsers ? 'color: var(--bd-danger)' : ''">
+              {{ seat(lic.usage.users) }} / {{ cap(lic.usage.maxUsers) }}
+              <template v-if="lic.usage.overUsers">（已超限）</template>
+            </b>
+          </div>
+          <div class="lic-usage__item">
+            <span>网关席位（未吊销证书的去重网关数）</span>
+            <b :style="lic.usage.overGateways ? 'color: var(--bd-danger)' : ''">
+              {{ seat(lic.usage.gateways) }} / {{ cap(lic.usage.maxGateways) }}
+              <template v-if="lic.usage.overGateways">（已超限）</template>
+            </b>
+          </div>
+        </div>
+      </div>
+
+      <!-- 导入（PermSystem；无发行公钥时如实说明为什么导不了，而不是让人贴完才 400） -->
+      <div class="bd-card" style="padding: 16px 18px; margin-bottom: 12px">
+        <div class="bd-card__title" style="margin-bottom: 8px">导入 / 替换 License</div>
+        <div v-if="lic && !lic.keysConfigured" class="bd-hint" style="color: var(--bd-warning)">
+          控制面未配置发行公钥（BAIDI_LICENSE_PUBKEY）：任何 license 都无法验证，导入会被拒绝。
+          公钥由发行方 <i class="bd-mono">baidi-license -genkey</i> 产出，经部署期配置分发。
+        </div>
+        <template v-else>
+          <a-textarea v-model="licPaste" :auto-size="{ minRows: 3, maxRows: 8 }"
+            placeholder='粘贴 license 文件内容（{"manifest":…,"signature":…}）' />
+          <div style="margin-top: 10px">
+            <a-button type="primary" :loading="saving" :disabled="!licPaste.trim()" @click="importLicense">
+              验证并导入
+            </a-button>
+            <span class="bd-hint" style="margin-left: 10px">导入后立刻生效（判定现算不缓存）；没有"删除回演示模式"的入口。</span>
+          </div>
+        </template>
+      </div>
+
+      <div class="bd-card" style="padding: 16px 18px">
+        <div class="bd-card__title" style="margin-bottom: 8px">边界（照实说）</div>
+        <ul class="lic-bounds">
+          <li v-for="(b, i) in lic?.boundaries ?? []" :key="i">{{ b }}</li>
+        </ul>
+      </div>
+    </div>
+
     <div v-show="tab === 'cluster'">
       <!-- ① 未配置备机（单机形态）-->
       <div v-if="!cluster.deployed" class="bd-card bd-empty bd-empty--lg">
@@ -613,20 +672,22 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
+  getToken,
   api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo,
   type NotifyChannel, type NotifyChannelsResp, type NotifyTestResp, type SaveNotifyChannelResp,
   type SmtpChannelConfig, type WebhookChannelConfig,
   type AuditForwardTarget, type AuditForwardResp, type SaveAuditForwardResp,
   type AuditForwardTestResp, type AuditForwardFlushResp,
-  type SyslogTargetConfig, type HttpTargetConfig
+  type SyslogTargetConfig, type HttpTargetConfig,
+  type LicenseInfo
 } from '@/lib/api';
 
 // 支持从审计中心深链过来（/system/manage?tab=forward）：那一页的「日志外送」
 // 入口指到这里，而不是在审计页上另放一份假的开关。
 const route = useRoute();
-const initialTab = (['admin', 'notify', 'forward', 'cluster'] as const)
+const initialTab = (['admin', 'notify', 'forward', 'cluster', 'license'] as const)
   .find((k) => k === route.query.tab) ?? 'admin';
-const tab = ref<'admin' | 'notify' | 'forward' | 'cluster'>(initialTab);
+const tab = ref<'admin' | 'notify' | 'forward' | 'cluster' | 'license'>(initialTab);
 const live = ref(false);
 const err = ref('');
 const kw = ref('');
@@ -720,7 +781,43 @@ async function load(toast = false) {
   }
 }
 function reload() { void load(true); }
-onMounted(() => { void load(); void loadNotify(); void loadForward(); });
+onMounted(() => { void load(); void loadNotify(); void loadForward(); void loadLicense(); });
+
+/* ── License（GET/POST /api/v1/license）── */
+const lic = ref<LicenseInfo | null>(null);
+const licPaste = ref('');
+const licModeLabel = computed(() =>
+  ({ demo: '演示模式 · 未导入 License（容量不限）', licensed: '已授权', expired: '已过期', invalid: '无效' }[lic.value?.mode ?? 'demo']));
+const licModeColor = computed(() =>
+  ({ demo: 'gray', licensed: 'green', expired: 'red', invalid: 'red' }[lic.value?.mode ?? 'demo']));
+/** -1 = 读不出（不可判定）：显示 —，绝不显示 0（0 的含义是"空着"）。 */
+function seat(n: number) { return n < 0 ? '—' : String(n); }
+function cap(n: number) { return n > 0 ? String(n) : '不限'; }
+
+async function loadLicense() {
+  try { lic.value = await api<LicenseInfo>('/license'); } catch { lic.value = null; }
+}
+
+async function importLicense() {
+  saving.value = true;
+  try {
+    // 原文直发：license 验签对象是文件原始字节，任何"重新序列化"都可能改变空白。
+    const res = await fetch('/api/v1/license', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${getToken()}` },
+      body: licPaste.value
+    });
+    const out = await res.json();
+    if (!res.ok) throw new Error(out?.error ?? `${res.status}`);
+    Message.success(`已导入：${out.manifest?.licensee ?? ''}（到期 ${out.manifest?.expiresAt ?? '—'}）`);
+    licPaste.value = '';
+    void loadLicense();
+  } catch (e) {
+    Message.error(`导入失败：${e instanceof Error ? e.message : e}`);
+  } finally {
+    saving.value = false;
+  }
+}
 
 /* ── 消息通道（PRD ch15.2）────────────────────────────────────────────
  * 全部来自 GET /api/v1/notify/channels（notify_channels 表）。这一页刻意**没有**

@@ -266,6 +266,13 @@ func (s *Server) handleCreateAdmin(w http.ResponseWriter, r *http.Request) {
 		adminStoreErr(w, store.ErrAdminRoleNotFound, "")
 		return
 	}
+	// License 用户席位闸：只拦**建号**分支——上面"提权已有账号"早已 return，
+	// 那条路不新占席位（账号本来就在目录里）。
+	if reason, ok := s.licenseAdmit(r, "user"); !ok {
+		s.audit(r, "admin", "新增管理员「"+account+"」被 License 拒绝："+reason, "fail")
+		httpx.Error(w, http.StatusConflict, reason)
+		return
+	}
 	pw := body.Password
 	if pw == "" {
 		pw = seedInitialPassword

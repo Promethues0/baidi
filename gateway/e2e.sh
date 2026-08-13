@@ -53,7 +53,7 @@ preflight_port() {
   #   把这些脚本接进 CI 的第一件事就会是端口预检无声失效。
   #   与本项目 posture / 设备指标那条「采不到就报不可判定，绝不当成 ok」同一条纪律。
   if ! command -v lsof >/dev/null 2>&1; then
-    echo "   ⚠ 本机没有 lsof，端口 $port（$label）**无法预检**——真撞上占用时，"
+    echo "   ⚠ 本机没有 lsof，端口 ${port}（${label}）**无法预检**——真撞上占用时，"
     echo "     报出来的会是后面某一步莫名其妙的失败，而不是这里一句话。"
     return 0
   fi

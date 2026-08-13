@@ -1,0 +1,160 @@
+# 服务端 · 编译 / 单测 / 全链路自检
+#
+# ★为什么现在才有这个文件：在它之前，整个仓库的 CI 只有客户端**打包**两条
+#   （clients.yml / clients-mobile.yml）。control、gateway、console 三个模块
+#   —— 几万行代码、136 个测试文件 —— 唯一的执行方是「开发者记得在本机跑一遍」。
+#
+#   同一天客户端流水线首次真跑，三条腿全红，五轮才修完；每一轮红的都是
+#   「本机怎么跑都对、只在别的机器上错」：bash 3.2 吞全角字符、UTF-8 locale、
+#   Windows PowerShell 5.1 按 ANSI 读 .ps1、msi 与 nsis 对同一份配置行为不一致。
+#   服务端代码没有理由豁免于同一类问题，只是没人去看而已。
+#
+# ★两个 Go 版本是真的不同，不是笔误：control 要 1.25.0、gateway 要 1.26.3
+#   （见各自 go.mod）。所以分成两个 job 各自 setup-go，**用 go-version-file 而不是
+#   写死版本号**——写死的话 go.mod 升级后这里会静默停在旧版本，而 setup-go 会设
+#   GOTOOLCHAIN=local，届时报的是"toolchain 太旧"而不是"CI 配置过期"。
+#
+# ★三个自检脚本（e2e / web-e2e / ipsec-e2e）单列一个 job：它们是本项目**唯一**的
+#   真链路证据（真敲门、真隧道、真 IKEv2 协商、真 ESP 加密、真反代），
+#   但也最容易因为端口/时序抖动而假红。与单测混在一个 job 里的话，
+#   一次抖动会让"代码编不过"和"自检没跑稳"在结果里无法区分。
+
+name: 服务端
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, 'feat/**']
+    paths:
+      - 'control/**'
+      - 'gateway/**'
+      - 'console/**'
+      - '.github/workflows/server.yml'
+  pull_request:
+    paths:
+      - 'control/**'
+      - 'gateway/**'
+      - 'console/**'
+      - '.github/workflows/server.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: Go · ${{ matrix.mod }}（vet + test）
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        mod: [control, gateway]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: ${{ matrix.mod }}/go.mod
+          cache-dependency-path: ${{ matrix.mod }}/go.sum
+
+      - name: 版本自证（两个模块要求不同，别猜）
+        working-directory: ${{ matrix.mod }}
+        run: |
+          echo "go.mod 要求：$(grep '^go ' go.mod)"
+          go version
+
+      - name: go vet
+        working-directory: ${{ matrix.mod }}
+        run: go vet ./...
+
+      # -race：本项目里网关的连接跟踪、JIT 到期回收、告警冷却、通知派发队列
+      # 全是并发结构，而竞态在单跑时几乎不复现。CGO_ENABLED=1 是 -race 的前提
+      # （生产构建一律 CGO_ENABLED=0，那是**交叉编译**的要求，与这里不冲突）。
+      - name: go test -race
+        working-directory: ${{ matrix.mod }}
+        run: CGO_ENABLED=1 go test -race -timeout 15m ./...
+
+      # 生产二进制走的是 CGO_ENABLED=0 交叉编译，与上面 -race 那次是两套编译条件。
+      # 只测不编的话，"测试全过但 linux/amd64 编不出来"会一路漏到部署那天。
+      - name: 交叉编译成部署用的那个形态（CGO_ENABLED=0 linux/amd64）
+        working-directory: ${{ matrix.mod }}
+        run: CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /dev/null ./...
+
+  console:
+    name: 控制台（type-check + build）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: npm
+          cache-dependency-path: console/package-lock.json
+
+      - name: 依赖
+        working-directory: console
+        run: npm ci
+
+      - name: type-check
+        working-directory: console
+        run: npm run type-check
+
+      # ★build 不是 type-check 的重复：vue-tsc 只看类型，vite build 还会做
+      #   模块解析、资源引用、按需引入插件那一层。改错一个 import 路径时
+      #   type-check 照样过，build 才炸——而用户拿到的是 build 的产物。
+      - name: build
+        working-directory: console
+        run: npm run build
+
+  e2e:
+    name: 全链路自检（真敲门 / 真隧道 / 真 IKEv2 / 真反代）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # 三个脚本都要同时起 control 与 gateway 两个模块的二进制，
+      # 而两个模块的 go.mod 要求不同版本 —— 取**较高**那个（gateway 1.26.3），
+      # Go 向后兼容，高版本编得动低版本的模块。
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+
+      # ★装 lsof 不是可有可无：三个脚本的 preflight_port 用它探端口占用，
+      #   而 GitHub 的 ubuntu runner 镜像**不默认装 lsof**。缺了它，脚本会打印
+      #   「无法预检」的警告然后继续（那道守卫已经改成不再静默放行了），
+      #   但那等于把一道本可以一句话报出来的端口冲突，推迟成后面某一步的莫名失败。
+      #   在 CI 上我们要的是真检查，所以显式装上。
+      - name: 装 lsof（端口预检要用；runner 镜像不自带）
+        run: sudo apt-get update -qq && sudo apt-get install -y -qq lsof
+
+      - name: 环境自证
+        run: |
+          echo "内核：$(uname -a)"
+          echo "go：$(go version)"
+          echo "python3：$(python3 --version)"
+          echo "lsof：$(command -v lsof || echo '没有——端口预检会退化成警告')"
+          # 这三个脚本在 CI 上从没跑过，第一次红的时候需要能分清
+          # 是"代码坏了"还是"环境不合"。
+          ss -lntu 2>/dev/null | head -20 || true
+
+      # ★三条分开跑、且都带 if: always()：它们验的是三条**互不相干**的链路
+      #   （L4 隧道 / 七层反代 / 站点组网）。合成一步的话，前一条挂了后两条根本不执行，
+      #   而"没跑"与"跑挂了"在结果里长得一模一样 —— 客户端那条流水线刚在这上面
+      #   栽过（msi 先跑且失败即中止，nsis 前三轮一次都没执行过）。
+      - name: e2e.sh（登录→剖面→敲门→钉扎→多资源路由→越权拒绝）
+        working-directory: gateway
+        run: ./e2e.sh
+
+      - name: web-e2e.sh（七层代理九条断言）
+        if: always()
+        working-directory: gateway
+        run: ./web-e2e.sh
+
+      - name: ipsec-e2e.sh（真 IKEv2 协商 + 真 ESP 加密 + 跨隧道业务流量）
+        if: always()
+        working-directory: gateway
+        run: ./ipsec-e2e.sh

@@ -25,8 +25,41 @@ NATT_A="${BAIDI_IPSEC_E2E_NATT_A:-15501}"
 IKE_B="${BAIDI_IPSEC_E2E_IKE_B:-15600}"
 NATT_B="${BAIDI_IPSEC_E2E_NATT_B:-15601}"
 
+# wait_for <描述> <超时秒> <shell 探针> —— 按**墙钟死线**轮询，而不是等一个固定秒数。
+#
+# ★为什么值得单独写一个：这三个自检脚本里原先全是 `sleep N` 之后只查一次。
+#   那个写法在开发机上几乎总是对的，一旦机器忙起来（CI、或者三个脚本连着跑）
+#   就变成掷硬币 —— 而且**失败时报的原因是错的**：明明只是还差一秒，
+#   报出来却是「网关未能对接控制面」，读的人会去查网关和控制面之间的信任链。
+#   实测：三个脚本连着跑时 web-e2e.sh 的业务后端就这么假失败过一次，
+#   单独跑则 9/9 全过 —— 正是这类偶发把 CI 拖成"红了先重跑一次看看"。
+#   死线轮询同时修掉另一头：机器快的时候不再白等满 N 秒。
+wait_for() {
+  local what="$1" limit="$2" probe="$3"
+  local deadline=$(( $(date +%s) + limit ))
+  until eval "$probe" >/dev/null 2>&1; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "   ✗ 等「${what}」超过 ${limit}s 仍未就绪" >&2
+      return 1
+    fi
+    sleep 0.3
+  done
+  return 0
+}
+
 preflight_port() {
   local proto=$1 port=$2 label=$3 holder
+  # ★lsof 缺席时**说清楚探不到**，别静默放行。
+  #   原先 `lsof … 2>/dev/null` 在没有 lsof 的机器上让 holder 恒为空，
+  #   于是这道预检退化成"永远通过"——而它存在的全部意义就是提前拦下端口冲突。
+  #   这不是假设：GitHub 的 ubuntu runner 镜像已经不默认装 lsof，
+  #   把这些脚本接进 CI 的第一件事就会是端口预检无声失效。
+  #   与本项目 posture / 设备指标那条「采不到就报不可判定，绝不当成 ok」同一条纪律。
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "   ⚠ 本机没有 lsof，端口 $port（$label）**无法预检**——真撞上占用时，"
+    echo "     报出来的会是后面某一步莫名其妙的失败，而不是这里一句话。"
+    return 0
+  fi
   holder=$(lsof -nP -i"$proto":"$port" 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')
   if [ -n "$holder" ]; then
     echo "   ✗ $label 端口 $port 已被占用：$holder"
@@ -135,11 +168,9 @@ start_node() {
 }
 start_node ipsec-a "$IKE_A" "$NATT_A" 10.90.0.1/24
 start_node ipsec-b "$IKE_B" "$NATT_B" 10.91.0.1/24
-sleep 3
 for cn in ipsec-a ipsec-b; do
-  if ! pgrep -f "$WORK/baidi-ipsec .*-gwid $cn" >/dev/null; then
-    echo "   ✗ $cn 未能启动，日志尾部："; tail -20 "$WORK/$cn.log"; exit 1
-  fi
+  wait_for "$cn 进程起来" 20 "pgrep -f '$WORK/baidi-ipsec .*-gwid $cn'" || {
+    echo "   ✗ $cn 未能启动，日志尾部："; tail -20 "$WORK/$cn.log"; exit 1; }
 done
 echo "   ✓ 两个组网网关已启动"
 

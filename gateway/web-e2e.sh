@@ -33,8 +33,41 @@ FAIL=0
 ok()   { echo "   ✓ $1"; PASS=$((PASS+1)); }
 bad()  { echo "   ✗ $1"; FAIL=$((FAIL+1)); }
 
+# wait_for <描述> <超时秒> <shell 探针> —— 按**墙钟死线**轮询，而不是等一个固定秒数。
+#
+# ★为什么值得单独写一个：这三个自检脚本里原先全是 `sleep N` 之后只查一次。
+#   那个写法在开发机上几乎总是对的，一旦机器忙起来（CI、或者三个脚本连着跑）
+#   就变成掷硬币 —— 而且**失败时报的原因是错的**：明明只是还差一秒，
+#   报出来却是「网关未能对接控制面」，读的人会去查网关和控制面之间的信任链。
+#   实测：三个脚本连着跑时 web-e2e.sh 的业务后端就这么假失败过一次，
+#   单独跑则 9/9 全过 —— 正是这类偶发把 CI 拖成"红了先重跑一次看看"。
+#   死线轮询同时修掉另一头：机器快的时候不再白等满 N 秒。
+wait_for() {
+  local what="$1" limit="$2" probe="$3"
+  local deadline=$(( $(date +%s) + limit ))
+  until eval "$probe" >/dev/null 2>&1; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "   ✗ 等「${what}」超过 ${limit}s 仍未就绪" >&2
+      return 1
+    fi
+    sleep 0.3
+  done
+  return 0
+}
+
 preflight_port() {
   local proto=$1 port=$2 label=$3 holder
+  # ★lsof 缺席时**说清楚探不到**，别静默放行。
+  #   原先 `lsof … 2>/dev/null` 在没有 lsof 的机器上让 holder 恒为空，
+  #   于是这道预检退化成"永远通过"——而它存在的全部意义就是提前拦下端口冲突。
+  #   这不是假设：GitHub 的 ubuntu runner 镜像已经不默认装 lsof，
+  #   把这些脚本接进 CI 的第一件事就会是端口预检无声失效。
+  #   与本项目 posture / 设备指标那条「采不到就报不可判定，绝不当成 ok」同一条纪律。
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "   ⚠ 本机没有 lsof，端口 $port（$label）**无法预检**——真撞上占用时，"
+    echo "     报出来的会是后面某一步莫名其妙的失败，而不是这里一句话。"
+    return 0
+  fi
   holder=$(lsof -nP -i"$proto":"$port" 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')
   if [ -n "$holder" ]; then
     echo "   ✗ $label 端口 $port 已被占用：$holder"
@@ -127,9 +160,11 @@ curl -s --max-time 2 "$CONTROL/healthz" >/dev/null || { echo "   ✗ 控制面�
 echo "   ✓ 控制面就绪"
 
 echo "==> 起业务后端"
-nohup python3 "$WORK/backend.py" "$BE_PORT" >/dev/null 2>&1 &
-sleep 1
-curl -s --max-time 2 "http://127.0.0.1:$BE_PORT/" | grep -q BAIDI-BACKEND || { echo "   ✗ 后端未就绪"; exit 1; }
+# ★stderr 不再丢进 /dev/null：这一步失败时原先只剩「后端未就绪」五个字，
+#   python 的 traceback（端口被占、语法错、权限）全被吞掉，等于没有线索。
+nohup python3 "$WORK/backend.py" "$BE_PORT" >"$WORK/backend.log" 2>&1 &
+wait_for "业务后端" 20 "curl -s --max-time 2 'http://127.0.0.1:$BE_PORT/' | grep -q BAIDI-BACKEND" || {
+  echo "   ✗ 后端未就绪，它自己的输出："; sed 's/^/     /' "$WORK/backend.log"; exit 1; }
 echo "   ✓ 后端就绪（127.0.0.1:${BE_PORT}）"
 
 echo "==> 签发网关 mTLS 客户端证书"
@@ -168,9 +203,10 @@ nohup "$WORK/baidi-gateway" -spa "127.0.0.1:$SPA_PORT" -proxy "127.0.0.1:$PROXY_
   -control "$MTLS" -gwid gw-1 \
   -mtls-cert "$WORK/gw.crt" -mtls-key "$WORK/gw.key" -mtls-ca "$WORK/ca.crt" \
   >"$WORK/gateway.log" 2>&1 &
-sleep 4
-grep -q '策略已拉取' "$WORK/gateway.log" || { echo "   ✗ 网关未能对接控制面，见 $WORK/gateway.log"; exit 1; }
-grep -q '七层 Web 代理监听' "$WORK/gateway.log" || { echo "   ✗ 七层监听没起来，见 $WORK/gateway.log"; exit 1; }
+wait_for "网关对接控制面" 30 "grep -q '策略已拉取' '$WORK/gateway.log'" || {
+  echo "   ✗ 网关未能对接控制面，日志尾部："; tail -20 "$WORK/gateway.log"; exit 1; }
+wait_for "七层 Web 代理监听" 15 "grep -q '七层 Web 代理监听' '$WORK/gateway.log'" || {
+  echo "   ✗ 七层监听没起来，日志尾部："; tail -20 "$WORK/gateway.log"; exit 1; }
 echo "   ✓ 网关已注册且七层监听就绪"
 
 WEB="http://127.0.0.1:$WEB_PORT"
@@ -302,7 +338,11 @@ fi
 
 echo "⑤ 撤销授权后同一个 Cookie 的下一个请求"
 setres oa "OA 协同办公" "127.0.0.1:$BE_PORT" '["someone-else"]'
-sleep 5   # 网关 -poll 2s，留两轮余量
+# ★等到"真的被拒"为止，而不是等 5 秒再赌一把。
+#   两个方向都在这里收口：轮询慢一拍时不再假失败；而**如果撤权根本没生效**，
+#   轮询会一直拿到 200 直到死线，最后照样判失败 —— 断言强度一点没降低，
+#   只是把"还没轮到"和"压根不生效"这两件事区分开了。
+wait_for "撤权在网关侧生效" 20 "[ \"\$(code -H 'Cookie: baidi_web=$CK' '$WEB/app/oa/')\" != 200 ]" || true
 c=$(code -H "Cookie: baidi_web=$CK" "$WEB/app/oa/")
 if [ "$c" = "403" ]; then
   ok "撤权后同一 Cookie 立即被拒（逐请求重新鉴权，不是只在建会话时判一次）"

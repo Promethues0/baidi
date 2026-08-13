@@ -22,8 +22,41 @@ BE1_PORT="${BAIDI_E2E_BE1_PORT:-19001}"
 BE2_PORT="${BAIDI_E2E_BE2_PORT:-19002}"
 
 # 端口预检：被占用就直接报清楚是谁占的，别让自检在后面以离奇的方式失败。
+# wait_for <描述> <超时秒> <shell 探针> —— 按**墙钟死线**轮询，而不是等一个固定秒数。
+#
+# ★为什么值得单独写一个：这三个自检脚本里原先全是 `sleep N` 之后只查一次。
+#   那个写法在开发机上几乎总是对的，一旦机器忙起来（CI、或者三个脚本连着跑）
+#   就变成掷硬币 —— 而且**失败时报的原因是错的**：明明只是还差一秒，
+#   报出来却是「网关未能对接控制面」，读的人会去查网关和控制面之间的信任链。
+#   实测：三个脚本连着跑时 web-e2e.sh 的业务后端就这么假失败过一次，
+#   单独跑则 9/9 全过 —— 正是这类偶发把 CI 拖成"红了先重跑一次看看"。
+#   死线轮询同时修掉另一头：机器快的时候不再白等满 N 秒。
+wait_for() {
+  local what="$1" limit="$2" probe="$3"
+  local deadline=$(( $(date +%s) + limit ))
+  until eval "$probe" >/dev/null 2>&1; do
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+      echo "   ✗ 等「${what}」超过 ${limit}s 仍未就绪" >&2
+      return 1
+    fi
+    sleep 0.3
+  done
+  return 0
+}
+
 preflight_port() {
   local proto=$1 port=$2 label=$3 holder
+  # ★lsof 缺席时**说清楚探不到**，别静默放行。
+  #   原先 `lsof … 2>/dev/null` 在没有 lsof 的机器上让 holder 恒为空，
+  #   于是这道预检退化成"永远通过"——而它存在的全部意义就是提前拦下端口冲突。
+  #   这不是假设：GitHub 的 ubuntu runner 镜像已经不默认装 lsof，
+  #   把这些脚本接进 CI 的第一件事就会是端口预检无声失效。
+  #   与本项目 posture / 设备指标那条「采不到就报不可判定，绝不当成 ok」同一条纪律。
+  if ! command -v lsof >/dev/null 2>&1; then
+    echo "   ⚠ 本机没有 lsof，端口 $port（$label）**无法预检**——真撞上占用时，"
+    echo "     报出来的会是后面某一步莫名其妙的失败，而不是这里一句话。"
+    return 0
+  fi
   holder=$(lsof -nP -i"$proto":"$port" 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')
   if [ -n "$holder" ]; then
     echo "   ✗ $label 端口 $port 已被占用：$holder"
@@ -86,9 +119,12 @@ echo "==> 起两个可区分的后端（验证多资源路由不是幻觉）"
 mkdir -p "$WORK/be-oa" "$WORK/be-git"
 echo "<h1>OA 协同办公 · 后端 A</h1>" > "$WORK/be-oa/index.html"
 echo "<h1>Git 仓库 · 后端 B</h1>"   > "$WORK/be-git/index.html"
-( cd "$WORK/be-oa"  && nohup python3 -m http.server "$BE1_PORT" --bind 127.0.0.1 >/dev/null 2>&1 & )
-( cd "$WORK/be-git" && nohup python3 -m http.server "$BE2_PORT" --bind 127.0.0.1 >/dev/null 2>&1 & )
-sleep 1
+( cd "$WORK/be-oa"  && nohup python3 -m http.server "$BE1_PORT" --bind 127.0.0.1 >"$WORK/be-oa.log" 2>&1 & )
+( cd "$WORK/be-git" && nohup python3 -m http.server "$BE2_PORT" --bind 127.0.0.1 >"$WORK/be-git.log" 2>&1 & )
+wait_for "后端 A" 20 "curl -s --max-time 2 -o /dev/null 'http://127.0.0.1:$BE1_PORT/'" || {
+  echo "   ✗ 后端 A 未就绪："; sed 's/^/     /' "$WORK/be-oa.log"; exit 1; }
+wait_for "后端 B" 20 "curl -s --max-time 2 -o /dev/null 'http://127.0.0.1:$BE2_PORT/'" || {
+  echo "   ✗ 后端 B 未就绪："; sed 's/^/     /' "$WORK/be-git.log"; exit 1; }
 
 echo "==> 签发网关 mTLS 客户端证书（机器身份的唯一路径）"
 ADMIN=$(curl -s -X POST "$CONTROL/api/v1/auth/login" -H 'Content-Type: application/json' \
@@ -122,8 +158,8 @@ nohup "$WORK/baidi-gateway" -spa "127.0.0.1:$SPA_PORT" -proxy "127.0.0.1:$PROXY_
   -control "$MTLS" -gwid gw-1 \
   -mtls-cert "$WORK/gw.crt" -mtls-key "$WORK/gw.key" -mtls-ca "$WORK/ca.crt" \
   >"$WORK/gateway.log" 2>&1 &
-sleep 4
-grep -q '策略已拉取' "$WORK/gateway.log" || { echo "   ✗ 网关未能对接控制面，见 $WORK/gateway.log"; exit 1; }
+wait_for "网关对接控制面" 30 "grep -q '策略已拉取' '$WORK/gateway.log'" || {
+  echo "   ✗ 网关未能对接控制面，日志尾部："; tail -20 "$WORK/gateway.log"; exit 1; }
 echo "   ✓ 网关已注册（指纹：$(grep -o 'fp=[0-9a-f]*' "$WORK/gateway.log" | head -1 | cut -c4-19)…）"
 
 echo ""

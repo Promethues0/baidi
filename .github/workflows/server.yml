@@ -183,15 +183,79 @@ jobs:
       #   而"没跑"与"跑挂了"在结果里长得一模一样 —— 客户端那条流水线刚在这上面
       #   栽过（msi 先跑且失败即中止，nsis 前三轮一次都没执行过）。
       - name: e2e.sh（登录→剖面→敲门→钉扎→多资源路由→越权拒绝）
+        if: always()
         working-directory: gateway
-        run: ./e2e.sh
+        run: |
+          set -o pipefail
+          if ./e2e.sh 2>&1 | tee /tmp/run-e2e.sh.log; then exit 0; fi
+          # ★失败证据走 ::error:: 注解——Actions 日志与 job summary 对未登录一律不可见，
+          #   注解是唯一公开通道（客户端流水线已实测三次）。脚本自己的输出 + 两端进程日志
+          #   的尾部一起带上：e2e 类失败没有这三样就只能猜。
+          python3 - <<'PY'
+          import pathlib
+          parts = ["── 脚本输出尾部 ──"]
+          parts += pathlib.Path("/tmp/run-e2e.sh.log").read_text(errors="replace").splitlines()[-30:]
+          for lg in ["/tmp/baidi-e2e/control.log","/tmp/baidi-e2e/gateway.log"]:
+              q = pathlib.Path(lg)
+              if q.exists():
+                  parts.append(f"── {q.name} 尾部 ──")
+                  parts += q.read_text(errors="replace").splitlines()[-20:]
+          msg = "\n".join(parts)
+          if len(msg) > 3500:
+              msg = msg[-3500:]
+          msg = msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+          print(f"::error title=e2e.sh 失败::{msg}")
+          PY
+          exit 1
 
       - name: web-e2e.sh（七层代理九条断言）
         if: always()
         working-directory: gateway
-        run: ./web-e2e.sh
+        run: |
+          set -o pipefail
+          if ./web-e2e.sh 2>&1 | tee /tmp/run-web-e2e.sh.log; then exit 0; fi
+          # ★失败证据走 ::error:: 注解——Actions 日志与 job summary 对未登录一律不可见，
+          #   注解是唯一公开通道（客户端流水线已实测三次）。脚本自己的输出 + 两端进程日志
+          #   的尾部一起带上：e2e 类失败没有这三样就只能猜。
+          python3 - <<'PY'
+          import pathlib
+          parts = ["── 脚本输出尾部 ──"]
+          parts += pathlib.Path("/tmp/run-web-e2e.sh.log").read_text(errors="replace").splitlines()[-30:]
+          for lg in ["/tmp/baidi-web-e2e/control.log","/tmp/baidi-web-e2e/gateway.log"]:
+              q = pathlib.Path(lg)
+              if q.exists():
+                  parts.append(f"── {q.name} 尾部 ──")
+                  parts += q.read_text(errors="replace").splitlines()[-20:]
+          msg = "\n".join(parts)
+          if len(msg) > 3500:
+              msg = msg[-3500:]
+          msg = msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+          print(f"::error title=web-e2e.sh 失败::{msg}")
+          PY
+          exit 1
 
       - name: ipsec-e2e.sh（真 IKEv2 协商 + 真 ESP 加密 + 跨隧道业务流量）
         if: always()
         working-directory: gateway
-        run: ./ipsec-e2e.sh
+        run: |
+          set -o pipefail
+          if ./ipsec-e2e.sh 2>&1 | tee /tmp/run-ipsec-e2e.sh.log; then exit 0; fi
+          # ★失败证据走 ::error:: 注解——Actions 日志与 job summary 对未登录一律不可见，
+          #   注解是唯一公开通道（客户端流水线已实测三次）。脚本自己的输出 + 两端进程日志
+          #   的尾部一起带上：e2e 类失败没有这三样就只能猜。
+          python3 - <<'PY'
+          import pathlib
+          parts = ["── 脚本输出尾部 ──"]
+          parts += pathlib.Path("/tmp/run-ipsec-e2e.sh.log").read_text(errors="replace").splitlines()[-30:]
+          for lg in ["/tmp/baidi-ipsec-e2e/control.log","/tmp/baidi-ipsec-e2e/ipsec-a.log","/tmp/baidi-ipsec-e2e/ipsec-b.log"]:
+              q = pathlib.Path(lg)
+              if q.exists():
+                  parts.append(f"── {q.name} 尾部 ──")
+                  parts += q.read_text(errors="replace").splitlines()[-20:]
+          msg = "\n".join(parts)
+          if len(msg) > 3500:
+              msg = msg[-3500:]
+          msg = msg.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+          print(f"::error title=ipsec-e2e.sh 失败::{msg}")
+          PY
+          exit 1

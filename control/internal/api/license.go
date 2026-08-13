@@ -61,12 +61,12 @@ func licenseBoundaries() []string {
 
 // licenseStatus 读当前状态。每次现算不缓存——导入/到期要立刻算数，
 // 与管理员角色现算同一条纪律。
-func (s *Server) licenseStatus(r *http.Request) license.Status {
+func (s *Server) licenseStatus(ctx context.Context) license.Status {
 	st, ok := s.store.(settingReader)
 	if !ok {
 		return license.Status{Mode: license.ModeDemo}
 	}
-	blob, found, err := st.Setting(r.Context(), licenseSettingKey)
+	blob, found, err := st.Setting(ctx, licenseSettingKey)
 	if err != nil {
 		// 读失败 ≠ 没有：按 invalid（fail-closed）处理并说明。
 		// 当 demo 处理会在库抖动的那一刻放开容量闸——错的方向。
@@ -82,12 +82,12 @@ func (s *Server) licenseStatus(r *http.Request) license.Status {
 // 用户 = users 全表（含管理员与外部建号——占的都是命名席位；禁用不释放，删除才释放）；
 // 网关 = 未吊销证书的去重 gatewayId（吊销即释放，换证不占新席位）。
 // 读失败回 -1 = 不可判定：绝不回 0，0 的含义是"空着"。
-func (s *Server) licenseUsage(r *http.Request) (users, gateways int) {
+func (s *Server) licenseUsage(ctx context.Context) (users, gateways int) {
 	users, gateways = -1, -1
-	if b, err := s.store.Users(r.Context()); err == nil {
+	if b, err := s.store.Users(ctx); err == nil {
 		users = len(b.Users)
 	}
-	if certs, err := s.store.GatewayCerts(r.Context()); err == nil {
+	if certs, err := s.store.GatewayCerts(ctx); err == nil {
 		seen := map[string]bool{}
 		for _, c := range certs {
 			if !c.Revoked {
@@ -104,14 +104,14 @@ func (s *Server) licenseUsage(r *http.Request) (users, gateways int) {
 // demo → 放行（从未声称被许可，不限）；invalid/expired → 拒（fail-closed，
 // 方向的理由见 license.Evaluate 注释）；licensed → 查对应维度席位。
 func (s *Server) licenseAdmit(r *http.Request, kind string) (string, bool) {
-	st := s.licenseStatus(r)
+	st := s.licenseStatus(r.Context())
 	switch st.Mode {
 	case license.ModeDemo:
 		return "", true
 	case license.ModeInvalid, license.ModeExpired:
 		return "License 不可用：" + st.Reason, false
 	}
-	users, gateways := s.licenseUsage(r)
+	users, gateways := s.licenseUsage(r.Context())
 	switch kind {
 	case "user":
 		if st.Manifest.MaxUsers > 0 {
@@ -142,8 +142,8 @@ func (s *Server) handleLicense(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	st := s.licenseStatus(r)
-	users, gateways := s.licenseUsage(r)
+	st := s.licenseStatus(r.Context())
+	users, gateways := s.licenseUsage(r.Context())
 	_, canStore := s.store.(settingReader)
 	out := map[string]any{
 		"mode":       st.Mode,

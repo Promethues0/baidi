@@ -12,7 +12,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/license"
@@ -205,5 +207,37 @@ func TestLicenseInvalidBlobFailsClosed(t *testing.T) {
 	if code, o := doJSON(t, h, "POST", "/api/v1/users", adminToken(),
 		map[string]any{"name": "x", "account": "x.invalid"}); code != http.StatusConflict {
 		t.Fatalf("invalid 态建号应 409（fail-closed），实得 %d %v", code, o)
+	}
+}
+
+// 快照注入 → 评估 → 落库整链：导入一份 5 天后到期的 license，
+// 建 license_expiry 规则，手动评估应产出一条告警（纯函数已单测，这里钉接线）。
+func TestLicenseExpiryAlertEndToEnd(t *testing.T) {
+	h, priv, _ := licFixture(t, true)
+	soon := time.Now().AddDate(0, 0, 5).Format("2006-01-02")
+	if code, o := importLic(t, h, adminToken(), licBlob(t, priv, soon, 0, 0)); code != http.StatusOK {
+		t.Fatalf("导入失败 %d %v", code, o)
+	}
+	if code, o := doJSON(t, h, "POST", "/api/v1/alerts/rules", adminToken(), map[string]any{
+		"name": "license 到期", "kind": "license_expiry", "enabled": true,
+	}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("建规则失败 %d %v", code, o)
+	}
+	code, out := doJSON(t, h, "POST", "/api/v1/alerts/evaluate", adminToken(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("评估失败 %d %v", code, out)
+	}
+	found := false
+	for _, raw := range out["created"].([]any) {
+		a := mapOf(t, raw)
+		if a["kind"] == "license_expiry" {
+			found = true
+			if title := a["title"].(string); !strings.Contains(title, "5 天") && !strings.Contains(title, soon) {
+				t.Errorf("告警标题要说清到期信息：%s", title)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("5 天后到期 + 默认阈值 15 天，评估应产出 license_expiry，实得 %v", out["created"])
 	}
 }

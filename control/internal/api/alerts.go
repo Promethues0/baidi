@@ -13,6 +13,7 @@ import (
 	"baidi.dev/control/internal/alerting"
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/license"
 	"baidi.dev/control/internal/notify"
 	"baidi.dev/control/internal/store"
 )
@@ -167,7 +168,18 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 	} else {
 		slog.Warn("告警评估：读终端合规阻断名单失败，本轮跳过该规则", "err", err.Error())
 	}
-	// 安全 ③：审计防篡改链自检。
+	// 安全 ③：License 状态与席位——与 GET /api/v1/license、建号/签证书容量闸
+	// 完全同一份判定（licenseStatus/licenseUsage 现算）。demo 不注入（无需判）。
+	if ls := s.licenseStatus(ctx); ls.Mode != license.ModeDemo {
+		users, gateways := s.licenseUsage(ctx)
+		days := int(time.Until(licExpireEnd(ls.Manifest.ExpiresAt)).Hours() / 24)
+		snap.License = &alerting.LicenseStat{
+			Mode: ls.Mode, Reason: ls.Reason, ExpiresAt: ls.Manifest.ExpiresAt, DaysLeft: days,
+			Users: users, MaxUsers: ls.Manifest.MaxUsers,
+			Gateways: gateways, MaxGateways: ls.Manifest.MaxGateways,
+		}
+	}
+	// 安全 ④：审计防篡改链自检。
 	if withChain {
 		snap.AuditChain = s.verifyChainForAlert(ctx)
 	}
@@ -610,4 +622,14 @@ func (s *Server) handleEvaluateAlerts(w http.ResponseWriter, r *http.Request) {
 	// 审计记的是事实：新增了几条（被冷却掉的不算"新增"）。
 	s.audit(r, "admin", "手动执行业务告警检测，新增 "+strconv.Itoa(len(created))+" 条告警", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "created": created})
+}
+
+// licExpireEnd 到期日的当日末刻（License 语义是含当日）。解析失败回零值——
+// DaysLeft 会是一个巨大的负数，expiry 规则按已过期报，方向 fail-closed。
+func licExpireEnd(d string) time.Time {
+	t, err := time.ParseInLocation("2006-01-02", d, time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return t.Add(24*time.Hour - time.Second)
 }

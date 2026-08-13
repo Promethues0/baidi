@@ -86,6 +86,13 @@ const (
 	// 每次敲门都以"过期"被拒，SPA 又是单包无回应的，客户端连错误都看不到。
 	// 旧网关不上报时钟：该网关不参与判定（不可判定 ≠ 偏差 0）。
 	AlertKindClockSkew = "clock_skew"
+	// AlertKindLicenseExpiry License 将到期/已过期/无效。信号 = settings 里的 license blob
+	// 经 license.Evaluate 现算的状态（与 GET /api/v1/license、容量闸同一份判定）。
+	// ★license 的容量闸是 fail-closed 的（过期即拒建号拒签网关证书）——无预警等于
+	// 定时故障，这条把「会突然咬人」补成「先叫后咬」。demo 模式不产生候选。
+	AlertKindLicenseExpiry = "license_expiry"
+	// AlertKindLicenseSeats License 席位将满（用户/网关任一维占用率超阈值）。
+	AlertKindLicenseSeats = "license_seats"
 	// AlertKindAuditChain 审计防篡改链周期性自检失败。
 	// ★这条是本组里最该存在的一条：防篡改链没人定期查就等于没有——
 	// 篡改发生到被发现之间的窗口，取决于有没有人手动点那个「校验」按钮。
@@ -144,6 +151,8 @@ const (
 	ThreshBeforeMin    = "beforeMinutes"
 	ThreshGraceMinutes = "graceMinutes"
 	ThreshSkewSec      = "skewSec"
+	ThreshExpireDays   = "expireDays"
+	ThreshSeatPercent  = "seatPercent"
 )
 
 // alertKindSpecs 全部规则种类。**新增一项前先回答：它读的那份数据现在真的存在吗？**
@@ -216,6 +225,22 @@ var alertKindSpecs = []AlertKindSpec{
 		ThresholdZh: map[string]string{
 			ThreshSkewSec: "允许偏差（秒）",
 		},
+	},
+	{
+		Kind: AlertKindLicenseExpiry, Name: "License 将到期 / 已失效", Category: AlertCategorySecurity,
+		Severity: AlertSevWarning,
+		Signal: "settings 里的 license 记录经 license.Evaluate 现算的状态——与 License 页、" +
+			"建号/签证书的容量闸完全同一份判定；demo（未导入）不产生候选",
+		Thresholds:  map[string]float64{ThreshExpireDays: 15},
+		ThresholdZh: map[string]string{ThreshExpireDays: "到期前提醒（天）"},
+	},
+	{
+		Kind: AlertKindLicenseSeats, Name: "License 席位将满", Category: AlertCategorySecurity,
+		Severity: AlertSevWarning,
+		Signal: "users 全表计数 / 未吊销证书的去重网关数，对照 license 容量上限——" +
+			"与 GET /api/v1/license 的 usage 同口径；该维不限（0）时不判",
+		Thresholds:  map[string]float64{ThreshSeatPercent: 90},
+		ThresholdZh: map[string]string{ThreshSeatPercent: "占用率提醒（%）"},
 	},
 	{
 		Kind: AlertKindAuditChain, Name: "审计防篡改链校验失败", Category: AlertCategorySecurity,

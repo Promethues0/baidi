@@ -56,6 +56,19 @@ type Snapshot struct {
 	// KnockTTLSec 敲门令牌有效期（api.knockTTL，由调用方注入保持同源）。
 	// 时钟偏差告警的文案用它说清后果的临界点；<=0 时文案略去这一句，不编一个数。
 	KnockTTLSec int64
+	// License license 状态快照；nil = 本轮取不到（存储不支持 / demo 模式无需判）。
+	// ★与其余信号同一条纪律：nil 不产生候选，不是"没问题"也不是"有问题"。
+	License *LicenseStat
+}
+
+// LicenseStat license 告警所需的最小快照（由 api 层从与容量闸同一份判定里现算注入）。
+type LicenseStat struct {
+	Mode      string // licensed | expired | invalid（demo 由调用方直接不注入）
+	Reason    string // expired/invalid 时的人话说明
+	ExpiresAt string // YYYY-MM-DD
+	DaysLeft  int    // 距到期天数（含当日；过期为负）
+	// 占用/上限。上限 0 = 该维不限；占用 -1 = 读不出（不可判定，该维不判）。
+	Users, MaxUsers, Gateways, MaxGateways int
 }
 
 // AppRef 一个未关联受控资源的应用。
@@ -258,6 +271,46 @@ func evalRule(rule store.AlertRule, spec store.AlertKindSpec, snap Snapshot) []C
 				"该账号任一设备的最新合规判定为 block：控制面已拒发敲门令牌，并经网关策略下发撤窗断隧道。"+
 					"修复终端环境并重新上报后自动恢复。"))
 		}
+
+	case store.AlertKindLicenseExpiry:
+		if snap.License == nil {
+			break // 取不到 / demo：不产生候选
+		}
+		l := snap.License
+		days := int64(thresh(rule, spec, store.ThreshExpireDays))
+		switch l.Mode {
+		case "expired", "invalid":
+			out = append(out, mk("license",
+				"License 已失效（"+l.Mode+"）",
+				l.Reason+" 此刻新增用户与签发网关证书都会被拒（容量闸 fail-closed），存量业务不受影响。"))
+		case "licensed":
+			if int64(l.DaysLeft) <= days {
+				out = append(out, mk("license",
+					fmt.Sprintf("License 将于 %s 到期（剩 %d 天）", l.ExpiresAt, l.DaysLeft),
+					fmt.Sprintf("到期后新增用户与签发网关证书会被拒（存量业务照常）。请在到期前导入新 license（提醒阈值 %d 天）。", days)))
+			}
+		}
+
+	case store.AlertKindLicenseSeats:
+		if snap.License == nil || snap.License.Mode != "licensed" {
+			break // expired/invalid 已有 license_expiry 那条更根本的告警
+		}
+		pct := thresh(rule, spec, store.ThreshSeatPercent)
+		l := snap.License
+		check := func(kind string, used, cap int) {
+			if cap <= 0 || used < 0 {
+				return // 不限 / 读不出：该维不判（-1 是不可判定，不是 0）
+			}
+			if float64(used)/float64(cap)*100 < pct {
+				return
+			}
+			out = append(out, mk("license-"+kind,
+				fmt.Sprintf("License %s席位将满（%d/%d）", map[string]string{"users": "用户", "gateways": "网关"}[kind], used, cap),
+				fmt.Sprintf("占用已达 %.0f%%（提醒阈值 %.0f%%）。满员后新增会被拒：请清理闲置或导入更大容量的 license。",
+					float64(used)/float64(cap)*100, pct)))
+		}
+		check("users", l.Users, l.MaxUsers)
+		check("gateways", l.Gateways, l.MaxGateways)
 
 	case store.AlertKindAuditChain:
 		st := snap.AuditChain

@@ -25,6 +25,10 @@ import (
 type GatewayStat struct {
 	ID       string
 	LastSeen int64 // Unix 秒
+	// SkewSec 该网关时钟相对控制面的偏差（秒，正=网关快）。
+	// nil = 该网关不上报时钟（旧版本）：时钟规则对它**不产生候选**——
+	// 不可判定不是正常，也不是异常，页面与 /diag 单列它，告警不替它编结论。
+	SkewSec *int64
 }
 
 // Snapshot 一次评估所需的全部信号。字段为空 = 该信号本轮无数据，
@@ -49,6 +53,9 @@ type Snapshot struct {
 	// AuditChain 审计链自检结论；nil = 本轮没查（存储不支持，或还没到自检周期）。
 	// ★nil 与「查了、没问题」必须区分：把没查当成没问题，正是"防篡改链没人查等于没有"。
 	AuditChain *ChainStatus
+	// KnockTTLSec 敲门令牌有效期（api.knockTTL，由调用方注入保持同源）。
+	// 时钟偏差告警的文案用它说清后果的临界点；<=0 时文案略去这一句，不编一个数。
+	KnockTTLSec int64
 }
 
 // AppRef 一个未关联受控资源的应用。
@@ -159,6 +166,42 @@ func evalRule(rule store.AlertRule, spec store.AlertKindSpec, snap Snapshot) []C
 			out = append(out, mk("gwload:"+m.GatewayID,
 				"网关「"+m.GatewayID+"」资源水位超阈值",
 				"最近一次上报："+strings.Join(over, "，")))
+		}
+
+	case store.AlertKindClockSkew:
+		limit := int64(thresh(rule, spec, store.ThreshSkewSec))
+		if limit <= 0 {
+			limit = 10
+		}
+		for _, gw := range snap.Gateways {
+			if gw.SkewSec == nil {
+				continue // 旧网关不上报时钟：不可判定，不产生候选（页面与 /diag 单列）
+			}
+			if snap.Now-gw.LastSeen > snap.OfflineAfterSec {
+				continue // 离线网关的偏差是陈旧读数，且它已有"心跳超时"那条更根本的告警
+			}
+			skew := *gw.SkewSec
+			abs := skew
+			if abs < 0 {
+				abs = -abs
+			}
+			if abs <= limit {
+				continue
+			}
+			dir := "快"
+			if skew < 0 {
+				dir = "慢"
+			}
+			detail := fmt.Sprintf("该网关自报的本机时钟比控制面%s %s（阈值 %ds）。"+
+				"敲门令牌由控制面签发、由网关校验有效期，两侧时钟不一致会缩短乃至清零令牌的实际可用窗口。",
+				dir, humanGap(abs), limit)
+			if snap.KnockTTLSec > 0 {
+				detail += fmt.Sprintf("偏差达到 %ds（令牌有效期）时，合法客户端的每次敲门都会以「令牌过期」被拒，"+
+					"且 SPA 单包无回应，客户端侧没有任何报错。请检查该网关宿主机的 NTP 同步（chrony/ntpd/w32time）。",
+					snap.KnockTTLSec)
+			}
+			out = append(out, mk("gwskew:"+gw.ID,
+				"网关「"+gw.ID+"」时钟偏差超阈值", detail))
 		}
 
 	case store.AlertKindGrantExpiring:

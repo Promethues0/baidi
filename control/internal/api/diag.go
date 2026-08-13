@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"sort"
 	"time"
 
 	"baidi.dev/control/internal/config"
@@ -86,6 +87,7 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 		s.checkDatabase(ctx),
 		s.checkAuditDisk(ctx),
 		s.checkGateways(),
+		s.checkClockSkew(),
 		s.checkStealth(),
 		s.checkCluster(ctx),
 		s.checkAuthSources(ctx),
@@ -252,6 +254,103 @@ func (s *Server) checkGateways() DiagCheck {
 	default:
 		c.Status = "pass"
 		c.Summary = "全部数据面网关在线，心跳正常"
+	}
+	return c
+}
+
+// checkClockSkew 控制面与各在线网关的时钟一致性。
+//
+// ★为什么这项体检值得存在：敲门令牌由控制面按自己的钟签发（knockTTL），
+// 由网关按**它自己的钟**校验有效期。两侧漂过这个量，合法客户端的每一次敲门
+// 都会以「令牌过期」被拒——SPA 单包无回应，客户端看不到错误；控制面签发日志
+// 一切正常；网关只会累积"验签失败"。三处都不指向时钟。这项检查是那种事故
+// 唯一的前置可见信号。判据阈值分两档：
+//   |偏差| ≥ knockTTL     → fail（敲门此刻就已经在失败）
+//   |偏差| >  10s          → warn（继续漂就会失败）
+// 未上报时钟的旧网关单列 warn（不可判定 ≠ 一致，也 ≠ 异常）。
+func (s *Server) checkClockSkew() DiagCheck {
+	c := DiagCheck{Key: "clock", Category: "dataplane", Name: "控制面与网关时钟一致性"}
+	now := time.Now().Unix()
+	window := int64(gatewayOnlineWindow / time.Second)
+	ttl := int64(knockTTL / time.Second)
+
+	type row struct {
+		id   string
+		skew *int64
+	}
+	var rows []row
+	s.mu.Lock()
+	for id, g := range s.gateways {
+		if now-g.LastSeen > window {
+			continue // 离线网关的偏差是陈旧读数，且已由"网关在线"那项覆盖
+		}
+		rows = append(rows, row{id: id, skew: g.SkewSec})
+	}
+	s.mu.Unlock()
+	sort.Slice(rows, func(i, j int) bool { return rows[i].id < rows[j].id })
+
+	if len(rows) == 0 {
+		c.Status = "skip"
+		c.Summary = "无在线网关，无从比对时钟"
+		c.Metric = "—"
+		return c
+	}
+
+	worst, unknown := int64(0), 0
+	for _, r := range rows {
+		if r.skew == nil {
+			unknown++
+			c.Items = append(c.Items, DiagItem{
+				Label: r.id, Value: "未上报时钟（旧版网关）——偏差不可判定", Status: "warn",
+			})
+			continue
+		}
+		abs := *r.skew
+		if abs < 0 {
+			abs = -abs
+		}
+		if abs > worst {
+			worst = abs
+		}
+		st, note := "pass", "与控制面一致"
+		switch {
+		case abs >= ttl:
+			st, note = "fail", fmt.Sprintf("偏差已达敲门令牌有效期（%ds），敲门此刻就在失败", ttl)
+		case abs > 10:
+			st, note = "warn", "偏差偏大，继续漂移会让敲门令牌的实际窗口清零"
+		}
+		dir := "快"
+		if *r.skew < 0 {
+			dir = "慢"
+		}
+		c.Items = append(c.Items, DiagItem{
+			Label:  r.id,
+			Value:  fmt.Sprintf("网关钟比控制面%s %ds · %s", dir, abs, note),
+			Status: st,
+		})
+	}
+
+	c.Metric = fmt.Sprintf("最大偏差 %ds · 敲门令牌有效期 %ds", worst, ttl)
+	switch {
+	case worst >= ttl:
+		c.Status = "fail"
+		c.Summary = "有网关时钟偏差不小于敲门令牌有效期：该网关上的敲门此刻就在以「令牌过期」被拒"
+		c.Hint = "校准该网关宿主机的系统时钟（chrony/ntpd/w32time）；控制面不代管 NTP，时钟同步由部署机自治"
+	case worst > 10:
+		c.Status = "warn"
+		c.Summary = "有网关时钟偏差超过 10s：尚未影响敲门，但已在侵蚀令牌的实际可用窗口"
+		c.Hint = "检查偏差网关的 NTP 同步是否在跑；持续漂移最终会让合法敲门全部失败且无报错"
+	case unknown == len(rows):
+		c.Status = "warn"
+		c.Summary = "在线网关均未上报时钟（旧版本）：偏差不可判定，不等于一致"
+		c.Hint = "升级网关二进制后心跳自动携带时钟；在此之前这项检查无法替你回答"
+	case unknown > 0:
+		c.Status = "warn"
+		c.Summary = fmt.Sprintf("%d 台在线网关未上报时钟（不可判定），其余偏差正常", unknown)
+		c.Hint = "升级未上报的网关；已上报的各台时钟一致"
+	default:
+		c.Status = "pass"
+		c.Summary = "全部在线网关与控制面时钟一致（偏差 ≤ 10s）"
 	}
 	return c
 }

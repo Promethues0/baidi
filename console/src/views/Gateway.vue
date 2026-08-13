@@ -170,7 +170,7 @@
             <thead>
               <tr>
                 <th>网关</th><th>敲门口</th><th>隧道口</th><th>状态</th>
-                <th>会话</th><th>隧道</th><th>放行源</th><th>版本</th><th>运行时长</th><th>最后心跳</th>
+                <th>会话</th><th>隧道</th><th>放行源</th><th>版本</th><th>时钟偏差</th><th>运行时长</th><th>最后心跳</th>
               </tr>
             </thead>
             <tbody>
@@ -188,6 +188,14 @@
                 <td>{{ n.clients }}</td>
                 <!-- 旧网关不上报版本：显示 — 而不是猜一个 -->
                 <td><span class="bd-mono">{{ n.version || '—' }}</span></td>
+                <!-- 时钟偏差三态：null=未上报（不可判定，绝不显示 0）；超 10s 标黄提醒。
+                     敲门令牌是控制面签、网关验的，这一列漂过令牌有效期时敲门全灭且无报错。 -->
+                <td>
+                  <span v-if="n.skewSec === null || n.skewSec === undefined" style="color: var(--bd-t3)">未上报</span>
+                  <span v-else :style="{ color: Math.abs(n.skewSec) > 10 ? 'var(--bd-warning, #FF7D00)' : 'var(--bd-t2)' }" class="bd-mono">
+                    {{ n.skewSec > 0 ? '+' : '' }}{{ n.skewSec }}s
+                  </span>
+                </td>
                 <td>{{ humanUptime(n.uptime) }}</td>
                 <td>{{ sinceText(n.lastSeen) }}</td>
               </tr>

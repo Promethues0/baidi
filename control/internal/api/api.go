@@ -186,6 +186,11 @@ type GatewayInfo struct {
 	// 控制面据此拼浏览器该跳的入口 URL；为空就如实说"未开启"，绝不猜一个地址。
 	Web    string `json:"web"`
 	WebTLS bool   `json:"webTls"` // 该监听自身是否已是 HTTPS（决定入口 URL 的 scheme）
+	// SkewSec 网关时钟相对控制面的偏差（网关钟 − 控制面钟，秒；正 = 网关快）。
+	// ★指针：nil = 旧网关不上报时钟，**不可判定**，与「偏差为 0」必须分得开——
+	// 塌缩成 0 会让一台从不上报的网关永远显示"时钟一致"，而它可能正因漂移拒掉所有敲门。
+	// 数值含约半个 RTT 的系统性误差（网关在发送时刻盖章），对 10s 级阈值可忽略。
+	SkewSec *int64 `json:"skewSec"`
 }
 
 // GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
@@ -1098,6 +1103,9 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// （旧版本），与「上报了但一项都没采到」（非 nil 但各项为 nil）必须分得开——
 		// 前者去升级网关，后者去查这台机器为什么读不到 /proc。
 		Metrics *gwMetrics `json:"metrics"`
+		// Now 网关发送心跳时刻的本机时钟（Unix 秒）。★指针：nil = 旧网关不上报，
+		// 时钟偏差按不可判定处理（不告警、页面显示"未上报"），绝不当 0。
+		Now *int64 `json:"now"`
 		// Ifaces 网关实测枚举的网卡清单（地址转换选接口用）。★同样是指针：
 		// nil（字段缺席，旧网关）必须**保留**库里已有的记录，而空数组才表示
 		// 「这台网关真的一张可用网卡都没有」。混为一谈的话，升级前的旧网关
@@ -1133,11 +1141,19 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 			"提示", "多半是 -gwid 与签发证书时的 gwID 写岔了；不改的话地址转换策略会下发不到这台网关")
 		id = cn
 	}
+	// 时钟偏差 = 网关自报时刻 − 控制面收包时刻。在锁外先算好：
+	// 敲门令牌（knockTTL=90s）是控制面签、网关验的，两侧漂过有效期时
+	// 每次敲门都以"过期"被拒且全链路无报错——这个减法是那次事故唯一的前置可见信号。
+	var skew *int64
+	if b.Now != nil {
+		d := *b.Now - time.Now().Unix()
+		skew = &d
+	}
 	s.mu.Lock()
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
-		Web: b.Web, WebTLS: b.WebTLS,
+		Web: b.Web, WebTLS: b.WebTLS, SkewSec: skew,
 	}
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP

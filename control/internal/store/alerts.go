@@ -80,6 +80,12 @@ const (
 	AlertKindAccountLockout = "account_lockout"
 	// AlertKindPostureBlock 终端合规判定 block（该账号已被拒发敲门令牌 + 撤窗断隧道）。
 	AlertKindPostureBlock = "posture_block"
+	// AlertKindClockSkew 网关时钟偏差超阈值。信号来自注册心跳里网关自报的本机时钟
+	// 与控制面收包时刻的差。★它守的是敲门链路的一个隐性前提：敲门令牌是控制面按
+	// 自己的钟签的（knockTTL），验它的却是网关的钟——两侧漂过有效期，合法客户端的
+	// 每次敲门都以"过期"被拒，SPA 又是单包无回应的，客户端连错误都看不到。
+	// 旧网关不上报时钟：该网关不参与判定（不可判定 ≠ 偏差 0）。
+	AlertKindClockSkew = "clock_skew"
 	// AlertKindAuditChain 审计防篡改链周期性自检失败。
 	// ★这条是本组里最该存在的一条：防篡改链没人定期查就等于没有——
 	// 篡改发生到被发现之间的窗口，取决于有没有人手动点那个「校验」按钮。
@@ -137,6 +143,7 @@ const (
 	ThreshDiskPercent  = "diskPercent"
 	ThreshBeforeMin    = "beforeMinutes"
 	ThreshGraceMinutes = "graceMinutes"
+	ThreshSkewSec      = "skewSec"
 )
 
 // alertKindSpecs 全部规则种类。**新增一项前先回答：它读的那份数据现在真的存在吗？**
@@ -199,6 +206,16 @@ var alertKindSpecs = []AlertKindSpec{
 		Signal:      "posture_reports 中任一设备最新判定为 block 的账号（与拒发敲门令牌、撤窗断隧道同一份名单）",
 		Thresholds:  map[string]float64{},
 		ThresholdZh: map[string]string{},
+	},
+	{
+		Kind: AlertKindClockSkew, Name: "网关时钟偏差超阈值", Category: AlertCategoryDevice,
+		Severity: AlertSevWarning,
+		Signal: "注册心跳里网关自报的本机时钟（now 字段）与控制面收包时刻的差；" +
+			"旧网关不上报该字段则不参与判定（不可判定，不是偏差 0）",
+		Thresholds: map[string]float64{ThreshSkewSec: 10},
+		ThresholdZh: map[string]string{
+			ThreshSkewSec: "允许偏差（秒）",
+		},
 	},
 	{
 		Kind: AlertKindAuditChain, Name: "审计防篡改链校验失败", Category: AlertCategorySecurity,

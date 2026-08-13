@@ -54,6 +54,9 @@ type GatewayNodeView struct {
 	Tunnels  int    `json:"tunnels"`  // 活跃隧道连接数
 	Sessions int    `json:"sessions"` // 该网关上报的活跃会话条数
 	Version  string `json:"version"`  // 二进制版本；旧网关不上报则为空串（前端显示 —）
+	// SkewSec 该网关时钟相对控制面的偏差（秒，正=网关快）；null = 未上报（旧网关），
+	// 页面必须显示"未上报"而不是 0——语义见 GatewayInfo.SkewSec。
+	SkewSec *int64 `json:"skewSec"`
 }
 
 // handleGateway 返回网关与隐身页的聚合视图。
@@ -78,6 +81,7 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		n := GatewayNodeView{
 			ID: id, Proxy: g.Proxy, SPA: g.SPA, LastSeen: g.LastSeen, Uptime: g.Uptime,
 			Clients: g.Clients, Tunnels: g.Tunnels, Sessions: len(s.gwSess[id]), Version: g.Version,
+			SkewSec: g.SkewSec,
 		}
 		n.Online = gatewayFresh(g.LastSeen, now)
 		if n.Online {

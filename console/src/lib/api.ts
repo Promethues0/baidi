@@ -176,6 +176,12 @@ export interface GwNode {
   clients: number; tunnels: number; sessions: number;
   /** 网关二进制版本；旧网关不上报则为空串。 */
   version: string;
+  /**
+   * 网关时钟相对控制面的偏差（秒，正=网关快）；null = 旧网关未上报（不可判定）。
+   * ★渲染纪律与 posture/设备指标一致：null 显示「未上报」，绝不显示 0——
+   * 敲门令牌由控制面签、网关验，时钟这一列失真的代价是「敲门全灭且无处报错」。
+   */
+  skewSec: number | null;
 }
 export interface GatewayBundle {
   nodes: GwNode[];

@@ -122,11 +122,13 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 		Now:             now,
 		OfflineAfterSec: int64(gatewayOnlineWindow / time.Second),
 		MetricsFreshSec: int64(alertMetricsFresh / time.Second),
+		// 敲门令牌有效期：时钟偏差告警的文案用它说清临界点（与签发常量同源，不另抄一份数）。
+		KnockTTLSec: int64(knockTTL / time.Second),
 	}
-	// 设备异常 ①：网关心跳。取的是控制面 mTLS 注册表——与在线用户统计同一份内存态。
+	// 设备异常 ①：网关心跳 + 自报时钟。取的是控制面 mTLS 注册表——与在线用户统计同一份内存态。
 	s.mu.Lock()
 	for id, gw := range s.gateways {
-		snap.Gateways = append(snap.Gateways, alerting.GatewayStat{ID: id, LastSeen: gw.LastSeen})
+		snap.Gateways = append(snap.Gateways, alerting.GatewayStat{ID: id, LastSeen: gw.LastSeen, SkewSec: gw.SkewSec})
 	}
 	s.mu.Unlock()
 	// 设备异常 ②：资源水位（数据源可能还不存在，探测结论一并带上）。

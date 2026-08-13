@@ -366,7 +366,13 @@ jobs:
             cargo-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: 构建 sidecar（baidi-knock + baidi-tun）
-        run: bash clients/desktop/src-tauri/build-sidecars.sh ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
+        # ★只有 Windows 传 --target。macOS 那条的 matrix.target 是
+        #   `universal-apple-darwin` —— 那是 **Tauri 的合成打包目标，不是真三元组**，
+        #   build-sidecars.sh 的 case 里没有也不该有它（它在 darwin 上本来就同时产
+        #   aarch64/x86_64/universal 三份）。把它当 --target 传进去，脚本会如实报
+        #   「未适配的三元组」并 exit 1 —— 这次 macOS 腿就是这么挂的，是我图省事
+        #   写成一步的代价。matrix 里给 macOS 留 target 键是为了下一步那道命名断言。
+        run: bash clients/desktop/src-tauri/build-sidecars.sh ${{ startsWith(matrix.os, 'windows') && format('--target {0}', matrix.target) || '' }}
 
       - name: 核对 sidecar 命名
         run: |

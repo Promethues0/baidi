@@ -252,11 +252,33 @@ jobs:
       matrix:
         include:
           - os: macos-latest
+            arch: universal
+            # ★macOS 也要 target：下面那道 sidecar 命名断言此前按 rustc host 判，
+            #   查的是 `-aarch64-apple-darwin`，而打包用的是 `--target universal-apple-darwin`、
+            #   Tauri 精确找 `-universal-apple-darwin`。也就是说那道断言在 macOS 上
+            #   **今天就是死规则**：lipo 合成那段真挂了它照样打 ✓。
+            target: universal-apple-darwin
             label: macOS · universal dmg
           - os: ubuntu-latest
+            arch: x86_64
+            # Linux 刻意不设 target：它不传 --target，产物在 target/release，
+            # 路径一个字节都不该动。
             label: Linux · deb + AppImage（未实机验证）
           - os: windows-latest
-            label: Windows · msi + nsis（未实机验证，自带 wintun.dll）
+            arch: x86_64
+            target: x86_64-pc-windows-msvc
+            label: Windows x64 · msi + nsis（未实机验证，自带 wintun.dll）
+          - os: windows-latest
+            arch: aarch64
+            target: aarch64-pc-windows-msvc
+            label: Windows ARM64 · msi + nsis（x64 runner 上交叉构建，未实机验证）
+
+    env:
+      # ★传了 --target 之后 cargo/tauri 把产物挪到 target/<三元组>/release。
+      #   这个路径**只在这里算一次**，下游全部引用它——否则要在十几处各写各的，
+      #   漏改一处的后果是「上传一个只有 README 的 Windows 包，而且全绿」。
+      #   Linux 不设 matrix.target，求值成 …/target/release，与今天逐字相同。
+      BD_BUNDLE_ROOT: clients/desktop/src-tauri/target/${{ (runner.os == 'Windows' && matrix.target) && format('{0}/', matrix.target) || '' }}release
 
     defaults:
       run:
@@ -302,6 +324,15 @@ jobs:
         if: runner.os == 'macOS'
         run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
 
+      - name: Rust 目标（Windows 两条腿都装；arm64 那条是交叉构建）
+        # 刻意不写 `if: matrix.arch == 'aarch64'`：按 arch 特判的话，
+        # 将来 x64 腿换了 target 就会静默漏装。非空断言同时兜住"矩阵键名拼错"
+        # ——GitHub 把未定义的 matrix 键求值成空串，命令行上参数整段消失。
+        if: runner.os == 'Windows'
+        run: |
+          [ -n "${{ matrix.target }}" ] || { echo "✗ Windows 腿必须有 matrix.target（键名拼错了？）"; exit 1; }
+          rustup target add ${{ matrix.target }}
+
       - name: Linux 系统依赖（Tauri v2 官方清单）
         if: runner.os == 'Linux'
         run: |
@@ -327,19 +358,23 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             clients/desktop/src-tauri/target
-          key: cargo-${{ matrix.os }}-${{ hashFiles('clients/desktop/src-tauri/Cargo.lock') }}
+          key: cargo-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('clients/desktop/src-tauri/Cargo.lock') }}
           restore-keys: |
-            cargo-${{ matrix.os }}-
+            cargo-${{ matrix.os }}-${{ matrix.arch }}-
 
       - name: 构建 sidecar（baidi-knock + baidi-tun）
-        run: bash clients/desktop/src-tauri/build-sidecars.sh
+        run: bash clients/desktop/src-tauri/build-sidecars.sh ${{ matrix.target && format('--target {0}', matrix.target) || '' }}
 
       - name: 核对 sidecar 命名
         run: |
           # Tauri 的 externalBin 是**精确按名字**找的：binaries/<name>-<host 三元组>[.exe]。
           # 名字差一个字（尤其 Windows 少了 .exe），tauri build 只会说「找不到 sidecar」，
           # 与"Go 没编出来"完全同形。在这里先断言一次，把两种失败分开。
-          TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
+          # 判据必须是**本次打包目标**而不是 runner host：交叉构建时两者分叉，
+          # 按 host 判会去找一个 Tauri 根本不会查找的文件名。
+          # macOS 上这一改还顺带把一条死规则救活了（见 matrix 里的说明）。
+          TRIPLE="${{ matrix.target }}"
+          [ -n "$TRIPLE" ] || TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"   # Linux 不设 target
           EXT=""
           if [ "$RUNNER_OS" = "Windows" ]; then EXT=".exe"; fi
           for b in baidi-knock baidi-tun; do
@@ -357,7 +392,7 @@ jobs:
       # 取件本身在 build-sidecars.sh 里（GOOS=windows 分支调 fetch-wintun.sh，官方 zip +
       # SHA-256 强校验）。这一步只做**输入侧**的断言，与打包后那一步是两码事：
       # 这里管"取到的这份对不对"，那里管"它有没有进包、进到哪个目录"。
-      - name: 核对 wintun 打包输入（DLL / 许可齐全，且架构与 runner 一致）
+      - name: 核对 wintun 打包输入（DLL / 许可齐全，且架构与本次打包目标一致）
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
@@ -385,7 +420,16 @@ jobs:
             Write-Host "✗ $stage/wintun.dll 的 PE 签名对不上"; exit 1
           }
           $machine = [BitConverter]::ToUInt16($bytes, $off + 4)
-          $triple = (& rustc -vV | Select-String '^host: ').ToString().Substring(6).Trim()
+          # ★判据从 rustc host 换成 matrix 目标（交叉构建时 host 是 x64、目标是 arm64）。
+          #   代价要说清楚：这一步因此**不再独立验证**"我们真的按声称的架构编了"，
+          #   它只验证"取件与声明一致"。链上唯一还独立的判官是
+          #   tauri.conf.json 的 beforeBundleCommand → verify-wintun-stage.sh，
+          #   那一次的三元组来自 Tauri 自己注入的 TAURI_ENV_ARCH/PLATFORM（真实目标）。
+          #   ☠ 谁都不许图省事把那次调用也改成 --triple ${{ matrix.target }}：
+          #     那会让整条链退化成同义反复（matrix 说 arm64 → 取 arm64 → 断言 arm64），
+          #     而 tauri 实际编了 x64 时全绿。
+          $triple = '${{ matrix.target }}'
+          if (-not $triple) { Write-Host "✗ Windows 腿缺 matrix.target"; exit 1 }
           $want = switch -Wildcard ($triple) {
             'x86_64-*'  { 0x8664 }
             'aarch64-*' { 0xAA64 }
@@ -513,12 +557,16 @@ jobs:
       - name: 打包（Windows · NSIS）
         if: runner.os == 'Windows'
         working-directory: clients/desktop
-        run: npm run tauri:build -- --bundles nsis --verbose
+        # ★必须真传 --target：只有这样 Tauri 才把 TAURI_ENV_ARCH 设成**目标**架构
+        #   （值是三元组第一段，arm64 上是 `aarch64`）。改用 CARGO_BUILD_TARGET 或
+        #   rustup override 的话 TAURI_ENV_ARCH 仍是 host 的 x86_64，而暂存区也正好是
+        #   x86_64 → verify-wintun-stage 检查通过、包是 arm64 的、DLL 却是 x64 的。
+        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles nsis --verbose
 
       - name: 打包（Windows · MSI）
         if: runner.os == 'Windows' && !cancelled()
         working-directory: clients/desktop
-        run: npm run tauri:build -- --bundles msi --verbose
+        run: npm run tauri:build -- --target ${{ matrix.target }} --bundles msi --verbose
 
       # ★这一步是本条流水线里最该存在的断言，理由是失败形态：
       #   wintun.dll 没进包、或者进了包但落在子目录（`bundle.resources` 写成列表形就会
@@ -538,7 +586,8 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          $root = 'clients/desktop/src-tauri/target'
+          $root = "$env:BD_BUNDLE_ROOT"     # 已含 target/<三元组>/release
+          $since = (Get-Date).ToUniversalTime().AddMinutes(-90)
           $fail = $false
 
           # ★诊断同时写进 job summary（运行页正面那块），不只写日志。
@@ -581,10 +630,14 @@ jobs:
           # ── NSIS ──
           # 常规落点是 target/release/nsis/<arch>/installer.nsi；兜底再全量找一遍，
           # 免得 bundler 换了目录结构时把"落点变了"报成"断言失败"（两者的下一步完全不同）。
-          $nsi = Get-ChildItem -Path "$root/release/nsis" -Recurse -Filter 'installer.nsi' -ErrorAction SilentlyContinue |
+          $nsi = Get-ChildItem -Path "$root/nsis" -Recurse -Filter 'installer.nsi' -ErrorAction SilentlyContinue |
                  Sort-Object LastWriteTime -Descending | Select-Object -First 1
           if (-not $nsi) {
+            # ★兜底只在**本轮 target 子目录**内找，且必须比本次构建新：
+            #   cargo 的 target/ 整目录进了 actions/cache，全量递归会捞到上一轮
+            #   （甚至另一条腿）的 installer.nsi，在一次根本没产出的构建上判绿。
             $nsi = Get-ChildItem -Path $root -Recurse -Filter 'installer.nsi' -ErrorAction SilentlyContinue |
+                   Where-Object { $_.LastWriteTimeUtc -gt $since } |
                    Sort-Object LastWriteTime -Descending | Select-Object -First 1
           }
           if (-not $nsi) {
@@ -630,7 +683,7 @@ jobs:
           }
 
           # ── MSI ──
-          $msi = Get-ChildItem -Path "$root/release/bundle/msi" -Filter '*.msi' -ErrorAction SilentlyContinue |
+          $msi = Get-ChildItem -Path "$root/bundle/msi" -Filter '*.msi' -ErrorAction SilentlyContinue |
                  Select-Object -First 1
           if (-not $msi) { Note "✗ 找不到 msi 产物"; Die }
           $dest = Join-Path $env:RUNNER_TEMP 'baidi-msi-admin'
@@ -671,13 +724,13 @@ jobs:
         if: runner.os == 'Windows' && failure()
         uses: actions/upload-artifact@v4
         with:
-          name: windows-bundle-diagnostics
+          name: windows-bundle-diagnostics-${{ matrix.arch }}
           if-no-files-found: warn
           retention-days: 7
           path: |
-            clients/desktop/src-tauri/target/release/wix/**/*.wxs
-            clients/desktop/src-tauri/target/release/wix/**/*.wxl
-            clients/desktop/src-tauri/target/release/nsis/**/installer.nsi
+            ${{ env.BD_BUNDLE_ROOT }}/wix/**/*.wxs
+            ${{ env.BD_BUNDLE_ROOT }}/wix/**/*.wxl
+            ${{ env.BD_BUNDLE_ROOT }}/nsis/**/installer.nsi
 
 
       # ── macOS：汇集进下载中心的产物目录，并注入构建溯源 ──
@@ -735,7 +788,7 @@ jobs:
         env:
           SRC_REV: ${{ steps.rev.outputs.rev }}
         run: |
-          BUNDLE=clients/desktop/src-tauri/target/release/bundle
+          BUNDLE="$BD_BUNDLE_ROOT/bundle"
           mkdir -p "$BUNDLE"
           BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           cat > "$BUNDLE/build-provenance.env" <<EOF
@@ -750,7 +803,7 @@ jobs:
       - name: 写 Linux 说明（随包一起下发）
         if: runner.os == 'Linux'
         run: |
-          cat > clients/desktop/src-tauri/target/release/bundle/README-linux.txt <<'TXT'
+          cat > "$BD_BUNDLE_ROOT/bundle/README-linux.txt" <<'TXT'
           白帝安全接入客户端 · Linux 包（未实机验证）
 
           这个包在 GitHub Actions 的 ubuntu runner 上原生构建，能装。但请注意：
@@ -765,8 +818,22 @@ jobs:
           {
             echo
             echo "构建溯源（机器可读的一份见同目录 build-provenance.env）："
-            sed 's/^/  /' clients/desktop/src-tauri/target/release/bundle/build-provenance.env
-          } >> clients/desktop/src-tauri/target/release/bundle/README-linux.txt
+            sed 's/^/  /' "$BD_BUNDLE_ROOT/bundle/build-provenance.env"
+          } >> "$BD_BUNDLE_ROOT/bundle/README-linux.txt"
+
+      - name: 上传前断言真有Linux 安装包（不是只有 README）
+        if: runner.os == 'Linux'
+        run: |
+          # ★upload-artifact 的 `if-no-files-found: error` 只在**四条 glob 全落空**时才报。
+          #   README 与 build-provenance.env 是上两步我们自己刚写进去的，必然命中——
+          #   于是「 deb/AppImage  一个都没有」会被它们掩盖成一次成功上传，全绿，
+          #   而下载的人拿到一个只有说明文件的"安装包"。
+          n=$(ls "$BD_BUNDLE_ROOT"/bundle/deb/*.deb "$BD_BUNDLE_ROOT"/bundle/appimage/*.AppImage 2>/dev/null | wc -l)
+          [ "$n" -ge 1 ] || {
+            echo "✗ $BD_BUNDLE_ROOT/bundle 下没有任何 deb/AppImage 产物"
+            ls -R "$BD_BUNDLE_ROOT/bundle" 2>/dev/null || true
+            exit 1; }
+          echo "✓ 安装包 $n 个"
 
       - name: 上传产物（Linux）
         if: runner.os == 'Linux'
@@ -774,16 +841,16 @@ jobs:
         with:
           name: baidi-desktop-linux-x86_64-UNVERIFIED
           path: |
-            clients/desktop/src-tauri/target/release/bundle/deb/*.deb
-            clients/desktop/src-tauri/target/release/bundle/appimage/*.AppImage
-            clients/desktop/src-tauri/target/release/bundle/README-linux.txt
-            clients/desktop/src-tauri/target/release/bundle/build-provenance.env
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/deb/*.deb
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/appimage/*.AppImage
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/README-linux.txt
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/build-provenance.env
           if-no-files-found: error
 
       - name: 写 Windows 说明（随包一起下发）
         if: runner.os == 'Windows'
         run: |
-          cat > clients/desktop/src-tauri/target/release/bundle/README-windows.txt <<'TXT'
+          cat > "$BD_BUNDLE_ROOT/bundle/README-windows.txt" <<'TXT'
           白帝安全接入客户端 · Windows 包（未实机验证）
 
           这个包在 GitHub Actions 的 windows runner 上原生构建，组件是齐的：
@@ -820,17 +887,31 @@ jobs:
           {
             echo
             echo "构建溯源（机器可读的一份见同目录 build-provenance.env）："
-            sed 's/^/  /' clients/desktop/src-tauri/target/release/bundle/build-provenance.env
-          } >> clients/desktop/src-tauri/target/release/bundle/README-windows.txt
+            sed 's/^/  /' "$BD_BUNDLE_ROOT/bundle/build-provenance.env"
+          } >> "$BD_BUNDLE_ROOT/bundle/README-windows.txt"
+
+      - name: 上传前断言真有Windows 安装包（不是只有 README）
+        if: runner.os == 'Windows'
+        run: |
+          # ★upload-artifact 的 `if-no-files-found: error` 只在**四条 glob 全落空**时才报。
+          #   README 与 build-provenance.env 是上两步我们自己刚写进去的，必然命中——
+          #   于是「 msi/nsis  一个都没有」会被它们掩盖成一次成功上传，全绿，
+          #   而下载的人拿到一个只有说明文件的"安装包"。
+          n=$(ls "$BD_BUNDLE_ROOT"/bundle/msi/*.msi "$BD_BUNDLE_ROOT"/bundle/nsis/*.exe 2>/dev/null | wc -l)
+          [ "$n" -ge 1 ] || {
+            echo "✗ $BD_BUNDLE_ROOT/bundle 下没有任何 msi/nsis 产物"
+            ls -R "$BD_BUNDLE_ROOT/bundle" 2>/dev/null || true
+            exit 1; }
+          echo "✓ 安装包 $n 个"
 
       - name: 上传产物（Windows）
         if: runner.os == 'Windows'
         uses: actions/upload-artifact@v4
         with:
-          name: baidi-desktop-windows-x86_64-UNVERIFIED
+          name: baidi-desktop-windows-${{ matrix.arch }}-UNVERIFIED
           path: |
-            clients/desktop/src-tauri/target/release/bundle/msi/*.msi
-            clients/desktop/src-tauri/target/release/bundle/nsis/*.exe
-            clients/desktop/src-tauri/target/release/bundle/README-windows.txt
-            clients/desktop/src-tauri/target/release/bundle/build-provenance.env
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/msi/*.msi
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/nsis/*.exe
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/README-windows.txt
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/build-provenance.env
           if-no-files-found: error

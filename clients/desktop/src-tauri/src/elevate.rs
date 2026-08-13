@@ -1719,6 +1719,34 @@ mod tests {
         assert!(out.contains("x86_64-pc-windows-msvc"), "也要报出本次目标是什么：{out}");
     }
 
+    /// ★反方向：暂存 x86_64、目标 aarch64。
+    ///
+    /// 上面那条测的是「暂存 arm64 / 目标 x64」，来源是有人手工跑过 `--arch all`。
+    /// 这一条测的是**交叉构建线会真实产生的那种错配**：CI 上 runner 是 x64，
+    /// 若 `build-sidecars.sh` 退回按 rustc host 判（例如 `--target` 被吞掉、
+    /// 或矩阵键名拼错求值成空串而脚本又回落 host），取件就会取 amd64 那份，
+    /// 而 tauri 正在打 aarch64 的包 —— 产物名、安装器、一切都写着 arm64，
+    /// 只有里面那个 DLL 是 x64。两个方向的错配后果一样（用户点「接入」才炸），
+    /// 但只钉一个方向的话，新增的交叉线恰好走的是没钉住的那半。
+    #[test]
+    fn wintun_暂存区_交叉构建方向的架构错配也必须拦下() {
+        if !有_bash() {
+            return;
+        }
+        let d = 造暂存区(
+            "mismatch-cross",
+            &[
+                ("wintun.dll", &造_pe(PE_MACHINE_AMD64)),
+                ("wintun.dll.triple", b"x86_64-pc-windows-msvc\n"),
+                ("wintun-LICENSE.txt", b"Prebuilt Binaries License"),
+            ],
+        );
+        let (ok, out) = 跑暂存区复核(&d, "aarch64-pc-windows-msvc");
+        assert!(!ok, "x64 的 DLL 配 arm64 的包必须拦下：{out}");
+        assert!(out.contains("x86_64-pc-windows-msvc"), "要报出暂存区里那份是什么：{out}");
+        assert!(out.contains("aarch64-pc-windows-msvc"), "也要报出本次目标是什么：{out}");
+    }
+
     /// 只有 DLL、没有 `.triple`：那份是手工放进去的，"它是哪个架构"没人能替你回答。
     /// 放行等于把这道守卫退化成"文件在不在"，与修复前完全同形。
     #[test]

@@ -43,6 +43,10 @@ Windows 同理（MSVC 工具链 + WebView2）。
 ```bash
 cd clients/desktop
 ./src-tauri/build-sidecars.sh                      # 先出 sidecar，缺了它 tauri build 会失败
+# 交叉：给谁打包就传谁的三元组（不传=取 rustc host）。传了空值会**当场拒绝**而不是
+# 悄悄回落 host —— CI 里矩阵键名拼错正是那个形态，回落会让 x64 的 sidecar 顶着
+# arm64 的产物名一路全绿。
+./src-tauri/build-sidecars.sh --target aarch64-pc-windows-msvc
 npm ci
 npm run tauri:build -- --target universal-apple-darwin
 cd .. && ./build-artifacts.sh                      # 汇集到 deploy/artifacts/downloads/ + 生成 manifest

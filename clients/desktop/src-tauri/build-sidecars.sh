@@ -1,7 +1,9 @@
 #!/usr/bin/env bash
 # 构建桌面客户端 Tauri sidecar 二进制（baidi-knock 敲门器 + baidi-tun 数据面引擎），
-# 按当前 Rust host 三元组命名放到 binaries/，供 tauri.conf.json externalBin 打包。
-# 用法：./build-sidecars.sh
+# 按**目标**三元组命名放到 binaries/，供 tauri.conf.json externalBin 打包。
+#
+# 用法：./build-sidecars.sh [--target <三元组>]      # 不给就取 rustc host（本机开发）
+#   交叉示例：./build-sidecars.sh --target aarch64-pc-windows-msvc
 #
 # 命名约定（Tauri v2 externalBin）：配置里写 "binaries/baidi-tun"，打包时**精确查找**
 # `binaries/baidi-tun-<host 三元组><可执行后缀>`——Windows 上那个后缀是 `.exe`，
@@ -10,10 +12,34 @@
 set -euo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 GW="$(cd "$HERE/../../../gateway" && pwd)"
+# ── 目标三元组 ─────────────────────────────────────────────────────────────
+# ★这个脚本此前**完全没有参数解析**：`build-sidecars.sh --target xxx` 会被原样吞掉、
+#   退出码 0、日志里一个字都看不出来。也就是说"只改调用方不改脚本"等于没改，
+#   而产物名会顶着调用方以为的架构一路全绿。所以先有解析，才谈得上交叉构建。
+TRIPLE=""
+TARGET_GIVEN=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --target)   TRIPLE="${2:-}"; TARGET_GIVEN=1; shift 2 ;;
+    --target=*) TRIPLE="${1#--target=}"; TARGET_GIVEN=1; shift ;;
+    -h|--help)  sed -n '2,10p' "${BASH_SOURCE[0]}"; exit 0 ;;
+    *) echo "✗ 未知参数：${1}（用 --help 看用法）" >&2; exit 1 ;;
+  esac
+done
 # 防御性剥 CR：Windows 上若 rustc 的输出走了 CRLF，三元组尾巴会挂一个不可见的 \r，
 # 产物名随之带上它——而 Tauri 报的错是「找不到 sidecar」，与把名字拼错完全同形。
-TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
-echo "==> host 三元组：$TRIPLE"
+TRIPLE="$(printf '%s' "$TRIPLE" | tr -d ' \t\r\n')"
+if [ "$TARGET_GIVEN" = 1 ]; then
+  # ★传了 --target 却是空值：**当场炸，不回落 host**。
+  #   CI 里矩阵键名拼错就是这个形态（GitHub 把未定义的 matrix 键求值成空串，
+  #   于是命令行上那个参数整段消失）。此时回落 host 会让 x64 的 sidecar
+  #   顶着 arm64 的产物名一路全绿 —— 这个参数存在的全部理由被它自己抵消掉。
+  [ -n "$TRIPLE" ] || { echo "✗ --target 收到空值（看起来传了、实际没传）。拒绝回落 host。" >&2; exit 1; }
+  echo "==> 目标三元组（--target）：${TRIPLE}；本机 host：$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
+else
+  TRIPLE="$(rustc -vV | sed -n 's/host: //p' | tr -d '\r')"
+  echo "==> 目标三元组（未指定，取 rustc host）：$TRIPLE"
+fi
 
 # 解析 GOOS/GOARCH/可执行后缀
 EXT=""

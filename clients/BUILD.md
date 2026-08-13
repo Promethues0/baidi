@@ -6,14 +6,15 @@
 |---|---|---|
 | macOS `.dmg`（universal） | **能** | `./src-tauri/build-sidecars.sh && npm run tauri:build -- --target universal-apple-darwin` |
 | Linux `.deb` / `.AppImage` | **不能** | GitHub Actions `ubuntu-latest`，或一台真 Linux |
-| Windows `.msi` / `.exe` | **不能** | GitHub Actions `windows-latest`，或一台真 Windows |
+| Windows x64 `.msi` / `.exe` | **不能** | GitHub Actions `windows-latest`，或一台真 Windows |
+| Windows **ARM64** `.msi` / `.exe` | **不能** | GitHub Actions `windows-latest` 上**交叉**构建（`--target aarch64-pc-windows-msvc`）；已跑通，msi 与 nsis 都出得来 |
 | Android `.apk` | **不能**（本机无 Java 运行时、未设 `ANDROID_HOME`、gomobile 跑不起来） | GitHub Actions `ubuntu-latest`，见第八节 |
 | iOS `.ipa` | **不能** | **只能人工构建**，公共 CI 上做不到，见第九节 |
 | 鸿蒙 `.hap` | **不能** | **只能人工构建**，公共 CI 上做不到，见第九节 |
 
 流水线两条，工具链毫无交集所以分开：
 
-- 桌面：[`.github/workflows/clients.yml`](../.github/workflows/clients.yml)（Tauri/Rust，三平台矩阵）
+- 桌面：[`.github/workflows/clients.yml`](../.github/workflows/clients.yml)（Tauri/Rust，**四条腿**：macOS universal / Linux x64 / Windows x64 / Windows ARM64）
 - 移动：[`.github/workflows/clients-mobile.yml`](../.github/workflows/clients-mobile.yml)（JDK + Android SDK/NDK + gomobile，**只有 Android**）
 
 ---
@@ -69,7 +70,8 @@ macOS 还多一步 `lipo`：`--target universal-apple-darwin` 时 Tauri 找的�
 |---|---|---|
 | `macos-latest` | universal `.dmg` + `manifest.json`（整个 `deploy/artifacts/downloads/`） | `baidi-desktop-macos-universal` |
 | `ubuntu-latest` | `.deb` + `.AppImage` + 说明 + `build-provenance.env` | `baidi-desktop-linux-x86_64-UNVERIFIED` |
-| `windows-latest` | `.msi` + NSIS `.exe` + 说明 + `build-provenance.env` | `baidi-desktop-windows-x86_64-UNVERIFIED` |
+| `windows-latest`（x64） | `.msi` + NSIS `.exe` + 说明 + `build-provenance.env` | `baidi-desktop-windows-x86_64-UNVERIFIED` |
+| `windows-latest`（交叉出 ARM64） | 同上 | `baidi-desktop-windows-aarch64-UNVERIFIED` |
 
 `fail-fast: false`：Windows 挂了不该连累 macOS 的包。
 

@@ -818,6 +818,8 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 - ~~**Rust/Tauri 侧甚至没有在 Windows 上编译过**~~ —— 2026-08-12 起这条**不再成立**：
   `.github/workflows/clients.yml` 已在 GitHub Actions 上跑通，windows-latest 上完成 release
   编译并产出 `.msi` 与 NSIS `.exe`（`baidi-desktop-windows-x86_64-UNVERIFIED`）。
+  **ARM64 同样出得来**（同一台 x64 runner 上 `--target aarch64-pc-windows-msvc` 交叉构建，
+  产物 `baidi-desktop-windows-aarch64-UNVERIFIED`），且 arm64 那份的落位断言也走完了。
   同一轮里 CI 的落位断言用 `msiexec /a` 摊开 MSI，观测到
   `wintun.dll` 与 `baidi-tun.exe` 确实在同一个目录 —— 所以「Windows 包能出、DLL 落位对」
   现在是**观测结果**而不再是设计意图。仍**不能**因此推出上面第一条被推翻：

@@ -24,8 +24,9 @@
 #               「发起加载的进程自身 exe 目录」与 System32），落错地方的症状是包照样
 #               打得出、装得上，只在用户点「接入」那一刻失败——下面两步断言就是为它设的。
 #
-# ★2026-08-12：本文件已在 GitHub Actions 上真实跑通，三条腿都产出了安装包
-#   （macOS universal dmg / Linux deb+AppImage / Windows msi+nsis）。**用了五轮**，
+# ★2026-08-12：本文件已在 GitHub Actions 上真实跑通，**四条腿**都产出了安装包
+#   （macOS universal dmg / Linux deb+AppImage / Windows x64 msi+nsis / Windows ARM64 msi+nsis）。
+#   最初三条腿**用了五轮**才全绿，
 #   而且每一轮红的都是真 bug，没有一次是"环境玄学"——记在这里，因为它们都是
 #   「本机怎么跑都对、只在 runner 上错」的形态，下次改这个文件前值得先读一遍：
 #     1. build-sidecars.sh 在 UTF-8 locale 下 `GOARCH<ef>: unbound variable`
@@ -39,6 +40,14 @@
 #     5. `bundle.resources` 的「源 → 目标」重命名**只有 NSIS 遵守，MSI 忽略** —— 见
 #        clients/BUILD.md「许可为什么不靠 resources 重命名」。这条是落位断言抓到的。
 #   前两类现在有 preflight job 拦着（几秒，不烧编译）。
+#
+# ★ARM64 那条腿（x64 runner 上交叉构建）顺带回答了两个此前说不准的问题：
+#   - **tauri v2 文档「Arm64 只有 NSIS 支持」是过时的**：2.11.3 把 msi 与 nsis 都出出来了。
+#   - **`msiexec /a` 摊得开 arm64 MSI**：落位断言整条走完并通过，也就是说
+#     wintun.dll 与 baidi-tun.exe 在 arm64 包里同样是同目录的。
+#   代价也记一笔：加这条腿时我把 --target 传给了所有平台，而 macOS 那条的
+#   matrix.target 是 `universal-apple-darwin`（Tauri 的合成打包目标，不是真三元组），
+#   build-sidecars.sh 如实报「未适配的三元组」并 exit 1。--target 只该给 Windows。
 #
 # ★仍然不能说的：包能出 ≠ 装了能用。Linux 与 Windows 的**实机验证一次都没做过**，
 #   产物照旧标 UNVERIFIED、不进下载中心。macOS 那份本机装起来跑过（进程存活、

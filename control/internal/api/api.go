@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/authsrc"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/lockout"
 	"baidi.dev/control/internal/notify"
@@ -82,6 +83,11 @@ type Server struct {
 	// licenseKeys License 发行公钥（BAIDI_LICENSE_PUBKEY）。与 upgradeKeys 是两个信任域，
 	// 刻意不共用一个变量/环境变量：升级发布方与 License 发行方不必是同一把钥匙的主人。
 	licenseKeys []ed25519.PublicKey
+	// oidcFlow OIDC 登录的服务端会话（state/nonce/verifier）与交接票据单次登记。
+	oidcFlow *oidcFlows
+	// testRedirectAuth 测试注入缝：协议实现另有 30 条真密码学用例，
+	// 这里换桩测的是编排（state 单次性 / 重定向 / 票据交接）。生产恒 nil。
+	testRedirectAuth func(store.AuthSourceRec) (authsrc.RedirectAuthenticator, error)
 	// sb 温备节点台账（PRD 15.5）。同 nat/upg：纯内存后端拿不到，集群视图如实回
 	// 「不可判定」而不是「未配置备机」——后者是另一件事（确实没配 vs 记不下来）。
 	sb store.StandbyStore
@@ -257,6 +263,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	s.standbyStale = standbyStaleFromEnv(os.Getenv("BAIDI_STANDBY_STALE_SECONDS"))
 	s.upgradeKeys = parseUpgradeKeys(os.Getenv("BAIDI_UPGRADE_PUBKEY"))
 	s.licenseKeys = parseLicenseKeys(os.Getenv("BAIDI_LICENSE_PUBKEY"))
+	s.oidcFlow = newOIDCFlows()
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
@@ -278,6 +285,11 @@ func (s *Server) IsOpen(_, path string) bool {
 	// WebAuthn 登录断言两回合：此时尚无会话令牌，身份由「口令已验」的一次性 mfaTicket 承载
 	// （handler 内 verifyMfaTicket 强校验，非免鉴权——只是不走 Bearer 中间件）。
 	case "/api/v1/webauthn/login/begin", "/api/v1/webauthn/login/finish":
+		return true
+	}
+	// OIDC 登录四端点免认证：authorize/callback 发生在拿到任何令牌之前，
+	// providers 是登录页渲染按钮用的公开清单，session 用交接票据自证（handler 内强校验）。
+	if strings.HasPrefix(path, "/api/v1/auth/oidc/") {
 		return true
 	}
 	// /downloads/{file} 路径可变，前缀豁免；白名单校验在 handler 内（manifest available 条目）。
@@ -380,6 +392,10 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /api/v1/audit/export", s.handleAuditExport)
 	mux.HandleFunc("GET /api/v1/audit/report", s.handleOpsReport)
+	mux.HandleFunc("GET /api/v1/auth/oidc/providers", s.handleOIDCProviders)
+	mux.HandleFunc("GET /api/v1/auth/oidc/{id}/authorize", s.handleOIDCAuthorize)
+	mux.HandleFunc("GET /api/v1/auth/oidc/{id}/callback", s.handleOIDCCallback)
+	mux.HandleFunc("POST /api/v1/auth/oidc/session", s.handleOIDCSession)
 	mux.HandleFunc("GET /api/v1/license", s.handleLicense)
 	mux.HandleFunc("POST /api/v1/license", s.handleImportLicense)
 	// 审计日志外送（PRD ch16 + ch21.6）：RFC 5424 syslog over TCP/TLS + 通用 HTTP JSON。

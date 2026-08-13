@@ -24,7 +24,7 @@
 
 ### 第一梯队：身份与持续验证（零信任主线核心）
 
-**1. OIDC 登录入口接线（FR-AUTH-02/05）— M**
+**1. OIDC 登录入口接线（FR-AUTH-02/05）— M ✅ 已落地**
 - 做什么：新增 `/api/v1/auth/oidc/{id}/authorize` + `/callback` 两端点（state/nonce 服务端会话、复用已有 `AuthURL/Exchange/PKCE`），回调成功后并入既有 `BindExternalUser → secondFactor → 签令牌` 同一链路；门户/管理台登录页按 `auth_sources` 真实行渲染 OIDC 入口按钮。
 - 改哪里：`control/internal/api`（新 handler，消费 `authsrc.RedirectAuthenticator`）、`console/src/views/PortalLogin.vue` / `Login.vue`。
 - 为什么值得：协议客户端 30 用例全绿、探测通过、配置页齐全，却没有任何用户能经它登录——本项目最忌的 config-only 静默失效的教科书案例；且 D 组的登出/回验洞要先「有人能登」才有意义。
@@ -54,19 +54,19 @@
 - 改哪里：`gateway/internal/spa`、`proxy`、`webproxy`、`cplane`；`control/internal/api/api.go`（gwEvent、心跳体）、`store/overview_sqlite.go`。
 - 为什么值得：SPA 隐身是第一卖点，「谁在敲门」是隐身在挡攻击的唯一可见证据；零信任的「拒绝」比「放行」更需要留痕——现在网关一重启拒绝痕迹即灭失，180 天留存对数据面事件是空话。两个 P0 一条管道解决。
 
-**6. 审计在线检索（B 组）— S**
+**6. 审计在线检索（B 组）— S ✅ 已落地**
 - 做什么：`store.Audit` 加过滤参数（actor/category/src_ip/from/to/关键词 + limit/offset 分页，列全在，纯缺 WHERE），`handleAudit` 读参，`Audit.vue` 检索控件接真——顺带把那排根本没接进过滤逻辑的时间快选 pill 接上（现在是装饰件）。
 - 改哪里：`control/internal/store/audit_sqlite.go`、`api/api.go:1713`、`console/src/views/Audit.vue`。
 - 为什么值得：按账号/IP 拉证据链是审计中心存在的第一理由，现状「查某账号历史只能全量导出自行 grep」把 180 天留存的取用价值折掉大半。导出口三参现成可搬，全清单性价比最高。
 
-**7. License 到期/容量告警（FR-MON-22 半类）— S**
+**7. License 到期/容量告警（FR-MON-22 半类）— S ✅ 已落地**
 - 做什么：`alertKindSpecs` 加两条 kind（到期前 15 天 / 席位将满），`alertSnapshot` 补 license 快照字段（ExpiresAt/Mode/席位占用全部现算可得），`Evaluate` 加两个 case；License 页顺带加剩余天数倒计时。
 - 改哪里：`control/internal/store/alerts.go`、`internal/alerting`、`api/alerts.go`、`System.vue`。
 - 为什么值得：license 已 fail-closed（过期即拒建号拒签网关证书），无预警等于定时故障——把「会突然咬人」补成「先叫后咬」，成本一个 kind。口径按命名席位如实写，别照抄 PRD 的「在线用户数」。
 
 ### 第三梯队：静默失效对症与运维闭环
 
-**8. last_login 写入方 + 闲置账号治理（FR-MON-19/20）— S+M**
+**8. last_login 写入方 + 闲置账号治理（FR-MON-19/20）— S+M（① ✅ 已落地，② 待做）**
 - 做什么：①先补 `users.last_login` 写入方（S）：本地与外部登录成功路径各一处 UPDATE——现在全仓零写入方，用户页「最后登录」整列停在建号时刻，是清单里最典型的展示失真；②再做闲置治理（M）：阈值配置 + 识别列表端点 + 批量锁定，接进用户页。
 - 改哪里：`control/internal/api/api.go`（两条登录成功路径）、`store`、`Users.vue`。
 - 为什么值得：僵尸账号是最便宜的攻击面；license 席位提示已在说「删除闲置账号释放席位」，系统却给不出哪些账号闲置——自相矛盾当场解决。

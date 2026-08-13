@@ -97,6 +97,17 @@
           >
             登录
           </a-button>
+
+          <!-- 企业身份（OIDC）入口：按 auth_sources 真实行渲染，没有已启用的源就整段不出现。
+               此前这里是 config-only 的教科书案例：协议客户端与配置页都真，唯独没有入口。 -->
+          <template v-if="oidcProviders.length">
+            <div class="bd-oidc__sep"><span>或使用企业身份登录</span></div>
+            <a-button v-for="pv in oidcProviders" :key="pv.id" long class="bd-oidc__btn"
+              :disabled="loading" @click="startOidc(pv.id)">
+              <template #icon><icon-idcard /></template>
+              {{ pv.name }}
+            </a-button>
+          </template>
         </template>
 
         <!-- 步骤二：passkey 二次认证（WebAuthn 断言） -->
@@ -244,7 +255,7 @@
 </template>
 
 <script setup lang="ts">
-import { reactive, ref } from 'vue';
+import { onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, setToken, type PortalLoginResp } from '@/lib/api';
@@ -262,6 +273,64 @@ const pwMsg = ref('');
 
 const form = reactive({ username: '', password: '', mfaCode: '' });
 const pwForm = reactive({ pw: '', pw2: '' });
+
+/* ── OIDC 登录（wave7 行动 1）── */
+interface OidcProvider { id: string; name: string }
+const oidcProviders = ref<OidcProvider[]>([]);
+
+function startOidc(id: string) {
+  // 整页跳转到控制面授权端点（302 去 IdP）。相对路径：与部署形态无关。
+  window.location.href = `/api/v1/auth/oidc/${encodeURIComponent(id)}/authorize`;
+}
+
+/** 回调落地处理。约定见 control/internal/api/oidc_login.go：
+ *  oidcGrant  = 60s 单次交接票据 → POST 换会话令牌（8h 令牌绝不出现在 URL 里）
+ *  oidcTicket = 认证已过但需 passkey 断言 → 接入既有 webauthn 流程
+ *  oidcError  = 人话失败原因 */
+async function handleOidcReturn() {
+  const qs = new URLSearchParams(window.location.search);
+  const grant = qs.get('oidcGrant');
+  const mfaT = qs.get('oidcTicket');
+  const oerr = qs.get('oidcError');
+  const src = qs.get('oidcSrc') ?? '';
+  if (!grant && !mfaT && !oerr) return;
+  // 先把票据从地址栏擦掉：留着会进书签/分享链接，且刷新会触发一次注定失败的重放。
+  window.history.replaceState(null, '', window.location.pathname);
+  if (oerr) {
+    errMsg.value = (src ? `【${src}】` : '') + oerr;
+    return;
+  }
+  if (mfaT) {
+    ticket.value = mfaT;
+    mfaReason.value = src ? `已通过 ${src} 认证，请完成 passkey 二次验证` : '请完成 passkey 二次验证';
+    form.username = '（企业身份）';
+    step.value = 'webauthn';
+    void submitWebauthn();
+    return;
+  }
+  if (grant) {
+    loading.value = true;
+    try {
+      const resp = await api<PortalLoginResp>('/auth/oidc/session', {
+        method: 'POST', body: JSON.stringify({ ticket: grant })
+      });
+      if (resp.ok && resp.token) onSuccess(resp);
+      else errMsg.value = resp.reason ?? '登录交接失败，请重新发起登录';
+    } catch (e) {
+      errMsg.value = `登录交接失败：${e instanceof Error ? e.message : e}`;
+    } finally {
+      loading.value = false;
+    }
+  }
+}
+
+onMounted(() => {
+  void handleOidcReturn();
+  // 公开清单（无需登录）；拉不到就不渲染入口——没有源时本地口令登录不受影响。
+  api<{ providers: OidcProvider[] }>('/auth/oidc/providers')
+    .then((r) => { oidcProviders.value = r.providers ?? []; })
+    .catch(() => { oidcProviders.value = []; });
+});
 
 function onSuccess(resp: PortalLoginResp) {
   // 首登强制改密：服务端只发了受限令牌（业务端点一律 403），转入改密表单
@@ -612,4 +681,8 @@ function backToLogin() {
 @media (max-width: 880px) {
   .bd-brand { display: none; }
 }
+
+.bd-oidc__sep { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; color: var(--bd-t3); font-size: 12px; }
+.bd-oidc__sep::before, .bd-oidc__sep::after { content: ''; flex: 1; height: 1px; background: var(--bd-line, rgba(0,0,0,.08)); }
+.bd-oidc__btn { margin-bottom: 8px; }
 </style>

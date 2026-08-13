@@ -58,7 +58,8 @@ export const NAV: NavGroup[] = [
       { title: '地址转换', path: '/security/nat', icon: 'IconSwap', done: true },
       { title: '资源策略', path: '/security/resources', icon: 'IconRelation', done: true },
       { title: '安全中心', path: '/security/center', icon: 'IconSafe', done: true },
-      { title: '审计中心', path: '/security/audit', icon: 'IconFile', done: true }
+      { title: '审计中心', path: '/security/audit', icon: 'IconFile', done: true },
+      { title: '运营报表', path: '/security/report', icon: 'IconBarChart', done: true }
     ]
   },
   {

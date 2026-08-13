@@ -164,6 +164,17 @@ export interface DiskStat { usedPct: number; totalGB: number; retainDays: number
 export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
 
+/* ── 运营报表（GET /api/v1/audit/report → store.OpsReport）──
+ * 全部字段是对 audit_log / alerts 的 SQL 聚合；权限归 audit（聚合并不脱敏）。 */
+export interface OpsDay { date: string; authOk: number; authFail: number; accessAllow: number; accessDeny: number; adminOps: number; security: number; total: number }
+export interface OpsReport {
+  days: number; since: string; truncated: boolean; retainDays: number;
+  daily: OpsDay[];
+  totals: { entries: number; activeAccounts: number; authOk: number; authFail: number; accessAllow: number; accessDeny: number; adminOps: number; security: number };
+  topLogin: KV[]; topDenied: KV[];
+  alerts: { total: number; pending: number; bySeverity: KV[] };
+}
+
 /* ── 网关与隐身（GET /api/v1/gateway → api.GatewayPageBundle）──
  *
  * ★数据源是 mTLS 注册心跳的在线登记（与 GET /api/v1/gateways、诊断页同一份），

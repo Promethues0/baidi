@@ -21,6 +21,7 @@ const BUILT: Record<string, RouteRecordRaw['component']> = {
   '/business/jit': () => import('@/views/Jit.vue'),
   '/business/auth': () => import('@/views/Auth.vue'),
   '/security/audit': () => import('@/views/Audit.vue'),
+  '/security/report': () => import('@/views/Reports.vue'),
   '/security/gateway': () => import('@/views/Gateway.vue'),
   '/security/resources': () => import('@/views/Resources.vue'),
   '/security/center': () => import('@/views/Security.vue'),

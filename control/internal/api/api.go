@@ -355,6 +355,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/audit", s.handleAudit)
 	mux.HandleFunc("GET /api/v1/audit/verify", s.handleAuditVerify)
 	mux.HandleFunc("GET /api/v1/audit/export", s.handleAuditExport)
+	mux.HandleFunc("GET /api/v1/audit/report", s.handleOpsReport)
 	// 审计日志外送（PRD ch16 + ch21.6）：RFC 5424 syslog over TCP/TLS + 通用 HTTP JSON。
 	// 归 PermSystem 一权（理由见 auditforward.go 顶部）。真实消费方 = 后台投递循环
 	// StartAuditForwardLoop，队列在 audit_forward_queue，发送成功才出队。

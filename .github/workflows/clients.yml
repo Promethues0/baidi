@@ -278,7 +278,10 @@ jobs:
       #   这个路径**只在这里算一次**，下游全部引用它——否则要在十几处各写各的，
       #   漏改一处的后果是「上传一个只有 README 的 Windows 包，而且全绿」。
       #   Linux 不设 matrix.target，求值成 …/target/release，与今天逐字相同。
-      BD_BUNDLE_ROOT: clients/desktop/src-tauri/target/${{ (runner.os == 'Windows' && matrix.target) && format('{0}/', matrix.target) || '' }}release
+      #   判据用 matrix.os 而不是 runner.os：**runner 上下文在 job 级 env 里不可用**
+      #   （只在 step 级可用）。写错的后果不是这一行失效，而是**整个工作流文件不合法**——
+      #   GitHub 直接零 job、连它自己的 preflight 都起不来，页面上只显示文件路径。
+      BD_BUNDLE_ROOT: clients/desktop/src-tauri/target/${{ (startsWith(matrix.os, 'windows') && matrix.target) && format('{0}/', matrix.target) || '' }}release
 
     defaults:
       run:

@@ -29,13 +29,13 @@ on:
       - 'control/**'
       - 'gateway/**'
       - 'console/**'
-      - '.github/workflows/server.yml'
+      - '.github/workflows/**'
   pull_request:
     paths:
       - 'control/**'
       - 'gateway/**'
       - 'console/**'
-      - '.github/workflows/server.yml'
+      - '.github/workflows/**'
 
 permissions:
   contents: read
@@ -45,6 +45,35 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # ── 工作流文件自身的校验 ─────────────────────────────────────────────────
+  #
+  # ★为什么这道检查必须放在**另一条**流水线里：工作流文件一旦不合法，
+  #   GitHub 会直接零 job —— 连它自己的 preflight 都起不来。也就是说
+  #   clients.yml 里所有守卫（全角变量、BOM、图标、码页…）会同时失效，
+  #   而页面上只显示一个文件路径、一句 "This workflow graph cannot be shown"，
+  #   注解里什么都没有。守卫不能由被守卫的文件自己承载。
+  #
+  #   实际发生过：job 级 env 里写了 `runner.os`（runner 上下文只在 step 级可用），
+  #   yaml.safe_load 照过、肉眼看不出，GitHub 侧整个文件作废。
+  #   actionlint 一句话点名到列号。两条流水线互相校验对方的文件，
+  #   一条写坏了另一条会报——除非同时写坏两条，那是可以接受的剩余风险。
+  actionlint:
+    name: 工作流文件校验（守卫不能由被守卫的文件自己承载）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: gateway/go.mod
+      - name: actionlint
+        run: |
+          go install github.com/rhysd/actionlint/cmd/actionlint@v1.7.12
+          # shellcheck/pyflakes 集成关掉：那两个是**另一类**检查（脚本内容），
+          # 这一步只管"这个文件 GitHub 认不认"。混在一起的话，
+          # 一条 shell 风格建议会挡住真正致命的上下文错误。
+          "$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
+          echo "✓ 全部工作流文件通过 actionlint"
+
   go:
     name: Go · ${{ matrix.mod }}（vet + test）
     runs-on: ubuntu-latest

@@ -102,9 +102,17 @@ jobs:
       # -race：本项目里网关的连接跟踪、JIT 到期回收、告警冷却、通知派发队列
       # 全是并发结构，而竞态在单跑时几乎不复现。CGO_ENABLED=1 是 -race 的前提
       # （生产构建一律 CGO_ENABLED=0，那是**交叉编译**的要求，与这里不冲突）。
-      - name: go test -race
+      # ★-count=1（禁用测试结果缓存）不是保守癖，是实测出来的洞：
+      #   Go 的测试缓存**不追踪测试用 os.ReadFile 读的模块外文件**。本仓库有一批
+      #   跨文件钉扎用例（钉 .github/workflows/clients.yml 的产物清单、真跑
+      #   clients/build-artifacts.sh、deploy/promote-standby.sh 干跑），它们的真实输入
+      #   在模块外。实测：改 clients.yml 后重跑，结果仍是 `(cached)`——于是 CI 上
+      #   setup-go 恢复的 GOCACHE 会让这些用例**永远端出第一次的结论**。
+      #   真出过事：clients.yml 的 Windows 产物名模板化之后，钉它的用例在本机必失败，
+      #   而其后四次 CI 全绿——绿的是一份陈旧缓存的判决，不是这批提交。
+      - name: go test -race（-count=1：测试缓存不追踪模块外文件，见注释）
         working-directory: ${{ matrix.mod }}
-        run: CGO_ENABLED=1 go test -race -timeout 15m ./...
+        run: CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./...
 
       # 生产二进制走的是 CGO_ENABLED=0 交叉编译，与上面 -race 那次是两套编译条件。
       # 只测不编的话，"测试全过但 linux/amd64 编不出来"会一路漏到部署那天。

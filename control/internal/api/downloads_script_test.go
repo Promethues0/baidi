@@ -239,10 +239,12 @@ func TestClientsWorkflowShipsProvenance(t *testing.T) {
 	if !strings.Contains(写溯源步骤, "runner.os != 'macOS'") {
 		t.Errorf("溯源步骤要覆盖 macOS 之外的两个 runner（if: runner.os != 'macOS'）：%s", 写溯源步骤)
 	}
-	// 两份 UNVERIFIED artifact 的上传步骤各自要把溯源文件列进 path
+	// 两份 UNVERIFIED artifact 的上传步骤各自要把溯源文件列进 path。
+	// Windows 的产物名自 ARM64 交叉线并入后按 matrix.arch 模板化（x86_64 与 aarch64
+	// 两条腿共用同一个上传步骤），所以这里钉的是模板原文而不是展开值。
 	for _, name := range []string{
 		"baidi-desktop-linux-x86_64-UNVERIFIED",
-		"baidi-desktop-windows-x86_64-UNVERIFIED",
+		"baidi-desktop-windows-${{ matrix.arch }}-UNVERIFIED",
 	} {
 		i := strings.Index(y, name)
 		if i < 0 {

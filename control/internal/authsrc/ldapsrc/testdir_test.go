@@ -133,7 +133,16 @@ func startDir(t *testing.T, o dirOpts) *testDir {
 	port := freePort(t)
 	d := &testDir{t: t, opts: o, port: port, addr: net.JoinHostPort("127.0.0.1", fmt.Sprint(port))}
 
-	srv, err := gldap.NewServer()
+	// closed 收 gldap 的连接关闭回调。★它是这个夹具躲开一条数据竞态的关键，见下方
+	// waitListening 之后那段注释。缓冲 + 非阻塞投递：onClose 对每条连接都触发，
+	// 在这里阻塞会把 gldap 的连接 goroutine 卡死。
+	closed := make(chan int, 8)
+	srv, err := gldap.NewServer(gldap.WithOnClose(func(id int) {
+		select {
+		case closed <- id:
+		default:
+		}
+	}))
 	if err != nil {
 		t.Fatalf("gldap.NewServer: %v", err)
 	}
@@ -150,15 +159,30 @@ func startDir(t *testing.T, o dirOpts) *testDir {
 	must(t, srv.Router(mux))
 	d.srv = srv
 
+	runDone := make(chan struct{})
 	go func() {
+		defer close(runDone)
 		var runOpts []gldap.Option
 		if o.ldaps {
 			runOpts = append(runOpts, gldap.WithTLSConfig(o.tlsCfg))
 		}
 		_ = srv.Run(d.addr, runOpts...)
 	}()
-	t.Cleanup(func() { _ = srv.Stop() })
+	// Stop 之后等 Run 真的退出：否则上一条用例的连接 goroutine（及其 hclog 输出）
+	// 会溢到下一条用例里，日志串台且难自证。
+	t.Cleanup(func() { _ = srv.Stop(); <-runDone })
 	waitListening(t, d.addr)
+	// ★等探活连接被服务端**收完**再放行用例体。这不是洁癖，是躲一条 -race 必报的竞态：
+	// gldap 的 Stop() 走 connWg.Wait()，而 Run 的 accept 循环走 connWg.Add(1)，两者无互斥。
+	// waitListening 拨通即关，那条连接会悬在内核 backlog 里；对于「起了服务端却从不真连它」
+	// 的用例（空口令、超长用户名——生产代码在拨号前就拦下了），用例体瞬间结束，
+	// Cleanup 里的 Wait 正好撞上 accept 循环的 Add，sync.WaitGroup 的 Add/Wait 并发即 race。
+	// 本机 GOMAXPROCS 高时几乎必然错开，CI（2 vCPU + -race）才复现——是夹具问题，与被测代码无关。
+	select {
+	case <-closed:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("测试 LDAP 服务端未收下探活连接: %s", d.addr)
+	}
 	return d
 }
 

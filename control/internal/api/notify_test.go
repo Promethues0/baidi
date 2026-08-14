@@ -328,17 +328,32 @@ func TestNotify_发送失败不阻塞主流程且落审计(t *testing.T) {
 	f := newNotifyFixture(t)
 	tok := makeAdmin(t, f.h, "sys.admin", "system")
 
-	block := make(chan struct{})
+	// ★判据是**相对**的，不是绝对毫秒数——这两个常量必须成对存在，拆开就退化成装饰。
+	//
+	// 被测区间的大头与通知无关：登录失败仍要跑一次 bcrypt 口令校验（cost=10），
+	// -race 下单次就要 0.7~1.5s（实测：有装死通道 707ms / 完全没有通道 701ms，
+	// 通知一路只贡献 6ms）。原先 900ms 的绝对阈值因此在 CI（2 vCPU + -race）上必然假红。
+	//
+	// 而单纯放宽阈值会**漏检真回归**：装死端的阻塞被通道自身的超时封顶，
+	// timeoutSec=1 时同步发送也只多花 1 秒——任何容得下一次 -race bcrypt 的阈值都会放过它。
+	// 故把超时拉到 sinkBlock 再取其 1/6 作预算：异步时耗时≈一次 bcrypt（远低于预算），
+	// 同步回归时会被钉死 sinkBlock（远高于预算），两侧各留一个数量级。
+	const sinkBlock = 30 * time.Second
+	const budget = sinkBlock / 6
+
+	release := make(chan struct{})
+	releaseOnce := sync.OnceFunc(func() { close(release) })
 	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-block
+		<-release                                     // 挂住：登录返回之前这个请求绝不完成
+		w.WriteHeader(http.StatusInternalServerError) // 放行后如实失败，供下面的审计断言
 	}))
-	// 清理是 LIFO：先放行 handler，再关服务端。
+	// 清理是 LIFO：先放行 handler，再关服务端（Close 会等在途请求）。
 	t.Cleanup(dead.Close)
-	t.Cleanup(func() { close(block) })
+	t.Cleanup(releaseOnce)
 
 	code, out := doJSON(t, f.h, "POST", "/api/v1/notify/channels", tok, map[string]any{
 		"name": "装死的通道", "kind": "webhook", "enabled": true,
-		"config": map[string]any{"url": dead.URL, "timeoutSec": 1},
+		"config": map[string]any{"url": dead.URL, "timeoutSec": int(sinkBlock / time.Second)},
 	})
 	if code != http.StatusOK {
 		t.Fatalf("建通道 http %d: %v", code, out)
@@ -352,8 +367,14 @@ func TestNotify_发送失败不阻塞主流程且落审计(t *testing.T) {
 	doJSON(t, f.h, "POST", "/api/v1/portal/login", "", wrong)
 	start := time.Now()
 	doJSON(t, f.h, "POST", "/api/v1/portal/login", "", wrong) // 这一次触发锁定 + 通知
-	if el := time.Since(start); el > 900*time.Millisecond {
-		t.Fatalf("★登录接口被通知发送拖住了 %v——一台连不上的通道会变成拒绝服务面", el)
+	el := time.Since(start)
+	// 登录已经返回，而装死端还卡在 handler 里没被放行——「没被拖住」就是这个意思。
+	// 若改成同步发送，这里根本走不到：登录等发送、发送等 release、release 等登录，
+	// 唯一的解开方式是通道自己的 sinkBlock 超时，于是 el≈30s 被下面稳稳抓住。
+	releaseOnce()
+	if el > budget {
+		t.Fatalf("★登录接口被通知发送拖住了 %v（装死通道挂住 %v，预算 %v）"+
+			"——一台连不上的通道会变成拒绝服务面", el, sinkBlock, budget)
 	}
 	// 锁定本身照常生效（通知发不出去不改变任何安全结论）
 	if code, _ := doJSON(t, f.h, "POST", "/api/v1/portal/login", "", wrong); code != http.StatusForbidden {

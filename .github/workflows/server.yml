@@ -112,22 +112,106 @@ jobs:
       #   而其后四次 CI 全绿——绿的是一份陈旧缓存的判决，不是这批提交。
       - name: go test -race（-count=1：测试缓存不追踪模块外文件，见注释）
         working-directory: ${{ matrix.mod }}
-        # 失败时把 FAIL 的用例名与其输出发到 ::error:: 注解——日志与 job summary 都
-        # 需要登录才可读，注解是匿名可见的唯一通道（与 e2e 三步同一条纪律；
-        # 此前这里红一次只能看到 "exit code 1"，连哪个测试挂了都不知道）。
+        env:
+          MOD: ${{ matrix.mod }}
+        # 失败时把 FAIL 用例名、DATA RACE 块与失败现场发到 ::error:: 注解——日志与
+        # job summary 都需要登录才可读，注解是匿名可见的唯一通道（与 e2e 三步同一条纪律）。
+        #
+        # ★竞态块必须单独抓：它打印在 `--- FAIL` **之前**（==== / WARNING: DATA RACE 块），
+        #   而 `grep -A N '^--- FAIL'` 是往后取窗口，方向反了——栈一行都进不来。
+        #   真出过事：一次 ldapsrc 竞态红，注解里只剩 "race detected during execution of
+        #   test" 这句结论，本机怎么跑都复现不了，全靠猜。
+        # ★提取交给 python3 而不是 grep：GitHub 默认 shell 是 `bash -e {0}`，叠加
+        #   `set -o pipefail` 后 grep 无匹配（退出 1）会让整步当场中止，一条注解都发不出；
+        #   且 head -c 会把中文测试输出切成半个字符（本仓输出全中文）。
         run: |
           set -o pipefail
-          if ! CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./... 2>&1 | tee /tmp/gotest.log; then
-            # FAIL 的用例名逐条（数量少）；正文合并成一条多行注解（%0A 转义换行）——
-            # 注解每步有条数上限，逐行刷会被截断得只剩开头。
-            grep -E "^(--- FAIL|FAIL\b)" /tmp/gotest.log | head -8 | while IFS= read -r line; do
-              echo "::error title=go test ${{ matrix.mod }}::${line}"
-            done
-            body=$(grep -A 20 -E "^--- FAIL" /tmp/gotest.log | head -100 | sed ':a;N;$!ba;s/\n/%0A/g')
-            [ -z "${body}" ] && body=$(tail -40 /tmp/gotest.log | sed ':a;N;$!ba;s/\n/%0A/g')
-            echo "::error title=gotest-detail ${{ matrix.mod }}::${body}"
-            exit 1
+          if CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./... 2>&1 | tee /tmp/gotest.log; then
+            exit 0
           fi
+          python3 - <<'PY'
+          import os, pathlib, re
+
+          MOD = os.environ.get("MOD", "?")
+          LOG = pathlib.Path("/tmp/gotest.log")
+          MAXC = 7000  # 单条注解正文预算（上限约 64KB，但过长会在页面上折叠）
+          lines = LOG.read_text(errors="replace").splitlines() if LOG.exists() else []
+
+          def emit(title, body):
+              # 顺序不可颠倒：先 % 后换行。反过来会把刚生成的 %0A 再转义成 %250A。
+              body = body.replace("%", "%25").replace("\r", "").replace("\n", "%0A")
+              title = title.replace("%", "%25").replace(":", "%3A").replace(",", "%2C")
+              print("::error title={}::{}".format(title, body))
+
+          def clip(s, n=MAXC):
+              if len(s) <= n:
+                  return s
+              h = n * 2 // 3
+              return s[:h] + "\n…（中间省略 {} 字符）…\n".format(len(s) - n) + s[-(n - h):]
+
+          # DATA RACE 块：WARNING 前那行 ==== 起，到块尾那行 ==== 止
+          BAR = re.compile(r"^={10,}\s*$")
+          races, i = [], 0
+          while i < len(lines):
+              if lines[i].strip() == "WARNING: DATA RACE":
+                  s = i - 1 if i > 0 and BAR.match(lines[i - 1]) else i
+                  j = i + 1
+                  while j < len(lines) and not BAR.match(lines[j]):
+                      j += 1
+                  races.append("\n".join(lines[s:min(j + 1, len(lines))]))
+                  i = j + 1
+              else:
+                  i += 1
+
+          # 同一条竞态常重复报：归一化地址与协程号后去重（file:line 保留，那是判别依据）
+          def sig(b):
+              return re.sub(r"goroutine \d+", "goroutine N", re.sub(r"0x[0-9a-fA-F]+", "0xX", b))
+
+          seen, uniq = set(), []
+          for b in races:
+              if sig(b) not in seen:
+                  seen.add(sig(b))
+                  uniq.append(b)
+
+          subs = [l.strip() for l in lines if re.match(r"^\s*--- FAIL", l)]  # ^\s* 才收得到子测试
+          pkgs = [l.strip() for l in lines if re.match(r"^FAIL\s+\S", l)]    # 丢掉无信息的裸 FAIL 行
+          fails = subs + pkgs
+          builds = [l for l in lines if re.match(r"^# \S", l) or re.match(r"^\S+\.go:\d+:\d+: ", l)]
+
+          head = ["模块 {}：FAIL {} 条（用例 {} / 包 {}），DATA RACE {} 块（去重 {} 块）".format(
+              MOD, len(fails), len(subs), len(pkgs), len(races), len(uniq))]
+          if builds:
+              head.append("编译错误 {} 行，前 5 行：".format(len(builds)))
+              head += builds[:5]
+          if not fails and not races:
+              head.append("未匹配到 FAIL/RACE —— 可能是超时 panic、模块解析失败或 OOM，见日志尾部")
+          emit("go test {} 概览".format(MOD), clip("\n".join(head), 2000))
+
+          # ★竞态块排在用例名之前：每步注解有条数上限，超出时丢的是靠后那些，
+          #   而栈是这里唯一别处拿不到的东西。
+          for n, b in enumerate(uniq[:2], 1):
+              emit("DATA RACE {}/{} {}".format(n, len(uniq), MOD), clip(b))
+
+          for l in fails[:4]:
+              emit("go test {}".format(MOD), l)
+
+          # 失败现场；重叠窗口合并，避免父测试与子测试各刷一遍同样的 20 行
+          spans = []
+          for n, l in enumerate(lines):
+              if re.match(r"^\s*--- FAIL", l):
+                  a, b = n, min(n + 20, len(lines))
+                  if spans and a <= spans[-1][1]:
+                      spans[-1] = (spans[-1][0], max(spans[-1][1], b))
+                  else:
+                      spans.append((a, b))
+          ctx = []
+          for a, b in spans:
+              ctx += lines[a:b] + ["--"]
+          if not ctx:
+              ctx = ["── 日志尾部 ──"] + lines[-60:]
+          emit("gotest-detail {}".format(MOD), clip("\n".join(ctx)))
+          PY
+          exit 1
 
       # 生产二进制走的是 CGO_ENABLED=0 交叉编译，与上面 -race 那次是两套编译条件。
       # 只测不编的话，"测试全过但 linux/amd64 编不出来"会一路漏到部署那天。

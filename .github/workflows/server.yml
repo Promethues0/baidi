@@ -112,7 +112,22 @@ jobs:
       #   而其后四次 CI 全绿——绿的是一份陈旧缓存的判决，不是这批提交。
       - name: go test -race（-count=1：测试缓存不追踪模块外文件，见注释）
         working-directory: ${{ matrix.mod }}
-        run: CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./...
+        # 失败时把 FAIL 的用例名与其输出发到 ::error:: 注解——日志与 job summary 都
+        # 需要登录才可读，注解是匿名可见的唯一通道（与 e2e 三步同一条纪律；
+        # 此前这里红一次只能看到 "exit code 1"，连哪个测试挂了都不知道）。
+        run: |
+          set -o pipefail
+          if ! CGO_ENABLED=1 go test -race -count=1 -timeout 15m ./... 2>&1 | tee /tmp/gotest.log; then
+            # FAIL 的用例名逐条（数量少）；正文合并成一条多行注解（%0A 转义换行）——
+            # 注解每步有条数上限，逐行刷会被截断得只剩开头。
+            grep -E "^(--- FAIL|FAIL\b)" /tmp/gotest.log | head -8 | while IFS= read -r line; do
+              echo "::error title=go test ${{ matrix.mod }}::${line}"
+            done
+            body=$(grep -A 20 -E "^--- FAIL" /tmp/gotest.log | head -100 | sed ':a;N;$!ba;s/\n/%0A/g')
+            [ -z "${body}" ] && body=$(tail -40 /tmp/gotest.log | sed ':a;N;$!ba;s/\n/%0A/g')
+            echo "::error title=gotest-detail ${{ matrix.mod }}::${body}"
+            exit 1
+          fi
 
       # 生产二进制走的是 CGO_ENABLED=0 交叉编译，与上面 -race 那次是两套编译条件。
       # 只测不编的话，"测试全过但 linux/amd64 编不出来"会一路漏到部署那天。

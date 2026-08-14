@@ -29,3 +29,6 @@ gateway/baidi-knock
 gateway/baidi-knock-agent
 gateway/baidi-gmca
 gateway/baidi-tlcp-probe
+
+# secret 盒主密钥（dev 运行期自动生成的密钥材料，任何情况下不入库——certs/ 同款纪律）
+ipsec-psk.key

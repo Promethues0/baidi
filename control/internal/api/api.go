@@ -284,9 +284,10 @@ func (s *Server) IsOpen(_, path string) bool {
 	switch path {
 	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads":
 		return true
-	// WebAuthn 登录断言两回合：此时尚无会话令牌，身份由「口令已验」的一次性 mfaTicket 承载
-	// （handler 内 verifyMfaTicket 强校验，非免鉴权——只是不走 Bearer 中间件）。
-	case "/api/v1/webauthn/login/begin", "/api/v1/webauthn/login/finish":
+	// WebAuthn 登录断言两回合 / TOTP 登录第二回合：此时尚无会话令牌，身份由
+	// 「口令已验」的一次性 mfaTicket 承载（handler 内 verifyMfaTicket 强校验，
+	// 非免鉴权——只是不走 Bearer 中间件）。
+	case "/api/v1/webauthn/login/begin", "/api/v1/webauthn/login/finish", "/api/v1/auth/totp":
 		return true
 	}
 	// OIDC 登录四端点免认证：authorize/callback 发生在拿到任何令牌之前，
@@ -462,6 +463,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/webauthn/login/finish", s.handleWebauthnLoginFinish)
 	mux.HandleFunc("GET /api/v1/webauthn/credentials", s.handleWebauthnCredentials)
 	mux.HandleFunc("DELETE /api/v1/webauthn/credentials/{id}", s.handleWebauthnDeleteCredential)
+	// TOTP 二次认证：注册/确认/解绑（需登录）+ 登录第二回合（凭口令已验票据）
+	mux.HandleFunc("GET /api/v1/totp", s.handleTotpStatus)
+	mux.HandleFunc("POST /api/v1/totp/enroll", s.handleTotpEnroll)
+	mux.HandleFunc("POST /api/v1/totp/confirm", s.handleTotpConfirm)
+	mux.HandleFunc("POST /api/v1/totp/disable", s.handleTotpDisable)
+	mux.HandleFunc("POST /api/v1/auth/totp", s.handleTotpLogin)
 	// 运维诊断：控制面/存储/数据面/隐身/集群/身份/态势/密钥多维真实自检（admin）
 	mux.HandleFunc("GET /api/v1/diag", s.handleDiag)
 

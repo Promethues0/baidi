@@ -14,11 +14,13 @@
       <div class="bd-pwrap">
         <div class="bd-phead">
           <div class="bd-phead__l">
-            <h1 class="bd-phead__hi">passkey 管理</h1>
+            <h1 class="bd-phead__hi">二次认证</h1>
             <p class="bd-phead__sub">
-              已注册 <b>{{ creds.length }}</b> 个认证器
+              passkey <b>{{ creds.length }}</b> 个
               <span class="bd-dot">·</span>
-              <span class="bd-sub2">抗钓鱼二次认证，私钥永不离开设备</span>
+              TOTP <b>{{ totp.confirmed ? '已启用' : '未启用' }}</b>
+              <span class="bd-dot">·</span>
+              <span class="bd-sub2">任一注册后，登录即强制二次认证</span>
             </p>
           </div>
           <a-tag :color="enabled ? 'green' : 'orange'" bordered>
@@ -34,7 +36,8 @@
             <p>
               passkey 需要服务端配置 <code>BAIDI_WEBAUTHN_RPID</code> /
               <code>BAIDI_WEBAUTHN_ORIGIN</code>，且 RP ID 必须是<b>可注册域名或 localhost</b>——
-              浏览器规范不允许用裸 IP 作 RP ID。未启用时二次认证回落演示验证码路径。
+              浏览器规范不允许用裸 IP 作 RP ID。本站可改用下方的 <b>TOTP 动态口令</b>：
+              它不依赖域名，是 IP 部署下的标准二次认证。
             </p>
           </div>
         </div>
@@ -74,6 +77,69 @@
               </div>
             </div>
           </div>
+
+          <!-- TOTP 动态口令（RFC 6238）：与 passkey 并列的第二种真二因子 -->
+          <div class="bd-sec">
+            <div class="bd-sec__t">
+              <icon-mobile />TOTP 动态口令
+              <a-tag v-if="totp.confirmed" color="green" size="small" bordered>已启用</a-tag>
+              <div style="flex:1" />
+              <button v-if="!totp.confirmed && !setup" class="bd-addbtn" @click="startTotp">
+                <icon-plus />{{ totp.enrolled ? '重新注册' : '启用 TOTP' }}
+              </button>
+            </div>
+
+            <!-- 空态 / 半截注册 -->
+            <div v-if="!totp.confirmed && !setup" class="bd-empty">
+              <icon-mobile class="bd-empty__ic" />
+              <div class="bd-empty__t">{{ totp.enrolled ? '上次注册未完成确认' : '还没有启用 TOTP' }}</div>
+              <div class="bd-empty__s">
+                RFC 6238 标准动态验证码，Google / 微软 Authenticator、1Password 等通用；
+                不依赖域名，IP 部署也可用。启用后登录将强制要求 6 位动态验证码。
+              </div>
+            </div>
+
+            <!-- 注册面板：扫码或手输密钥 → 验证码确认（密钥只显示这一次） -->
+            <div v-else-if="setup" class="bd-tsetup">
+              <div class="bd-tsetup__qr"><img v-if="qrData" :src="qrData" alt="TOTP 注册二维码" /></div>
+              <div class="bd-tsetup__m">
+                <div class="bd-tsetup__step"><b>1.</b> 用认证器 App 扫码，或手动输入密钥：</div>
+                <code class="bd-mono bd-tsetup__sec">{{ setup.secret }}</code>
+                <div class="bd-tsetup__step"><b>2.</b> 输入 App 显示的 6 位验证码完成确认（确认前不生效）：</div>
+                <div class="bd-tsetup__row">
+                  <input v-model="confirmCode" class="bd-tinput bd-mono" maxlength="6" inputmode="numeric"
+                    placeholder="000000" @keyup.enter="confirmTotp" />
+                  <button class="bd-addbtn" :disabled="confirming" @click="confirmTotp">
+                    {{ confirming ? '校验中…' : '确认启用' }}
+                  </button>
+                  <button class="bd-cancelbtn" @click="cancelSetup">取消</button>
+                </div>
+                <div class="bd-tsetup__note">密钥只显示这一次；未完成确认可重新注册（旧密钥即作废）。</div>
+              </div>
+            </div>
+
+            <!-- 已启用：解绑需出示当前验证码（拿到会话 ≠ 拿到认证器） -->
+            <div v-else class="bd-clist">
+              <div class="bd-ccard">
+                <span class="bd-ccard__ic"><icon-mobile /></span>
+                <div class="bd-ccard__m">
+                  <div class="bd-ccard__name">TOTP 动态口令</div>
+                  <div class="bd-ccard__meta bd-mono">
+                    启用于 {{ totp.createdAt || '—' }} · 登录强制要求动态验证码
+                  </div>
+                </div>
+                <template v-if="!disarming">
+                  <button class="bd-del" title="解绑" @click="disarming = true"><icon-delete /></button>
+                </template>
+                <template v-else>
+                  <input v-model="disableCode" class="bd-tinput bd-mono" maxlength="6" inputmode="numeric"
+                    placeholder="当前验证码" @keyup.enter="disableTotp" />
+                  <button class="bd-addbtn" @click="disableTotp">确认解绑</button>
+                  <button class="bd-cancelbtn" @click="disarming = false; disableCode = ''">取消</button>
+                </template>
+              </div>
+            </div>
+          </div>
         </a-spin>
       </div>
     </main>
@@ -84,7 +150,8 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type WebauthnCredentialsResp, type WebauthnCredential } from '@/lib/api';
+import QRCode from 'qrcode';
+import { api, type WebauthnCredentialsResp, type WebauthnCredential, type TotpStatus, type TotpEnrollResp } from '@/lib/api';
 import { createCredential, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 import PortalBar from '@/components/PortalBar.vue';
 
@@ -162,6 +229,80 @@ function guessName(): string {
   return 'passkey';
 }
 
+/* ── TOTP 动态口令 ── */
+const totp = ref<TotpStatus>({ enrolled: false, confirmed: false });
+const setup = ref<TotpEnrollResp | null>(null); // 密钥只存在于本次会话内存，刷新即不可再见
+const qrData = ref('');
+const confirmCode = ref('');
+const confirming = ref(false);
+const disarming = ref(false);
+const disableCode = ref('');
+
+async function loadTotp() {
+  try {
+    totp.value = await api<TotpStatus>('/totp');
+  } catch {
+    totp.value = { enrolled: false, confirmed: false };
+  }
+}
+
+async function startTotp() {
+  try {
+    const r = await api<TotpEnrollResp>('/totp/enroll', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+    });
+    setup.value = r;
+    confirmCode.value = '';
+    qrData.value = await QRCode.toDataURL(r.uri, { width: 168, margin: 1 });
+    await loadTotp();
+  } catch {
+    Message.error('生成密钥失败');
+  }
+}
+
+async function confirmTotp() {
+  if (!/^\d{6}$/.test(confirmCode.value.trim())) {
+    Message.error('请输入 6 位数字验证码');
+    return;
+  }
+  confirming.value = true;
+  try {
+    await api('/totp/confirm', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: confirmCode.value.trim() })
+    });
+    Message.success('TOTP 已启用，下次登录将要求动态验证码');
+    setup.value = null;
+    qrData.value = '';
+    await loadTotp();
+  } catch {
+    Message.error('验证码不正确，请确认扫码 / 录入无误后重试');
+  } finally {
+    confirming.value = false;
+  }
+}
+
+function cancelSetup() {
+  setup.value = null;
+  qrData.value = '';
+  confirmCode.value = '';
+}
+
+async function disableTotp() {
+  try {
+    await api('/totp/disable', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: disableCode.value.trim() })
+    });
+    Message.success('TOTP 已解绑');
+    disarming.value = false;
+    disableCode.value = '';
+    await loadTotp();
+  } catch {
+    Message.error('解绑失败：请输入认证器 App 当前显示的验证码');
+  }
+}
+
 async function remove(c: WebauthnCredential) {
   try {
     await api(`/webauthn/credentials/${c.id}`, { method: 'DELETE' });
@@ -182,6 +323,7 @@ onMounted(() => {
     displayName.value = s.displayName;
   } catch { router.replace('/portal/login'); return; }
   load();
+  loadTotp();
 });
 </script>
 
@@ -254,6 +396,38 @@ onMounted(() => {
   font-size: 11.5px; font-weight: 500; color: var(--bd-purple);
   background: var(--bd-tag-purple-bg); padding: 4px 10px; border-radius: 6px; white-space: nowrap;
 }
+/* TOTP 注册面板 */
+.bd-tsetup {
+  display: flex; gap: 22px; align-items: flex-start;
+  background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
+  padding: 20px 22px;
+}
+.bd-tsetup__qr {
+  width: 168px; height: 168px; flex: none; border: 1px solid var(--bd-border); border-radius: 10px;
+  display: flex; align-items: center; justify-content: center; overflow: hidden; background: #fff;
+}
+.bd-tsetup__qr img { width: 100%; height: 100%; display: block; }
+.bd-tsetup__m { flex: 1; min-width: 0; }
+.bd-tsetup__step { font-size: 13px; color: var(--bd-t2); margin-bottom: 8px; line-height: 1.6; }
+.bd-tsetup__step b { color: var(--bd-primary); }
+.bd-tsetup__sec {
+  display: block; background: var(--bd-fill-1); border: 1px dashed var(--bd-border);
+  border-radius: 8px; padding: 8px 12px; margin-bottom: 14px;
+  font-size: 13px; letter-spacing: 1px; word-break: break-all; color: var(--bd-t1);
+}
+.bd-tsetup__row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.bd-tsetup__note { font-size: 12px; color: var(--bd-t3); margin-top: 10px; }
+.bd-tinput {
+  width: 130px; height: 34px; padding: 0 12px; border: 1px solid var(--bd-border);
+  border-radius: 8px; font-size: 15px; letter-spacing: 3px; outline: none; color: var(--bd-t1);
+}
+.bd-tinput:focus { border-color: var(--bd-primary); }
+.bd-cancelbtn {
+  height: 34px; padding: 0 14px; border: 1px solid var(--bd-border); background: #fff;
+  border-radius: 8px; font-size: 13px; color: var(--bd-t2); cursor: pointer; transition: all .15s;
+}
+.bd-cancelbtn:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
+
 .bd-del {
   width: 32px; height: 32px; flex: none; border: 1px solid var(--bd-border); background: #fff;
   border-radius: 7px; color: var(--bd-t3); cursor: pointer; transition: all .15s;

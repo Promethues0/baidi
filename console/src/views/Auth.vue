@@ -269,7 +269,9 @@
             </a-select>
             <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
             <a-select v-model="editing.pc.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
-              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value" :disabled="!methodAvailable(m.value)">
+                {{ m.label }}{{ methodAvailable(m.value) ? '' : '（未实现）' }}
+              </a-option>
             </a-select>
           </div>
           <div class="bd-form__plat">
@@ -280,9 +282,16 @@
             </a-select>
             <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
             <a-select v-model="editing.mobile.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
-              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
+              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value" :disabled="!methodAvailable(m.value)">
+                {{ m.label }}{{ methodAvailable(m.value) ? '' : '（未实现）' }}
+              </a-option>
             </a-select>
           </div>
+        </div>
+        <!-- 方式能力说明：置灰的是未实现的（后端能力声明同源，保存也会被拒）。 -->
+        <div v-if="totpMethod" class="bd-form__hint" style="margin-top: 8px">
+          <b>TOTP 动态口令</b>：{{ totpMethod.effect }}
+          <template v-if="frozenMethodNote">　<span style="color: var(--bd-t3)">{{ frozenMethodNote }}</span></template>
         </div>
 
         <!-- 自适应 · 增强认证（命中则要求二次认证；每条开关下都写清判据） -->
@@ -583,7 +592,7 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
-  type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthDirectory, type EnhanceRule,
+  type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthMethodCapability, type AuthDirectory, type EnhanceRule,
   type PrimaryMethod, type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
   type LdapConfig, type OidcConfig
@@ -988,6 +997,18 @@ function can(key: string): boolean {
   const c = capOf(key);
   return c ? c.available : true;
 }
+/* 二次认证方式能力（authpolicy.SecondaryMethods）：置灰与保存校验同源。
+ * 未拿到声明（降级演示模式）时不置灰——与 can() 同一条回退纪律。 */
+const methodCaps = ref<AuthMethodCapability[]>([]);
+function methodAvailable(key: string): boolean {
+  const m = methodCaps.value.find((x) => x.key === key);
+  return m ? m.available : true;
+}
+const totpMethod = computed(() => methodCaps.value.find((m) => m.key === 'totp' && m.available));
+const frozenMethodNote = computed(() => {
+  const off = methodCaps.value.filter((m) => !m.available).map((m) => m.label);
+  return off.length ? `置灰的方式（${off.join('/')}）本版本未实现，保存也会被拒。` : '';
+});
 function capText(key: string): string {
   const c = capOf(key);
   if (!c) return '';
@@ -1092,6 +1113,7 @@ async function loadPolicies() {
     const r = await api<AuthPolicyResp>('/authpolicy');
     policies.value = (r.policies ?? []).map(normalizePolicy);
     capabilities.value = r.capabilities ?? [];
+    methodCaps.value = r.methods ?? [];
     directories.value = r.directories ?? [];
     orgOpts.value = r.orgs ?? [];
     groupOpts.value = r.groups ?? [];

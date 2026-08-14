@@ -44,11 +44,28 @@
           <span>{{ pkMsg || '请用 Touch ID / Windows Hello / 安全密钥完成二次认证' }}</span>
         </div>
 
+        <!-- TOTP 动态验证码（口令已通过，已启用 TOTP 的账号强制） -->
+        <template v-if="step === 'totp'">
+          <div class="bd-login__pk">
+            <icon-mobile />
+            <span>{{ pkMsg || '请输入认证器 App 中的 6 位动态验证码' }}</span>
+          </div>
+          <a-input v-model="totpCode" size="large" placeholder="6 位动态验证码" class="bd-login__inp"
+            :max-length="6" @keyup.enter="submitTotp">
+            <template #prefix><icon-safe /></template>
+          </a-input>
+        </template>
+
         <a-button
           v-if="step === 'webauthn'"
           type="primary" size="large" long :loading="loading" class="bd-login__btn"
           @click="submitWebauthn"
         >使用 passkey 验证</a-button>
+        <a-button
+          v-else-if="step === 'totp'"
+          type="primary" size="large" long :loading="loading" class="bd-login__btn"
+          @click="submitTotp"
+        >验证并登录</a-button>
         <a-button v-else type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submit">登 录</a-button>
       </template>
 
@@ -69,9 +86,10 @@ const username = ref('admin');
 const password = ref('');
 const loading = ref(false);
 const err = ref('');
-const step = ref<'login' | 'webauthn' | 'changepw'>('login');
+const step = ref<'login' | 'webauthn' | 'totp' | 'changepw'>('login');
 const ticket = ref('');
 const pkMsg = ref('');
+const totpCode = ref('');
 const pwToken = ref(''); // 首登强制改密的 15min 受限令牌（只够调 /auth/password，不入 localStorage）
 const newPw = ref('');
 const newPw2 = ref('');
@@ -107,7 +125,15 @@ async function submit() {
       void submitWebauthn();
       return;
     }
-    if (r.needEnroll) { err.value = r.reason || '该账号须先注册 passkey'; return; }
+    // TOTP 动态验证码（已启用 TOTP 的 admin 强制）
+    if (r.needTotp && r.ticket) {
+      ticket.value = r.ticket;
+      pkMsg.value = r.reason ?? '';
+      totpCode.value = '';
+      step.value = 'totp';
+      return;
+    }
+    if (r.needEnroll) { err.value = r.reason || '该账号须先注册 passkey 或 TOTP'; return; }
     if (r.ok && r.token) {
       finishLogin(r);
     } else {
@@ -146,6 +172,34 @@ async function submitWebauthn() {
       step.value = 'login'; ticket.value = '';
     } else {
       pkMsg.value = webauthnErrMsg(e);
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+
+/** TOTP 第二回合：mfa 票据 + 动态验证码换管理台会话令牌。 */
+async function submitTotp() {
+  if (!ticket.value) { step.value = 'login'; return; }
+  if (!/^\d{6}$/.test(totpCode.value.trim())) { pkMsg.value = '请输入 6 位数字验证码'; return; }
+  loading.value = true; err.value = '';
+  try {
+    const r = await api<PortalLoginResp>('/auth/totp', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: ticket.value, code: totpCode.value.trim() })
+    });
+    if (r.ok && r.token) {
+      finishLogin(r);
+      return;
+    }
+    pkMsg.value = r.reason || '验证码不正确，请重试';
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    if (msg.startsWith('401') && msg.includes('票据')) {
+      err.value = '认证超时，请重新登录';
+      step.value = 'login'; ticket.value = '';
+    } else {
+      pkMsg.value = '验证码不正确或已使用，请输入 App 当前显示的验证码';
     }
   } finally {
     loading.value = false;

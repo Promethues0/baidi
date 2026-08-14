@@ -59,6 +59,8 @@ type Store interface {
 	WebauthnCredentialsFor(ctx context.Context, account string) ([]WebauthnCredential, error)
 	WebauthnCredentialByID(ctx context.Context, credentialID string) (WebauthnCredential, bool, error)
 	WebauthnCredentialCount(ctx context.Context, account string) (int, error)
+	// TOTP 二次认证密文行（真实数据域，Memory 恒未注册）
+	TotpFor(ctx context.Context, account string) (TotpRecord, bool, error)
 	// 网关客户端证书白名单（mTLS 机器身份）
 	GatewayCerts(ctx context.Context) ([]GatewayCert, error)
 	GatewayCertTrusted(ctx context.Context, fingerprint string) (GatewayCert, bool, error)

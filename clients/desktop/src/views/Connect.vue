@@ -10,20 +10,24 @@
           </svg>
         </div>
         <div class="ck-login__t">登录白帝安全接入</div>
-        <div class="ck-login__s">{{ needMfa ? '终端未授信，请完成短信二次认证' : '使用企业账号登录终端客户端' }}</div>
+        <div class="ck-login__s">{{ needTotp ? '请输入认证器 App 的动态验证码' : needMfa ? '请完成二次认证' : '使用企业账号登录终端客户端' }}</div>
 
-        <template v-if="!needMfa">
+        <template v-if="!needMfa && !needTotp">
           <a-input v-model="form.username" size="large" placeholder="企业账号" class="ck-inp"><template #prefix><icon-user /></template></a-input>
           <a-input-password v-model="form.password" size="large" placeholder="登录口令" class="ck-inp" @keyup.enter="doLogin(false)"><template #prefix><icon-lock /></template></a-input-password>
         </template>
+        <template v-else-if="needTotp">
+          <div class="ck-mfa-tip"><icon-exclamation-circle-fill /> {{ mfaReason || '该账号已启用 TOTP 二次认证' }}</div>
+          <a-input v-model="form.mfaCode" size="large" placeholder="6 位动态验证码" class="ck-inp" :max-length="6" @keyup.enter="doTotp"><template #prefix><icon-safe /></template></a-input>
+        </template>
         <template v-else>
           <div class="ck-mfa-tip"><icon-exclamation-circle-fill /> {{ mfaReason }}</div>
-          <a-input v-model="form.mfaCode" size="large" placeholder="短信验证码" class="ck-inp" @keyup.enter="doLogin(true)"><template #prefix><icon-safe /></template></a-input>
+          <a-input v-model="form.mfaCode" size="large" placeholder="验证码" class="ck-inp" @keyup.enter="doLogin(true)"><template #prefix><icon-safe /></template></a-input>
         </template>
 
         <div v-if="err" class="ck-err"><icon-close-circle-fill /> {{ err }}</div>
-        <button class="dk-btn ck-login__btn" :disabled="loading" @click="doLogin(needMfa)">{{ loading ? '验证中…' : needMfa ? '验证并登录' : '登 录' }}</button>
-        <div class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · passkey 二次认证请用浏览器门户</div>
+        <button class="dk-btn ck-login__btn" :disabled="loading" @click="needTotp ? doTotp() : doLogin(needMfa)">{{ loading ? '验证中…' : (needMfa || needTotp) ? '验证并登录' : '登 录' }}</button>
+        <div class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · passkey 二次认证请用浏览器门户，TOTP 可直接在此输入</div>
       </div>
     </div>
 
@@ -178,6 +182,8 @@ const isTauri = tauriRuntime();
 /* 登录 */
 const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
 const needMfa = ref(false);
+const needTotp = ref(false);
+const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOTP 第二回合凭它绑定账号
 const mfaReason = ref('');
 const err = ref('');
 const loading = ref(false);
@@ -207,9 +213,33 @@ async function doLogin(withMfa: boolean) {
       login(r.token, r.displayName || form.username);
       await loadProfile(); // 登录即取接入剖面：接入所需的网关落点/路由表/资源映射全在其中
     }
+    else if (r.needTotp && r.ticket) { needTotp.value = true; totpTicket.value = r.ticket; mfaReason.value = r.reason || ''; form.mfaCode = ''; err.value = ''; }
+    else if (r.needWebauthn) { err.value = '该账号已启用 passkey 二次认证：客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP。'; }
     else if (r.needMfa) { needMfa.value = true; mfaReason.value = r.reason || ''; err.value = ''; }
     else { err.value = r.reason || '登录失败'; }
   } catch { err.value = '无法连接控制中心（检查「设置」里的控制中心地址）'; } finally { loading.value = false; }
+}
+
+/** TOTP 第二回合：口令已验票据 + 动态验证码换会话令牌（同码只能成功一次）。 */
+async function doTotp() {
+  if (!totpTicket.value) { needTotp.value = false; return; }
+  if (!/^\d{6}$/.test(form.mfaCode.trim())) { err.value = '请输入 6 位数字验证码'; return; }
+  loading.value = true; err.value = '';
+  try {
+    const r = await api<PortalLoginResp>('/auth/totp', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: totpTicket.value, code: form.mfaCode.trim() })
+    });
+    if (r.ok && r.token) {
+      needTotp.value = false; totpTicket.value = '';
+      login(r.token, r.displayName || form.username);
+      await loadProfile();
+    } else { err.value = r.reason || '验证码不正确或已使用'; }
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    if (msg.startsWith('401') && msg.includes('票据')) { err.value = '认证超时，请重新登录'; needTotp.value = false; totpTicket.value = ''; }
+    else { err.value = '验证码不正确或已使用，请输入 App 当前显示的验证码'; }
+  } finally { loading.value = false; }
 }
 
 /* 接入状态机 —— 真 utun 数据面 */

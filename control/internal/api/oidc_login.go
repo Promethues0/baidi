@@ -292,6 +292,12 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			s.oidcRedirect(w, r, url.Values{"oidcTicket": {t}, "oidcSrc": {rec.Name}})
 			return
 		}
+		// TOTP 同款：mfa 票据经 URL 交给门户的验证码输入框（oidcTotp 参数区分因子）。
+		if need, _ := resp["needTotp"].(bool); need {
+			t, _ := resp["ticket"].(string)
+			s.oidcRedirect(w, r, url.Values{"oidcTotp": {t}, "oidcSrc": {rec.Name}})
+			return
+		}
 		reason, _ := resp["reason"].(string)
 		if reason == "" {
 			reason = "登录被认证策略拦截"

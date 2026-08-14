@@ -9,9 +9,10 @@
     <div class="lg__form">
       <div class="lg__f"><icon-user class="lg__ic" /><input v-model="form.username" placeholder="企业账号" autocapitalize="off" autocorrect="off" /></div>
       <div class="lg__f"><icon-lock class="lg__ic" /><input v-model="form.password" type="password" placeholder="登录口令" @keyup.enter="submit" /></div>
-      <div v-if="needMfa" class="lg__f"><icon-message class="lg__ic" /><input v-model="form.mfaCode" placeholder="短信验证码" inputmode="numeric" @keyup.enter="submit" /></div>
+      <div v-if="needMfa || needTotp" class="lg__f"><icon-message class="lg__ic" /><input v-model="form.mfaCode" :placeholder="needTotp ? '6 位动态验证码' : '验证码'" inputmode="numeric" maxlength="6" @keyup.enter="submit" /></div>
 
-      <div v-if="needMfa" class="lg__mfa">{{ mfaReason || '检测到未授信终端 / 异地登录，需短信二次认证' }}</div>
+      <div v-if="needTotp" class="lg__mfa">{{ mfaReason || '该账号已启用 TOTP，请输入认证器 App 的动态验证码' }}</div>
+      <div v-else-if="needMfa" class="lg__mfa">{{ mfaReason || '需要二次认证' }}</div>
       <div v-if="err" class="lg__err">{{ err }}</div>
 
       <button class="m-btn" :disabled="loading" @click="submit">{{ loading ? '登录中…' : '登 录' }}</button>
@@ -29,11 +30,14 @@ import { login } from '@/lib/store';
 const router = useRouter();
 const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
 const needMfa = ref(false);
+const needTotp = ref(false);
+const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOTP 第二回合凭它绑定账号
 const mfaReason = ref('');
 const err = ref('');
 const loading = ref(false);
 
 async function submit() {
+  if (needTotp.value) { await submitTotp(); return; }
   if (!form.username || !form.password) { err.value = '请输入账号与口令'; return; }
   loading.value = true; err.value = '';
   try {
@@ -44,12 +48,34 @@ async function submit() {
     if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);
       router.replace('/connect');
+    } else if (r.needTotp && r.ticket) {
+      needTotp.value = true; totpTicket.value = r.ticket; mfaReason.value = r.reason || ''; form.mfaCode = ''; err.value = '';
+    } else if (r.needWebauthn) {
+      err.value = '该账号已启用 passkey：移动客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP';
     } else if (r.needMfa) {
       needMfa.value = true; mfaReason.value = r.reason || ''; err.value = '';
     } else {
       err.value = r.reason || '登录失败';
     }
   } catch { err.value = '无法连接控制中心（baidi-control）'; } finally { loading.value = false; }
+}
+
+/** TOTP 第二回合：票据 + 动态验证码换会话令牌（同码只能成功一次）。 */
+async function submitTotp() {
+  if (!/^\d{6}$/.test(form.mfaCode.trim())) { err.value = '请输入 6 位数字验证码'; return; }
+  loading.value = true; err.value = '';
+  try {
+    const r = await api<PortalLoginResp>('/auth/totp', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: totpTicket.value, code: form.mfaCode.trim() })
+    });
+    if (r.ok && r.token) {
+      login(r.token, r.displayName || form.username);
+      router.replace('/connect');
+    } else { err.value = r.reason || '验证码不正确或已使用'; }
+  } catch {
+    err.value = '验证码不正确或已使用；若停留过久请返回重新登录';
+  } finally { loading.value = false; }
 }
 </script>
 

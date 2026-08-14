@@ -89,6 +89,47 @@ func Capabilities() []Capability {
 	}
 }
 
+// MethodCapability 二次认证**方式**的能力声明（与 Capability 同一条纪律：
+// 置灰与保存校验必须同源，都由这一份产出）。
+// wave7 行动 4：此前抽屉里 sms/totp/radius/cert/http 全部可选、全部不生效——
+// TOTP 真实现后，其余四种显式冻结而不是继续静默无效。
+type MethodCapability struct {
+	Key       string `json:"key"`
+	Label     string `json:"label"`
+	Available bool   `json:"available"`
+	Effect    string `json:"effect,omitempty"`
+	Reason    string `json:"reason,omitempty"`
+}
+
+// SecondaryMethods 二次认证方式清单。
+func SecondaryMethods() []MethodCapability {
+	return []MethodCapability{
+		{Key: "totp", Label: "TOTP 动态口令", Available: true,
+			Effect: "RFC 6238 标准动态验证码，Google/微软 Authenticator、1Password 等通用。" +
+				"用户在门户「安全设置」注册并确认后，登录即强制要求验证码（与 passkey 同级；" +
+				"两者都注册时优先走抗钓鱼的 passkey）。不依赖可注册域名，裸 IP 部署也可用。"},
+		{Key: "sms", Label: "短信", Available: false,
+			Reason: "登录链路没有短信发码/验码实现。消息通道里的 sms 只是一次 webhook 转发" +
+				"（用于告警通知），承担不了认证因子。"},
+		{Key: "radius", Label: "RADIUS 动态令牌", Available: false,
+			Reason: "RADIUS 协议未实现（认证源保存同样拒绝 radius 类型）。"},
+		{Key: "cert", Label: "证书 / USB-Key", Available: false,
+			Reason: "白帝没有终端证书/USB-Key 的校验能力。"},
+		{Key: "http", Label: "HTTP(S) 令牌", Available: false,
+			Reason: "无 HTTP 令牌服务对接实现。"},
+	}
+}
+
+// MethodOf 按 key 取二次认证方式声明。
+func MethodOf(key string) (MethodCapability, bool) {
+	for _, m := range SecondaryMethods() {
+		if m.Key == key {
+			return m, true
+		}
+	}
+	return MethodCapability{}, false
+}
+
 // CapabilityOf 按 key 取能力声明。
 func CapabilityOf(key string) (Capability, bool) {
 	for _, c := range Capabilities() {
@@ -364,6 +405,16 @@ func Validate(p store.AuthPolicy) error {
 	if p.Exempt.WinDomain {
 		c, _ := CapabilityOf(KeyWinDomain)
 		return fmt.Errorf("「%s」不可启用：%s", c.Label, c.Reason)
+	}
+	// 二次认证方式：未实现的方式拒绝入库（与冻结开关同一条纪律）。
+	for _, m := range append(trimAll(p.PC.Secondary), trimAll(p.Mobile.Secondary)...) {
+		mc, known := MethodOf(m)
+		if !known {
+			return fmt.Errorf("未知的二次认证方式「%s」", m)
+		}
+		if !mc.Available {
+			return fmt.Errorf("「%s」不可选用：%s", mc.Label, mc.Reason)
+		}
 	}
 	if p.Exempt.TrustedNetwork && len(trimAll(p.Exempt.Networks)) == 0 {
 		return fmt.Errorf("启用「可信网络」豁免必须至少配置一个网段（CIDR），否则这条豁免永远不会命中")

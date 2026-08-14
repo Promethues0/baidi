@@ -47,10 +47,11 @@ const legacyDemoCode = "123456"
 //
 // 判定顺序（顺序本身就是安全语义，别调换）：
 //  1. 已注册 passkey 且 RP 已配置 → **无条件**要求 WebAuthn 断言（抗钓鱼，最强）；
-//  2. 否则按认证策略求值（internal/authpolicy）：命中增强条件且未被豁免 → 要求二次认证。
-//     RP 已配置时要求先注册 passkey（引导，不放行）；RP 未配置（裸 IP 演示站/dev）
-//     回落 legacy 演示验证码，保证演示可用；
-//  3. 其余 → 单因子口令放行。
+//  2. 已确认 TOTP → **无条件**要求动态验证码（RFC 6238；裸 IP 部署下唯一的标准二因子）；
+//  3. 否则按认证策略求值（internal/authpolicy）：命中增强条件且未被豁免 → 要求二次认证。
+//     RP 已配置时要求先注册 passkey 或 TOTP（引导，不放行）；RP 未配置（裸 IP 演示站/dev）
+//     且未注册 TOTP 时回落 legacy 演示验证码——注册 TOTP 后该回落对本账号不可达；
+//  4. 其余 → 单因子口令放行。
 //
 // ★第 1 步排在策略之前，是「策略只能加强、不能削弱」这条语义的落点：
 // 账号自己注册了 passkey，就没有任何一条豁免规则（可信网络 / 授信终端）能把它降级成单因素。
@@ -78,6 +79,20 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 			"reason": "请用已注册的 passkey（Touch ID / Windows Hello / 安全密钥）完成二次认证",
 		}, true
 	}
+	// TOTP 与 passkey 同款纪律：已确认即无条件强制，策略豁免碰不到它。
+	// 排在 passkey 之后——两者都注册时用抗钓鱼的那个。
+	trec, tfound, terr := s.store.TotpFor(r.Context(), account)
+	if terr != nil {
+		s.auditAs(r, cred.Account, "auth", "二次认证前置查询失败，拒绝登录", "fail")
+		return map[string]any{"ok": false, "reason": "二次认证服务暂不可用，请稍后重试"}, true
+	}
+	if tfound && trec.Confirmed {
+		s.auditAs(r, cred.Account, "auth", "登录触发 TOTP 二次认证（账号已启用动态验证码）", "mfa")
+		return map[string]any{
+			"ok": false, "needTotp": true, "ticket": s.signMfaTicket(account),
+			"reason": "请输入认证器 App 中的 6 位动态验证码",
+		}, true
+	}
 
 	dec, ok := s.stepUpDecision(r, cred, lc)
 	if !ok {
@@ -92,10 +107,12 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 		if s.webauthnEnabled() {
 			return map[string]any{
 				"ok": false, "needEnroll": true,
-				"reason": dec.Summary() + "；该账号尚未注册 passkey，请先注册后再接入（可联系管理员协助录入）",
+				"reason": dec.Summary() + "；该账号尚未注册 passkey 或 TOTP，请先注册后再接入（可联系管理员协助录入）",
 			}, true
 		}
-		// legacy 演示回落：RP 未配置（如裸 IP 演示站），保留演示验证码路径。
+		// legacy 演示回落：RP 未配置（如裸 IP 演示站）**且未注册 TOTP**（注册了在
+		// 上面的无条件分支就拦下了），保留演示验证码路径。真 MFA 的出路是引导
+		// 用户去门户注册 TOTP——它不依赖可注册域名，裸 IP 下也可用。
 		return s.legacySecondFactor(r, cred, dec)
 	case dec.Exempted:
 		// 豁免也是一次发生过的判定，必须留痕：否则"为什么这次没要二次认证"无从回答。
@@ -109,8 +126,9 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 func (s *Server) legacySecondFactor(r *http.Request, cred store.Credential, dec authpolicy.Decision) (map[string]any, bool) {
 	code := legacyMfaCode(r)
 	if code == "" {
-		s.auditAs(r, cred.Account, "auth", dec.Summary()+"（WebAuthn 未配置，回落 legacy 演示验证码）", "mfa")
-		return map[string]any{"ok": false, "needMfa": true, "reason": dec.Summary() + "，请完成短信二次认证"}, true
+		s.auditAs(r, cred.Account, "auth", dec.Summary()+"（WebAuthn 未配置且未注册 TOTP，回落 legacy 演示验证码）", "mfa")
+		return map[string]any{"ok": false, "needMfa": true,
+			"reason": dec.Summary() + "，请输入演示验证码（登录后可在门户「安全设置」注册 TOTP 换成真动态码）"}, true
 	}
 	if code != legacyDemoCode {
 		return map[string]any{"ok": false, "needMfa": true, "reason": "验证码错误（演示验证码：" + legacyDemoCode + "）"}, true

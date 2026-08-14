@@ -120,6 +120,8 @@ func (s *Server) handleAuthPolicies(w http.ResponseWriter, r *http.Request) {
 		// ★能力声明必须由后端下发而不是前端自己写死：置灰与保存校验必须同源，
 		// 否则前端放开一个后端会拒的开关（或反过来），管理员两头看不懂。
 		"capabilities": authpolicy.Capabilities(),
+		// 二次认证方式的能力声明：真实现的（totp）可选，其余置灰并说明原因。
+		"methods": authpolicy.SecondaryMethods(),
 		// ★目录候选同样由后端下发：前端自己写死一份的话，真实认证源的 kind
 		// （ldap/oidc）永远进不了下拉，而登录链路只按 kind 匹配。
 		"directories": dirs,

@@ -16,8 +16,11 @@ import "context"
 
 // AuthMethodSet 一个接入端（PC/WEB 或 移动端）的认证方式组合。
 type AuthMethodSet struct {
-	Primary   string   `json:"primary"`   // 主认证：local | ad | ldap | radius | oauth | sms | cert
-	Secondary []string `json:"secondary"` // 二次认证（可多选 / 可空）：sms | totp | radius | cert | http
+	Primary string `json:"primary"` // 主认证：local | ad | ldap | radius | oauth | sms | cert
+	// Secondary 二次认证（可多选 / 可空）。可用集由 authpolicy.SecondaryMethods 声明：
+	// 当前只有 totp 真实现；sms/radius/cert/http 无登录链路实现，保存时拒绝、
+	// 控制台置灰（与 GeoAnomaly/WinDomain 同一条冻结纪律），存量值由迁移清掉。
+	Secondary []string `json:"secondary"`
 }
 
 // ExemptRule 自适应 · 免二次认证的豁免触发条件。
@@ -106,8 +109,10 @@ func (m *Memory) AuthPolicies(_ context.Context) ([]AuthPolicy, error) {
 		{
 			ID: "ap-ad-default", Name: "AD 域 · 默认策略", Directory: "ad", IsDefault: true,
 			Scope: "总部 AD 域 · 全体用户", Priority: 100, Enabled: true,
+			// Secondary 只列真实现的方式（totp）：sms/radius/cert/http 均无登录链路实现，
+			// 已按能力声明冻结（authpolicy.SecondaryMethods），种子里不许出现。
 			PC:     AuthMethodSet{Primary: "ad", Secondary: []string{"totp"}},
-			Mobile: AuthMethodSet{Primary: "ad", Secondary: []string{"sms"}},
+			Mobile: AuthMethodSet{Primary: "ad", Secondary: []string{"totp"}},
 			// 授信终端 + 内网网段两条豁免与下面的增强条件配套：内网的合规终端照常单因素，
 			// 换台没登记过的机器、或跑到办公网之外，才被抬到二次认证。
 			Exempt: ExemptRule{TrustedDevice: true, TrustedNetwork: true, Networks: []string{"10.8.0.0/16"}},

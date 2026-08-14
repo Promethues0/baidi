@@ -536,9 +536,15 @@ export interface AuthDirectory {
   configured: boolean;
   sources: string[];
 }
+/** 二次认证方式的能力声明（后端 authpolicy.SecondaryMethods）：
+ *  真实现的（totp）可选；未实现的置灰并给出原因，保存端同源拒绝。 */
+export interface AuthMethodCapability {
+  key: string; label: string; available: boolean; effect?: string; reason?: string;
+}
 export interface AuthPolicyResp {
   policies: AuthPolicy[];
   capabilities?: AuthRuleCapability[];
+  methods?: AuthMethodCapability[];
   directories?: AuthDirectory[];
   orgs?: SubjectOption[];
   groups?: SubjectOption[];
@@ -754,9 +760,10 @@ export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 /* ── 终端用户门户 ── */
 export interface PortalLoginResp {
   ok: boolean;
-  needMfa?: boolean;        // legacy 演示验证码路径（未配置 WebAuthn RP 时回落）
+  needMfa?: boolean;        // legacy 演示验证码路径（未配置 WebAuthn RP 且未注册 TOTP 时回落）
   needWebauthn?: boolean;   // 需 passkey 断言；配合 ticket 走 /webauthn/login/*
-  needEnroll?: boolean;     // 风险账号尚未注册 passkey，须先录入
+  needTotp?: boolean;       // 需 TOTP 动态验证码；配合 ticket 走 /auth/totp
+  needEnroll?: boolean;     // 风险账号尚未注册 passkey/TOTP，须先录入
   mustChangePassword?: boolean; // 首登强制改密：token 是 15min 受限令牌，只够调 /auth/password
   ticket?: string;          // 「口令已验」一次性票据（3min），断言两回合凭它绑定账号
   reason?: string;
@@ -772,6 +779,9 @@ export interface WebauthnCredential {
   name: string; createdAt: string; lastUsedAt: string;
 }
 export interface WebauthnCredentialsResp { credentials: WebauthnCredential[]; enabled: boolean }
+/** TOTP 状态（GET /totp）。永不携带密钥材料——密钥只在 enroll 响应里回显一次。 */
+export interface TotpStatus { enrolled: boolean; confirmed: boolean; createdAt?: string }
+export interface TotpEnrollResp { secret: string; uri: string }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';

@@ -144,6 +144,47 @@
           </a-button>
         </template>
 
+        <!-- 步骤二：TOTP 动态验证码（RFC 6238，已启用 TOTP 的账号强制） -->
+        <template v-else-if="step === 'totp'">
+          <h2 class="bd-card__h">二次认证</h2>
+          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 输入动态验证码</p>
+
+          <div class="bd-tip bd-tip--warn">
+            <icon-safe />
+            <span>{{ mfaReason || '请输入认证器 App 中的 6 位动态验证码。' }}</span>
+          </div>
+
+          <a-form :model="form" layout="vertical" @submit.prevent>
+            <a-form-item field="mfaCode" hide-label>
+              <a-input
+                v-model="form.mfaCode"
+                placeholder="6 位动态验证码"
+                size="large"
+                allow-clear
+                :max-length="6"
+                @keyup.enter="submitTotp"
+              >
+                <template #prefix><icon-mobile /></template>
+              </a-input>
+            </a-form-item>
+          </a-form>
+
+          <a-button
+            type="primary"
+            long
+            size="large"
+            :loading="loading"
+            class="bd-submit"
+            @click="submitTotp"
+          >
+            验证并登录
+          </a-button>
+          <a-button type="text" long class="bd-back" @click="backToLogin">
+            <template #icon><icon-left /></template>
+            返回重新登录
+          </a-button>
+        </template>
+
         <!-- 强制改密：初始口令须由本人换掉后才发正常会话 -->
         <template v-else-if="step === 'changepw'">
           <h2 class="bd-card__h">修改初始口令</h2>
@@ -237,9 +278,8 @@
         </template>
 
         <p class="bd-demo">
-          演示提示：口令 <code class="bd-mono">baidi@123</code>。已注册 passkey 的账号登录需
-          <b>Touch ID / Windows Hello / 安全密钥</b> 二次认证；登录后可在
-          <b>「我的安全」</b> 管理 passkey。
+          演示提示：口令 <code class="bd-mono">baidi@123</code>。已注册 passkey / TOTP 的账号登录需
+          二次认证；登录后可在 <b>「我的安全」</b> 管理 passkey 与 TOTP 动态口令。
         </p>
 
         <p class="bd-getcli">
@@ -263,7 +303,7 @@ import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn'
 
 const router = useRouter();
 
-const step = ref<'login' | 'webauthn' | 'mfa' | 'changepw'>('login');
+const step = ref<'login' | 'webauthn' | 'totp' | 'mfa' | 'changepw'>('login');
 const loading = ref(false);
 const errMsg = ref('');
 const mfaReason = ref('');
@@ -291,9 +331,10 @@ async function handleOidcReturn() {
   const qs = new URLSearchParams(window.location.search);
   const grant = qs.get('oidcGrant');
   const mfaT = qs.get('oidcTicket');
+  const totpT = qs.get('oidcTotp');
   const oerr = qs.get('oidcError');
   const src = qs.get('oidcSrc') ?? '';
-  if (!grant && !mfaT && !oerr) return;
+  if (!grant && !mfaT && !totpT && !oerr) return;
   // 先把票据从地址栏擦掉：留着会进书签/分享链接，且刷新会触发一次注定失败的重放。
   window.history.replaceState(null, '', window.location.pathname);
   if (oerr) {
@@ -306,6 +347,14 @@ async function handleOidcReturn() {
     form.username = '（企业身份）';
     step.value = 'webauthn';
     void submitWebauthn();
+    return;
+  }
+  if (totpT) {
+    ticket.value = totpT;
+    mfaReason.value = src ? `已通过 ${src} 认证，请输入 TOTP 动态验证码` : '请输入 TOTP 动态验证码';
+    form.username = '（企业身份）';
+    form.mfaCode = '';
+    step.value = 'totp';
     return;
   }
   if (grant) {
@@ -389,9 +438,17 @@ async function submitLogin() {
     void submitWebauthn(); // 直接唤起认证器，省去多一次点击
     return;
   }
-  // 风险账号尚未注册 passkey：不放行，提示先录入
+  // TOTP 动态验证码（口令已通过，已启用 TOTP 的账号强制）
+  if (resp.needTotp && resp.ticket) {
+    ticket.value = resp.ticket;
+    mfaReason.value = resp.reason ?? '';
+    form.mfaCode = '';
+    step.value = 'totp';
+    return;
+  }
+  // 风险账号尚未注册 passkey/TOTP：不放行，提示先录入
   if (resp.needEnroll) {
-    errMsg.value = resp.reason || '该账号须先注册 passkey 才能接入。';
+    errMsg.value = resp.reason || '该账号须先注册 passkey 或 TOTP 才能接入。';
     return;
   }
   if (resp.needMfa) {
@@ -440,6 +497,43 @@ async function submitWebauthn() {
       backToLogin();
     } else {
       mfaReason.value = webauthnErrMsg(e);
+    }
+  } finally {
+    loading.value = false;
+  }
+}
+
+/** TOTP 第二回合：mfa 票据 + 6 位动态验证码换会话令牌（防重放：同码只能成功一次）。 */
+async function submitTotp() {
+  if (!ticket.value) {
+    backToLogin();
+    return;
+  }
+  if (!/^\d{6}$/.test(form.mfaCode.trim())) {
+    Message.warning('请输入 6 位数字验证码。');
+    return;
+  }
+  errMsg.value = '';
+  loading.value = true;
+  try {
+    const resp = await api<PortalLoginResp>('/auth/totp', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ticket: ticket.value, code: form.mfaCode.trim() })
+    });
+    if (resp.ok && resp.token) {
+      onSuccess(resp);
+      return;
+    }
+    mfaReason.value = resp.reason || '验证码不正确，请重试。';
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    if (msg.startsWith('401') && msg.includes('票据')) {
+      // 票据过期（3min）→ 退回口令步骤重来
+      errMsg.value = '认证超时，请重新登录。';
+      backToLogin();
+    } else {
+      mfaReason.value = '验证码不正确或已使用，请输入 App 当前显示的验证码。';
     }
   } finally {
     loading.value = false;

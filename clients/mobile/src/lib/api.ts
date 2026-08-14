@@ -35,7 +35,14 @@ export async function ping(): Promise<boolean> {
 }
 
 /* 与门户端点同构（移动端以 user 身份登录、拉取可访问应用） */
-export interface PortalLoginResp { ok: boolean; needMfa?: boolean; reason?: string; token?: string; displayName?: string }
+export interface PortalLoginResp {
+  ok: boolean;
+  needMfa?: boolean;      // legacy 演示验证码（未配置 WebAuthn 且未注册 TOTP 时回落）
+  needTotp?: boolean;     // TOTP 动态验证码：配合 ticket 走 POST /auth/totp
+  needWebauthn?: boolean; // passkey 断言（移动客户端做不了，引导去浏览器门户）
+  ticket?: string;        // 「口令已验」一次性票据（3min）
+  reason?: string; token?: string; displayName?: string;
+}
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';

@@ -77,6 +77,11 @@ type Writer interface {
 	CreateWebauthnChallenge(ctx context.Context, ch WebauthnChallenge) (WebauthnChallenge, error)
 	ConsumeWebauthnChallenge(ctx context.Context, challenge, typ string) (WebauthnChallenge, error)
 	PurgeExpiredChallenges(ctx context.Context) (int64, error)
+	// TOTP：密钥落库（密文）/ 确认转正 / 防重放计数消费 / 解绑
+	SaveTotpSecret(ctx context.Context, account string, nonce, cipher []byte) error
+	ConfirmTotp(ctx context.Context, account string, counter uint64) error
+	ConsumeTotpCounter(ctx context.Context, account string, counter uint64) (bool, error)
+	DeleteTotp(ctx context.Context, account string) (bool, error)
 	// 网关客户端证书：签发登记 + 吊销
 	SaveGatewayCert(ctx context.Context, c GatewayCert) error
 	RevokeGatewayCert(ctx context.Context, fingerprint, reason string) error
@@ -449,6 +454,14 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
   expires_at INTEGER, consumed INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);
+-- TOTP 二次认证（RFC 6238）。密钥经 secret 盒 AES-256-GCM 加密、AAD 绑账号
+-- （"totp:"+account，与 auth_source_secrets 同一条纪律：密文行跨账号剪贴直接
+-- 解密失败而不是悄悄生效）。last_counter 是防重放的执行点：记录已成功消费的
+-- 最大时间计数器，同一 30 秒步长内的码只能成功一次（截获一次性码重放无效）。
+CREATE TABLE IF NOT EXISTS totp_secrets (
+  account TEXT PRIMARY KEY, nonce BLOB, cipher BLOB, confirmed INTEGER DEFAULT 0,
+  last_counter INTEGER DEFAULT 0, created_at TEXT
+);
 -- ── 认证源接入 ──
 -- 配置与凭据**物理分表**：让「某天有人写了 SELECT *」或忘加 requireAdmin 时，
 -- 泄露需要显式写代码，而不是默认发生（与 ipsec_secrets 同一条推理）。
@@ -959,10 +972,71 @@ func (s *SQLiteStore) backfillAuthPolicyScope() error {
 		 WHERE json_valid(enhance) AND json_extract(enhance,'$.geoAnomaly')=1`); err != nil {
 		return err
 	}
-	_, err := s.db.Exec(
+	if _, err := s.db.Exec(
 		`UPDATE auth_policies SET exempt=json_set(exempt,'$.winDomain',json('false'))
-		 WHERE json_valid(exempt) AND json_extract(exempt,'$.winDomain')=1`)
-	return err
+		 WHERE json_valid(exempt) AND json_extract(exempt,'$.winDomain')=1`); err != nil {
+		return err
+	}
+	return s.cleanFrozenSecondaryMethods()
+}
+
+// cleanFrozenSecondaryMethods 从既有策略的 pc/mobile 二次认证列表里剔除未实现的
+// 方式（保存接口已拒绝、控制台已置灰，见 authpolicy.SecondaryMethods）。
+// 不清的话，页面上永久留着「短信」这类打开了但永远不会生效的勾——与
+// geoAnomaly/winDomain 同一条清理纪律。只 json_set 覆盖 $.secondary 一个路径，
+// 不整列反序列化重写（避免覆盖未知字段）。幂等：清过的行不再命中过滤条件。
+func (s *SQLiteStore) cleanFrozenSecondaryMethods() error {
+	// 可用集与 authpolicy.SecondaryMethods 同步维护（store 不能反向 import authpolicy）。
+	available := map[string]bool{"totp": true}
+	rows, err := s.db.Query(`SELECT id, pc, mobile FROM auth_policies`)
+	if err != nil {
+		return err
+	}
+	type patch struct{ id, col, val string }
+	var patches []patch
+	for rows.Next() {
+		var id string
+		var pc, mobile sql.NullString
+		if err := rows.Scan(&id, &pc, &mobile); err != nil {
+			rows.Close()
+			return err
+		}
+		for _, c := range []struct{ col, raw string }{{"pc", pc.String}, {"mobile", mobile.String}} {
+			if c.raw == "" {
+				continue
+			}
+			var ms struct {
+				Secondary []string `json:"secondary"`
+			}
+			if json.Unmarshal([]byte(c.raw), &ms) != nil {
+				continue
+			}
+			kept := make([]string, 0, len(ms.Secondary))
+			for _, m := range ms.Secondary {
+				if available[m] {
+					kept = append(kept, m)
+				}
+			}
+			if len(kept) == len(ms.Secondary) {
+				continue
+			}
+			b, _ := json.Marshal(kept)
+			patches = append(patches, patch{id, c.col, string(b)})
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
+	rows.Close()
+	for _, p := range patches {
+		if _, err := s.db.Exec(
+			`UPDATE auth_policies SET `+p.col+`=json_set(`+p.col+`,'$.secondary',json(?)) WHERE id=?`,
+			p.val, p.id); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // addColumnIfMissing 幂等地为表补一列；列已存在（duplicate column name）视为成功。

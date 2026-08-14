@@ -225,6 +225,7 @@
           <button v-if="sel.status === 'locked'" class="bd-btn" @click="setStatus('active', '已解锁账号')"><icon-unlock />解锁账号</button>
           <button v-if="sel.status === 'disabled'" class="bd-btn" @click="setStatus('active', '已启用账号')"><icon-check />启用账号</button>
           <button class="bd-btn bd-btn--ghost" @click="openReset"><icon-lock />重置密码</button>
+          <button class="bd-btn bd-btn--ghost" @click="resetTotp"><icon-mobile />重置 TOTP</button>
           <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
         </div>
       </div>
@@ -683,6 +684,20 @@ async function doReset() {
     resetOpen.value = false;
   } catch { Message.error('重置失败，请检查权限或后端连接'); }
   finally { resetting.value = false; }
+}
+
+/** 管理员清除用户的 TOTP（丢认证器的 helpdesk 通道）：下次登录回到口令单因素，须本人重新注册。
+ *  目标是管理员时后端把门槛抬到 admins 权（与重置口令同一道收口）。 */
+async function resetTotp() {
+  if (!sel.value) return;
+  try {
+    const r = await api<{ ok: boolean; removed: boolean }>(`/users/${sel.value.id}/totp`, { method: 'DELETE' });
+    if (r.removed) Message.success(`已清除「${sel.value.name}」的 TOTP，下次登录回到口令单因素`);
+    else Message.info(`「${sel.value.name}」未注册 TOTP，无需重置`);
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    Message.error(msg.startsWith('403') ? '权限不足：重置管理员的 TOTP 需要「管理员管理」权限' : '重置失败，请检查权限或后端连接');
+  }
 }
 
 onMounted(load);

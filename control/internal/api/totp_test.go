@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/secret"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/totp"
@@ -172,6 +173,76 @@ func TestTotpDisable(t *testing.T) {
 	}
 	if out := loginResp(t, h, "li.fang"); out["token"] == nil {
 		t.Fatalf("解绑后应回到单因素，实得 %v", out)
+	}
+}
+
+// 管理员重置 TOTP（helpdesk：用户丢了认证器，没有自助恢复码）。
+// 收口与重置口令同款：普通用户目标要 PermSecurity；管理员目标抬到 PermAdmins。
+func TestAdminResetTotp(t *testing.T) {
+	h := totpFixture(t)
+
+	// 给 li.fang 启用 TOTP
+	tok, _ := loginResp(t, h, "li.fang")["token"].(string)
+	_, enr := doJSON(t, h, "POST", "/api/v1/totp/enroll", tok, nil)
+	sec := enr["secret"].(string)
+	cc, _ := totp.Code(sec, time.Now())
+	if code, _ := doJSON(t, h, "POST", "/api/v1/totp/confirm", tok, map[string]string{"code": cc}); code != http.StatusOK {
+		t.Fatal("confirm 应成功")
+	}
+	if out := loginResp(t, h, "li.fang"); out["needTotp"] != true {
+		t.Fatal("确认后登录应强制 TOTP")
+	}
+
+	// 普通用户令牌不能重置 → 403
+	if code, _ := doJSON(t, h, "DELETE", "/api/v1/users/u2/totp", userToken("wang.qiang"), nil); code != http.StatusForbidden {
+		t.Fatal("普通用户不得重置他人 TOTP")
+	}
+
+	// root 重置 → 回到口令单因素
+	if code, out := doJSON(t, h, "DELETE", "/api/v1/users/u2/totp", adminToken(), nil); code != http.StatusOK || out["removed"] != true {
+		t.Fatalf("root 重置应成功，实得 %d %v", code, out)
+	}
+	if out := loginResp(t, h, "li.fang"); out["token"] == nil {
+		t.Fatalf("重置后应回到单因素，实得 %v", out)
+	}
+
+	// ★目标是管理员时门槛抬到 PermAdmins：security 角色的管理员给 root 挂上 TOTP 后
+	// 不能再由 security 清掉（能清 root 的二因子 + 能重置口令 = 全权接管，两道必须同门槛）。
+	_, atok := doJSON(t, h, "POST", "/api/v1/auth/login", "",
+		map[string]string{"username": "admin", "password": "baidi@123"})
+	rootTok, _ := atok["token"].(string)
+	if rootTok == "" {
+		t.Fatalf("root 登录失败：%v", atok)
+	}
+	if code, out := doJSON(t, h, "POST", "/api/v1/admins", rootTok,
+		map[string]string{"account": "sec.op", "name": "安全专员", "roleKey": "security", "password": "baidi@123456"}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("建 security 管理员失败 %d %v", code, out)
+	}
+	// root 自己注册 TOTP
+	_, renr := doJSON(t, h, "POST", "/api/v1/totp/enroll", rootTok, nil)
+	rsec := renr["secret"].(string)
+	rcc, _ := totp.Code(rsec, time.Now())
+	if code, _ := doJSON(t, h, "POST", "/api/v1/totp/confirm", rootTok, map[string]string{"code": rcc}); code != http.StatusOK {
+		t.Fatal("root confirm 应成功")
+	}
+	// 查 root 的用户 id
+	_, dir := doJSON(t, h, "GET", "/api/v1/users", rootTok, nil)
+	rootID := ""
+	for _, u := range dir["users"].([]any) {
+		um := u.(map[string]any)
+		if um["account"] == "admin" {
+			rootID, _ = um["id"].(string)
+		}
+	}
+	if rootID == "" {
+		t.Fatal("找不到 root 的用户 id")
+	}
+	secTok := testKeys.Sign(auth.Claims{Sub: "sec.op", Role: "admin", Name: "sec.op"}, tokenTTL)
+	if code, _ := doJSON(t, h, "DELETE", "/api/v1/users/"+rootID+"/totp", secTok, nil); code != http.StatusForbidden {
+		t.Fatalf("security 管理员清 root 的 TOTP 应 403（PermAdmins 门槛），实得 %d", code)
+	}
+	if code, out := doJSON(t, h, "DELETE", "/api/v1/users/"+rootID+"/totp", rootTok, nil); code != http.StatusOK || out["removed"] != true {
+		t.Fatalf("root 自清应成功，实得 %d %v", code, out)
 	}
 }
 

@@ -193,6 +193,40 @@ func (s *Server) handleTotpDisable(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// handleAdminResetTotp DELETE /api/v1/users/{id}/totp——管理员为用户清除 TOTP。
+// helpdesk 刚需：TOTP 没有自助恢复码，用户丢了认证器就永远登不进，唯一出路
+// 若是「运维直接删库里的行」，等于逼着每次事故都做一次 DB 手术（部署首日就真实发生过）。
+// 与重置口令同一道收口：PermSecurity + 目标是管理员时须 admins 权（guardAdminTarget）——
+// 清二因子是**削弱**目标账号防护的方向，能清 root 的 TOTP 再重置其口令即全权接管。
+func (s *Server) handleAdminResetTotp(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
+		return
+	}
+	id := r.PathValue("id")
+	u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	if !found {
+		httpx.Error(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if !s.guardAdminTarget(w, r, u, "重置 TOTP 二次认证") {
+		return
+	}
+	removed, err := s.writer.DeleteTotp(r.Context(), u.Account)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "重置落库失败")
+		return
+	}
+	if removed {
+		s.audit(r, "security",
+			"重置用户「"+u.Account+"」的 TOTP 二次认证（下次登录回到口令单因素，须本人重新注册）", "ok")
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
+}
+
 // handleTotpLogin POST /api/v1/auth/totp {ticket, code}——TOTP 登录第二回合。
 // 身份由「口令已验」的一次性 mfaTicket 承载（与 WebAuthn 断言同款），
 // 免 Bearer 中间件但 handler 内强校验；完成后签发会话令牌。

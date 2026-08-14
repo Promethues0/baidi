@@ -530,6 +530,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                       // 新增用户
 	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)        // 禁用/启用/解锁
 	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword)  // 管理员重置口令
+	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)       // 管理员清除 TOTP（丢认证器）
 	mux.HandleFunc("PUT /api/v1/users/{id}/membership", s.handleSetUserMembership) // 改组织归属 / 所属用户组
 
 	// 组织与用户组（业务管理 · 用户与角色页内维护；全部 admin）

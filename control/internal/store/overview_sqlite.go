@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"fmt"
 	"time"
 )
 
@@ -95,9 +96,26 @@ func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
 		}
 	}
 
+	// 5) 攻击源统计（wave7 行动 5）：数据面拒绝事件的 24h 聚合。
+	// 第一格防线从「设备台账顶包」换成它——SPA 隐身在挡谁，这里是唯一能回答的地方。
+	atk, err := s.AttackStats(ctx, 24)
+	if err != nil {
+		return Overview{}, err
+	}
+	ov.Attack = &atk
+	atkTop := []string{}
+	for _, t := range atk.Top {
+		if len(atkTop) >= 3 {
+			break
+		}
+		atkTop = append(atkTop, fmt.Sprintf("%s · %s ×%d", t.IP, t.Cat, t.Count))
+	}
+	_ = devTop // 设备台账 TOP 不再上第一格防线（台账数字仍在 ov.Devices）
+
 	ov.Defense = []DefenseLine{
-		// 设备防线：台账里"没批过"与"批过又吊销"的两类设备，都是真实存在的行。
-		{Key: "device", Name: "设备防线", Risk: riskScore(dev.Pending, dev.Revoked), Top: devTop},
+		// 隐身防线：24h 内被网关拒之门外的来源（敲门/隧道/L7 三个面）。
+		// 风险分口径：来源数是主信号（多来源=面上有扫描），总量是次信号。
+		{Key: "attack", Name: "隐身防线", Risk: riskScore(atk.Sources, atk.Denies/50), Top: atkTop},
 		{Key: "account", Name: "账号防线", Risk: riskScore(ov.Users.Locked+ov.Users.Disabled, len(highRisk)), Top: acctTop},
 		// 终端防线的分值直接用最差 posture 报告的真实分（不再二次加工）。
 		{Key: "endpoint", Name: "终端防线", Risk: epRisk, Top: epTop},

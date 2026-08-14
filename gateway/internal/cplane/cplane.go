@@ -80,18 +80,37 @@ func (c *Client) SetMetrics(fn func() sysstat.Sample) { c.metrics = fn }
 // SetIfaces 装上网卡枚举源；不调用即不上报。
 func (c *Client) SetIfaces(fn func() []sysstat.Iface) { c.ifaces = fn }
 
-// Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实。
-// 措辞必须是已发生的事（"已撤销/已生效"），控制面会原样落审计——谎报即审计失实。
+// Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实，
+// 或一次**已实际发生**的拒绝（安全事件，kind=sec-deny）。
+// 措辞必须是已发生的事（"已撤销/已生效/已拒绝"），控制面会原样落审计——谎报即审计失实。
 type Event struct {
 	TS     int64  `json:"ts"`     // 网关侧执行时刻（Unix 秒）
-	Kind   string `json:"kind"`   // revoke-applied | policy-applied
+	Kind   string `json:"kind"`   // revoke-applied | policy-applied | nat-applied | sec-deny
 	Detail string `json:"detail"` // 事实描述（中文，含关键参数）
+	// 以下三个字段只有安全事件（sec-deny）携带；回执类事件缺省即零值不序列化。
+	// 旧控制面不认识它们也无碍——Detail 里已含同样的事实（人读），字段是给统计（机读）的。
+	Src string `json:"src,omitempty"` // 拒绝的来源 IP（secevent 溢出聚合时为「（多源聚合）」）
+	// Cat 细分类别（有限枚举，攻击源统计的分类键）：
+	//   knock-envelope|knock-token|knock-use|knock-replay|knock-banned（SPA 五种）
+	//   proxy-unauth|proxy-revoked|proxy-preamble|proxy-ssrf|proxy-authz（L4 五种）
+	//   web-ticket|web-ticket-replay|web-entry-banned|web-res-missing|web-entry-authz
+	//   web-cookie|web-cookie-cross|web-cross-origin|web-banned|web-authz（L7 十种）
+	// 控制面按 cat 落攻击源计数表；改枚举须同步 control/internal/store/attack.go 的中文名映射。
+	Cat   string `json:"cat,omitempty"`
+	Count int    `json:"count,omitempty"` // 该 (Cat,Src) 在节流窗口内的聚合次数（见 internal/secevent）
 }
 
 // QueueEvent 把一条回执入队，随下次心跳带走；队列满时丢最旧（回执是尽力而为的
 // 观测通道，不是执行通道——安全动作本身已在网关本地完成，丢回执不影响防护）。
 func (c *Client) QueueEvent(kind, detail string) {
 	c.events.push(Event{TS: time.Now().Unix(), Kind: kind, Detail: detail})
+}
+
+// QueueSecEvent 把一条**已节流**的安全事件（拒绝）入队。调用方是 internal/secevent
+// 的上报器——绝不要绕过它直接调这里：SPA 收任意 UDP，不节流的洪泛会把 64 条
+// 队列冲成全噪声，挤掉真正该留痕的回执与第一现场。
+func (c *Client) QueueSecEvent(cat, src, detail string, count int) {
+	c.events.push(Event{TS: time.Now().Unix(), Kind: "sec-deny", Detail: detail, Src: src, Cat: cat, Count: count})
 }
 
 // DroppedEvents 返回因队列溢出被丢弃的回执累计条数（观测/测试用）。

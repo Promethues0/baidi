@@ -32,6 +32,7 @@ import (
 	"baidi.dev/gateway/internal/natfw"
 	"baidi.dev/gateway/internal/proxy"
 	"baidi.dev/gateway/internal/resource"
+	"baidi.dev/gateway/internal/secevent"
 	"baidi.dev/gateway/internal/spa"
 	"baidi.dev/gateway/internal/sysstat"
 	"baidi.dev/gateway/internal/webproxy"
@@ -175,6 +176,10 @@ func main() {
 	// ★装配必须排在控制面对接**之前**：强制下线的 L7 执行方（webSrv.KillUser）要被
 	// applyRevoked 闭包捕获，而那个闭包在控制面块里当场就会被首轮策略调用。
 	// 放在后面赋值就是一个数据竞争 + 首轮强制下线切不到 L7 连接。
+	// 安全事件上报器：三处拒绝点（SPA/L4/L7）共用一个节流器。先建后绑——
+	// 各监听的构造早于控制面客户端；未配 -control 就永不 Bind，保持空转（只落本机日志）。
+	secRep := secevent.New(nil)
+
 	var webSrv *webproxy.Server
 	if *webAddr != "" {
 		sessKey, kerr := webproxy.NewSessionKey()
@@ -188,6 +193,7 @@ func main() {
 			TrustedProxies: webTrustedProxies,
 			ExternalHost:   *webExtHost,
 			GatewayID:      *gwid,
+			SecEvents:      secRep,
 		})
 		if err != nil {
 			log.Fatalf("七层 Web 代理装配失败: %v", err)
@@ -242,6 +248,9 @@ func main() {
 		}
 		slog.Info("控制面身份：mTLS 客户端证书", "cert", *mtlsCert)
 		cp.SetTunnelFP(tunnelFP) // 隧道证书指纹随后续每次注册心跳上报，供客户端钉扎
+		// 安全事件从此有了去处：拒绝经节流后随心跳带给控制面（落审计 + 攻击源统计）。
+		secRep.Bind(cp.QueueSecEvent)
+		secRep.StartFlusher(time.Minute)
 		cp.SetVersion(version)   // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
 		// 七层落点随心跳上报：控制面据此拼出浏览器该跳的入口 URL。没开就不上报，
 		// 控制面于是能对门户如实回「本网关未开启七层 Web 代理」，而不是发一张跳不通的票。
@@ -422,7 +431,7 @@ func main() {
 	}
 
 	go func() {
-		if err := spa.Serve(*spaAddr, verifier, *ttl, al, *strictKnock, *knockMaxTTL); err != nil {
+		if err := spa.Serve(*spaAddr, verifier, *ttl, al, *strictKnock, *knockMaxTTL, secRep); err != nil {
 			log.Fatalf("SPA 监听失败: %v", err)
 		}
 	}()
@@ -430,13 +439,13 @@ func main() {
 	// 证书已在上文备妥（指纹须先于注册上报），这里只负责监听。
 	if *gm {
 		slog.Info("隧道加密：国密 TLCP（持久化 CA 签发的 SM2 双证书）", "certdir", *certDir)
-		if err := proxy.ServeTLCP(*proxyAddr, tlcpCerts, reg, al); err != nil {
+		if err := proxy.ServeTLCP(*proxyAddr, tlcpCerts, reg, al, secRep); err != nil {
 			log.Fatalf("TLCP 代理监听失败: %v", err)
 		}
 		return
 	}
 	slog.Info("隧道加密：通用 TLS（自签）")
-	if err := proxy.Serve(*proxyAddr, tlsCert, reg, al); err != nil {
+	if err := proxy.Serve(*proxyAddr, tlsCert, reg, al, secRep); err != nil {
 		log.Fatalf("代理监听失败: %v", err)
 	}
 }

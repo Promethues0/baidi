@@ -151,3 +151,60 @@ func TestGatewayRegisterBodyTooLargeRejected(t *testing.T) {
 		t.Fatalf("正常心跳应 200，返回 %d：%s", w.Code, w.Body.String())
 	}
 }
+
+// 安全事件（sec-deny）：审计 verdict=deny（不再一律 ok）+ 机读字段落攻击源统计；
+// 回执类事件维持 verdict=ok；旧网关不带机读字段时审计照落、统计不炸。
+func TestGatewaySecEventsVerdictAndAttackStats(t *testing.T) {
+	h, st := gwReceiptServer(t)
+	body := `{
+		"id":"gw-1","proxy":":18443","spa":":18201",
+		"events":[
+			{"ts":1754800000,"kind":"sec-deny","detail":"SPA 敲门拒绝（令牌无效）","src":"203.0.113.9","cat":"knock-token","count":37},
+			{"ts":1754800001,"kind":"policy-applied","detail":"资源授权策略已生效：资源数 3→4"},
+			{"ts":1754800002,"kind":"sec-deny","detail":"旧网关形态：无机读字段"}
+		]}`
+	if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), body); w.Code != http.StatusOK {
+		t.Fatalf("注册返回 %d：%s", w.Code, w.Body.String())
+	}
+	byVerdict := map[string]int{}
+	for _, e := range dataplaneAudits(t, st) {
+		byVerdict[e.Verdict]++
+	}
+	if byVerdict["deny"] != 2 || byVerdict["ok"] != 1 {
+		t.Fatalf("sec-deny 应落 deny、回执落 ok，实得 %v", byVerdict)
+	}
+	// 机读字段齐全的那条计入攻击源；缺字段的那条只留审计不进统计
+	atk, err := st.AttackStats(t.Context(), 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atk.Sources != 1 || atk.Denies != 37 {
+		t.Fatalf("攻击统计应只计入带机读字段的事件，实得 %+v", atk)
+	}
+	if len(atk.Top) != 1 || atk.Top[0].IP != "203.0.113.9" {
+		t.Fatalf("TOP 应为上报来源，实得 %+v", atk.Top)
+	}
+	// 安全概览的隐身防线由同一份统计驱动
+	code, out := doJSON(t, h, "GET", "/api/v1/overview", adminToken(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("overview http %d", code)
+	}
+	am, _ := out["attack"].(map[string]any)
+	if am == nil || am["denies"].(float64) != 37 {
+		t.Fatalf("概览应带攻击统计，实得 %v", out["attack"])
+	}
+	found := false
+	for _, raw := range out["defense"].([]any) {
+		d := raw.(map[string]any)
+		if d["key"] == "attack" {
+			found = true
+			top, _ := d["top"].([]any)
+			if len(top) != 1 || !strings.Contains(top[0].(string), "203.0.113.9") {
+				t.Fatalf("隐身防线 TOP 应含攻击源，实得 %v", top)
+			}
+		}
+	}
+	if !found {
+		t.Fatal("防线应含 attack 格")
+	}
+}

@@ -153,3 +153,45 @@ func TestPolicyDecodesDenyUsers(t *testing.T) {
 		t.Fatalf("未下发 denyUsers 的资源应解出空名单：%v", byID["oa"])
 	}
 }
+
+// 安全事件（sec-deny）的 src/cat/count 三个机读字段必须随心跳序列化——
+// 控制面攻击源统计按它们分类计数，字段名对不上就是统计永远为零且无报错。
+func TestRegisterCarriesSecEventFields(t *testing.T) {
+	var got map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
+	})
+	c.QueueSecEvent("knock-replay", "203.0.113.9", "SPA 敲门拒绝（一次性令牌已用）", 37)
+
+	if err := c.Register(0, 0, 1, nil); err != nil {
+		t.Fatalf("注册失败：%v", err)
+	}
+	evs, _ := got["events"].([]any)
+	if len(evs) != 1 {
+		t.Fatalf("events 长度 %d，期望 1", len(evs))
+	}
+	ev, _ := evs[0].(map[string]any)
+	if ev["kind"] != "sec-deny" || ev["src"] != "203.0.113.9" || ev["cat"] != "knock-replay" {
+		t.Fatalf("sec-deny 机读字段不符：%v", ev)
+	}
+	if n, _ := ev["count"].(float64); int(n) != 37 {
+		t.Fatalf("count=%v，期望 37", ev["count"])
+	}
+	// 回执类事件不带这三个字段（omitempty）：旧控制面视角下报文形状不变。
+	c2 := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
+	})
+	c2.QueueEvent("policy-applied", "x")
+	if err := c2.Register(0, 0, 1, nil); err != nil {
+		t.Fatalf("注册失败：%v", err)
+	}
+	evs, _ = got["events"].([]any)
+	ev, _ = evs[0].(map[string]any)
+	for _, k := range []string{"src", "cat", "count"} {
+		if _, present := ev[k]; present {
+			t.Errorf("回执类事件不应携带 %s 字段", k)
+		}
+	}
+}

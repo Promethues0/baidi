@@ -105,6 +105,13 @@ func main() {
 			} else if n > 0 {
 				slog.Info("设备状态留存轮转完成", "deleted", n, "retentionHours", cfg.MetricsRetentionHours)
 			}
+			// 攻击源小时桶搭同一班清理车（写入率低得多，但同样没有"不清理"这一档）。
+			before := time.Now().Add(-time.Duration(cfg.AttackRetentionDays) * 24 * time.Hour).Unix()
+			if an, aerr := st.PurgeAttackSources(context.Background(), before); aerr != nil {
+				slog.Error("攻击源留存轮转失败", "err", aerr)
+			} else if an > 0 {
+				slog.Info("攻击源留存轮转完成", "deleted", an, "retentionDays", cfg.AttackRetentionDays)
+			}
 		}
 		purgeMetrics()
 		go func() {

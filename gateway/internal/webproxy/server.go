@@ -18,6 +18,7 @@ import (
 	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/knock"
 	"baidi.dev/gateway/internal/resource"
+	"baidi.dev/gateway/internal/secevent"
 	"baidi.dev/gateway/internal/spa"
 )
 
@@ -66,6 +67,10 @@ type Config struct {
 	// UpgradeRecheck 已升级连接（WebSocket）的授权复查间隔；<=0 用默认值。
 	// 它是逐请求鉴权在长连接上的等价物，见 upgraded.go。
 	UpgradeRecheck time.Duration
+	// SecEvents 安全事件上报器（nil 安全）：每种拒绝除本机日志外，经节流上报
+	// 控制面留痕（心跳捎带落审计 + 攻击源统计）。★L7 端口不受 SPA 隐身保护，
+	// 是全系统唯一直接暴露的 HTTP 面——谁在打它此前只有本机日志知道。
+	SecEvents *secevent.Reporter
 }
 
 const (
@@ -197,6 +202,7 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 	c, err := VerifyTicket(s.cfg.Verifier, r.URL.Query().Get("t"), s.cfg.TicketMaxTTL, s.cfg.GatewayID)
 	if err != nil {
 		slog.Warn("L7 入口拒绝（票据无效）", "src", ip, "err", err.Error())
+		s.cfg.SecEvents.Report("web-ticket", ip, "L7 入口拒绝（票据无效）")
 		writeNotice(w, http.StatusUnauthorized, "访问票据无效",
 			"票据已过期或不属于本网关。请回到应用门户重新点击该应用。")
 		return
@@ -209,6 +215,7 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 	if s.ticketUsed(c) {
 		slog.Warn("L7 入口拒绝（一次性票据已用，重放被拒）", "src", ip, "user", c.Name,
 			"resource", c.Res, "jti", c.Jti)
+		s.cfg.SecEvents.Report("web-ticket-replay", ip, "L7 入口拒绝（一次性票据重放被拒，账号 "+c.Name+"）")
 		writeNotice(w, http.StatusUnauthorized, "访问票据已被使用",
 			"每张票据只能换取一次会话（防止票据从地址栏或代理日志里被重放）。请回到应用门户重新点击该应用。")
 		return
@@ -217,6 +224,7 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 	// 换条 L7 路径照样进得来，而管理台显示他已被切断。
 	if s.cfg.Allow.UserDenied(c.Name) {
 		slog.Warn("L7 入口拒绝（账号在强制下线封禁期内）", "src", ip, "user", c.Name)
+		s.cfg.SecEvents.Report("web-entry-banned", ip, "L7 入口拒绝（账号 "+c.Name+" 在强制下线封禁期内）")
 		writeNotice(w, http.StatusForbidden, "已被强制下线", "账号处于封禁期内，暂时无法接入。")
 		return
 	}
@@ -224,11 +232,13 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 	res, ok := s.cfg.Registry.Lookup(c.Res)
 	if !ok {
 		slog.Warn("L7 入口拒绝（资源未下发到本网关）", "src", ip, "user", c.Name, "resource", c.Res)
+		s.cfg.SecEvents.Report("web-res-missing", ip, "L7 入口拒绝（资源 "+c.Res+" 未下发到本网关，账号 "+c.Name+"）")
 		writeNotice(w, http.StatusNotFound, "资源不存在", "该应用未下发到本网关，请联系管理员。")
 		return
 	}
 	if !s.cfg.Registry.Authorize(c.Name, c.Role, res) {
 		slog.Warn("L7 入口拒绝（无资源授权）", "src", ip, "user", c.Name, "role", c.Role, "resource", c.Res)
+		s.cfg.SecEvents.Report("web-entry-authz", ip, "L7 入口拒绝（账号 "+c.Name+" 无资源 "+c.Res+" 授权）")
 		writeNotice(w, http.StatusForbidden, "无访问授权", "你当前对该应用没有访问权限。")
 		return
 	}
@@ -317,6 +327,7 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 	sess, err := Open(s.cfg.SessionKey, ck.Value)
 	if err != nil {
 		slog.Warn("L7 拒绝（会话 Cookie 无效）", "src", ip, "resource", resID, "err", err.Error())
+		s.cfg.SecEvents.Report("web-cookie", ip, "L7 拒绝（会话 Cookie 无效，资源 "+resID+"）")
 		writeNotice(w, http.StatusUnauthorized, "会话已失效", "请回到应用门户重新点击该应用。")
 		return
 	}
@@ -324,6 +335,7 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 	if sess.Res != resID {
 		slog.Warn("L7 拒绝（Cookie 绑定的资源与请求路径不符——疑似跨应用复用）",
 			"src", ip, "user", sess.User, "cookieRes", sess.Res, "pathRes", resID)
+		s.cfg.SecEvents.Report("web-cookie-cross", ip, "L7 拒绝（Cookie 跨应用复用被拒，账号 "+sess.User+"）")
 		writeNotice(w, http.StatusForbidden, "会话与应用不匹配",
 			"该会话绑定的是另一个应用，不能用来访问本应用。")
 		return
@@ -341,6 +353,7 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 		r.Header.Get("Sec-Fetch-Mode"), r.Header.Get("Sec-Fetch-Dest")); cross {
 		slog.Warn("L7 拒绝（跨应用发起的同源请求）", "src", ip, "user", sess.User,
 			"fromRes", from, "pathRes", resID)
+		s.cfg.SecEvents.Report("web-cross-origin", ip, "L7 拒绝（跨应用发起的同源请求，账号 "+sess.User+"）")
 		writeNotice(w, http.StatusForbidden, "跨应用请求已拒绝",
 			"这个请求是从另一个应用的页面发起的。若确属正常业务，请给该应用配置专属访问域名。")
 		return
@@ -349,6 +362,7 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 	// 强制下线、风险降权（DenyUsers）、JIT 到期都会在下一次策略轮询后从这里生效。
 	if s.cfg.Allow.UserDenied(sess.User) {
 		slog.Warn("L7 拒绝（账号在强制下线封禁期内）", "src", ip, "user", sess.User)
+		s.cfg.SecEvents.Report("web-banned", ip, "L7 拒绝（账号 "+sess.User+" 在强制下线封禁期内，会话已终止）")
 		writeNotice(w, http.StatusForbidden, "已被强制下线", "账号处于封禁期内，会话已终止。")
 		return
 	}
@@ -359,6 +373,7 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 	}
 	if !s.cfg.Registry.Authorize(sess.User, sess.Role, res) {
 		slog.Warn("L7 拒绝（逐请求鉴权未通过）", "src", ip, "user", sess.User, "role", sess.Role, "resource", resID)
+		s.cfg.SecEvents.Report("web-authz", ip, "L7 拒绝（账号 "+sess.User+" 对资源 "+resID+" 的逐请求鉴权未通过）")
 		writeNotice(w, http.StatusForbidden, "访问已被收回",
 			"你对该应用的访问权限已变更（可能是授权调整、终端降级或临时授予到期）。")
 		return

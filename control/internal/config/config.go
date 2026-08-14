@@ -65,6 +65,10 @@ type Config struct {
 	// gateway_metrics 是每网关 15s 一条的写入热点，留一个能关掉清理的开关，
 	// 等于留一个把库撑爆的按钮，而且撑爆前毫无征兆（与审计留存的 0=不清理刻意不同）。
 	MetricsRetentionHours int
+	// AttackRetentionDays 攻击源小时桶（attack_sources）的留存天数。同样没有
+	// "关闭清理"这一档——写入率虽被网关侧节流钉死，被扫描的公网机器日积月累
+	// 照样能堆出一张大表。默认 30 天：概览只看 24h，30 天够做月度回溯。
+	AttackRetentionDays int
 }
 
 // DefaultAlertRetentionDays 已处置告警默认留存 90 天。
@@ -133,7 +137,23 @@ func Load() Config {
 		AuditForwardQueueMax: envInt("BAIDI_AUDIT_FORWARD_QUEUE_MAX", store.DefaultForwardQueueMax),
 		// 设备状态留存：启动时 + 每小时清理超期采样点（见 store.PurgeExpiredGatewayMetrics）。
 		MetricsRetentionHours: clampMetricsRetention(envInt("BAIDI_METRICS_RETENTION_HOURS", DefaultMetricsRetentionHours)),
+		// 攻击源留存：与设备状态同一条清理循环（见 cmd/baidi-control）。
+		AttackRetentionDays: clampAttackRetention(envInt("BAIDI_ATTACK_RETENTION_DAYS", DefaultAttackRetentionDays)),
 	}
+}
+
+// DefaultAttackRetentionDays 攻击源统计默认留存 30 天。
+const DefaultAttackRetentionDays = 30
+
+// MinAttackRetentionDays 留存下限：低于 2 天的话概览的 24h 窗口在跨日清理后会缺口。
+const MinAttackRetentionDays = 2
+
+// clampAttackRetention 把攻击源留存夹到合法区间（非正数不代表"关掉清理"）。
+func clampAttackRetention(d int) int {
+	if d < MinAttackRetentionDays {
+		return DefaultAttackRetentionDays
+	}
+	return d
 }
 
 // envInt 读整数环境变量（解析失败取默认）。

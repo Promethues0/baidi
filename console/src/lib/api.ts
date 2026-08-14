@@ -47,6 +47,13 @@ async function errText(res: Response): Promise<string> {
 export interface KV { name: string; value: number }
 /** 三道防线之一。刻意没有 trend：趋势要有历史快照才算得出来，后端一张历史态势表都没有。 */
 export interface DefenseLine { key: string; name: string; risk: number; top: string[] }
+/** 近 24h 攻击源统计（数据面拒绝事件的聚合，attack_sources 表）。
+ *  trend 的 0 是真实的「这一小时没有拒绝」——与设备指标的 NULL 语义不同。 */
+export interface AttackStat {
+  sources: number; denies: number;
+  top: { ip: string; count: number; cat: string }[];
+  trend: KV[];
+}
 export interface Overview {
   generatedAt: string;
   /** 授信终端台账统计（trusted_devices 真实计数）。"设备此刻是否在线"控制面无从得知，
@@ -58,6 +65,8 @@ export interface Overview {
   auditByKind: KV[];
   verdicts: KV[];
   defense: DefenseLine[];
+  /** 缺席 = 后端没有攻击表（内存种子模式），整块面板不画。 */
+  attack?: AttackStat;
 }
 
 /* ── 与 store.PolicyBundle 同构（策略继承树） ── */

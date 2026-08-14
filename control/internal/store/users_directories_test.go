@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"testing"
+	"time"
 )
 
 // 访问者目录页顶部的身份源分栏必须来自真实数据。
@@ -138,17 +139,40 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 	if ov.Devices.Rate <= 0.66 || ov.Devices.Rate >= 0.67 {
 		t.Errorf("纳管率应为 2/3，实得 %v", ov.Devices.Rate)
 	}
-	// 设备防线的 TOP 实体必须是台账里真实存在的那台待审批设备。
-	var dev DefenseLine
+	// wave7 行动 5 起第一格防线是「隐身防线」（攻击源统计）——设备台账不再顶包，
+	// 但台账数字仍完整落在 ov.Devices（上面已逐项断言）。
+	keys := map[string]bool{}
 	for _, d := range ov.Defense {
-		if d.Key == "device" {
-			dev = d
+		keys[d.Key] = true
+	}
+	if keys["device"] {
+		t.Error("设备台账不应再作为防线格（已被攻击源统计取代）")
+	}
+	if !keys["attack"] {
+		t.Errorf("第一格防线应为 attack（隐身防线），实得 %v", keys)
+	}
+	// 没有任何拒绝事件时：攻击统计如实为零，不编造
+	if ov.Attack == nil || ov.Attack.Sources != 0 || ov.Attack.Denies != 0 {
+		t.Errorf("无拒绝事件时攻击统计应为零值实体，实得 %+v", ov.Attack)
+	}
+	// 落一条拒绝事件后：防线 TOP 出现真实来源
+	if err := st.RecordAttack(ctx, "gw-1", "203.0.113.9", "knock-token", 12, time.Now().Unix()); err != nil {
+		t.Fatalf("RecordAttack: %v", err)
+	}
+	ov, err = st.Overview(ctx)
+	if err != nil {
+		t.Fatalf("Overview: %v", err)
+	}
+	if ov.Attack.Sources != 1 || ov.Attack.Denies != 12 {
+		t.Fatalf("攻击统计应计入拒绝事件，实得 %+v", ov.Attack)
+	}
+	var atk DefenseLine
+	for _, d := range ov.Defense {
+		if d.Key == "attack" {
+			atk = d
 		}
 	}
-	if len(dev.Top) != 1 || dev.Top[0] != "li.fang · ThinkPad" {
-		t.Errorf("设备防线 TOP 应是台账里那台待审批设备，实得 %v", dev.Top)
-	}
-	if dev.Risk == 0 {
-		t.Error("有待审批设备时设备防线风险分不应为 0")
+	if len(atk.Top) != 1 || atk.Risk == 0 {
+		t.Errorf("有攻击源时隐身防线应有 TOP 与非零风险分，实得 %+v", atk)
 	}
 }

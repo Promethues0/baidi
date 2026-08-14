@@ -95,6 +95,41 @@
         </a-card>
       </a-grid-item>
     </a-grid>
+
+    <!-- 攻击源（24h）：数据面拒绝事件的真实聚合（网关心跳上报，attack_sources 表）。
+         后端没有该字段（内存种子模式）就整块不画——绝不造种子攻击。 -->
+    <a-card v-if="ov.attack" class="bd-atk" :bordered="false" style="margin-top: 16px">
+      <template #title>
+        SPA 攻击源（24 小时）
+        <span class="bd-atk__sub">隐身在挡谁——敲门 / 隧道 / Web 三个面的拒绝聚合</span>
+      </template>
+      <div class="bd-atk__grid">
+        <div class="bd-atk__kpis">
+          <div class="bd-atk__kpi"><b>{{ ov.attack.sources }}</b><span>攻击来源</span></div>
+          <div class="bd-atk__kpi"><b>{{ ov.attack.denies }}</b><span>拒绝次数</span></div>
+        </div>
+        <div class="bd-atk__trend">
+          <div class="bd-atk__cols">
+            <div v-for="(kv, i) in ov.attack.trend" :key="i" class="bd-atk__col" :title="`${kv.name} · ${kv.value} 次`">
+              <span class="bd-atk__colfill" :style="{ height: colH(kv.value), background: kv.value ? '#F53F3F' : 'var(--color-fill-3)' }" />
+            </div>
+          </div>
+          <div class="bd-atk__axis">
+            <span>{{ ov.attack.trend[0]?.name }}</span><span>{{ ov.attack.trend[ov.attack.trend.length - 1]?.name }}</span>
+          </div>
+        </div>
+        <div class="bd-atk__top">
+          <div class="bd-atk__toph">TOP 攻击源</div>
+          <div v-for="(t2, i) in ov.attack.top" :key="t2.ip" class="bd-atk__toprow">
+            <span class="bd-line__rank">{{ i + 1 }}</span>
+            <span class="bd-mono bd-atk__ip">{{ t2.ip }}</span>
+            <span class="bd-atk__cat">{{ t2.cat }}</span>
+            <span class="bd-atk__cnt">×{{ t2.count }}</span>
+          </div>
+          <div v-if="!ov.attack.top.length" class="bd-line__none">24 小时内没有任何拒绝——面上很安静</div>
+        </div>
+      </div>
+    </a-card>
   </div>
 </template>
 
@@ -119,10 +154,18 @@ const MOCK: Overview = {
     { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
   ],
   defense: [
-    { key: 'device', name: '设备防线', risk: 28, top: ['ext.zhou · 未授信-Android-3', 'li.fang · ThinkPad-08'] },
+    { key: 'attack', name: '隐身防线', risk: 28, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'] },
     { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
     { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] }
-  ]
+  ],
+  attack: {
+    sources: 6, denies: 87,
+    top: [
+      { ip: '203.0.113.7', count: 41, cat: '敲门令牌无效' },
+      { ip: '198.51.100.4', count: 9, cat: '未敲门直连隧道口' }
+    ],
+    trend: Array.from({ length: 24 }, (_, i) => ({ name: `${String(i).padStart(2, '0')}:00`, value: [0, 2, 0, 5, 12, 3][i % 6] }))
+  }
 };
 
 const ov = ref<Overview>(MOCK);
@@ -135,6 +178,9 @@ const auditMax = computed(() => Math.max(...ov.value.auditByKind.map((b) => b.va
 const verdictMax = computed(() => Math.max(...ov.value.verdicts.map((b) => b.value), 1));
 
 function pct(v: number, max: number) { return `${Math.round((v / max) * 100)}%`; }
+/** 攻击趋势柱高（相对 24h 内最大桶；零桶给 2px 底线示意"这一小时确实没有"）。 */
+const atkMax = computed(() => Math.max(...(ov.value.attack?.trend ?? []).map((k) => k.value), 1));
+function colH(v: number) { return v ? `${Math.max(8, Math.round((v / atkMax.value) * 100))}%` : '2px'; }
 function riskColor(r: number) { return r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
 function riskHex(r: number) { return r >= 40 ? '#F53F3F' : r >= 25 ? '#FF7D00' : '#00B42A'; }
 function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
@@ -173,6 +219,26 @@ onMounted(load);
 .bd-line__score { font-size: 28px; font-weight: 700; }
 .bd-line__unit { font-size: 12px; color: var(--color-text-3); }
 .bd-line__none { font-size: 12px; color: var(--color-text-3); padding: 3px 0; }
+
+/* 攻击源面板 */
+.bd-atk { border-radius: var(--bd-radius); }
+.bd-atk__sub { font-size: 12px; font-weight: 400; color: var(--color-text-3); margin-left: 10px; }
+.bd-atk__grid { display: grid; grid-template-columns: 150px 1fr 300px; gap: 22px; align-items: stretch; }
+@media (max-width: 960px) { .bd-atk__grid { grid-template-columns: 1fr; } }
+.bd-atk__kpis { display: flex; flex-direction: column; gap: 14px; justify-content: center; }
+.bd-atk__kpi b { display: block; font-size: 26px; font-weight: 700; color: var(--color-text-1); }
+.bd-atk__kpi span { font-size: 12px; color: var(--color-text-3); }
+.bd-atk__trend { display: flex; flex-direction: column; justify-content: flex-end; min-width: 0; }
+.bd-atk__cols { display: flex; align-items: flex-end; gap: 3px; height: 84px; }
+.bd-atk__col { flex: 1; display: flex; align-items: flex-end; min-width: 0; }
+.bd-atk__colfill { width: 100%; border-radius: 2px 2px 0 0; transition: height .2s; }
+.bd-atk__axis { display: flex; justify-content: space-between; font-size: 11px; color: var(--color-text-3); margin-top: 6px; }
+.bd-atk__top { min-width: 0; }
+.bd-atk__toph { font-size: 12px; color: var(--color-text-3); margin-bottom: 8px; }
+.bd-atk__toprow { display: flex; align-items: center; gap: 8px; padding: 4px 0; font-size: 13px; }
+.bd-atk__ip { color: var(--color-text-1); font-weight: 600; }
+.bd-atk__cat { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; color: var(--color-text-3); }
+.bd-atk__cnt { color: var(--bd-danger); font-weight: 600; }
 .bd-line__top { margin-top: 14px; }
 .bd-line__top-h { font-size: 12px; color: var(--color-text-3); margin-bottom: 8px; }
 .bd-line__top-row { display: flex; align-items: center; gap: 8px; padding: 3px 0; font-size: 13px; }

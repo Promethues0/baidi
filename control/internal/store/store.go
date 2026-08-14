@@ -108,6 +108,10 @@ type Overview struct {
 	AuditByKind []KV          `json:"auditByKind"`
 	Verdicts    []KV          `json:"verdicts"`
 	Defense     []DefenseLine `json:"defense"`
+	// Attack 近 24h 攻击源统计（数据面拒绝事件的机读聚合，见 attack.go）。
+	// ★指针：nil = 本后端没有攻击表（Memory 种子模式），前端整块面板不画——
+	// 绝不造种子攻击源，「有没有人在打」这件事只有真实数据有资格回答。
+	Attack *AttackStat `json:"attack,omitempty"`
 }
 
 // DeviceStat 授信终端台账统计（trusted_devices 真实计数）。
@@ -150,8 +154,8 @@ type KV struct {
 // 一张历史态势表都没有，种子里那三个箭头（down/up/flat）是纯画上去的。
 // 一个永远指着"下降"的绿箭头，比没有箭头更容易让人以为风险在收敛。
 type DefenseLine struct {
-	Key  string   `json:"key"`  // device | account | endpoint
-	Name string   `json:"name"` // 设备防线 / 账号防线 / 终端防线
+	Key  string   `json:"key"`  // attack | account | endpoint（SQLite；Memory 种子仍是 device 首格）
+	Name string   `json:"name"` // 隐身防线 / 账号防线 / 终端防线
 	Risk int      `json:"risk"` // 0-100 风险分（由真实计数粗算，单调可解释，见 riskScore）
 	Top  []string `json:"top"`  // TOP 风险实体（真实账号 / 设备，没有就是空）
 }

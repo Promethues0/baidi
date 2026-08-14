@@ -454,6 +454,14 @@ CREATE TABLE IF NOT EXISTS webauthn_challenges (
   expires_at INTEGER, consumed INTEGER DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_webauthn_chal_value ON webauthn_challenges(challenge, type);
+-- 攻击源统计（数据面拒绝事件的机读聚合，wave7 行动 5）。
+-- 行 = (网关, 源IP, 拒绝类别, 小时桶)；count 累加网关节流器报来的聚合数。
+-- 写入率被网关侧 5min 节流钉死，读取方是安全概览（见 attack.go）。
+CREATE TABLE IF NOT EXISTS attack_sources (
+  gateway_id TEXT, ip TEXT, cat TEXT, bucket INTEGER, count INTEGER DEFAULT 0, last_at TEXT,
+  PRIMARY KEY(gateway_id, ip, cat, bucket)
+);
+CREATE INDEX IF NOT EXISTS idx_attack_bucket ON attack_sources(bucket);
 -- TOTP 二次认证（RFC 6238）。密钥经 secret 盒 AES-256-GCM 加密、AAD 绑账号
 -- （"totp:"+account，与 auth_source_secrets 同一条纪律：密文行跨账号剪贴直接
 -- 解密失败而不是悄悄生效）。last_counter 是防重放的执行点：记录已成功消费的

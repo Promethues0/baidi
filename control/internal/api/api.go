@@ -1237,21 +1237,40 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	if actor == "" {
 		actor = id // 迁移期明文口回退注册 id
 	}
+	as, _ := s.writer.(store.AttackStore) // Memory 后端没有攻击表：审计照落，统计跳过
 	for _, ev := range events {
 		detail := strings.TrimSpace(ev.Detail)
 		if detail == "" {
 			detail = ev.Kind // 空 detail 至少留下事件种类，不落一条空话
 		}
-		s.auditAs(r, actor, "dataplane", "网关 "+id+" 报告："+detail, "ok")
+		// ★verdict 按事件种类：安全事件（拒绝）落 deny，回执类落 ok。
+		// 此前一律硬编码 "ok"——「网关报告了一次拒绝」在审计判定分布里被数成"允许"，
+		// 安全概览的"拒绝"计数对数据面事件永远为零。
+		verdict := "ok"
+		if ev.Kind == "sec-deny" {
+			verdict = "deny"
+			if ev.Src != "" && ev.Cat != "" && as != nil {
+				// 机读半边：按 (网关, 源IP, 类别) 计入攻击源小时桶。落库失败只记日志——
+				// 统计是观测通道，绝不能挡住同一条事件的审计留痕。
+				if err := as.RecordAttack(r.Context(), id, ev.Src, ev.Cat, ev.Count, time.Now().Unix()); err != nil {
+					slog.Warn("攻击源计数落库失败（审计已留痕）", "gw", id, "src", ev.Src, "err", err.Error())
+				}
+			}
+		}
+		s.auditAs(r, actor, "dataplane", "网关 "+id+" 报告："+detail, verdict)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
-// gwEvent 网关随心跳捎带的一条数据面回执（与 gateway/internal/cplane 的 Event 同构）。
+// gwEvent 网关随心跳捎带的一条数据面回执或安全事件（与 gateway/internal/cplane 的 Event 同构）。
 type gwEvent struct {
 	TS     int64  `json:"ts"`     // 网关侧执行时刻（Unix 秒；仅参考，审计时间以控制面落库为准）
-	Kind   string `json:"kind"`   // revoke-applied | policy-applied
+	Kind   string `json:"kind"`   // revoke-applied | policy-applied | nat-applied | sec-deny
 	Detail string `json:"detail"` // 网关侧生成的事实描述
+	// 以下仅安全事件（sec-deny）携带；旧网关不发，零值即无统计（审计照落）。
+	Src   string `json:"src"`   // 拒绝来源 IP
+	Cat   string `json:"cat"`   // 细分类别（枚举见 store.AttackCatZh）
+	Count int    `json:"count"` // 网关节流窗口内的聚合次数
 }
 
 // handleGatewayPolicy 网关拉取当前资源授权策略（替代静态 resources.json）+ 强制下线撤销名单。

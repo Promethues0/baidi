@@ -18,6 +18,7 @@ import (
 	"gitee.com/Trisia/gotlcp/tlcp"
 
 	"baidi.dev/gateway/internal/resource"
+	"baidi.dev/gateway/internal/secevent"
 	"baidi.dev/gateway/internal/spa"
 )
 
@@ -87,27 +88,28 @@ const (
 )
 
 // Serve 启动通用 TLS 代理监听。reg.Default 为默认回退后端。
-func Serve(addr string, cert tls.Certificate, reg *resource.Registry, al *spa.Allowlist) error {
+// rep 为安全事件上报器（nil 安全）：拒绝除本机日志外，经节流上报控制面留痕。
+func Serve(addr string, cert tls.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
 	ln, err := tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return err
 	}
 	slog.Info("SSL 隧道代理监听（通用 TLS）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al)
+	return serve(ln, reg, al, rep)
 }
 
 // ServeTLCP 启动国密 TLCP 代理监听（SM2 双证书 + SM3/SM4 套件）。
-func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al *spa.Allowlist) error {
+func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
 	ln, err := tlcp.Listen("tcp", addr, &tlcp.Config{Certificates: certs})
 	if err != nil {
 		return err
 	}
 	slog.Info("SSL 隧道代理监听（国密 TLCP）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al)
+	return serve(ln, reg, al, rep)
 }
 
 // serve 是两种监听共享的接受循环（门控/路由逻辑与加密层无关）；信号量封顶并发。
-func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist) error {
+func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
 	sem := make(chan struct{}, maxConcurrent)
 	for {
 		c, err := ln.Accept()
@@ -117,17 +119,18 @@ func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist) error {
 		sem <- struct{}{}
 		go func() {
 			defer func() { <-sem }()
-			handle(c, reg, al)
+			handle(c, reg, al, rep)
 		}()
 	}
 }
 
-func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
+func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) {
 	ip := hostOf(c.RemoteAddr().String())
 	user, role, ok := al.Allowed(ip)
 	if !ok {
 		// 未敲门 → 立即断开（业务对未授权者隐身；内核态 DROP 见 -pf）
 		slog.Warn("代理拒绝（无 SPA 授权）", "src", ip)
+		rep.Report("proxy-unauth", ip, "隧道代理拒绝（无 SPA 授权，直连被断）")
 		_ = c.Close()
 		return
 	}
@@ -140,6 +143,7 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 	// 本连接恰在 KillUser 扫描后落表则漏杀），此处 Allowed 已为 false → 立即断开，杜绝连接逃逸切断。
 	if _, _, ok := al.Allowed(ip); !ok {
 		slog.Warn("代理拒绝（登记后放行窗口已失效，疑似强制下线竞态）", "src", ip, "user", user)
+		rep.Report("proxy-revoked", ip, "隧道代理拒绝（账号 "+user+" 放行窗口已被撤销）")
 		_ = c.Close()
 		return
 	}
@@ -161,6 +165,7 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 	if !good {
 		// 疑似前导但未在预算内读全（截断/超时）→ fail-closed，绝不降级回退默认后端
 		slog.Warn("代理拒绝（前导不完整/超时，fail-closed）", "src", ip, "user", user)
+		rep.Report("proxy-preamble", ip, "隧道代理拒绝（前导不完整/超时，账号 "+user+"）")
 		_ = c.Close()
 		return
 	}
@@ -170,11 +175,13 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist) {
 		res, found := reg.Lookup(rid) // ★ 白名单查表：唯一允许的取后端途径（SSRF 防线）
 		if !found {
 			slog.Warn("代理拒绝（资源未注册/疑似 SSRF）", "src", ip, "user", user, "resource", rid)
+			rep.Report("proxy-ssrf", ip, "隧道代理拒绝（资源 "+rid+" 未注册/疑似 SSRF，账号 "+user+"）")
 			_ = c.Close()
 			return
 		}
 		if !reg.Authorize(user, role, res) {
 			slog.Warn("代理拒绝（无资源授权）", "src", ip, "user", user, "role", role, "resource", rid)
+			rep.Report("proxy-authz", ip, "隧道代理拒绝（账号 "+user+" 无资源 "+rid+" 授权）")
 			_ = c.Close()
 			return
 		}

@@ -13,6 +13,7 @@ import (
 
 	"baidi.dev/gateway/internal/auth"
 	"baidi.dev/gateway/internal/knock"
+	"baidi.dev/gateway/internal/secevent"
 )
 
 // normUser 规范化账号（去首尾空格 + 小写），用作封禁/切断的匹配键——
@@ -207,7 +208,9 @@ func checkKnock(c auth.Claims, protected bool, maxTTL time.Duration) error {
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
 // strict=true 时只接受 control /knock-token 签发的短时效一次性敲门令牌（见 checkKnock）；
 // false 为过渡兼容姿态，仅告警不拒绝——生产务必开启。
-func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, strict bool, knockMaxTTL time.Duration) error {
+// rep 为安全事件上报器（nil 安全）：每种拒绝除本机日志外，还经节流上报控制面留痕——
+// SPA 隐身在挡谁，此前网关一重启就无从回答。
+func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, strict bool, knockMaxTTL time.Duration, rep *secevent.Reporter) error {
 	conn, err := net.ListenPacket("udp", addr)
 	if err != nil {
 		return err
@@ -226,11 +229,13 @@ func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, stri
 		token, protected, err := knock.Open(buf[:n], skew, cache)
 		if err != nil {
 			slog.Warn("SPA 敲门拒绝（重放/信封无效）", "src", ip, "err", err.Error())
+			rep.Report("knock-envelope", ip, "SPA 敲门拒绝（重放/信封无效）")
 			continue
 		}
 		claims, err := v.Verify(token)
 		if err != nil {
 			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
+			rep.Report("knock-token", ip, "SPA 敲门拒绝（令牌无效）")
 			continue
 		}
 		// 用途闸：只认 control 签发的短时效一次性敲门令牌。
@@ -238,6 +243,7 @@ func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, stri
 			if strict {
 				slog.Warn("SPA 敲门拒绝（令牌用途不符）", "src", ip, "user", claims.Name,
 					"role", claims.Role, "use", claims.Use, "err", err.Error())
+				rep.Report("knock-use", ip, "SPA 敲门拒绝（令牌用途不符，账号 "+claims.Name+"）")
 				continue
 			}
 			slog.Warn("SPA 敲门放行了非规范令牌（strict 已关闭，长效会话令牌可绕过控制面三道闸——仅限过渡）",
@@ -253,12 +259,14 @@ func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, stri
 			}
 			if dedupTTL > 0 && cache.Seen("j:"+claims.Jti, dedupTTL) {
 				slog.Warn("SPA 敲门拒绝（一次性令牌已用，主动重放被拒）", "src", ip, "jti", claims.Jti)
+				rep.Report("knock-replay", ip, "SPA 敲门拒绝（一次性令牌已用，主动重放被拒，账号 "+claims.Name+"）")
 				continue
 			}
 		}
 		// Allow 内在同一把锁下复核封禁：即便与并发强制下线相撞，也不会重开放行窗口。
 		if !al.Allow(ip, claims.Name, claims.Role, ttl) {
 			slog.Warn("SPA 敲门拒绝（用户已被强制下线，封禁期内）", "src", ip, "user", claims.Name)
+			rep.Report("knock-banned", ip, "SPA 敲门拒绝（账号 "+claims.Name+" 已被强制下线，封禁期内）")
 			continue
 		}
 		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())

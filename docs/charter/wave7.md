@@ -50,7 +50,8 @@
 
 ### 第二梯队：拒绝留痕与证据链
 
-**5. 网关安全事件上报管道（A 组：FR-MON-05 + FR-AUDIT-02）— M**
+**5. 网关安全事件上报管道（A 组：FR-MON-05 + FR-AUDIT-02）— M ✅ 已落地**
+- 落地记（2026-08-14）：`gateway/internal/secevent` 节流上报器（(类别,IP) 5min 窗、第一现场立即报、内存有界 4096 键、伪造源折叠聚合）；SPA 5 + L4 5 + L7 10 共 20 个拒绝点接入；`cplane.Event` 扩 src/cat/count 机读字段随心跳捎带；控制面 verdict 按 kind 落 deny（不再硬编码 ok）+ `attack_sources` 小时桶 + 30 天留存轮转；安全概览第一格换成「隐身防线」+ SPA 攻击源 24h 面板（来源/次数/趋势/TOP5），零态如实、Memory 无表不画。类别中文名唯一定义 `store.AttackCatZh`。
 - 做什么：网关侧给 SPA 五种敲门拒绝（spa.go:228-261）、L4 五种代理拒绝（proxy.go:130-177）、L7 十种拒绝（webproxy/server.go）加计数与事件入队（扩 `QueueEvent` 的 kind，按 (来源IP,类别) 节流——仿 `auditGrayObserved` 的 5min 纪律，否则 UDP 敲门噪声会刷爆审计）→ 心跳捎带 → 控制面 `gwEvent` 扩 kind 映射（verdict 不再硬编码 "ok"）落 `audit_log` dataplane 类 + 攻击源计数表；安全概览「设备防线」换成真实攻击源统计（IP 数/趋势/TOP5），替掉现在顶包的 trusted_devices 台账。
 - 改哪里：`gateway/internal/spa`、`proxy`、`webproxy`、`cplane`；`control/internal/api/api.go`（gwEvent、心跳体）、`store/overview_sqlite.go`。
 - 为什么值得：SPA 隐身是第一卖点，「谁在敲门」是隐身在挡攻击的唯一可见证据；零信任的「拒绝」比「放行」更需要留痕——现在网关一重启拒绝痕迹即灭失，180 天留存对数据面事件是空话。两个 P0 一条管道解决。

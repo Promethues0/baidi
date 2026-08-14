@@ -11,7 +11,7 @@
 | 4 | 产品升级管理 | ➖ | 升级前校验（版本序/禁降级/强制链路/组件一致性/包签名）、加密配置备份、**客户端灰度真跑通**；服务端换二进制仍由部署脚本执行，集群升级编排未做（集群本就没部署） |
 | 5 | 监控中心 | ✅ | `MonitorDashboard` 安全监控大屏 |
 | 6 | 用户与角色（身份目录） | ✅ | `IdentityUsers/Org/Groups`；**外部目录组映射已真**（LDAP memberOf / OIDC groups → kind=external 用户组，按登录逐次收敛、双源隔离、页面只读，直接进 `SubjectIndex` 供资源授权与认证策略引用）；目录全量同步为 L 级延后项（见 docs/charter/wave7.md D 组） |
-| 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver` |
+| 7 | 认证管理 | ✅ | `IdentityAuth/AuthPolicy/Idp/PwdPolicy/SecPolicy/Waiver`；**外部账号状态回验已真**（LDAP/AD 按 entryDN 周期直查，禁用/过期/删除即禁号+撤窗断隧道，源不可用绝不动手；OIDC 无此协议通道，如实标注） |
 | 8 | 应用管理（资源发布） | ➖ | 隧道应用发布/资源鉴权/JIT 审批已真实现；**七层 Web 代理（8.3.3）已真实现**（控制面签 use=web 短时效一次性票据 → 网关 L7 验票换会话 Cookie → 逐请求重新鉴权 → 反代；XFF 按真实对端重写、Location/Set-Cookie 作用域改写、`web-e2e.sh` 九条断言，含票据重放、跨应用 Cookie、撤权后立即失效三条反例）。仍不做：**HTML 正文绝对链接改写**（无底洞，如实标边界）、**DLP/水印/禁复制打印下载**（属 ch11 UEM，整章不做）、**SSO 免认证代填**；L7 端口不受 SPA 隐身保护，边界见 docs/ARCHITECTURE.md 第七节 |
 | 9 | 终端管理 | ✅ | `IdentityDevices` + `IdentityCompliance`（终端合规基线 = 设备 posture，属身份/设备信任，**保留**） |
 | 10 | 策略管理（全局/用户策略） | ✅ | `Policy` 统一策略 + `PolicySimulator` + `LoginFlowSim` |

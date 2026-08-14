@@ -638,7 +638,7 @@ PRD FR-ARCH-03/04、第 19 章多数据中心。改造前剖面结构上**只装
 - **未与真实 Active Directory / OpenLDAP / Keycloak / Azure AD 实机互通验证过**。所有往返都是对自写的进程内服务端/mock IdP。协议编解码是真的，但 AD 的具体行为（`data 533` 诊断串格式、referral 回法）与真实 IdP 的实现差异（form 编码、字符串型 `exp`、单值 `groups`）是**按文档模拟**的，不是抓包抄的。这条边界和 IPSec 那条一样硬。
 - **LDAP 不支持 referral 追踪**（AD 多域林会表现为「某些域的人登不上」）、**不支持 SASL/GSSAPI/Kerberos**（只做 simple bind）、**嵌套组不展开**（按组授权时嵌套组成员会被判成不在组里）。
 - **`Subject = entryDN` 有代价**：用户改名或跨 OU 移动时 DN 会变，绑定需要重建。AD 的 `objectGUID` 才是真正不变的标识，但它是 AD 专有。
-- **OIDC 没有登出通道**（RP-initiated / back-channel logout 都没做）：**IdP 上禁用了账号，白帝这边 8h 会话照用**。这是目前最需要补的一个洞。
+- **外部账号状态回验已补上 LDAP/AD 半边**（wave7 行动 3）：后台循环按 `entryDN` 直查目录（AD 读 `userAccountControl`/`accountExpires`，通用 LDAP 只有存在性——协议里没有更多语义），目录侧禁用/过期/删除即禁用本地账号并入撤销通道（撤窗断隧道+拒敲门），失效窗从 8h 压到回验周期（`BAIDI_EXTAUTH_RECHECK`，默认 5 分钟）。三条方向纪律：**源不可用绝不动手**（AD 抖一下禁光全员是比 8h 窗大得多的自伤）、只单向禁用不自动恢复（自动恢复会撤销本地管理员的显式禁用）、幂等不刷审计。**OIDC 那半仍是洞**：标准 OIDC 没有"按 sub 查状态"的通道（RP-initiated / back-channel logout 也没做），IdP 禁号后该源账号的 8h 会话照用到自然过期——协议边界如实标注，接了支持 back-channel logout 的 IdP 再补。
 - **RADIUS / 短信网关 / 商密证书三种类型没有实现**，`Kind.Supported()` 会在保存时明确拒绝，控制台上置灰——不再是「能选但静默不生效」。
 
 ### ✅ 认证策略 → 二次认证（真接进登录链路，判不了的两条已冻结）

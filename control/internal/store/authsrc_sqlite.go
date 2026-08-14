@@ -155,6 +155,36 @@ func (s *SQLiteStore) AuthSourceSecret(ctx context.Context, id string) (AuthSour
 
 // ── 外部身份绑定 ──
 
+// ExternalBinding 一条外部身份绑定（回验循环用的最小投影）。
+type ExternalBinding struct {
+	Subject string // 权威标识（LDAP entryDN / OIDC sub）
+	UserID  string
+	Account string
+	Status  string // users.status（回验只碰 active 的行，幂等）
+}
+
+// ExternalBindings 某认证源名下的全部绑定（含本地账号当前状态）。
+// 绑定指向已删除用户的行直接跳过——UserBySubject 对这种行的语义就是"未绑定"。
+func (s *SQLiteStore) ExternalBindings(ctx context.Context, sourceID string) ([]ExternalBinding, error) {
+	rows, err := s.db.QueryContext(ctx, `
+SELECT b.subject, u.id, u.account, COALESCE(u.status,'active')
+FROM auth_source_bindings b JOIN users u ON u.id = b.user_id
+WHERE b.source_id=? ORDER BY u.account`, sourceID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ExternalBinding{}
+	for rows.Next() {
+		var b ExternalBinding
+		if err := rows.Scan(&b.Subject, &b.UserID, &b.Account, &b.Status); err != nil {
+			return nil, err
+		}
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 // UserBySubject 按 (认证源, 权威 subject) 查已绑定的本地用户。
 func (s *SQLiteStore) UserBySubject(ctx context.Context, sourceID, subject string) (Credential, bool, error) {
 	var uid string

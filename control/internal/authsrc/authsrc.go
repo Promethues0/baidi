@@ -73,6 +73,35 @@ type RedirectAuthenticator interface {
 	Probe(ctx context.Context) error
 }
 
+// AccountState 一次账号状态回验的结论。
+type AccountState string
+
+const (
+	// StateActive 目录侧账号正常。
+	StateActive AccountState = "active"
+	// StateDisabled 目录侧已禁用（AD userAccountControl 的 ACCOUNTDISABLE 位）。
+	StateDisabled AccountState = "disabled"
+	// StateExpired 目录侧账号已过期（AD accountExpires 已过）。
+	StateExpired AccountState = "expired"
+	// StateGone 目录里已经没有这个条目（被删除或移出可见范围）。
+	StateGone AccountState = "gone"
+)
+
+// StatusChecker 支持按权威标识回验账号状态的源（LDAP/AD：subject = entryDN）。
+//
+// ★这是「持续验证」补洞的关键口（wave7 行动 3）：外部目录禁号后，白帝这边的
+// 8h 会话及其派生（敲门令牌、JIT）在此之前会继续有效到自然过期。
+// OIDC **没有**这个口——标准 OIDC 不提供"按 sub 查账号状态"的通道
+// （RP 拿到的只是登录时刻的断言），这不是偷懒，是协议边界，调用方须如实标注。
+//
+// ★错误语义与 Authenticate 同款且更要紧：**源不可用绝不能被当成任何一种状态**。
+// 这里 fail 的正确方向与本项目常见的 fail-closed 相反——AD 抖一下就把全部外部
+// 账号禁用，是比 8h 失效窗大得多的自伤。只有**目录明确说了**禁用/过期/不存在，
+// 才允许调用方动手。
+type StatusChecker interface {
+	CheckAccount(ctx context.Context, subject string) (AccountState, error)
+}
+
 // 认证失败的两类根因。调用方必须区别对待，见 PasswordAuthenticator.Authenticate 的说明。
 var (
 	// ErrInvalidCredentials 账号或口令不对（也包括账号在目录里不存在）。

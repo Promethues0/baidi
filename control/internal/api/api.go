@@ -88,6 +88,8 @@ type Server struct {
 	// testRedirectAuth 测试注入缝：协议实现另有 30 条真密码学用例，
 	// 这里换桩测的是编排（state 单次性 / 重定向 / 票据交接）。生产恒 nil。
 	testRedirectAuth func(store.AuthSourceRec) (authsrc.RedirectAuthenticator, error)
+	// testStatusChecker 外部账号回验的测试注入缝（同上：LDAP 协议路径另有真服务端用例）。
+	testStatusChecker func(store.AuthSourceRec) (authsrc.StatusChecker, error)
 	// sb 温备节点台账（PRD 15.5）。同 nat/upg：纯内存后端拿不到，集群视图如实回
 	// 「不可判定」而不是「未配置备机」——后者是另一件事（确实没配 vs 记不下来）。
 	sb store.StandbyStore

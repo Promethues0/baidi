@@ -264,8 +264,11 @@ func (d *testDir) handleStartTLS(w *gldap.ResponseWriter, r *gldap.Request) {
 }
 
 func (d *testDir) knownBase(dn string) bool {
+	// 真实目录接受**任意已知子树内 DN** 作为搜索基（base-scope 直查条目就是这么用的，
+	// 回验 CheckAccount 依赖它）；只有整棵树都不认识的 base 才回 noSuchObject。
+	// 原实现只认精确的 baseDN——那会把"按 entryDN 直查"这种合法用法错报成 32。
 	for _, b := range d.opts.baseDNs {
-		if strings.EqualFold(strings.TrimSpace(b), strings.TrimSpace(dn)) {
+		if dnUnder(dn, b) {
 			return true
 		}
 	}

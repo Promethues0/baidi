@@ -36,7 +36,7 @@
 - 为什么值得：「按 AD 安全组授权应用/差异化 MFA」是企业接目录后的第一个真实诉求；采集侧（GroupAttr/EmailAttr）与承接侧（allow_groups/ScopeGroups/SubjectIndex）全部现成，只缺中间一行消费——全清单杠杆最高的一条。
 - 注意：外部组绝不能进 `admin_roles` 语义；手机号映射不做（见边界第 6 条）。
 
-**3. 外部账号状态回验（D 组第一步）— M**
+**3. 外部账号状态回验（D 组第一步）— M ✅ 已落地**
 - 做什么：后台循环（仿 alerts/auditforward 模式）对 LDAP 源按 `Subject=entryDN` 周期查账号状态，禁用/过期即置 `users.status` 并并入既有撤销名单（撤窗断隧道 + 拒敲门链路现成）；OIDC 源暂无回验通道，如实标注。
 - 改哪里：`control/internal/authsrc/ldapsrc`（按 DN 查状态）、`control` 主循环、复用 `api` 撤销通道。
 - 为什么值得：ARCHITECTURE.md 自认「目前最需要补的一个洞」——AD 禁号后 8h 会话及其派生（敲门令牌、JIT）继续有效，直接击穿「持续验证」第一性主张。把失效窗从 8h 压到回验周期，成本远小于全量同步。

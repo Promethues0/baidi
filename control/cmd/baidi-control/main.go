@@ -173,6 +173,7 @@ func main() {
 	// ★与告警循环共用 alertCtx 的取消信号（关服时一起停）；在途的那一批发完即止，
 	// 没发完的留在队列里，下次启动继续——这正是持久化队列存在的意义。
 	srv.StartAuditForwardLoop(alertCtx, cfg.AuditForwardInterval)
+	srv.StartExternalRecheckLoop(alertCtx, cfg.ExtRecheckInterval)
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

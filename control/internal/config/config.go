@@ -48,6 +48,11 @@ type Config struct {
 	// 资源、过期授予没有回收动作），没有轮转就是一张只增不减的表。非法/缺省值落回
 	// DefaultAlertRetentionDays，**没有"关闭清理"这一档**（同 MetricsRetentionHours）。
 	AlertRetentionDays int
+	// ExtRecheckInterval 外部账号状态回验间隔（wave7 行动 3）；<=0 关闭回验（启动时告警：
+	// 外部目录禁号后已签发会话将继续有效至自然过期）。默认 5 分钟——这就是
+	// 「AD 禁号 → 白帝断连」的最大失效窗，按需收紧，代价是对目录的查询频率。
+	ExtRecheckInterval time.Duration
+
 	// AuditForwardInterval 审计外送投递循环的间隔；<=0 关闭投递（队列只增不减，启动时告警）。
 	// ★这条循环是外送功能唯一的执行方——没有它，配置齐全但 SIEM 永远收不到东西。
 	AuditForwardInterval time.Duration
@@ -124,6 +129,7 @@ func Load() Config {
 		// 审计外送：默认每 5s 投递一轮（够快到"刚发生的事很快就在 SIEM 里"，
 		// 又不至于把一个空队列查成热点）。上界的唯一定义在 store，别在这里另抄一份。
 		AuditForwardInterval: envDuration("BAIDI_AUDIT_FORWARD_INTERVAL", 5*time.Second),
+		ExtRecheckInterval:   envDuration("BAIDI_EXTAUTH_RECHECK", 5*time.Minute),
 		AuditForwardQueueMax: envInt("BAIDI_AUDIT_FORWARD_QUEUE_MAX", store.DefaultForwardQueueMax),
 		// 设备状态留存：启动时 + 每小时清理超期采样点（见 store.PurgeExpiredGatewayMetrics）。
 		MetricsRetentionHours: clampMetricsRetention(envInt("BAIDI_METRICS_RETENTION_HOURS", DefaultMetricsRetentionHours)),

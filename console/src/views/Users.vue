@@ -7,6 +7,7 @@
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
+        <button class="bd-btn bd-btn--ghost" @click="openIdle"><icon-clock-circle />闲置治理</button>
         <button class="bd-btn bd-btn--ghost"><icon-upload />批量导入</button>
         <button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button>
       </div>
@@ -312,6 +313,44 @@
         <div class="bd-uform__foot">
           <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
           <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 闲置账号治理（wave7 行动 8②）：按 last_login 识别 + 批量锁定。
+         判据是真实登录记录；「无记录」按建号时间估算并单独标注，绝不混同「从未登录」。 -->
+    <a-modal v-model:visible="idleOpen" title="闲置账号治理" :width="640" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-uform__hint">
+          按最后登录时间识别闲置账号（仅 active 状态）。僵尸账号是最便宜的攻击面；
+          锁定后可随时在用户详情里解锁，license 席位则需删除账号才释放。
+        </div>
+        <div class="bd-idle__bar">
+          <span>超过</span>
+          <a-input-number v-model="idleDays" :min="7" :max="3650" style="width: 110px" size="small" />
+          <span>天未登录</span>
+          <button class="bd-btn" :disabled="idleLoading" @click="loadIdle">{{ idleLoading ? '识别中…' : '识别' }}</button>
+          <div style="flex:1" />
+          <span v-if="idleList.length" class="bd-idle__cnt">命中 {{ idleList.length }} 个，已选 {{ idleSel.length }} 个</span>
+        </div>
+        <div v-if="idleQueried && !idleList.length" class="bd-idle__empty">没有超过 {{ idleDays }} 天未登录的活跃账号。</div>
+        <div v-else-if="idleList.length" class="bd-idle__list">
+          <label v-for="a in idleList" :key="a.id" class="bd-idle__row">
+            <input type="checkbox" :value="a.id" v-model="idleSel" />
+            <span class="bd-idle__acct bd-mono">{{ a.account }}</span>
+            <span class="bd-idle__name">{{ a.name }}</span>
+            <span v-if="a.isAdmin" class="bd-tg" :style="tagStyle('#F53F3F')">管理员</span>
+            <span class="bd-idle__days">
+              <template v-if="a.neverRecorded">无登录记录 · 建号 {{ a.idleDays }} 天</template>
+              <template v-else>{{ a.idleDays }} 天未登录</template>
+            </span>
+          </label>
+        </div>
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="idleOpen = false">关闭</button>
+          <button class="bd-btn bd-btn--danger2" :disabled="!idleSel.length || idleLocking" @click="lockIdle">
+            {{ idleLocking ? '锁定中…' : `批量锁定（${idleSel.length}）` }}
+          </button>
         </div>
       </div>
     </a-modal>
@@ -686,6 +725,55 @@ async function doReset() {
   finally { resetting.value = false; }
 }
 
+/* ── 闲置账号治理（wave7 行动 8②）── */
+interface IdleAccount { id: string; name: string; account: string; lastLogin: string; idleDays: number; neverRecorded: boolean; isAdmin: boolean }
+const idleOpen = ref(false);
+const idleDays = ref(90);
+const idleList = ref<IdleAccount[]>([]);
+const idleSel = ref<string[]>([]);
+const idleLoading = ref(false);
+const idleLocking = ref(false);
+const idleQueried = ref(false);
+
+function openIdle() {
+  idleOpen.value = true;
+  idleList.value = [];
+  idleSel.value = [];
+  idleQueried.value = false;
+}
+
+async function loadIdle() {
+  idleLoading.value = true;
+  try {
+    const r = await api<{ days: number; accounts: IdleAccount[] }>(`/users/idle?days=${idleDays.value}`);
+    idleList.value = r.accounts ?? [];
+    // 默认勾选非管理员（管理员目标需要更高权限且更该逐个斟酌，不进默认选集）
+    idleSel.value = idleList.value.filter((a) => !a.isAdmin).map((a) => a.id);
+    idleQueried.value = true;
+  } catch { Message.error('识别失败：请检查后端连接'); }
+  finally { idleLoading.value = false; }
+}
+
+async function lockIdle() {
+  idleLocking.value = true;
+  try {
+    const r = await api<{ locked: string[]; skipped: { account?: string; reason: string }[] }>(
+      '/users/idle/lock', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ids: idleSel.value })
+      });
+    const n = r.locked?.length ?? 0;
+    if (r.skipped?.length) {
+      Message.warning(`已锁定 ${n} 个；${r.skipped.length} 个跳过：${r.skipped.map((s2) => `${s2.account ?? '?'}（${s2.reason}）`).join('、')}`);
+    } else {
+      Message.success(`已锁定 ${n} 个闲置账号（数据面同步撤窗断隧道）`);
+    }
+    await loadIdle();
+    await load(); // 目录列表状态同步刷新
+  } catch { Message.error('批量锁定失败：请检查权限或后端连接'); }
+  finally { idleLocking.value = false; }
+}
+
 /** 管理员清除用户的 TOTP（丢认证器的 helpdesk 通道）：下次登录回到口令单因素，须本人重新注册。
  *  目标是管理员时后端把门槛抬到 admins 权（与重置口令同一道收口）。 */
 async function resetTotp() {
@@ -792,4 +880,18 @@ onMounted(load);
 .bd-uform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .bd-uform__foot .bd-btn[disabled] { opacity: .6; cursor: not-allowed; }
 .bd-kindtag--ext { color: #0FC6C2; background: #0FC6C214; }
+
+/* 闲置治理弹窗 */
+.bd-idle__bar { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--color-text-2); }
+.bd-idle__cnt { font-size: 12px; color: var(--color-text-3); }
+.bd-idle__empty { padding: 22px 0; text-align: center; font-size: 13px; color: var(--color-text-3); }
+.bd-idle__list { max-height: 320px; overflow: auto; border: 1px solid var(--color-border-2); border-radius: 8px; padding: 4px 0; }
+.bd-idle__row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
+.bd-idle__row:hover { background: var(--color-fill-1); }
+.bd-idle__acct { font-weight: 600; color: var(--color-text-1); }
+.bd-idle__name { color: var(--color-text-2); }
+.bd-idle__days { margin-left: auto; font-size: 12px; color: var(--color-text-3); white-space: nowrap; }
+.bd-btn--danger2 { background: var(--bd-danger, #F53F3F); }
+.bd-btn--danger2:hover:not(:disabled) { background: #d92b2b; }
+.bd-btn--danger2:disabled { opacity: .5; cursor: not-allowed; }
 </style>

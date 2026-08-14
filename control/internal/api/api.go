@@ -531,6 +531,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)        // 禁用/启用/解锁
 	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword)  // 管理员重置口令
 	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)       // 管理员清除 TOTP（丢认证器）
+	// 闲置账号治理：识别（读=任意管理员）+ 批量锁定（写=PermSecurity，管理员目标逐个抬 PermAdmins）
+	mux.HandleFunc("GET /api/v1/users/idle", s.handleIdleAccounts)
+	mux.HandleFunc("POST /api/v1/users/idle/lock", s.handleIdleLock)
 	mux.HandleFunc("PUT /api/v1/users/{id}/membership", s.handleSetUserMembership) // 改组织归属 / 所属用户组
 
 	// 组织与用户组（业务管理 · 用户与角色页内维护；全部 admin）

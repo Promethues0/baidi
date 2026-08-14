@@ -107,6 +107,8 @@ type Server struct {
 	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
 	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
 	gwTunnelFP map[string]string
+	// gwReach 各网关最近心跳捎带的后端拨测快照（wave7 行动 9；心跳刷新态，不落库）。
+	gwReach map[string]gwReachInfo
 	kicked     map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
 	revoked    map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
@@ -240,7 +242,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
-		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{},
+		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
 		standbyAudited:  map[string]int64{},
@@ -565,6 +567,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/pki/gateway-certs/{fingerprint}/revoke", s.handleRevokeGatewayCert)
 	mux.HandleFunc("GET /api/v1/gateways", s.handleGateways)                // 在线网关清单（管理）
 	mux.HandleFunc("GET /api/v1/resources", s.handleResources)              // 资源清单（管理）
+	mux.HandleFunc("GET /api/v1/resources/reach", s.handleResourceReach)   // 逐资源后端可达性（网关拨测聚合）
 	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)          // 新增/改资源
 	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource) // 删资源
 
@@ -1176,6 +1179,9 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// 「这台网关真的一张可用网卡都没有」。混为一谈的话，升级前的旧网关
 		// 每次心跳都会把网卡表连同管理员定的 LAN/WAN 定性一起清空。
 		Ifaces *[]gwIface `json:"ifaces"`
+		// Reach 后端可达性拨测结果（wave7 行动 9）。★指针：nil（字段缺席，旧网关）
+		// = 该网关不会测，聚合时按「未探测」；空数组 = 测了但当前零资源。
+		Reach *[]gwReachResult `json:"reach"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -1222,6 +1228,10 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP
+	// 后端拨测快照：旧网关（nil）不覆盖不清空——它没说任何事。
+	if b.Reach != nil {
+		s.gwReach[id] = gwReachInfo{Results: *b.Reach, At: time.Now().Unix()}
+	}
 	s.mu.Unlock()
 
 	// 设备状态落时序表（缺字段的旧网关在这里是空操作，双向兼容）。

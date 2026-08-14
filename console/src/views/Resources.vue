@@ -57,7 +57,7 @@
       </div>
       <table class="bd-table">
         <thead>
-          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>敏感度</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
+          <tr><th>资源 id</th><th>名称</th><th>后端</th><th>可达性</th><th>敏感度</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="r in resources" :key="r.id">
@@ -68,6 +68,15 @@
               <a-tooltip v-if="r.addrRef || r.svcRef" :content="refLabel(r)">
                 <span class="bd-srctag"><icon-link />源自对象库</span>
               </a-tooltip>
+            </td>
+            <td>
+              <!-- 网关侧真实拨测的聚合（60s 一轮随心跳上报）。「未探测」是三态之一：
+                   旧网关不上报 / 新资源未到下一轮，绝不显示成可达——那正是
+                   「一切显示正常、点开才炸」要消灭的形态。 -->
+              <a-tooltip v-if="reachOf(r.id)" :content="reachTip(r.id)">
+                <span class="bd-rtag" :style="tagStyle(reachColor(reachOf(r.id)!.status))">{{ reachLabel(reachOf(r.id)!.status) }}<template v-if="reachOf(r.id)!.status === 'ok'"> · {{ reachOf(r.id)!.ms }}ms</template></span>
+              </a-tooltip>
+              <span v-else class="bd-rtag" :style="tagStyle('#86909C')">未探测</span>
             </td>
             <td>
               <!-- 高敏是**可执行**的标记：终端被判降权的用户会从这一行的允许集合里被摘掉
@@ -109,7 +118,7 @@
               <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="del(r)">删除</span>
             </td>
           </tr>
-          <tr v-if="!resources.length"><td colspan="8" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
+          <tr v-if="!resources.length"><td colspan="9" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
         </tbody>
       </table>
     </div>
@@ -231,6 +240,21 @@ function seenAgo(ts: number) {
   return `${Math.floor(d / 3600)} 时前`;
 }
 
+/* ── 后端可达性（wave7 行动 9：网关侧拨测聚合）── */
+interface ReachAgg { status: 'ok' | 'partial' | 'fail' | 'unknown'; detail: string[]; ms: number }
+const reach = ref<Record<string, ReachAgg>>({});
+function reachOf(id: string): ReachAgg | undefined { return reach.value[id]; }
+function reachLabel(st: string) {
+  return st === 'ok' ? '可达' : st === 'partial' ? '部分不可达' : st === 'fail' ? '不可达' : '未探测';
+}
+function reachColor(st: string) {
+  return st === 'ok' ? '#00B42A' : st === 'partial' ? '#FF7D00' : st === 'fail' ? '#F53F3F' : '#86909C';
+}
+function reachTip(id: string) {
+  const a = reach.value[id];
+  return a && a.detail.length ? a.detail.join('；') : '暂无拨测详情';
+}
+
 async function load() {
   try {
     const r = await api<ResourcesResp>('/resources');
@@ -246,6 +270,10 @@ async function load() {
     const o = await api<ObjectBundle>('/objects');
     addrs.value = o.addrs || []; services.value = o.services || [];
   } catch { /* 对象库失败不影响资源管理 */ }
+  try {
+    const rc = await api<{ items: Record<string, ReachAgg> }>('/resources/reach');
+    reach.value = rc.items || {};
+  } catch { reach.value = {}; /* 可达性拉不到 → 全部显示未探测（不编造可达） */ }
 }
 
 function refLabel(r: Resource) {

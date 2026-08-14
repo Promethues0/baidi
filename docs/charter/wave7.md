@@ -74,7 +74,8 @@
 - 改哪里：`control/internal/api/api.go`（两条登录成功路径）、`store`、`Users.vue`。
 - 为什么值得：僵尸账号是最便宜的攻击面；license 席位提示已在说「删除闲置账号释放席位」，系统却给不出哪些账号闲置——自相矛盾当场解决。
 
-**9. 网关→后端可达性预检（FR-SCEN-26）— M**
+**9. 网关→后端可达性预检（FR-SCEN-26）— M ✅ 已落地**
+- 落地记（2026-08-14）：`gateway/internal/reachprobe`（60s±20% 抖动、逐资源串行 100ms 间隔、3s 超时、TCP connect 即判不发应用层字节、整轮替换无陈旧行）→ 心跳 `reach` 字段（缺席=旧网关，与 metrics 同款三态）→ 控制面内存聚合 `api.reachAggregate`（只吃新鲜心跳网关 + 快照 5min 内；四态 ok/partial/fail/unknown，partial=部分网关不可达必须与全可达区分）→ `/diag` `checkBackendReach`（无网关 skip / 未上报 warn / 有不可达 fail 且 summary 直指「点开就炸」）+ 资源页「可达性」列（tooltip 逐网关详情；未探测灰标绝不冒充可达）。拨测在网关做——控制面未必可达业务网段。发布向导集成未做（资源页列已覆盖主诉求）。
 - 做什么：网关侧对注册资源的 backend 周期拨测（TCP connect，低频+抖动），结果随心跳 metrics 同模式上报 → 落库 → `/diag` 新增检查项 + 资源页/发布向导显示逐资源可达性。拨测必须在网关做（control 未必可达业务网段）。
 - 改哪里：`gateway/internal/cplane`（心跳捎带）、新采集点、`control/internal/api/diag.go`、`Resources` 页。
 - 为什么值得：直接对症 CLAUDE.md 记载的「历史上最迷惑失败形态」——把「点开应用才炸」的静默失败提前到部署/诊断期可见。与行动 5 共用心跳扩展，合并实现边际成本低。

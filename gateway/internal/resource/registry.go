@@ -102,6 +102,17 @@ func (r *Registry) Count() int {
 	return len(r.byID)
 }
 
+// List 当前全部资源的快照（可达性拨测遍历用；返回副本，调用方随便拿）。
+func (r *Registry) List() []Resource {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	out := make([]Resource, 0, len(r.byID))
+	for _, res := range r.byID {
+		out = append(out, res)
+	}
+	return out
+}
+
 // Authorize 判断身份是否可访问该资源：
 // DenyUsers 命中即拒（先判，压过一切允许来源）；
 // 其后 AllowRoles/AllowUsers 都空 = 不限（等价默认后端语义），任一非空则须命中其一。

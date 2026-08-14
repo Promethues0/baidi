@@ -31,6 +31,7 @@ import (
 	"baidi.dev/gateway/internal/gmcert"
 	"baidi.dev/gateway/internal/natfw"
 	"baidi.dev/gateway/internal/proxy"
+	"baidi.dev/gateway/internal/reachprobe"
 	"baidi.dev/gateway/internal/resource"
 	"baidi.dev/gateway/internal/secevent"
 	"baidi.dev/gateway/internal/spa"
@@ -259,6 +260,26 @@ func main() {
 		// Register 里调一次——CPU 与吞吐是差分指标，采样节奏必须与上报节奏一致。
 		// 首次心跳里这两项必然缺席（还没有第二个采样点），控制面按不可判定落 NULL。
 		cp.SetMetrics(sysstat.New(*statDisk).Sample)
+		// 后端可达性拨测（wave7 行动 9）：拨测必须在网关做——控制面未必可达业务网段。
+		// 60s 一轮 ±20% 抖动，结果随心跳 reach 字段上报；旧控制面按 JSON 语义直接忽略。
+		prober := reachprobe.New(func() ([]string, []string) {
+			list := reg.List()
+			ids := make([]string, len(list))
+			backends := make([]string, len(list))
+			for i, res := range list {
+				ids[i], backends[i] = res.ID, res.Backend
+			}
+			return ids, backends
+		})
+		prober.Start(time.Minute)
+		cp.SetReach(func() []cplane.ReachResult {
+			snap := prober.Snapshot()
+			out := make([]cplane.ReachResult, len(snap))
+			for i, r := range snap {
+				out[i] = cplane.ReachResult{ID: r.ID, OK: r.OK, MS: r.MS, Err: r.Err, TS: r.TS}
+			}
+			return out
+		})
 		cp.SetIfaces(sysstat.Ifaces) // 网卡清单随心跳上报，供控制面配置地址转换时选接口
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
 		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关

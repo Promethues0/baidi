@@ -55,7 +55,10 @@ type Client struct {
 	metrics func() sysstat.Sample
 	// ifaces 本机网卡枚举源（地址转换用）。nil = 不上报，报文里无该字段。
 	ifaces func() []sysstat.Iface
-	httpc  *http.Client
+	// reach 后端可达性拨测快照源（wave7 行动 9）。nil = 不上报，报文里无 reach 字段——
+	// 控制面据此区分「旧网关不会测」与「新网关测了但当前零资源」（空数组）。
+	reach func() []ReachResult
+	httpc *http.Client
 
 	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
 	// 两者分开存是必须的：nil（旧控制面不认识 NAT）与空数组（本网关无策略）
@@ -79,6 +82,19 @@ func (c *Client) SetMetrics(fn func() sysstat.Sample) { c.metrics = fn }
 
 // SetIfaces 装上网卡枚举源；不调用即不上报。
 func (c *Client) SetIfaces(fn func() []sysstat.Iface) { c.ifaces = fn }
+
+// ReachResult 一条资源后端的拨测结果（与 reachprobe.Result 同构；
+// 这里另定义一份是依赖方向使然——cplane 是底层传输，不该 import 采集包）。
+type ReachResult struct {
+	ID  string `json:"id"`
+	OK  bool   `json:"ok"`
+	MS  int    `json:"ms"`
+	Err string `json:"err,omitempty"`
+	TS  int64  `json:"ts"`
+}
+
+// SetReach 装上后端可达性快照源；不调用即不上报（旧网关形态）。
+func (c *Client) SetReach(fn func() []ReachResult) { c.reach = fn }
 
 // Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实，
 // 或一次**已实际发生**的拒绝（安全事件，kind=sec-deny）。
@@ -281,6 +297,10 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	// 与 metrics 同款兼容策略——未装枚举源就连字段都不出现，旧控制面照常忽略。
 	if c.ifaces != nil {
 		payload["ifaces"] = c.ifaces()
+	}
+	// 后端可达性拨测结果（wave7 行动 9）：同款三态兼容——未装拨测源连字段都不出现。
+	if c.reach != nil {
+		payload["reach"] = c.reach()
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)

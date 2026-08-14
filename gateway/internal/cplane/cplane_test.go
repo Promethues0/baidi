@@ -195,3 +195,47 @@ func TestRegisterCarriesSecEventFields(t *testing.T) {
 		}
 	}
 }
+
+// 后端可达性拨测结果随心跳捎带；未装拨测源时连字段都不出现（三态兼容）。
+func TestRegisterCarriesReach(t *testing.T) {
+	var got map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
+	})
+	c.SetReach(func() []ReachResult {
+		return []ReachResult{
+			{ID: "res-oa", OK: true, MS: 3, TS: 1754800000},
+			{ID: "res-db", OK: false, Err: "connection refused", TS: 1754800000},
+		}
+	})
+	if err := c.Register(0, 0, 1, nil); err != nil {
+		t.Fatalf("注册失败：%v", err)
+	}
+	rs, _ := got["reach"].([]any)
+	if len(rs) != 2 {
+		t.Fatalf("reach 应 2 条，实得 %v", got["reach"])
+	}
+	first, _ := rs[0].(map[string]any)
+	if first["id"] != "res-oa" || first["ok"] != true {
+		t.Fatalf("字段名须与控制面解码口径一致，实得 %v", first)
+	}
+	second, _ := rs[1].(map[string]any)
+	if second["err"] != "connection refused" {
+		t.Fatalf("失败原因应携带，实得 %v", second)
+	}
+
+	// 未装拨测源：字段缺席（旧网关形态，控制面按"未上报"三态处理）。
+	// ★Decode 进已有 map 不清旧键，先重置再收。
+	got = nil
+	c2 := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
+	})
+	if err := c2.Register(0, 0, 1, nil); err != nil {
+		t.Fatalf("注册失败：%v", err)
+	}
+	if _, present := got["reach"]; present {
+		t.Fatal("未装拨测源不应出现 reach 字段")
+	}
+}

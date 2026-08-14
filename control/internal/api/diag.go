@@ -88,6 +88,7 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 		s.checkAuditDisk(ctx),
 		s.checkGateways(),
 		s.checkClockSkew(),
+		s.checkBackendReach(),
 		s.checkStealth(),
 		s.checkCluster(ctx),
 		s.checkAuthSources(ctx),

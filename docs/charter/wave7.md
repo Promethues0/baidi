@@ -43,7 +43,7 @@
 - 第二步（记档延后，L）：目录导入/立即与周期同步/同步日志/属性映射配置面（FR-USER-07/20 完整形态），本波不做但写进 TODO 档，别再让它悬在「未表态」。
 
 **4. TOTP 真二因子 + 摘除假方法选择器（FR-AUTH-03/12/16）— S+M ✅ 已落地**
-- 落地记（2026-08-14）：`internal/totp` 自研 RFC 6238（RFC 4226/6238 官方向量钉住）；`totp_secrets` 密文行（secret 盒 AAD 绑账号）+ `ConsumeTotpCounter` 原子防重放；secondFactor 顺序 passkey>TOTP>策略，legacy 123456 仅在「RP 未配且未注册 TOTP」可达；门户/管理台/桌面/移动四端登录都接 `needTotp`（TOTP 是 C/S 客户端唯一可用的标准二因子）；方法多选由 `authpolicy.SecondaryMethods` 驱动置灰，sms/radius/cert/http 保存拒收+迁移清洗。浏览器实测全流程（注册→独立 Python 实现算码确认互通→强制登录→动态码放行）。
+- 落地记（2026-08-14）：`internal/totp` 自研 RFC 6238（RFC 4226/6238 官方向量钉住）；`totp_secrets` 密文行（secret 盒 AAD 绑账号）+ `ConsumeTotpCounter` 原子防重放；secondFactor 顺序 passkey>TOTP>策略，legacy 123456 仅在「RP 未配且未注册 TOTP」可达；门户/管理台/桌面/移动四端登录都接 `needTotp`（TOTP 是 C/S 客户端唯一可用的标准二因子）；方法多选由 `authpolicy.SecondaryMethods` 驱动置灰，sms/radius/cert/http 保存拒收+迁移清洗。浏览器实测全流程（注册→独立 Python 实现算码确认互通→强制登录→动态码放行）。追加管理员重置通道 `DELETE /users/{id}/totp`（PermSecurity + 管理员目标抬 PermAdmins）——云机冒烟时密钥没落盘、演示账号被锁死只能 SSH 删行，当天就证明了「丢认证器无自助恢复码」必须有管理通道。已部署 101.43.125.131 并线上终验（注册→强制→admin 重置→回单因素）。
 - 做什么：两步。①当天可做（S）：认证策略抽屉的 PC/移动 Secondary 多选按 `capabilities` 置灰（与 enhance/exempt 勾选框同款门），摘掉「能选 sms/totp/radius/cert 却全不生效」的假开关——违反自家「界面上任何一个勾都必须真能生效」的纪律。②TOTP 实现（M）：RFC 6238 标准库可写（本项目自研 JWT/IKEv2 的先例），注册（门户 /portal/security 与 passkey 并列）+ `secondFactor` 增加 totp 路径 + 替换 legacyDemoCode 回落。
 - 改哪里：`console/src/views/Auth.vue`、`control/internal/api/webauthn.go`（secondFactor）、新 `control/internal/totp`。
 - 为什么值得：裸 IP 部署（含演示站 101.43.125.131）目前唯一「二因子」是 123456——TOTP 是不依赖可注册域名的唯一标准因子，这条修完演示站才有真 MFA。

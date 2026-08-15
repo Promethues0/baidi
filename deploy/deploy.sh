@@ -33,7 +33,13 @@ if [ "$WIPE" = "1" ]; then
   "${SSH[@]}" "$SERVER_SSH" "sudo bash /tmp/baidi-deploy/wipe-remote.sh"
 fi
 
+# 环境基线自检的旋钮必须**跟着这条路径转发**：install-remote.sh 的自检是本脚本历史上
+# 第一个能拦住部署的闸，而这条 ssh 是白名单式显式转发。不转发的话，中止文案里那句
+# 「BD_FORCE=1 可跳过」在标准部署路径上根本够不着——运维只能改走手工 ssh 拼环境变量，
+# 等于把一条逃生舱写在了门外。
+: "${BD_FORCE:=}" "${BD_MIN_CPU:=}" "${BD_MIN_MEM_MB:=}" "${BD_MIN_DISK_MB:=}" "${BD_DNS_PROBE_HOST:=}"
+
 echo "==> 远程安装（sudo；独立端口 ${BD_HTTPS_PORT}）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

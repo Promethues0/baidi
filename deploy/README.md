@@ -38,6 +38,95 @@ cp config.env.example config.env      # 填 SERVER_SSH / 前缀 / 端口
 
 或分步：`./build.sh` 出 `_out/`，再把 `_out/` 拷到服务器执行 `sudo ./install-remote.sh`。
 
+## 环境要求（install-remote.sh 装机前自检，FR-DEPLOY-01）
+
+`install-remote.sh` 在**任何写操作之前**（useradd / mkdir / install 全在它后面）核对一遍目标机的
+环境基线，输出「达标 / 不达标」结论。中止时这台机器一个字节都没被改过，扩容后原样重跑即可。
+
+阈值分两档，刻意不是一刀切：**硬下限**低于即中止，只收「连一次部署都做不完 / 起来必被 OOM 杀」
+的量；**推荐值**低于只警告。**只有内存与磁盘两项会中止**，其余三项永不中止——理由逐条写在下表，
+共同的一条是：这段代码跑在远端生产机上，一次假阳性 = 一次本可成功的部署被自己的脚本挡在门外，
+而运维此刻手里没有第二条路。「判不了 ≠ 不达标」同样适用（与 posture 采集三态、
+`gateway_metrics` 不补 0 是同一条纪律）：读不出 `/proc/meminfo`、机器上一个 DNS 工具都没有、
+没有 `timedatectl` —— 一律记为警告，绝不当成不达标。
+
+| 检查项 | 取数方式 | 硬下限（中止） | 推荐值（警告） | 不达标的后果 |
+|---|---|---|---|---|
+| CPU 核数 | `nproc`，回退 `getconf _NPROCESSORS_ONLN` | 无（永不中止） | ≥ 2 | 只是慢：TLS/TLCP 握手、SM2 签验、用户态 ESP 加解密都在 CPU 上，单核时与 control 抢同一个核 |
+| 内存总量 | `/proc/meminfo` 的 `MemTotal` | **400 MiB** | ≥ 1900 MiB | 低于硬下限时装得上但跑不住：OOM killer 挑 RSS 最大的（通常正是 `baidi-control`），表现为「部署显示成功、服务过几分钟自己没了」，journal 里只有一行 Killed |
+| 可用磁盘 | `df -Pk` 查 **`BD_PREFIX` 所在分区** | **600 MiB** | ≥ 4096 MiB | 失败点在 `cp -R` 中途，留下半棵 `web/` 目录树而不是一次干净的失败 |
+| DNS 解析 | `getent hosts` 优先，回退 `host` / `dig` / `nslookup` | 无（永不中止） | 能解析 `BD_DNS_PROBE_HOST` | 装机期：本机没有 nginx 时 `apt-get`/`yum` 取包失败；运行期：认证源（LDAP/OIDC）、消息通道（SMTP/webhook）、审计外送（syslog/HTTP）里凡按域名填的目标都连不上，页面上表现为「保存成功、就是不发/不通」 |
+| 时间同步 | `timedatectl show -p NTPSynchronized`，回退 `systemctl is-active chrony/chronyd/systemd-timesyncd/ntp/ntpsec/openntpd` | 无（永不中止） | 有一项在跑 | 见下方「为什么时钟这项写得这么长」 |
+
+### 阈值是怎么定的
+
+不是抄 PRD 的数字，是从这个仓库的实测产物与真实常量推出来的：
+
+- **磁盘 600 MiB 硬下限** = 实测峰值 334 MiB 的约 1.8 倍。峰值这么算：`deploy/_out` 实测
+  127 MiB（`bin/` 45 = control 15.2 + gateway 10.7 + ipsec 10.5 + standby 6.4 + gmca 4.8，
+  `web/` 2.3，`downloads/` 80 = dmg 21 + apk 62），落到 `BD_PREFIX` 一份 127，
+  `deploy.sh` 先 rsync 到 `/tmp/baidi-deploy` 的暂存副本再一份 127，客户端包**原子切换**
+  （先落 `downloads.new` 再瞬时 `mv`）期间第二份 80 —— 合计 334。
+- **磁盘 4096 MiB 推荐值**留的是长期量：审计默认存 180 天（`BAIDI_AUDIT_RETENTION_DAYS`）、
+  告警 90 天、攻击源 30 天、设备指标 72 小时（每网关每 15s 一行，是全系统唯一的高频写入口），
+  外加 journald 与 `POST /api/v1/upgrade/backup` 产出的配置备份归档。
+- **内存 400 MiB 硬下限 / 1900 MiB 推荐值**：这两个数是**按常驻进程数与 Go 运行时量级估的，
+  不是实测 RSS**（本仓库没有做过 RSS 基准，别把它当测量值引用）。常驻的是
+  `baidi-control` + `nginx`，`WITH_GATEWAY=1` 再加 `baidi-gateway`、`WITH_IPSEC=1` 再加
+  `baidi-ipsec`；control 用的是纯 Go SQLite（modernc），页缓存与 GC 都吃内存。
+  两个数都刻意**避开整数边界**：`MemTotal` 报的是内核可用内存，固件与内核预留会吃掉一截，
+  标称 2 GiB 的云主机通常只报 1.9 GiB 出头（具体值随机型浮动），推荐值写 2048 会让
+  **每一台** 2G 机器都无谓报警；同理标称 512 MiB 的机器报不到 500，硬下限写 512
+  会把一台能跑的机器直接拦死 —— 400 这道闸收的是 256 / 384 MiB 那一档。
+- **CPU 推荐 2 核、且永不中止**：1C 云主机是演示/测试环境最常见的形态，核少只会慢，
+  不会装不上也不会起不来。为它中止是纯粹的误杀。
+
+### 为什么时钟这项写得这么长
+
+控制面按**自己的钟**签敲门令牌，网关按**它自己的钟**校验有效期。两边漂过 **90 秒**
+（`knockTTL`，`control/internal/api/api.go:36`）之后，合法客户端的每一次敲门都会以
+「令牌过期」被拒，而现场看不出是时钟问题：SPA 是单包无回应，客户端**看不到任何错误**；
+控制面的签发日志一切正常；网关那边只累积「验签失败」。三处都不指向时钟。
+管理台 `/diag` 的「控制面与网关时钟一致性」（`|偏差| ≥ 90s` 判 fail、`> 10s` 判 warn）
+就是为这个失败形态加的，装完记得去看一眼。装机时补一个守护进程即可：
+
+```bash
+apt-get install -y chrony            # 或
+systemctl enable --now systemd-timesyncd
+```
+
+### 覆盖与调阈值
+
+```bash
+# 强行装（跳过硬下限中止，警告照样打印）
+sudo BD_FORCE=1 BD_PREFIX=/opt/baidi … bash install-remote.sh
+# 单项放宽 / 收紧
+sudo BD_MIN_MEM_MB=256 BD_MIN_DISK_MB=300 … bash install-remote.sh
+# 内网没有公网 DNS，换成能解析的内部域名再判
+sudo BD_DNS_PROBE_HOST=idp.corp.example … bash install-remote.sh
+```
+
+| 变量 | 默认 | 说明 |
+|---|---|---|
+| `BD_FORCE` | `0` | `=1` 跳过硬下限中止；`FORCE=1` 是兼容别名 |
+| `BD_MIN_CPU` | `2` | CPU 推荐核数（调高也只是抬高警告门槛，仍不中止） |
+| `BD_MIN_MEM_MB` / `BD_REC_MEM_MB` | `400` / `1900` | 内存硬下限 / 推荐值（MiB） |
+| `BD_MIN_DISK_MB` / `BD_REC_DISK_MB` | `600` / `4096` | 可用磁盘硬下限 / 推荐值（MiB） |
+| `BD_DNS_PROBE_HOST` | `archive.ubuntu.com` | DNS 自检探的域名 |
+
+> ★**这几个变量必须给在远端那条命令上**。`deploy.sh` 只显式转发固定几个变量
+> （`BD_PREFIX`/`BD_USER`/`CONTROL_PORT`/`WITH_GATEWAY`/`WITH_IPSEC`/…），**不含**上表任何一项——
+> 写进 `config.env` 到不了远端，且不会有任何提示。要走 `deploy.sh` 又要覆盖，
+> 得先给 `deploy.sh` 的 ssh 命令行补上转发。
+
+### 这道自检**没有**覆盖的
+
+- **`/tmp` 所在分区**：`deploy.sh` 的暂存副本落在 `/tmp/baidi-deploy`，而检查只看
+  `BD_PREFIX` 所在分区。`/tmp` 单独挂一块小盘或挂成 tmpfs（吃的是内存）时不在判定范围内。
+- **认证源 / IdP / SMTP 的可达性**：部署时点这些还没配，判不了，刻意不做。
+- **时钟准不准**：判据只是「有没有同步守护进程在跑」。真实偏差要等网关连上来之后，
+  由 `/diag` 的时钟一致性检查回答。
+
 ## 运维
 
 ```bash

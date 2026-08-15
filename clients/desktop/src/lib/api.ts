@@ -122,3 +122,37 @@ export interface ClientProfile {
 export function fetchProfile(): Promise<ClientProfile> {
   return api<ClientProfile>('/client/profile');
 }
+
+/* ── 客户端灰度更新检查（GET /api/v1/client/update，登录用户）──
+ *
+ * ★判定完全在服务端：控制面按 (平台, 账号) 稳定分桶、叠加定向名单/用户组，
+ * 算出「这台机器此刻该被告知哪个版本」，并且只有目标版本**高于**上报版本时才回 update=true。
+ * 客户端刻意不自己算比例、也不自己比版本号——本地算的话改一个配置就能提前领灰度包，
+ * 灰度就失去了"先小范围验证"的意义；两边各写一份版本比较，则迟早出现
+ * 「服务端说不用升、客户端横幅还挂着」这种谁也说不清对错的分歧。
+ */
+export interface ClientUpdateResp {
+  platform: string;
+  /** 客户端上报的当前版本，服务端原样回显。 */
+  current: string;
+  /** 该账号此刻应拿到的版本。平台无发布计划时该字段缺席。 */
+  latest?: string;
+  /** 是否落在灰度批次里（false = 拿的是稳定版）。 */
+  inGray?: boolean;
+  /** 判定理由（定向灰度名单 / 按 N% 命中 / 未落入批次 / 该平台当前没有发布计划）。 */
+  reason: string;
+  /** ★横幅的唯一判据：服务端已排除「版本相同」与「目标更旧（那是降级）」两种情况。 */
+  update: boolean;
+}
+
+/**
+ * 检查客户端更新。
+ *
+ * ★version 必须是本机真实版本，不能留空：服务端对空版本的语义是
+ * 「客户端没报版本 → 把最新版告诉它，由它自行比对」，会无条件回 update=true，
+ * 于是横幅在早已是最新版的机器上常亮。取不到版本就别调（见 Connect.vue 的 checkUpdate）。
+ */
+export function checkClientUpdate(platform: string, version: string): Promise<ClientUpdateResp> {
+  const q = new URLSearchParams({ platform, version });
+  return api<ClientUpdateResp>('/client/update?' + q.toString());
+}

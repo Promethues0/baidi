@@ -13,6 +13,236 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 echo "==> 目标：prefix=$BD_PREFIX user=$BD_USER control_port=$CONTROL_PORT https_port=$BD_HTTPS_PORT"
 
+# ── 部署前环境基线自检（FR-DEPLOY-01）────────────────────────────────────────
+# 姿态照抄本文件下面两处既有预检（nginx default_server 防御① / 端口占用防御②）：
+# 中止时当场说清三件事——检出了什么、为什么这就不行、怎么绕过。
+#
+# 位置刻意放在**一切写操作之前**（useradd / mkdir / install 全在下面）：中止时这台
+# 机器一个字节都没被改过，运维不必先做清理才能重来。
+#
+# 两档阈值，刻意不是一刀切：
+#   硬下限 —— 低于即中止。只收「这台机连一次部署都做不完 / 起来必被 OOM 杀」的量。
+#   推荐值 —— 低于只警告。按 deploy/_out 的实测体积与常驻进程数给出的舒适量。
+# ★宁可宽松不可误杀：这段跑在**远端生产机**上，一次假阳性 = 一次本可成功的部署被
+#   自己的脚本挡在门外，而运维此刻手里没有第二条路。所以 CPU / DNS / 时间同步三项
+#   **永不中止**：它们判出来的「不达标」要么只是慢，要么根本是「判不了」——
+#   而「判不了 ≠ 不达标」是本项目在 posture 采集三态、gateway_metrics 不补 0 上
+#   反复写过的同一条纪律，这里不破例。
+: "${BD_MIN_CPU:=2}"          # CPU 推荐核数（仅警告，永不中止）
+: "${BD_MIN_MEM_MB:=400}"     # 内存硬下限 MiB（低于即中止）
+: "${BD_REC_MEM_MB:=1900}"    # 内存推荐值 MiB（仅警告）
+: "${BD_MIN_DISK_MB:=600}"    # BD_PREFIX 所在分区可用磁盘硬下限 MiB（低于即中止）
+: "${BD_REC_DISK_MB:=4096}"   # 可用磁盘推荐值 MiB（仅警告）
+: "${BD_DNS_PROBE_HOST:=archive.ubuntu.com}"   # DNS 自检探的域名（内网部署可换成内部域名）
+: "${BD_FORCE:=${FORCE:-0}}"  # =1 跳过硬下限中止（FORCE 是兼容别名）
+
+echo "==> 环境基线自检（FR-DEPLOY-01）"
+envck_bad=0    # 低于硬下限的项数（>0 且未 BD_FORCE 即中止）
+envck_warn=0   # 仅警告的项数（含「判不了」）
+
+# 阈值必须是纯数字：下面全用 [ -lt ] 比，喂进非数字会让 test 直接报
+# 「integer expression expected」并在 set -e 下退 2——那条报错既不说是哪个变量，
+# 也不说该怎么改。宁可在这里当场点名。
+for v in BD_MIN_CPU BD_MIN_MEM_MB BD_REC_MEM_MB BD_MIN_DISK_MB BD_REC_DISK_MB; do
+  # ${!v} 间接展开（bash 2 起就有，3.2 也吃）；上面的 := 保证这五个一定已赋值，set -u 不会踩空。
+  case "${!v}" in
+    ''|*[!0-9]*)
+      echo "✗ ${v}=${!v} 不是非负整数，拒绝安装（阈值是拿来做数值比较的）"; exit 1 ;;
+  esac
+done
+
+# 本次会常驻在这台机上的进程，内存文案要按它报数而不是含糊说「几个服务」。
+bd_procs="baidi-control + nginx"
+if [ "${WITH_GATEWAY:-0}" = "1" ]; then bd_procs="${bd_procs} + baidi-gateway"; fi
+if [ "${WITH_IPSEC:-0}" = "1" ]; then bd_procs="${bd_procs} + baidi-ipsec"; fi
+
+# ① CPU 核数。**永不中止**：核少只会慢，不会装不上、也不会起不来；而 1C 云主机是
+#    演示/测试环境最常见的形态，为它中止就是纯粹的误杀。把 BD_MIN_CPU 调高也只是
+#    抬高这行文案的门槛，仍然只警告。
+bd_cpu="$(nproc 2>/dev/null || getconf _NPROCESSORS_ONLN 2>/dev/null || echo '')"
+case "$bd_cpu" in ''|*[!0-9]*) bd_cpu="" ;; esac
+if [ -z "$bd_cpu" ]; then
+  echo "  ⚠ CPU 核数：读不出（无 nproc、也无 getconf）——不可判定，不当作不达标"
+  envck_warn=$((envck_warn + 1))
+elif [ "$bd_cpu" -lt "$BD_MIN_CPU" ]; then
+  echo "  ⚠ CPU 核数：${bd_cpu}（推荐 ≥ ${BD_MIN_CPU}，不中止）"
+  echo "      后果只是慢：TLS/TLCP 握手、SM2 签验、用户态 ESP 加解密全在 CPU 上，"
+  echo "      单核时它们与 baidi-control 抢同一个核，表现为登录与隧道建立变慢。"
+  envck_warn=$((envck_warn + 1))
+else
+  echo "  ✓ CPU 核数：${bd_cpu}"
+fi
+
+# ② 内存总量（/proc/meminfo 的 MemTotal，单位 kB）。
+# ★阈值刻意避开整数边界。MemTotal 报的是内核可用内存，固件与内核预留会吃掉一截：
+#   标称 2 GiB 的云主机通常只报 1.9 GiB 出头，写 2048 会让**每一台** 2G 机器都无谓
+#   报一次警。硬下限 400 同理——标称 512 MiB 的机器报不到 500，它能跑只是紧；
+#   被这道闸拦下的是 256/384 MiB 那一档，那一档是真的起不来。
+#   内存这两个数是**按常驻进程数与 Go 运行时量级估的，不是实测 RSS**（本仓库没做过
+#   RSS 基准）——所以硬下限只敢定在「必然 OOM」那一侧，不拿估计值去卡边界。
+bd_mem_mb=""
+if [ -r /proc/meminfo ]; then
+  bd_mem_kb="$(awk '/^MemTotal:/ {print $2; exit}' /proc/meminfo 2>/dev/null || echo '')"
+  case "$bd_mem_kb" in ''|*[!0-9]*) bd_mem_kb="" ;; esac
+  if [ -n "$bd_mem_kb" ]; then bd_mem_mb=$((bd_mem_kb / 1024)); fi
+fi
+if [ -z "$bd_mem_mb" ]; then
+  echo "  ⚠ 内存总量：读不出 /proc/meminfo——不可判定，不当作不达标"
+  envck_warn=$((envck_warn + 1))
+elif [ "$bd_mem_mb" -lt "$BD_MIN_MEM_MB" ]; then
+  echo "  ✗ 内存总量：${bd_mem_mb} MiB，低于硬下限 ${BD_MIN_MEM_MB} MiB"
+  echo "      这台机装得上但跑不住：常驻的 ${bd_procs} 之外，安装期还要跑 apt/yum 与 openssl；"
+  echo "      OOM killer 挑的是 RSS 最大的那个（通常正是 baidi-control），"
+  echo "      表现为「部署显示成功、服务过几分钟自己没了」，而 journal 里只有一行 Killed。"
+  envck_bad=$((envck_bad + 1))
+elif [ "$bd_mem_mb" -lt "$BD_REC_MEM_MB" ]; then
+  echo "  ⚠ 内存总量：${bd_mem_mb} MiB（推荐 ≥ ${BD_REC_MEM_MB} MiB，不中止）"
+  echo "      常驻进程：${bd_procs}；控制面用的是纯 Go SQLite（modernc），页缓存与 GC 都吃内存。"
+  envck_warn=$((envck_warn + 1))
+else
+  echo "  ✓ 内存总量：${bd_mem_mb} MiB"
+fi
+
+# ③ 目标分区可用磁盘。**看 BD_PREFIX 所在分区，不是 /**：把 /opt 或 /data 单挂一块盘
+#    是常见做法，查 / 得出的数字与安装目标毫无关系——典型症状是「预检通过、cp -R 中途
+#    ENOSPC」，而那时 web/ 已经是半棵目录树了。
+# ★首装时 BD_PREFIX 还不存在（mkdir 在下面几行），而 df 对不存在的路径直接报错，
+#   所以往上找最近一个存在的祖先目录再问。不兜这一下的话，这项检查在首装时永远走不到。
+bd_dfpath="$BD_PREFIX"
+while [ ! -d "$bd_dfpath" ]; do
+  bd_parent="$(dirname "$bd_dfpath")"
+  if [ "$bd_parent" = "$bd_dfpath" ]; then break; fi
+  bd_dfpath="$bd_parent"
+done
+if [ ! -d "$bd_dfpath" ]; then bd_dfpath="/"; fi
+# -P 保证一个文件系统只占一行（长设备名默认会折行，折了 NR==2 取到的是设备名那半行），
+# -k 固定 1024 字节块（不加就吃 POSIXLY_CORRECT/BLOCKSIZE 的脸色，数值会差一倍）。
+bd_avail_mb=""
+bd_avail_kb="$(df -Pk "$bd_dfpath" 2>/dev/null | awk 'NR == 2 {print $4}' || echo '')"
+case "$bd_avail_kb" in ''|*[!0-9]*) bd_avail_kb="" ;; esac
+if [ -n "$bd_avail_kb" ]; then bd_avail_mb=$((bd_avail_kb / 1024)); fi
+if [ -z "$bd_avail_mb" ]; then
+  echo "  ⚠ 可用磁盘：df 读不出 ${bd_dfpath} 所在分区——不可判定，不当作不达标"
+  envck_warn=$((envck_warn + 1))
+elif [ "$bd_avail_mb" -lt "$BD_MIN_DISK_MB" ]; then
+  echo "  ✗ 可用磁盘：${bd_dfpath} 所在分区仅剩 ${bd_avail_mb} MiB，低于硬下限 ${BD_MIN_DISK_MB} MiB"
+  echo "      一次部署的峰值实测约 334 MiB：交付包落盘 127（bin 45 + web 2 + 客户端包 80）"
+  echo "      + /tmp/baidi-deploy 的暂存副本同样 127 + 客户端包原子切换期并存的第二份 80。"
+  echo "      不够时的失败点在 cp -R 中途，留下的是半棵 web/ 目录树而不是一次干净的失败。"
+  envck_bad=$((envck_bad + 1))
+elif [ "$bd_avail_mb" -lt "$BD_REC_DISK_MB" ]; then
+  echo "  ⚠ 可用磁盘：${bd_dfpath} 所在分区剩 ${bd_avail_mb} MiB（推荐 ≥ ${BD_REC_DISK_MB} MiB，不中止）"
+  echo "      推荐值留的是长期量：审计默认存 180 天、告警 90 天、攻击源 30 天、设备指标 72 小时，"
+  echo "      再加 journald 与 /api/v1/upgrade/backup 产出的配置备份归档。"
+  envck_warn=$((envck_warn + 1))
+else
+  echo "  ✓ 可用磁盘：${bd_dfpath} 所在分区剩 ${bd_avail_mb} MiB"
+fi
+
+# ④ DNS 解析自检。**永不中止**，两个理由都实打实：
+#    a) 内网/离线部署本就没有公网 DNS，这类机器解析得了内部域名就够用，拿一个公网
+#       域名解不出来当「环境不达标」是误杀；
+#    b) 工具一个都没有时是「判不了」，不是「不达标」。
+# ★优先 getent：它走 nsswitch（/etc/hosts + DNS + …），与 control/gateway 里 Go 解析器
+#   看到的口径最接近。dig/host 只问 DNS 服务器，会把「靠 /etc/hosts 解析」误判成失败。
+bd_dns_tool=""
+# ★这一步必须能自己停下来。目标机的 resolv.conf 指着一台不可达的 DNS 时，
+# getent/host/nslookup 会按 timeout×attempts×nameservers 阻塞（默认可到几十秒），
+# 而这里没有任何"正在探测"的回显——现场看到的就是部署卡死。dig 自带 +time/+tries，
+# 其余三条套一层 timeout；没有 timeout 命令的机器就照旧（宁可慢，不要因为缺工具而中止）。
+bd_to=""
+if command -v timeout >/dev/null 2>&1; then bd_to="timeout 5"; fi
+
+for t in getent host dig nslookup; do
+  if command -v "$t" >/dev/null 2>&1; then bd_dns_tool="$t"; break; fi
+done
+if [ -z "$bd_dns_tool" ]; then
+  echo "  ⚠ DNS 解析：机器上 getent/host/dig/nslookup 一个都没有——不可判定，不当作不达标"
+  envck_warn=$((envck_warn + 1))
+else
+  bd_dns_ok=1
+  case "$bd_dns_tool" in
+    getent)   ${bd_to} getent hosts "$BD_DNS_PROBE_HOST" >/dev/null 2>&1 || bd_dns_ok=0 ;;
+    host)     ${bd_to} host "$BD_DNS_PROBE_HOST" >/dev/null 2>&1 || bd_dns_ok=0 ;;
+    # dig 解不出来照样退 0（"没有记录" 不是它的错误），所以判的是输出空不空。
+    dig)      if [ -z "$(dig +short +time=3 +tries=1 "$BD_DNS_PROBE_HOST" 2>/dev/null || echo '')" ]; then bd_dns_ok=0; fi ;;
+    nslookup) ${bd_to} nslookup "$BD_DNS_PROBE_HOST" >/dev/null 2>&1 || bd_dns_ok=0 ;;
+  esac
+  if [ "$bd_dns_ok" = "1" ]; then
+    echo "  ✓ DNS 解析：${bd_dns_tool} 解得出 ${BD_DNS_PROBE_HOST}"
+  else
+    echo "  ⚠ DNS 解析：${bd_dns_tool} 解不出 ${BD_DNS_PROBE_HOST}（不中止）"
+    echo "      装机期：本机若还没装 nginx，下面那步 apt-get/yum 取包会失败（脚本会在那里明确报错）。"
+    echo "      运行期：认证源（LDAP/OIDC）、消息通道（SMTP/webhook）、审计外送（syslog/HTTP）里"
+    echo "      凡按域名填的目标都连不上，而这类错在页面上表现为「保存成功、就是不发/不通」。"
+    echo "      → 内网部署本来就没有公网 DNS 的话，这条无视即可；换内部域名复检："
+    echo "         BD_DNS_PROBE_HOST=<你的内部域名> bash install-remote.sh"
+    envck_warn=$((envck_warn + 1))
+  fi
+fi
+
+# ⑤ 时间同步。**永不中止**（判据本身就只是「有没有在跑」，不是「准不准」），
+#    但后果必须说透：控制面按自己的钟签敲门令牌、网关按**它自己的钟**校验有效期，
+#    两边漂过 90s（knockTTL，control/internal/api/api.go:36）之后，合法客户端的每一次
+#    敲门都会以「令牌过期」被拒——SPA 是单包无回应、客户端看不到任何错误；控制面的
+#    签发日志一切正常；网关那边只累积「验签失败」。三处都不指向时钟。
+bd_ntp="unknown"; bd_ntp_svc=""
+if command -v timedatectl >/dev/null 2>&1; then
+  # 刻意不加 --value：那是 systemd 239+ 才有的参数，老机器上整条命令直接报错退出，
+  # 于是「chrony 明明在跑」也会被判成不可判定。解析 KEY=VALUE 新旧都吃得下。
+  case "$(timedatectl show -p NTPSynchronized 2>/dev/null || echo '')" in
+    *=yes) bd_ntp="ok" ;;
+    *=no)  bd_ntp="no" ;;
+  esac
+fi
+if command -v systemctl >/dev/null 2>&1; then
+  for u in chrony chronyd systemd-timesyncd ntp ntpsec openntpd; do
+    if systemctl is-active --quiet "$u" 2>/dev/null; then bd_ntp_svc="$u"; break; fi
+  done
+fi
+if [ "$bd_ntp" = "ok" ]; then
+  echo "  ✓ 时间同步：内核已标记时钟已同步（守护进程：${bd_ntp_svc:-未识别}）"
+elif [ "$bd_ntp" = "no" ] && [ -n "$bd_ntp_svc" ]; then
+  # 有守护进程在跑、内核还没标记：刚开机 / 刚装上时是正常过渡态，不该吓唬人。
+  echo "  ⚠ 时间同步：${bd_ntp_svc} 在跑，但内核尚未标记「已同步」（刚开机或刚装上属正常，几分钟后复查）"
+  envck_warn=$((envck_warn + 1))
+elif [ -n "$bd_ntp_svc" ]; then
+  # timedatectl 不支持 show 子命令（systemd < 239），只知道有进程在跑。
+  # ★不能顺手写成「尚未同步」——那是编一个我们根本没读到的状态；
+  #   同步与否在这台机上就是不可判定。
+  echo "  ⚠ 时间同步：检测到 ${bd_ntp_svc} 在跑，但本机 timedatectl 不支持 show（systemd < 239），同步状态不可判定（不中止）"
+  envck_warn=$((envck_warn + 1))
+else
+  echo "  ⚠ 时间同步：未发现 chrony / systemd-timesyncd / ntp 中任何一个在跑（不中止）"
+  echo "      后果不在这台机上，在敲门链路：控制面与网关的钟漂过 90s（敲门令牌有效期）后，"
+  echo "      合法敲门会被整片判成「令牌过期」——SPA 单包无回应、客户端无错误、控制面签发日志正常，"
+  echo "      只有网关侧累积验签失败，三处都不指向时钟。管理台 /diag 的「控制面与网关时钟一致性」"
+  echo "      就是为这个失败形态加的，装完记得去看一眼。"
+  echo "      → 装一个：apt-get install -y chrony（或 systemctl enable --now systemd-timesyncd）"
+  envck_warn=$((envck_warn + 1))
+fi
+
+# 结论。硬下限项才决定中止；警告项只报数，绝不影响退出码。
+if [ "$envck_bad" -gt 0 ]; then
+  if [ "$BD_FORCE" = "1" ]; then
+    echo "  ⚠ 结论：不达标（${envck_bad} 项低于硬下限）——BD_FORCE=1，继续安装"
+    echo "     出问题时先回看上面这几行，它们已经写明了会怎么坏。"
+  else
+    echo "✗ 结论：环境基线不达标，拒绝安装（${envck_bad} 项低于硬下限，另有 ${envck_warn} 项警告）"
+    echo "  ${BD_PREFIX} 下一个字节都没动，扩容后原样重跑即可。"
+    echo "  （若经 deploy.sh 部署：/tmp/baidi-deploy 里还有约 130 MiB 暂存副本，可 rm -rf 回收）"
+    echo "  → 确知无碍要强行装，把 BD_FORCE=1 加在**远端这条命令**上："
+    echo "     sudo BD_FORCE=1 BD_PREFIX=${BD_PREFIX} … bash install-remote.sh"
+    echo "  ★deploy.sh 只显式转发固定那几个变量，不含 BD_FORCE——写进 config.env 到不了这里。"
+    echo "  → 也可单项放宽（同样必须给在远端命令上）：BD_MIN_MEM_MB=… / BD_MIN_DISK_MB=…"
+    exit 1
+  fi
+elif [ "$envck_warn" -gt 0 ]; then
+  echo "  ✓ 结论：达标（另有 ${envck_warn} 项警告，不影响安装；每条上面都写了后果）"
+else
+  echo "  ✓ 结论：达标"
+fi
+
 # 用户与目录
 id -u "$BD_USER" >/dev/null 2>&1 || useradd -r -s /usr/sbin/nologin "$BD_USER"
 mkdir -p "$BD_PREFIX"/{bin,web,data,etc/tls}

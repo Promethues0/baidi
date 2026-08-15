@@ -15,6 +15,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -27,11 +28,19 @@ import (
 // settingKey 运行时配置在 settings 表里的键。
 const settingKey = "lockout_config"
 
-// maxFailKeys 失败计数表的键数上限。账号维度的键是攻击者可控的——未认证请求
-// 随便编一个不存在的用户名就多一个键，不设上限则「海量随机用户名刷登录失败」
-// 会让 fails 无界增长直至 OOM。达到上限时先清扫已整体滑出窗口的死键，
-// 仍满则淘汰最久没有新失败的那个键（它离自然滑出最近，误伤面最小）。
+// maxFailKeys 失败计数表**每个维度**的键数上限。账号维度与 IP 维度的键都是攻击者
+// 可控的（未认证请求随便编一个用户名 / 换一个源地址就多一个键），不设上限则
+// 「海量随机键刷登录失败」会让 fails 无界增长直至 OOM。
+//
+// ★两个维度**分表各自限额**，不是共用一张表——共用的话，IP 键洪泛能把账号键整体挤出去，
+// 而账号锁恰恰是跨 IP 撞库的唯一防线（PoC：灌 IPv6 /64 里的新地址，受害账号连猜 20 次不锁）。
 const maxFailKeys = 4096
+
+// maxLocks 生效锁定表的上限。锁定本身是安全状态，正常运维下远到不了这个量级；
+// 触到就意味着正在被大规模洪泛，值得一条 error 日志。
+// ★满了淘汰**最快到期**的那条而不是拒绝新建：拒绝新建等于让攻击者用垃圾锁定
+// 把真锁定挡在门外（撑爆表 = 获得豁免），那是把上限做成了绕过手段。
+const maxLocks = 65536
 
 // sweepIntervalSec 到期锁定全量清扫的最小间隔（秒）。逐键懒清理只覆盖
 // 「又被查到的键」，攻击者制造的一次性键没人再查，得靠周期兜底回收内存与库中过期行。
@@ -108,17 +117,39 @@ type Guard struct {
 
 	mu        sync.Mutex
 	cfg       Config
-	fails     map[string][]int64       // kind␀key → 窗口内失败时间戳（键数受 maxFailKeys 约束）
+	// fails 按维度分表：kind → (key → 窗口内失败时间戳)。每个维度各自受 maxFailKeys 约束，
+	// 一个维度被洪泛不会挤掉另一个维度的计数（见 maxFailKeys 注释）。
+	fails     map[string]map[string][]int64
 	locks     map[string]store.Lockout // kind␀key → 生效锁定
 	lastSweep int64                    // 上次到期锁定全量清扫的时刻（Unix 秒）
 }
 
 func lockKey(kind, key string) string { return kind + "\x00" + key }
 
+// normIPKey 把源地址归一成计数键：IPv6 按 /64 聚合，IPv4 原样。
+//
+// ★不聚合的话 IP 维度在 IPv6 环境下形同虚设：运营商给终端的通常是一整个 /64，
+// 攻击者在自己那段里换地址是零成本的（2^64 个），每个新地址都是一个全新的键、
+// 各自从 0 开始计数——「同一个人连错 5 次」这件事永远数不出来。
+// 聚合到 /64 的代价是同段内的用户会互相影响，那与 IPv4 NAT 后共用出口 IP 是同一种取舍。
+func normIPKey(ip string) string {
+	if ip == "" {
+		return ""
+	}
+	addr, err := netip.ParseAddr(ip)
+	if err != nil || !addr.Is6() || addr.Is4In6() {
+		return ip
+	}
+	if p, perr := addr.Prefix(64); perr == nil {
+		return p.String()
+	}
+	return ip
+}
+
 // New 构造守卫：环境变量默认 → settings 运行时覆盖 → 装回库中未到期锁定。
 func New(st Store) *Guard {
 	g := &Guard{st: st, now: time.Now, cfg: FromEnv(),
-		fails: map[string][]int64{}, locks: map[string]store.Lockout{}}
+		fails: map[string]map[string][]int64{}, locks: map[string]store.Lockout{}}
 	if st == nil {
 		return g
 	}
@@ -183,7 +214,7 @@ func (g *Guard) Check(account, ip string) (store.Lockout, bool) {
 		res, hit = g.activeLocked(store.LockKindAccount, account, now, &expired)
 	}
 	if !hit && g.cfg.IPEnabled && ip != "" {
-		res, hit = g.activeLocked(store.LockKindIP, ip, now, &expired)
+		res, hit = g.activeLocked(store.LockKindIP, normIPKey(ip), now, &expired)
 	}
 	g.purgeStore(expired)
 	return res, hit
@@ -251,7 +282,7 @@ func (g *Guard) Fail(ctx context.Context, account, ip string) []store.Lockout {
 		}
 	}
 	if g.cfg.IPEnabled && ip != "" {
-		if l, ok := g.fail1(ctx, store.LockKindIP, ip, now); ok {
+		if l, ok := g.fail1(ctx, store.LockKindIP, normIPKey(ip), now); ok {
 			created = append(created, l)
 		}
 	}
@@ -262,21 +293,27 @@ func (g *Guard) Fail(ctx context.Context, account, ip string) []store.Lockout {
 func (g *Guard) fail1(ctx context.Context, kind, key string, now time.Time) (store.Lockout, bool) {
 	kk := lockKey(kind, key)
 	cut := now.Unix() - int64(g.cfg.WindowSec)
-	if _, exists := g.fails[kk]; !exists && len(g.fails) >= maxFailKeys {
-		g.evictFailKey(cut) // 新键且已达上限：先腾位，保证 fails 键数有界
+	dim := g.fails[kind]
+	if dim == nil {
+		dim = map[string][]int64{}
+		g.fails[kind] = dim
 	}
-	win := make([]int64, 0, len(g.fails[kk])+1)
-	for _, ts := range g.fails[kk] {
+	if _, exists := dim[key]; !exists && len(dim) >= maxFailKeys {
+		g.evictFailKey(dim, cut) // 新键且本维度已达上限：先腾位，保证键数有界
+	}
+	win := make([]int64, 0, len(dim[key])+1)
+	for _, ts := range dim[key] {
 		if ts > cut { // 窗口外的历史失败滑出，不累计
 			win = append(win, ts)
 		}
 	}
 	win = append(win, now.Unix())
 	if len(win) < g.cfg.Threshold {
-		g.fails[kk] = win
+		dim[key] = win
 		return store.Lockout{}, false
 	}
-	delete(g.fails, kk)
+	delete(dim, key)
+	g.evictLocksIfFull(now.Unix())
 	l := store.Lockout{
 		Kind: kind, Key: key,
 		Until:     now.Unix() + int64(g.cfg.DurationSec),
@@ -293,24 +330,64 @@ func (g *Guard) fail1(ctx context.Context, kind, key string, now time.Time) (sto
 	return l, true
 }
 
-// evictFailKey 须持锁调用：先清扫全部已整体滑出窗口的死键（时间戳全部 ≤ cut 的键
-// 已经不可能再贡献锁定，只是没人再碰它才留在表里）；清完仍达上限则淘汰最后一次
-// 失败最早的那个键——它离自然滑出最近，丢掉的计数价值最低。
-func (g *Guard) evictFailKey(cut int64) {
-	var oldestKey string
-	var oldestTS int64
-	for kk, ts := range g.fails {
+// evictFailKey 须持锁调用：先清扫本维度里已整体滑出窗口的死键（时间戳全部 ≤ cut 的键
+// 已经不可能再贡献锁定，只是没人再碰它才留在表里）；清完仍达上限才淘汰一个。
+//
+// ★淘汰判据是「**失败次数最少**，同数再看最后一次失败最早」，不是单纯的最旧。
+// 这一条是安全判据而非性能取舍：已累计 4 次、下一次就要锁定的那个键，恰恰是全表里
+// 最不能丢的——按"最旧"淘汰的话，攻击者只要在两次猜测之间灌满一批更新的键，
+// 受害账号的计数就被整条删掉、下次猜测从 1 重来，账号锁**永远够不到阈值**，
+// 而且全程静默（审计与告警都只在真的建立锁定时才写）。
+// 反过来只失败过 1 次的键丢掉，代价只是攻击者少被记一次——两者不对称。
+func (g *Guard) evictFailKey(dim map[string][]int64, cut int64) {
+	var victimKey string
+	var victimLen int
+	var victimTS int64
+	for k, ts := range dim {
 		last := ts[len(ts)-1] // 追加序即时间序，末位就是最新一次失败
 		if last <= cut {
-			delete(g.fails, kk)
+			delete(dim, k)
 			continue
 		}
-		if oldestKey == "" || last < oldestTS {
-			oldestKey, oldestTS = kk, last
+		n := len(ts)
+		if victimKey == "" || n < victimLen || (n == victimLen && last < victimTS) {
+			victimKey, victimLen, victimTS = k, n, last
 		}
 	}
-	if len(g.fails) >= maxFailKeys && oldestKey != "" {
-		delete(g.fails, oldestKey)
+	if len(dim) >= maxFailKeys && victimKey != "" {
+		delete(dim, victimKey)
+		// ★不能静默：淘汰一个**仍在窗口内**的活计数，意味着防爆破正在被稀释。
+		// 正常运维下这张表远到不了 4096 个活键；到了就说明有人在灌。
+		// 这条日志是「账号锁没触发」唯一的前置信号——少了它，攻击成功时
+		// 用户状态页干干净净、告警一条没有（审计只在真的建立锁定时才写）。
+		slog.Warn("登录失败计数表已满，淘汰了一个仍在计数的键——防爆破可能正被大量新键稀释",
+			"被淘汰键的失败次数", victimLen,
+			"上限", maxFailKeys, "建议", "在前置 nginx 对 /api/v1/*/login 按源限速（limit_req）")
+	}
+}
+
+// evictLocksIfFull 须持锁调用：locks 达上限时先清到期的，仍满则淘汰最快到期的那条。
+//
+// 见 maxLocks 注释：这里刻意**不拒绝新建**——拒绝等于让攻击者靠撑爆表给自己换来豁免。
+func (g *Guard) evictLocksIfFull(now int64) {
+	if len(g.locks) < maxLocks {
+		return
+	}
+	var soonKey string
+	var soonUntil int64
+	for kk, l := range g.locks {
+		if now >= l.Until {
+			delete(g.locks, kk)
+			continue
+		}
+		if soonKey == "" || l.Until < soonUntil {
+			soonKey, soonUntil = kk, l.Until
+		}
+	}
+	if len(g.locks) >= maxLocks && soonKey != "" {
+		delete(g.locks, soonKey)
+		slog.Error("生效锁定数达上限，已淘汰最快到期的一条——这通常意味着正在遭遇大规模登录洪泛",
+			"上限", maxLocks, "被淘汰", soonKey)
 	}
 }
 
@@ -319,7 +396,9 @@ func (g *Guard) evictFailKey(cut int64) {
 func (g *Guard) Success(account string) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	delete(g.fails, lockKey(store.LockKindAccount, account))
+	if dim := g.fails[store.LockKindAccount]; dim != nil {
+		delete(dim, account)
+	}
 }
 
 // Unlock 管理员解锁：删内存锁定 + 删库中记录 + 清残余失败计数（解锁即既往不咎）。
@@ -332,7 +411,9 @@ func (g *Guard) Unlock(ctx context.Context, kind, key string) (bool, error) {
 		mem = false // 已到期的不算「解锁」，只是顺手清理
 	}
 	delete(g.locks, kk)
-	delete(g.fails, kk)
+	if dim := g.fails[kind]; dim != nil {
+		delete(dim, key)
+	}
 	g.mu.Unlock()
 	removed := mem
 	if g.st != nil {

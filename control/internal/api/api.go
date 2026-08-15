@@ -926,12 +926,21 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "新口令不得与旧口令相同")
 		return
 	}
+	// ★旧口令校验同样要过防爆破闸。它需要已持有会话，所以不是未认证爆破面，
+	// 但它是一个**口令预言机**：拿到会话（终端被盗、共享机器上没登出）的人可以
+	// 在这里无限次试旧口令，把「拿到会话」升级成「知道口令」，进而横向复用到别的系统。
+	// 其余四个认证入口（门户/管理台登录、TOTP 第二回合、passkey 断言）早就接了这道闸，
+	// 唯独这里漏了——补上，判据与它们完全一致。
+	if s.loginGateLocked(w, r, c.Sub) {
+		return
+	}
 	cred, found, err := s.store.Credential(r.Context(), c.Sub) // Sub=规范账号
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
 		return
 	}
 	if !found || !auth.VerifyPassword(cred.PassHash, body.Old) {
+		s.noteLoginFailure(r, c.Sub)
 		s.audit(r, "auth", "自助改密失败（旧口令错误）", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "旧口令错误"})
 		return

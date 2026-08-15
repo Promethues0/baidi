@@ -112,12 +112,19 @@
       <div class="bd-card bd-gbody">
         <div v-for="g in globalSecs" v-show="gsec === g.key" :key="g.key">
           <div class="bd-sec__h plain">{{ g.label }}</div>
-          <div v-for="r in g.rows" :key="r.label" class="bd-row">
-            <div class="bd-row__main">
-              <div class="bd-row__label">{{ r.label }}<span v-if="r.risk" class="bd-risk">高影响</span></div>
-              <div class="bd-row__desc">{{ r.desc }}</div>
+          <!--
+            这里原先有六个纯前端开关（图形校验码 / 弱网优化 / 0RTT / 禁止浏览器登录 /
+            强制安装客户端 / 强制升级 / 开机自启），保存时根本不提交、后端一处消费都没有。
+            按「界面上任何一个勾都必须真能生效」的纪律整批摘除，改为如实列出未实现项。
+            其中「禁止用户通过浏览器登录」尤其危险：它看起来能关掉七层 Web 代理这条
+            免客户端接入路径，而实际上那条路照常敞着——一个会被当成已生效的安全措施。
+          -->
+          <div v-if="g.notes.length" class="bd-unimpl">
+            <div class="bd-unimpl__h"><icon-info-circle />本版本未实现（此前这里是几个不生效的演示开关，已摘除）</div>
+            <div v-for="n in g.notes" :key="n.label" class="bd-unimpl__row">
+              <b>{{ n.label }}</b><span>{{ n.why }}</span>
             </div>
-            <a-switch v-model="r.on" size="small" />
+            <div class="bd-unimpl__f">取舍与理由见 docs/ARCHITECTURE.md 第七节</div>
           </div>
           <!-- 防暴力破解 · 真实接线（GET/PUT /security/lockout-config，消费方=控制面登录链路） -->
           <template v-if="g.key === 'brute'">
@@ -379,20 +386,18 @@ const gsec = ref('brute');
 // ★防暴力破解的两个「锁定」开关不在这里：它们已接到真实后端（见 lockCfg），
 // 不再是纯前端摆设。此处只剩尚无后端的演示行。
 const globalSecs = reactive([
-  { key: 'brute', label: '防暴力破解', rows: [
-    { label: '图形校验码', desc: '登录时要求输入校验码（支持中文 / 英文）', on: true }
+  { key: 'brute', label: '防暴力破解', notes: [
+    { label: '图形校验码', why: '不做：账号锁跨 IP 计数、IP 锁按 /64 聚合，两道闸已覆盖撞库；验证码补的那道缝（分布式喷洒）它自己也挡不住，而自研抗 OCR 的验证码做不好等于没做' }
   ] },
-  { key: 'access', label: '接入加速与限制', rows: [
-    { label: '弱网带宽优化', desc: '优化 TCP，抗丢包抗抖动，提升弱网访问体验', on: true },
-    { label: '时延优化（0RTT）', desc: 'Local Handshake + Early Data，仅 PC 短隧道资源生效', on: false },
-    { label: '禁止用户通过浏览器登录', desc: '强制走客户端接入（暂不支持 Linux）', on: false, risk: true }
+  { key: 'access', label: '接入加速与限制', notes: [
+    { label: '弱网带宽优化 / 时延优化（0RTT）', why: '不做：隧道传输层未做拥塞与握手优化，开关背后没有任何实现' },
+    { label: '禁止用户通过浏览器登录', why: '不做：七层 Web 代理（-web）是否开启由网关启动参数决定，控制面没有关掉它的通道——这个开关看起来能封掉免客户端接入，实际封不掉' }
   ] },
-  { key: 'client', label: '客户端强管控', rows: [
-    { label: '强制安装客户端', desc: 'Web 认证页检测未装客户端则弹框引导安装', on: true },
-    { label: '强制升级至最新客户端', desc: '检测到新版本则阻断登录直至更新；开启后自动关闭灰度', on: false, risk: true },
-    { label: '开机自动启动客户端', desc: '默认开关，用户可在客户端侧个性化覆盖', on: true }
+  { key: 'client', label: '客户端强管控', notes: [
+    { label: '强制安装客户端 / 开机自启', why: '不做：需要终端管控通道（现架构客户端只拉不收）' },
+    { label: '强制升级至最新客户端', why: '不做：灰度只决定「告诉谁有新版」，控制面不阻断旧版本登录（见 SCOPE.md 第 4 章）' }
   ] }
-] as { key: string; label: string; rows: { label: string; desc: string; on: boolean; risk?: boolean }[] }[]);
+] as { key: string; label: string; notes: { label: string; why: string }[] }[]);
 
 /* ── 防暴力破解 · 真实接线（BAIDI_LOCKOUT_* 的运行时覆盖，settings 落库）──
  * 开关与阈值直接读写 /security/lockout-config，控制面登录链路即时消费——不是摆设。 */
@@ -507,6 +512,12 @@ onMounted(async () => {
 .bd-editor__foot { display: flex; justify-content: flex-end; gap: 10px; padding: 4px 0 10px; }
 
 /* 全局策略 */
+.bd-unimpl { margin: 10px 0 4px; padding: 12px 14px; background: var(--color-fill-1); border-radius: 8px; }
+.bd-unimpl__h { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--color-text-2); margin-bottom: 8px; }
+.bd-unimpl__row { display: flex; gap: 10px; padding: 5px 0; font-size: 12.5px; line-height: 1.7; }
+.bd-unimpl__row b { flex: none; min-width: 210px; color: var(--color-text-1); font-weight: 600; }
+.bd-unimpl__row span { color: var(--color-text-3); }
+.bd-unimpl__f { margin-top: 8px; font-size: 12px; color: var(--color-text-3); }
 .bd-gsec-nav { width: 200px; flex: none; padding: 8px; }
 .bd-gnav { width: 100%; text-align: left; border: none; background: transparent; font-size: 13px; color: var(--bd-t2); padding: 10px 12px; border-radius: 7px; cursor: pointer; }
 .bd-gnav:hover { background: var(--bd-fill-2); }

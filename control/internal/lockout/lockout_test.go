@@ -163,14 +163,15 @@ func TestFailMapBounded(t *testing.T) {
 		g.Fail(ctx, fmt.Sprintf("spam-%06d", i), "")
 	}
 	g.mu.Lock()
-	n := len(g.fails)
-	_, newest := g.fails[lockKey(store.LockKindAccount, fmt.Sprintf("spam-%06d", maxFailKeys+49))]
+	n := len(g.fails[store.LockKindAccount])
+	_, newest := g.fails[store.LockKindAccount][fmt.Sprintf("spam-%06d", maxFailKeys+49)]
 	g.mu.Unlock()
 	if n > maxFailKeys {
 		t.Fatalf("失败计数键数应有界（≤%d），实际 %d", maxFailKeys, n)
 	}
 	if !newest {
-		t.Fatal("淘汰不应牺牲最新的键（应淘汰最旧的）")
+		// 这批键失败次数相同（各 1 次），同数时按「最后一次失败最早」淘汰 → 最新的那个必须活着
+		t.Fatal("同失败次数时应淘汰最旧的，不该牺牲最新的键")
 	}
 }
 
@@ -183,8 +184,8 @@ func TestFailMapEvictSweepsDeadKeysFirst(t *testing.T) {
 	*now = now.Add(11 * time.Minute) // 全部滑出 10m 窗口
 	g.Fail(ctx, "fresh", "")
 	g.mu.Lock()
-	n := len(g.fails)
-	_, fresh := g.fails[lockKey(store.LockKindAccount, "fresh")]
+	n := len(g.fails[store.LockKindAccount])
+	_, fresh := g.fails[store.LockKindAccount]["fresh"]
 	g.mu.Unlock()
 	if n != 1 || !fresh {
 		t.Fatalf("死键应被整批清扫、只留新键：len=%d fresh=%v", n, fresh)

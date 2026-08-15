@@ -80,7 +80,10 @@
 - 改哪里：`gateway/internal/cplane`（心跳捎带）、新采集点、`control/internal/api/diag.go`、`Resources` 页。
 - 为什么值得：直接对症 CLAUDE.md 记载的「历史上最迷惑失败形态」——把「点开应用才炸」的静默失败提前到部署/诊断期可见。与行动 5 共用心跳扩展，合并实现边际成本低。
 
-**10. 桌面端自助诊断真化（E 组第一步，NFR-OPS-02）— M**
+**10. 桌面端自助诊断真化（E 组第一步，NFR-OPS-02）— M ✅ 已落地**
+- 落地记（2026-08-15）：新 `src-tauri/src/probe.rs`（TCP 探针 + 手写 RFC 1035 DNS 查询，纯标准库不引 crate，10 条单测含畸形应答防护）+ 两条 Tauri 命令（spawn_blocking，不占 async 工作线程）；新 `src/lib/diagnose.ts` 判定层纯函数；`Diagnostics.vue` 重写。**判据是「立刻 EOF」还是「挂住」而非「有没有读到数据」**——TLS/TLCP 都是 client-speaks-first，按"读到字节=网关活着"写会把三种情况全判成故障。**真机验证**：对真 baidi-gateway 实测两端，未敲门 → closed-immediately、SPA 放行后 → held-open、30s 窗口过期后变回 closed-immediately。
+- 三条语义纪律（都反直觉，写进代码注释）：①未接入时连不上是**正确行为**（隐身），判 skip 绝不判 fail；②**只在已接入态探网关口**——未敲门的连接会被网关记成 `proxy-unauth` 安全事件，落成控制面 deny 审计并累加攻击源，否则用户每点一次"一键诊断"就把自己刷进「SPA 攻击源 TOP」；③DNS 探正例 + 反例（`.invalid`）两发，只探正例分不清"隧道内解析器答的"与"系统解析器碰巧也能解析"（白帝对未知名回 REFUSED，系统解析器回 NXDOMAIN 或递归）。
+- 顺带接上一处早就存在却没人调的线：`diag.rs`（531 行，脱敏纪律严谨）与 `diag::collect_diag` 命令一直注册着，而前端 `collect()` 只弹一句假 toast 说生成了 .zip——现在真调它，落纯文本报告到桌面，UI 文案同步改成「诊断报告」。
 - 做什么：Diagnostics.vue 的「网关连通」「专用 DNS 解析」两项从恒 ok 改为真实探测（经 Tauri 命令拨网关隧道口 / 向解析器 VIP 发一次真实查询）；`collect()` 从假 toast 改为真 Tauri 命令打包本地日志（tunnel 日志 + posture 快照 + 剖面快照 + 诊断结果 → zip 落桌面）。
 - 改哪里：`clients/desktop/src/views/Diagnostics.vue`、`src-tauri/src/main.rs`（新增命令）。
 - 为什么值得：假绿诊断比没有诊断更糟——它替坏链路背书，与「隧道显示已接入实际不通」静默失效族直接冲突。该文件自初始壳提交后六波未碰，是全客户端最陈旧的假代码。

@@ -12,8 +12,10 @@ use std::process::{Command, Output};
 use std::sync::OnceLock;
 use tauri::{Emitter, Manager};
 
+mod diag;
 mod elevate;
 mod posture;
+mod probe;
 
 use elevate::{Elevator, Paths, Platform, StartReq};
 
@@ -541,6 +543,40 @@ async fn collect_posture() -> posture::PostureInfo {
     posture::gather_posture()
 }
 
+// ── 自助诊断的两条真探针（wave7 行动 10）──────────────────────────────────
+//
+// 替换掉 Diagnostics.vue 里两个恒 ok 的假检查项。判定不在这里做
+// （什么算正常、什么算故障见 probe.rs 顶部与前端 lib/diagnose.ts）——
+// 那套规则里有几条反直觉的语义翻转（未接入时连不上是**正确行为**），
+// 必须能被纯函数单测钉住，而 Tauri 命令依赖真实网络，测不了。
+//
+// 诊断包（collect_diag）另有其人：见 diag.rs，它早就写好且注册了，
+// 只是前端一直没调——那正是本轮要接上的另一半。
+
+/// TCP 探测：拨一个端口，一个字节都不写，只看它是「立刻断开」还是「被保持着」。
+#[tauri::command]
+async fn probe_tcp(host: String, port: u16, timeout_ms: Option<u64>, read_ms: Option<u64>) -> probe::TcpProbe {
+    let (t, r) = (timeout_ms.unwrap_or(3000), read_ms.unwrap_or(1200));
+    // 同步 IO 放进阻塞线程池：占住 tauri 的 async 工作线程会让整个 invoke 通道卡住
+    // （探测最长 3s+1.2s，足够让用户以为客户端死了）。
+    tauri::async_runtime::spawn_blocking(move || probe::probe_tcp_inner(&host, port, t, r))
+        .await
+        .unwrap_or_else(|e| probe::TcpProbe {
+            kind: "error".into(), ms: 0, head: String::new(), err: format!("探测线程异常：{e}"),
+        })
+}
+
+/// DNS 探测：向指定解析器发一次真实 A 查询（隧道内解析器活在 netstack 的 VIP:53 上）。
+#[tauri::command]
+async fn probe_dns(server: String, port: Option<u16>, name: String, timeout_ms: Option<u64>) -> probe::DnsProbe {
+    let (p, t) = (port.unwrap_or(53), timeout_ms.unwrap_or(2000));
+    tauri::async_runtime::spawn_blocking(move || probe::probe_dns_inner(&server, p, &name, t))
+        .await
+        .unwrap_or_else(|e| probe::DnsProbe {
+            kind: "error".into(), ms: 0, addr: String::new(), err: format!("探测线程异常：{e}"),
+        })
+}
+
 /// 显示并聚焦主窗口（从托盘唤起）。
 fn show_main(app: &tauri::AppHandle) {
     if let Some(w) = app.get_webview_window("main") {
@@ -563,7 +599,10 @@ fn main() {
             tunnel_stop,
             force_quit,
             collect_posture,
-            open_app_url
+            diag::collect_diag,
+            open_app_url,
+            probe_tcp,
+            probe_dns
         ])
         .setup(|app| {
             // 托盘菜单：状态（禁用只读）/ 显示主窗口 / 退出

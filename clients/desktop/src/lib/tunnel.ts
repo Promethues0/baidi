@@ -181,6 +181,25 @@ export async function openAppUrl(url: string): Promise<void> {
   await invoke('open_app_url', { url });
 }
 
+/**
+ * 自助诊断用：数据面**此刻真正在用**的隧道内解析器配置。
+ *
+ * ★必须取 startedOpts 而不是现算剖面，理由与接入信息那处同源（见上方注释）：
+ * 记录表在 baidi-tun 拉起那一刻就定死了。拿刚获批的新域名去探运行中的隧道，
+ * 解析器必然回 REFUSED——那是「需重连才生效」，不是解析器故障，
+ * 判成红色会把用户引向完全错误的排查方向。
+ * 未运行时回当前剖面（那时诊断页对该项本就判 skip，只用于展示"下次会用什么"）。
+ */
+export function effectiveDNS(running: boolean): { server: string; firstName: string } {
+  const eff = running && startedOpts ? startedOpts : resolveTunOpts();
+  let firstName = '';
+  try {
+    const rec = eff.dnsRecords ? (JSON.parse(eff.dnsRecords) as Record<string, string>) : {};
+    firstName = Object.keys(rec)[0] || '';
+  } catch { /* 记录表解析不了就当没有——诊断页会显示"未启用" */ }
+  return { server: eff.dnsListen || '', firstName };
+}
+
 export async function tunnelStop(): Promise<void> {
   await invoke('tunnel_stop');
   startedOpts = null;

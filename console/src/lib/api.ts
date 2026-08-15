@@ -135,6 +135,33 @@ export interface DirUser {
 }
 export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; groups: UserGroup[]; users: DirUser[] }
 
+/* ── 用户批量导入导出（GET /users/export → CSV 附件；POST /users/import ← CSV 原文）──
+ *
+ * ★导出**不含口令哈希、也不含口令强度**：前者是能拿去离线爆破的材料，后者是一张
+ * "先打哪个账号"的排序表。两者都由后端的 store.UserExportRow 从类型层面排除。
+ * ★导入**只建普通用户**：CSV 里出现「角色 / role / 管理员角色」一类列，后端整份拒收
+ * （建管理员的唯一入口是 /api/v1/admins）。界面必须照实说，别让人以为能用表格发管理员。
+ */
+export interface UserImportRow {
+  /** 文件里的**物理行号**（含表头行，故首个数据行通常是 2）——管理员拿它回 Excel 定位。 */
+  row: number;
+  account?: string;
+  name?: string;
+  /** 成功时给新账号 id。 */
+  id?: string;
+  /** 失败时给原因（后端原话，直接展示）。 */
+  reason?: string;
+}
+export interface UserImportResp {
+  ok: boolean;
+  /** 文件里的数据行总数（= created + failed）。 */
+  total: number;
+  created: UserImportRow[];
+  failed: UserImportRow[];
+  /** 表头里没被识别的列。必须展示：填了却什么都没发生，是最难自查的一种"导入成功"。 */
+  ignoredColumns?: string[];
+}
+
 /* ── 终端管理 · 授信终端（store.DeviceBundle）── */
 
 /** 准入模式：observe = 非授信终端照常放行但留痕；strict = 拒发敲门令牌（连不进数据面）。 */
@@ -1017,4 +1044,36 @@ export interface UpgradeBundle {
 export interface UpgradeCheckResult {
   blocked: boolean; reasons?: string[]; warnings?: string[];
   nextHop?: string; manifest?: { version: string; component: string; notes?: string };
+}
+
+/* ── 终端设备台账批量出入口（wave7 行动 14）──────────────────────────────
+ *
+ * GET  /api/v1/devices/export  → CSV 附件（流式，全列过公式注入中和）
+ * POST /api/v1/devices/import  → 正文是 CSV 文本，回执逐行可见
+ *
+ * ★导入是**预登记**，不是"把设备弄成能连"：它只写设备台账（trusted_devices），
+ * 不产生终端环境报告（posture_reports）。设备准入闸与终端合规闸各判各的，
+ * 所以在 BAIDI_POSTURE_ENFORCE=strict 下，预登记为已授信的终端**仍然连不进来**，
+ * 直到它用客户端真的上报过一次环境。这句话由后端随回执下发（note/postureEnforce），
+ * 前端必须原样展示——不说的话，这就是又一个「配置齐全却连不上」。
+ */
+
+/** 一行成功预登记的设备。line 是 CSV 文件里的行号（含表头那一行）。 */
+export interface DeviceImportOK {
+  line: number; account: string; fingerprint: string; name: string; status: DeviceStatus;
+}
+/** 一行被跳过的记录。reason 是后端原话——它常常是唯一能指导下一步动作的信息，不要改写。 */
+export interface DeviceImportSkip {
+  line: number; account?: string; fingerprint?: string; reason: string;
+}
+export interface DeviceImportResult {
+  ok: boolean;
+  imported: DeviceImportOK[];
+  skipped: DeviceImportSkip[];
+  /** 其中直接置为「已授信」的台数（= 本次真正发出的准入授予数）。 */
+  trusted: number;
+  /** 控制面当前的 BAIDI_POSTURE_ENFORCE 取值。strict 时预登记不足以让终端连上。 */
+  postureEnforce: 'observe' | 'strict';
+  /** 预登记与终端合规闸的交互说明（后端 api.deviceImportPostureNote，同一份文本）。 */
+  note: string;
 }

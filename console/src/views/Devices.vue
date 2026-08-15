@@ -59,6 +59,10 @@
           <a-input v-model="kw" allow-clear size="small" style="width: 240px" placeholder="按账号 / 设备名 / 指纹搜索">
             <template #prefix><icon-search /></template>
           </a-input>
+          <button class="bd-btn bd-btn--ghost" :disabled="exp.busy" @click="doExport">
+            <icon-download />{{ exp.busy ? '导出中…' : '导出 CSV' }}
+          </button>
+          <button class="bd-btn bd-btn--ghost" @click="openImport"><icon-upload />批量预登记</button>
           <button class="bd-btn bd-btn--ghost" :disabled="!staleCount" @click="cleanupOpen = true">
             <icon-delete />清理陈旧（{{ staleCount }}）
           </button>
@@ -259,6 +263,91 @@
       </div>
     </a-modal>
 
+    <!-- 批量预登记（导入 CSV）。
+         ★上传前就把「预登记 ≠ 能连上」写在脸上，而不是等导完再补一句：
+         管理员是在点「导入」之前决定要不要切 strict 的。 -->
+    <a-modal v-model:visible="imp.open" title="批量预登记终端（导入 CSV）" :width="640" :footer="false" unmount-on-close>
+      <template v-if="!imp.result">
+        <div class="bd-wdesc">
+          从资产系统导出「账号 + 硬件指纹」清单，一次性完成预授信——这是切换到<b>严格准入</b>之前
+          把在用终端纳管完的唯一批量路径（否则只能等每台终端自己上报、再逐台批准）。
+        </div>
+        <div class="bd-blast">
+          <div class="bd-blast__t">格式（第一行必须是表头，认列名不认列序）</div>
+          <div class="bd-blast__d">
+            必需列：<b>账号</b>（account/user）、<b>指纹</b>（fingerprint/device）；
+            可选列：<b>设备名</b>、<b>平台</b>（Windows|macOS|Linux）、<b>状态</b>（待批准 / 已授信，
+            <b>留空按「待批准」处理</b>）。「已吊销」不接受——那是对既有设备的处置动作。
+            <br>单批上限 <b>{{ MAX_ROWS }}</b> 行 / <b>{{ MAX_KIB }} KiB</b>，超限整批拒绝（不会导一半）。
+            <br>「导出 CSV」出来的文件可直接当模板：改完再导入，<b>已登记的行会被逐行跳过</b>，
+            导入<b>永不改写</b>既有设备的状态（否则一次上传就能静默撤销一条吊销）。
+          </div>
+        </div>
+        <div class="bd-warnbox">
+          <icon-exclamation-circle-fill />
+          <div>
+            <b>预登记不等于这台终端就能连上。</b>它只写设备台账，不产生终端环境报告（posture）：
+            若控制面开着 <span class="bd-mono">BAIDI_POSTURE_ENFORCE=strict</span>（缺报即拒），
+            这些终端在用客户端真正上报一次环境之前，敲门令牌<b>依然会被拒</b>——
+            设备闸与终端合规闸各判各的。导入完成后回执里会显示当前实际取值。
+          </div>
+        </div>
+        <input ref="fileEl" type="file" accept=".csv,text/csv,text/plain" style="display: none" @change="onPick">
+        <div class="bd-picker">
+          <button class="bd-btn bd-btn--ghost" @click="fileEl?.click()"><icon-folder />选择 CSV 文件</button>
+          <span v-if="imp.name" class="bd-sub">{{ imp.name }} · 约 {{ imp.rows }} 行数据</span>
+          <span v-else class="bd-sub">尚未选择文件</span>
+          <div style="flex: 1" />
+          <button class="bd-btn" :disabled="!imp.text || imp.busy" @click="doImport">
+            <icon-upload />{{ imp.busy ? '导入中…' : '开始导入' }}
+          </button>
+        </div>
+      </template>
+
+      <!-- 回执：逐行可见。成功与跳过分列，跳过必须带行号与原话理由。 -->
+      <template v-else>
+        <div class="bd-impsum">
+          <span class="bd-tg" :style="tagStyle('var(--bd-success)')">已预登记 {{ imp.result.imported.length }} 台</span>
+          <span class="bd-tg" :style="tagStyle('var(--bd-primary)')">其中直接授信 {{ imp.result.trusted }} 台</span>
+          <span class="bd-tg" :style="tagStyle(imp.result.skipped.length ? 'var(--bd-warning)' : 'var(--bd-t3)')">
+            跳过 {{ imp.result.skipped.length }} 行
+          </span>
+        </div>
+        <div class="bd-warnbox" :class="{ 'bd-warnbox--red': imp.result.postureEnforce === 'strict' }">
+          <icon-exclamation-circle-fill />
+          <div>
+            <b>当前 BAIDI_POSTURE_ENFORCE = {{ imp.result.postureEnforce }}</b>
+            <template v-if="imp.result.postureEnforce === 'strict'">
+              ：这些终端在<b>首次成功上报终端环境之前仍连不进来</b>（缺报即拒）。
+            </template>
+            <template v-else>：缺报不拒，但一旦切到 strict 就会出现上面这种情况。</template>
+            <div class="bd-impnote">{{ imp.result.note }}</div>
+          </div>
+        </div>
+        <div v-if="imp.result.skipped.length" class="bd-implist">
+          <div class="bd-implist__h">跳过的行（行号对得上你上传的文件）</div>
+          <div v-for="s in imp.result.skipped" :key="s.line" class="bd-improw">
+            <span class="bd-improw__ln bd-mono">第 {{ s.line }} 行</span>
+            <span class="bd-improw__id">{{ s.account || '（无账号）' }} · <i class="bd-mono">{{ s.fingerprint || '（无指纹）' }}</i></span>
+            <span class="bd-improw__why">{{ s.reason }}</span>
+          </div>
+        </div>
+        <div v-if="imp.result.imported.length" class="bd-implist">
+          <div class="bd-implist__h">已预登记</div>
+          <div v-for="d in imp.result.imported" :key="d.line" class="bd-improw">
+            <span class="bd-improw__ln bd-mono">第 {{ d.line }} 行</span>
+            <span class="bd-improw__id">{{ d.account }} · {{ d.name }} · <i class="bd-mono">{{ d.fingerprint }}</i></span>
+            <span class="bd-improw__why">{{ d.status === 'trusted' ? '已授信' : '待批准' }}</span>
+          </div>
+        </div>
+        <div class="bd-picker">
+          <div style="flex: 1" />
+          <button class="bd-btn bd-btn--ghost" @click="resetImport">再导一批</button>
+          <button class="bd-btn" @click="imp.open = false">完成</button>
+        </div>
+      </template>
+    </a-modal>
+
     <!-- 批量清理陈旧 -->
     <a-modal v-model:visible="cleanupOpen" title="清理陈旧终端" :width="520" @ok="doCleanup" ok-text="确认清理" cancel-text="取消">
       <div class="bd-reject">
@@ -275,7 +364,10 @@
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type DeviceBundle, type Device, type TrustApproval, type DeviceTrustSetting } from '@/lib/api';
+import {
+  api, getToken,
+  type DeviceBundle, type Device, type TrustApproval, type DeviceTrustSetting, type DeviceImportResult
+} from '@/lib/api';
 
 const tab = ref<'list' | 'approval'>('list');
 const live = ref(false);
@@ -451,6 +543,80 @@ function reject() {
   decide('rejected', r);
 }
 
+/* ── 台账导出（GET /devices/export，PermSecurity）──
+ *
+ * 后端回的是 CSV 附件而不是 JSON，api() 封装只吃 JSON，这里直接 fetch blob 触发下载
+ * （与审计导出同一套做法）。文件名跟随后端 Content-Disposition。 */
+const exp = reactive({ busy: false });
+async function doExport() {
+  exp.busy = true;
+  try {
+    const res = await fetch('/api/v1/devices/export', { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) {
+      // 403 的原话（"需要权限 security"）是唯一能指导下一步的信息，不要吞掉。
+      const msg = await res.text().catch(() => '');
+      throw new Error(msg || `${res.status}`);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const name = /filename="([^"]+)"/.exec(cd)?.[1] ?? `baidi-devices-${new Date().toISOString().slice(0, 10)}.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = name;
+    a.click();
+    URL.revokeObjectURL(url);
+    Message.success(`已导出 ${name}`);
+  } catch (e) {
+    Message.error(`导出失败：${(e as Error).message}（需已连 baidi-control，且当前管理员持有「安全策略」权限）`);
+  } finally {
+    exp.busy = false;
+  }
+}
+
+/* ── 批量预登记（POST /devices/import，正文是 CSV 文本）── */
+const MAX_ROWS = 500;   // 与后端 deviceImportMaxRows 同值；仅用于提示，真判定在后端
+const MAX_KIB = 512;    // 同 deviceImportMaxBytes
+const fileEl = ref<HTMLInputElement | null>(null);
+const imp = reactive({
+  open: false, busy: false,
+  name: '', text: '', rows: 0,
+  result: null as DeviceImportResult | null
+});
+
+function resetImport() {
+  imp.name = ''; imp.text = ''; imp.rows = 0; imp.result = null; imp.busy = false;
+  if (fileEl.value) fileEl.value.value = '';
+}
+function openImport() { resetImport(); imp.open = true; }
+
+async function onPick(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0];
+  if (!f) return;
+  imp.name = f.name;
+  imp.text = await f.text();
+  // 行数只是给人看的估计值（表头不算、空行不算），真正的上限判定在后端。
+  imp.rows = Math.max(0, imp.text.split('\n').filter((l) => l.trim() !== '').length - 1);
+}
+
+async function doImport() {
+  imp.busy = true;
+  try {
+    imp.result = await api<DeviceImportResult>('/devices/import', {
+      method: 'POST', headers: { 'Content-Type': 'text/csv' }, body: imp.text
+    });
+    const r = imp.result;
+    if (r.skipped.length) Message.warning(`已预登记 ${r.imported.length} 台，${r.skipped.length} 行跳过（见逐行原因）`);
+    else Message.success(`已预登记 ${r.imported.length} 台终端`);
+    await load();
+  } catch (e) {
+    // 整批被拒（超限 / 表头不合法）时后端一台都没写，文案里已说明，原样透出。
+    Message.error(`导入失败：${(e as Error).message}`);
+  } finally {
+    imp.busy = false;
+  }
+}
+
 async function load() {
   try {
     const b = await api<DeviceBundle>('/devices');
@@ -548,6 +714,22 @@ onMounted(load);
 .bd-setrow__main { flex: 1; min-width: 0; }
 .bd-setrow__label { font-size: 13.5px; font-weight: 500; color: var(--bd-t1); }
 .bd-setrow__desc { font-size: 12px; color: var(--bd-t3); margin-top: 3px; line-height: 1.6; }
+
+/* 批量预登记 modal */
+.bd-wdesc { font-size: 13px; color: var(--bd-t2); line-height: 1.75; margin-bottom: 14px; }
+.bd-warnbox { display: flex; gap: 10px; background: color-mix(in srgb, var(--bd-warning) 10%, #fff); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; font-size: 12.5px; color: var(--bd-t2); line-height: 1.75; }
+.bd-warnbox :deep(svg) { color: var(--bd-warning); font-size: 17px; flex: none; margin-top: 2px; }
+.bd-warnbox--red { background: color-mix(in srgb, var(--bd-danger) 10%, #fff); }
+.bd-warnbox--red :deep(svg) { color: var(--bd-danger); }
+.bd-impnote { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--bd-fill-2); font-size: 12px; color: var(--bd-t3); }
+.bd-picker { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
+.bd-impsum { display: flex; gap: 8px; margin-bottom: 14px; }
+.bd-implist { margin-bottom: 14px; max-height: 220px; overflow: auto; border: 1px solid var(--bd-fill-2); border-radius: 8px; }
+.bd-implist__h { position: sticky; top: 0; background: var(--bd-fill-1); font-size: 12px; font-weight: 600; color: var(--bd-t2); padding: 8px 12px; }
+.bd-improw { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; border-top: 1px solid var(--bd-fill-1); font-size: 12px; }
+.bd-improw__ln { flex: none; color: var(--bd-t3); width: 66px; }
+.bd-improw__id { flex: none; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bd-t1); }
+.bd-improw__why { flex: 1; color: var(--bd-t3); line-height: 1.6; }
 
 /* 危险确认 modal */
 .bd-reject { display: flex; gap: 12px; font-size: 13.5px; line-height: 1.7; color: var(--bd-t2); margin-bottom: 14px; }

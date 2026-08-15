@@ -106,7 +106,11 @@
 - 改哪里：`console/src/views/Policy.vue:380`、（若接真）`control/internal/api` 登录链路。
 - 为什么值得：FR-SCEN-13 集合内独此一项是壳；假开关是审计陷阱的种子。
 
-**14. 用户/终端批量导入导出（F 组）— S**
+**14. 用户/终端批量导入导出（F 组）— S ✅ 已落地**
+- 落地记（2026-08-15）：两个域并行实现 + 一道验收。四个端点（users/devices × export/import），全部照 `handleAuditExport` 模板：流式、UTF-8 BOM、**每一个单元格**过 `csvCell` 中和公式注入、审计只在真写完后落。导入逐行回报（照 `handleIdleLock` 的 locked/skipped 先例），部分失败不回滚，行号取**物理行号**（管理员回 Excel 定位用）。Users.vue 那个无 @click 的「批量导入」死按钮接上了。
+- **安全红线（导入不能造管理员）**：CSV 里出现角色/管理员角色一类列 → **整份拒收 + 落 security 审计**（不是静默忽略——静默忽略会让管理员以为自己用表格发了一批管理员）。验收 agent 实际构造了 7 种列名变体（含 `rôle`、`管理员`、空格分隔）跑真实例验证，均不落库且账号恒为普通用户。导出侧从**类型层面**排除口令哈希与口令强度（`store.UserExportRow` 不复用 `DirUser`，SQL 逐列点名不用 `SELECT *`）。
+- **设备预登记**：这是 strict 准入模式上线前完成预授信的唯一路径。尊重既有约定——单账号上限走 `store.MaxDevicesPerAccount` 同一判据（不硬编 20）；导入行**没有 posture 报告**，与 `BAIDI_POSTURE_ENFORCE=strict`（缺报即拒）有真实交互，已在响应与 UI 上如实说明，不制造第二个「配置齐全却连不上」。
+- 验收抓到一条 blocking 已修：`handleUsersImport` 在判 err 之前调 `csv.Reader.FieldPos`，而解析失败那一轮它必然越界 **panic**——数据行里有一个落单引号（Excel 存出来最常见的一类输入）就 500 `internal error`，而精心写的中文错误文案反倒只在表头畸形时可达。改用 `csv.ParseError.Line` 取行号并补了回归用例。另修四处 nit：devices 行号漂移（改用物理行号，与 users 统一）、导入模板缺「组织ID」列（后端最可能报的那个错只能靠这列修）、devices 空文件报错指错方向、重复列名两侧取舍相反（统一先到先得）。
 - 做什么：①当场处理 Users.vue:10 无 @click 的「批量导入」死按钮（自家纪律明令禁止的装饰件）；②users 与 devices 各加 CSV 导出端点（照 audit/export 的流式+BOM+公式注入中和现成模板）；③导入端点：用户建号复用现有校验，设备预登记注意 MaxDevicesPerAccount=20 与 trusted_devices↔posture_reports 对应约定（导入行无 posture 报告，与 strict 缺报即拒有交互，导入时如实标注）。
 - 改哪里：`control/internal/api`（4 个端点）、`Users.vue`、`Devices.vue`。
 - 为什么值得：设备导入是 strict 准入模式上线前完成预授信的唯一路径（现在只能 observe 模式下逐台上报再批准）；导出服务资产盘点。

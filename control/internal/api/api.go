@@ -536,6 +536,14 @@ func (s *Server) Routes() http.Handler {
 	// 闲置账号治理：识别（读=任意管理员）+ 批量锁定（写=PermSecurity，管理员目标逐个抬 PermAdmins）
 	mux.HandleFunc("GET /api/v1/users/idle", s.handleIdleAccounts)
 	mux.HandleFunc("POST /api/v1/users/idle/lock", s.handleIdleLock)
+	// 台账批量导出 / 导入（wave7 行动 14）。导出流式 CSV 附件、**每一个单元格**都过公式注入中和；
+	// 导入逐行回报成功与失败原因（部分失败不回滚），且**只建普通用户**——CSV 里出现角色列
+	// 一律整份拒收并落 security 审计，建管理员的唯一入口仍是 POST /api/v1/admins。
+	// 设备导入是 strict 准入模式上线前完成预授信的唯一路径（此前只能 observe 下逐台上报再批准）。
+	mux.HandleFunc("GET /api/v1/users/export", s.handleUsersExport)
+	mux.HandleFunc("POST /api/v1/users/import", s.handleUsersImport)
+	mux.HandleFunc("GET /api/v1/devices/export", s.handleDeviceExport)
+	mux.HandleFunc("POST /api/v1/devices/import", s.handleDeviceImport)
 	mux.HandleFunc("PUT /api/v1/users/{id}/membership", s.handleSetUserMembership) // 改组织归属 / 所属用户组
 
 	// 组织与用户组（业务管理 · 用户与角色页内维护；全部 admin）

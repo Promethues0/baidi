@@ -8,7 +8,10 @@
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
         <button class="bd-btn bd-btn--ghost" @click="openIdle"><icon-clock-circle />闲置治理</button>
-        <button class="bd-btn bd-btn--ghost"><icon-upload />批量导入</button>
+        <button class="bd-btn bd-btn--ghost" :disabled="exporting" @click="exportUsers">
+          <icon-download />{{ exporting ? '导出中…' : '导出台账' }}
+        </button>
+        <button class="bd-btn bd-btn--ghost" @click="openImport"><icon-upload />批量导入</button>
         <button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button>
       </div>
     </div>
@@ -355,6 +358,66 @@
       </div>
     </a-modal>
 
+    <!-- 批量导入（wave7 行动 14）：CSV → 逐行建普通用户。
+         ★这里必须把两条边界说在人点「开始导入」之前：① 只能建普通用户（含角色列整份拒收）；
+         ② 有行数与文件大小上限。不说的话，管理员会拿一份带「角色」列的花名册反复试。 -->
+    <a-modal v-model:visible="impOpen" title="批量导入用户" :width="680" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-uform__hint">
+          CSV 逐行创建<b>普通用户</b>：必填列「账号」「姓名」，可选列「组织」「组织ID」「用户组」「邮箱」「初始口令」。
+          初始口令留空则用默认 {{ DEFAULT_PW }}，<b>所有导入账号一律置首登强制改密</b>。
+          单次上限 {{ IMP_MAX_ROWS }} 行 / {{ IMP_MAX_KB }} KiB，超出请分批。
+        </div>
+        <div class="bd-imp__warn">
+          <icon-exclamation-circle-fill class="bd-imp__warnic" />
+          <span>
+            含「角色 / role / 管理员角色 / 状态」等列的文件会被<b>整份拒收</b>——导入不能创建管理员，
+            管理员账号请在「系统管理 → 管理员」页单独创建。导出的台账文件带这些列，
+            回传前需先删掉（或直接用下方模板）。
+          </span>
+        </div>
+        <div class="bd-imp__bar">
+          <input ref="impFileEl" type="file" accept=".csv,text/csv" @change="onPickImportFile" />
+          <div style="flex:1" />
+          <span class="bd-link" @click="downloadTemplate">下载导入模板</span>
+        </div>
+        <div v-if="impFileName" class="bd-imp__file">
+          已选择 <b>{{ impFileName }}</b>（{{ (impFileSize / 1024).toFixed(1) }} KiB）
+        </div>
+
+        <!-- 逐行结果：成功多少、失败多少、每一行为什么失败 -->
+        <div v-if="impResult" class="bd-imp__res">
+          <div class="bd-imp__sum">
+            <span class="bd-tg" :style="tagStyle('#00B42A')">成功 {{ impResult.created.length }} 条</span>
+            <span class="bd-tg" :style="tagStyle(impResult.failed.length ? '#F53F3F' : '#86909C')">
+              失败 {{ impResult.failed.length }} 条
+            </span>
+            <span class="bd-imp__total">共 {{ impResult.total }} 行</span>
+          </div>
+          <div v-if="impResult.ignoredColumns?.length" class="bd-imp__ign">
+            未识别的列（其内容未被导入）：{{ impResult.ignoredColumns.join('、') }}
+          </div>
+          <div v-if="impResult.failed.length" class="bd-imp__list">
+            <div v-for="f in impResult.failed" :key="f.row" class="bd-imp__row">
+              <span class="bd-imp__rowno">第 {{ f.row }} 行</span>
+              <span class="bd-mono">{{ f.account || '—' }}</span>
+              <span class="bd-imp__reason">{{ f.reason }}</span>
+            </div>
+          </div>
+          <div v-if="impResult.created.length" class="bd-imp__ok">
+            已创建：{{ impResult.created.map((c) => c.account).join('、') }}
+          </div>
+        </div>
+
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="impOpen = false">关闭</button>
+          <button class="bd-btn" :disabled="!impFileName || importing" @click="doImport">
+            {{ importing ? '导入中…' : '开始导入' }}
+          </button>
+        </div>
+      </div>
+    </a-modal>
+
     <!-- 重置口令（管理员，落库改 bcrypt 哈希） -->
     <a-modal v-model:visible="resetOpen" title="重置登录口令" :width="420" :footer="false">
       <div class="bd-uform">
@@ -374,7 +437,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers } from '@/lib/api';
+import { api, getToken, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers, type UserImportResp } from '@/lib/api';
 
 const live = ref(false);
 const directories = ref<Directory[]>([{ key: 'local', name: '本地目录', type: 'local', users: 0 }]);
@@ -774,6 +837,101 @@ async function lockIdle() {
   finally { idleLocking.value = false; }
 }
 
+/* ── 批量导入导出（wave7 行动 14）──
+ *
+ * 导出走原生 fetch 拿 blob：后端回的是 CSV 附件，api() 封装只吃 JSON（与 Audit.vue 同款）。
+ * 导入把文件读成文本直接 POST（请求体就是 CSV 原文），响应是逐行结果 JSON，可以走 api()。
+ */
+const DEFAULT_PW = 'baidi@123';
+// 与后端 userImportMaxRows / userImportMaxBytes 对齐。写在这里只为**提前**告知用户，
+// 真正的闸在服务端——前端这份对不上也只是提示文案不准，不会放大导入量。
+const IMP_MAX_ROWS = 500;
+const IMP_MAX_KB = 1024;
+
+const exporting = ref(false);
+async function exportUsers() {
+  exporting.value = true;
+  try {
+    const res = await fetch('/api/v1/users/export', { headers: { Authorization: `Bearer ${getToken()}` } });
+    if (!res.ok) throw new Error(String(res.status));
+    const blob = await res.blob();
+    // 文件名跟随后端 Content-Disposition（带导出日期），解析不到才兜底
+    const cd = res.headers.get('Content-Disposition') ?? '';
+    const name = /filename="([^"]+)"/.exec(cd)?.[1] ?? `baidi-users-${new Date().toISOString().slice(0, 10)}.csv`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = name; a.click();
+    URL.revokeObjectURL(url);
+    Message.success(`已导出 ${name}（不含口令哈希）`);
+  } catch (e) {
+    const msg = String((e as Error)?.message ?? '');
+    Message.error(msg === '403'
+      ? '权限不足：导出用户台账需要「安全策略」权限'
+      : '导出失败：请检查权限或后端连接');
+  } finally { exporting.value = false; }
+}
+
+const impOpen = ref(false);
+const importing = ref(false);
+const impFileEl = ref<HTMLInputElement | null>(null);
+const impFileName = ref('');
+const impFileSize = ref(0);
+const impText = ref('');
+const impResult = ref<UserImportResp | null>(null);
+
+function openImport() {
+  impOpen.value = true;
+  impFileName.value = ''; impFileSize.value = 0; impText.value = '';
+  impResult.value = null;
+  if (impFileEl.value) impFileEl.value.value = '';
+}
+
+async function onPickImportFile(e: Event) {
+  const f = (e.target as HTMLInputElement).files?.[0];
+  impResult.value = null;
+  if (!f) { impFileName.value = ''; impText.value = ''; return; }
+  impFileName.value = f.name;
+  impFileSize.value = f.size;
+  // 读成文本即可：后端按 UTF-8 解析并自己剥 BOM（Excel 存的 CSV 一定带 BOM）。
+  impText.value = await f.text();
+}
+
+/** 下载导入模板：只含后端认得的列。
+ *  导出的台账带「角色/管理员角色/状态」三列会被导入侧整份拒收，所以模板必须单独给一份，
+ *  而不是让人拿导出件去试错。 */
+function downloadTemplate() {
+  // ★必须带「组织ID」列：组织树里同名部门是常态（不同上级下各有一个「研发部」），
+  // 后端遇到重名会如实报「有 2 个同名部门，请改用组织ID列指明」——而模板里没有这列的话，
+  // 管理员拿着一句正确的错误提示却不知道该往哪填。留空即按名字解析。
+  const csv = '﻿账号,姓名,组织,组织ID,用户组,邮箱,初始口令\n'
+    + 'qian.qi,钱七,研发部,,,qian.qi@example.com,\n';
+  const url = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  const a = document.createElement('a');
+  a.href = url; a.download = 'baidi-users-import-template.csv'; a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function doImport() {
+  if (!impText.value) { Message.warning('请先选择 CSV 文件'); return; }
+  importing.value = true;
+  try {
+    const r = await api<UserImportResp>('/users/import', {
+      method: 'POST', headers: { 'Content-Type': 'text/csv; charset=utf-8' }, body: impText.value
+    });
+    impResult.value = r;
+    if (r.failed.length) {
+      Message.warning(`导入完成：成功 ${r.created.length} 条、失败 ${r.failed.length} 条（逐行原因见下方）`);
+    } else {
+      Message.success(`导入完成：${r.created.length} 条账号已创建，均已置首登强制改密`);
+    }
+    await load(); // 成功的那些立刻出现在目录里
+  } catch (e) {
+    // 后端的拒收理由（含角色列 / 超上限 / 缺必填列）是唯一能指导下一步的信息，
+    // 用 Modal 留在屏幕上，别被 3 秒的 toast 带走。
+    Modal.warning({ title: '导入未执行', content: detail(e, '导入失败，请检查权限或后端连接') });
+  } finally { importing.value = false; }
+}
+
 /** 管理员清除用户的 TOTP（丢认证器的 helpdesk 通道）：下次登录回到口令单因素，须本人重新注册。
  *  目标是管理员时后端把门槛抬到 admins 权（与重置口令同一道收口）。 */
 async function resetTotp() {
@@ -891,6 +1049,22 @@ onMounted(load);
 .bd-idle__acct { font-weight: 600; color: var(--color-text-1); }
 .bd-idle__name { color: var(--color-text-2); }
 .bd-idle__days { margin-left: auto; font-size: 12px; color: var(--color-text-3); white-space: nowrap; }
+/* 批量导入弹窗 */
+.bd-imp__warn { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2); background: var(--bd-tag-gold-bg); border: 1px solid var(--bd-warning); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
+.bd-imp__warnic { color: var(--bd-warning); font-size: 15px; flex: none; margin-top: 2px; }
+.bd-imp__bar { display: flex; align-items: center; gap: 10px; font-size: 13px; }
+.bd-imp__file { margin-top: 8px; font-size: 12.5px; color: var(--bd-t3); }
+.bd-imp__res { margin-top: 16px; border-top: 1px solid var(--bd-fill-2); padding-top: 14px; }
+.bd-imp__sum { display: flex; align-items: center; gap: 8px; }
+.bd-imp__total { font-size: 12px; color: var(--bd-t3); }
+.bd-imp__ign { margin-top: 10px; font-size: 12.5px; color: var(--bd-warning); }
+.bd-imp__list { margin-top: 10px; max-height: 240px; overflow: auto; border: 1px solid var(--bd-fill-2); border-radius: 8px; }
+.bd-imp__row { display: flex; align-items: baseline; gap: 10px; padding: 7px 12px; font-size: 12.5px; border-bottom: 1px solid var(--bd-fill-1); }
+.bd-imp__row:last-child { border-bottom: none; }
+.bd-imp__rowno { flex: none; width: 66px; color: var(--bd-t3); }
+.bd-imp__reason { margin-left: auto; color: var(--bd-danger, #F53F3F); text-align: right; }
+.bd-imp__ok { margin-top: 10px; font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; word-break: break-all; }
+
 .bd-btn--danger2 { background: var(--bd-danger, #F53F3F); }
 .bd-btn--danger2:hover:not(:disabled) { background: #d92b2b; }
 .bd-btn--danger2:disabled { opacity: .5; cursor: not-allowed; }

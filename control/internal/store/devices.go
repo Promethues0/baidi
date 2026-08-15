@@ -2,7 +2,9 @@ package store
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"strings"
 )
 
 // ── 授信终端（trusted_devices，PRD ch9 FR-EP-10/12/13/14/15）──
@@ -49,6 +51,179 @@ const (
 	DeviceBindAuto     = "auto"     // 首次上报即 trusted（省事，但等于放弃人工核验）
 	DeviceBindApproval = "approval" // 首次上报入 pending 并生成一条绑定审批（复用既有审批流）
 )
+
+// ── 资产分类（wave7 行动 15，PRD ch9 FR-EP-06~09）──
+//
+// 分类回答的是「这台机器是谁的」，与 status（这台机器批没批过）正交：
+//
+//	enterprise  企业资产。公司配发、完全纳管。**这是回填值与默认值**——
+//	            分类是本次新增的维度，既有设备此前都是按企业资产在用的，
+//	            回填成别的值会在升级那一刻改变既有主体的实际接入权。
+//	personal    个人资产（BYOD）。员工自带、未纳管。**唯一受个人资产准入策略约束的一档**。
+//	managed     企业纳管个人。员工自带但已装管控/已备案——语义就是"个人设备但已纳管"，
+//	            因此**按企业资产处理**（见 IsPersonalAsset）。
+//
+// ★分类是**管理员标注**的，白帝不自动识别设备归属：没有 MDM、没有资产系统对接，
+// 硬件指纹只能说明"是同一台机器"，说明不了"这台机器是谁买的"。标错就是标错，
+// 与资源敏感度（resources.sensitivity）同一条纪律。
+const (
+	AssetClassEnterprise = "enterprise"
+	AssetClassPersonal   = "personal"
+	AssetClassManaged    = "managed"
+)
+
+// AssetClassValid 报告分类是否为合法枚举（写入口校验：拼错的值会永远匹配不上判据，
+// 表现为「明明标成个人资产、deny 策略却不生效」这种零报错的静默失效）。
+func AssetClassValid(s string) bool {
+	return s == AssetClassEnterprise || s == AssetClassPersonal || s == AssetClassManaged
+}
+
+// NormalizeAssetClass 把空值/脏值收敛到 enterprise。
+//
+// ★兜底方向必须是 enterprise 而不是 personal：这一列读出脏值时若按个人资产处理，
+// 在 personalPolicy=deny 下会把一台企业机整台挡在门外，而管理员在页面上看到的
+// 仍然是「企业资产」。与 DeviceTrustSetting.Normalize 的兜底方向同一条理由——
+// 收缩动作宁可短暂不生效，也不能因为一个脏值把人锁在门外；真正的 fail-closed
+// 底线由 status（pending/revoked）与 posture block 承担。
+//
+// 它同时是**旧库补列尚未回填**时的读侧兜底（asset_class 为 NULL → enterprise，
+// 与回填值逐字节一致）。但这不能替代回填：回填才让 SQL 侧的按分类查询/统计成立。
+func NormalizeAssetClass(s string) string {
+	if AssetClassValid(s) {
+		return s
+	}
+	return AssetClassEnterprise
+}
+
+// IsPersonalAsset 报告该分类是否受「个人资产准入策略」约束。
+//
+// ★只有 personal 受约束。managed（企业纳管个人）按企业资产处理——它的语义就是
+// "个人设备但已纳管"，纳管完成之后仍按 BYOD 收紧的话，管理员就没有任何办法
+// 让一台已纳管的自带设备正常接入，「纳管」这个动作也就没有了结果。
+func IsPersonalAsset(class string) bool {
+	return NormalizeAssetClass(class) == AssetClassPersonal
+}
+
+// AssetClassZh 分类的中文名。**唯一定义在这里**：审计文案、CSV 导出、控制台
+// 三处都取它，免得同一个枚举在三个地方长出三种说法（导出件与页面对不上时，
+// 拿导出件做资产盘点的人无从发现自己看的是另一套口径）。
+func AssetClassZh(class string) string {
+	switch NormalizeAssetClass(class) {
+	case AssetClassPersonal:
+		return "个人资产"
+	case AssetClassManaged:
+		return "企业纳管个人"
+	}
+	return "企业资产"
+}
+
+// ── 个人资产准入策略（资产分类的唯一执行方）──
+//
+// 它是 DeviceTrustSetting 里独立于 Mode 的一档，消费方只有 api.deviceAdmissionGate：
+//
+//	inherit  个人资产与企业资产一视同仁，走全局 Mode。**默认值，行为与本功能上线前完全一致**。
+//	strict   个人资产恒按 strict 判（即使全局 Mode=observe）：未显式批准为 trusted 就拒发敲门令牌。
+//	deny     个人资产一律拒（即使已批准为 trusted）。
+//
+// ★为什么执行方落在准入闸而不是并入风险降权（disposal=degrade）：
+// degrade 是**账号维度**的（store.PostureUsersByDisposal 出账号名单 → 网关 DenyUsers），
+// 而资产分类是**设备维度**的。一个人同时有企业机与个人机时，按账号并入 degrade
+// 会把他用**企业机**访问高敏资源的权限也一起摘掉——误伤，且用户完全无从理解
+// （他那台公司发的电脑昨天还好好的）。准入闸天然就是 (账号,指纹) 粒度，
+// 判定落在这里才能只影响那一台。用例 TestPersonalDenyDoesNotAffectEnterpriseDevice 钉住。
+const (
+	PersonalPolicyInherit = "inherit"
+	PersonalPolicyStrict  = "strict"
+	PersonalPolicyDeny    = "deny"
+)
+
+// PersonalPolicyValid 报告个人资产策略是否为合法枚举。
+func PersonalPolicyValid(s string) bool {
+	return s == PersonalPolicyInherit || s == PersonalPolicyStrict || s == PersonalPolicyDeny
+}
+
+// PersonalPolicyZh 个人资产策略的中文名（审计与控制台同源）。
+func PersonalPolicyZh(p string) string {
+	switch p {
+	case PersonalPolicyStrict:
+		return "个人资产按严格准入判定（未批准即拒）"
+	case PersonalPolicyDeny:
+		return "个人资产一律拒绝接入（含已批准）"
+	}
+	return "跟随全局准入模式（与企业资产一视同仁）"
+}
+
+// ── 资产标签（纯管理属性，**没有执行方**）──
+//
+// ★标签不参与任何判定：不影响准入、不影响授权、不影响风险评分。它的用途只有
+// 台账筛选、导出与资产盘点。这一点必须在 UI 上写明——本项目的纪律是
+// 「界面上任何一个勾都必须真能生效」，反过来说，不生效的东西要标明它只是标签，
+// 否则管理员会以为给一台机器打上「禁止外网」就真的限制了什么。
+//
+// 要让某个维度真能控制访问，得给它做一个执行点（像 asset_class 那样落在准入闸上），
+// 而不是让它长在一个自由文本字段里。
+const (
+	// DeviceTagMaxCount 单台设备的标签数上界。标签会随 GET /api/v1/devices 全量下发
+	// （那个端点刻意不分页），不设上界等于给台账响应体开一个由管理员自己撑爆的口子。
+	DeviceTagMaxCount = 12
+	// DeviceTagMaxRunes 单个标签的长度上界（字符）。与 DeviceNameMaxRunes 同一条理由。
+	DeviceTagMaxRunes = 24
+)
+
+// NormalizeDeviceTags 归一标签集合：去首尾空白 → 丢空串 → 去重（**保序**）→ 逐个截长 →
+// 截到 DeviceTagMaxCount。恒返回非 nil 切片（JSON 里是 [] 而不是 null——前端少一处判空）。
+//
+// 去重按截断**之后**的值比较：两个只在第 25 个字符起才不同的标签，截完就是同一个，
+// 留两份只会让筛选器里出现两个看起来一模一样的选项。
+func NormalizeDeviceTags(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, t := range in {
+		t = strings.TrimSpace(t)
+		if t == "" {
+			continue
+		}
+		if r := []rune(t); len(r) > DeviceTagMaxRunes {
+			t = string(r[:DeviceTagMaxRunes])
+		}
+		if seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+		if len(out) >= DeviceTagMaxCount {
+			break
+		}
+	}
+	return out
+}
+
+// EmptyDeviceTagsJSON 空标签集合的落库形态（回填值）。
+const EmptyDeviceTagsJSON = "[]"
+
+// ParseDeviceTags 把库里的 JSON 文本解回切片。坏值/空值一律回空集合而不是报错：
+// 标签没有执行方，一条坏 JSON 不该让设备台账整页读不出来，更不该让敲门链路上的
+// DeviceByFingerprint 失败（那一步失败在 strict 下是 fail-closed 拒绝接入）。
+func ParseDeviceTags(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return []string{}
+	}
+	var tags []string
+	if json.Unmarshal([]byte(raw), &tags) != nil {
+		return []string{}
+	}
+	return NormalizeDeviceTags(tags)
+}
+
+// MarshalDeviceTags 归一后序列化，供落库。
+func MarshalDeviceTags(tags []string) string {
+	b, err := json.Marshal(NormalizeDeviceTags(tags))
+	if err != nil {
+		return EmptyDeviceTagsJSON
+	}
+	return string(b)
+}
 
 // MaxDevicesPerAccount 单账号最多留存的终端设备数。
 //
@@ -111,6 +286,10 @@ type DeviceBundle struct {
 type DeviceTrustSetting struct {
 	// Mode 准入模式：observe | strict。消费方 api.deviceAdmissionGate（敲门令牌签发）。
 	Mode string `json:"mode"`
+	// PersonalPolicy 个人资产（asset_class=personal）的准入策略：inherit | strict | deny。
+	// 消费方同为 api.deviceAdmissionGate；managed 按企业资产处理，不受它约束。
+	// 默认 inherit = 与本功能上线前完全一致的行为。
+	PersonalPolicy string `json:"personalPolicy"`
 	// BindMethod 绑定方式：auto | approval。消费方 SQLiteStore.EnrollDevice（首次上报的初始状态）。
 	BindMethod string `json:"bindMethod"`
 	// StaleDays 多少天没上报 posture 即标记陈旧。消费方：Devices() 的 Stale 派生 +
@@ -131,6 +310,7 @@ func DefaultDeviceTrustSetting() DeviceTrustSetting {
 	return DeviceTrustSetting{
 		Mode: DeviceTrustObserve, BindMethod: DeviceBindApproval,
 		StaleDays: DefaultStaleDays, PerUserQuota: MaxDevicesPerAccount,
+		PersonalPolicy: PersonalPolicyInherit,
 	}
 }
 
@@ -152,6 +332,13 @@ func (s DeviceTrustSetting) Normalize() DeviceTrustSetting {
 	if s.StaleDays > 3650 {
 		s.StaleDays = 3650
 	}
+	// ★个人资产策略的兜底方向同样是"最宽的那一档"（inherit）：脏值不该把一批
+	// 自带设备静默挡在门外。它与 Mode 的兜底方向一致，理由见该处说明。
+	// 存量库里这个键根本不存在（本功能之前落的 JSON 没有这一项），读出来是空串 →
+	// inherit，恰好就是"行为不变"这个正确语义，故这一项**不需要单独的回填**。
+	if !PersonalPolicyValid(s.PersonalPolicy) {
+		s.PersonalPolicy = PersonalPolicyInherit
+	}
 	s.PerUserQuota = MaxDevicesPerAccount // 只读：永远回内置上限，不接受前端回传值
 	return s
 }
@@ -172,6 +359,13 @@ type Device struct {
 	ApprovedAt   int64  `json:"approvedAt"`
 	ApprovalID   string `json:"approvalId"`   // 关联的绑定审批单 id（approval 绑定模式下非空）
 	RevokeReason string `json:"revokeReason"` // 吊销/驳回理由（UI 展示 + 审计取同一份文本）
+
+	// AssetClass 资产分类：enterprise | personal | managed。**是准入判据**——
+	// personal 受 DeviceTrustSetting.PersonalPolicy 约束（api.deviceAdmissionGate）。
+	AssetClass string `json:"assetClass"`
+	// Tags 自由标签。**纯管理属性，没有任何执行方**：不参与准入、授权、风险评分。
+	// 只用于台账筛选、导出与资产盘点，UI 上必须照实说明（见 NormalizeDeviceTags 顶部）。
+	Tags []string `json:"tags"`
 
 	// ── 以下为读时派生，不落库 ──
 	Stale         bool   `json:"stale"`         // LastSeen 早于 now-StaleDays

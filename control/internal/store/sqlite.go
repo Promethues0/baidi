@@ -38,6 +38,9 @@ type Writer interface {
 	// SetDeviceStatus 批准 / 吊销 / 打回。返回 (改动前, 改动后)，供审计如实措辞。
 	SetDeviceStatus(ctx context.Context, id, status, by, reason string) (Device, Device, error)
 	RenameDevice(ctx context.Context, id, name string) (Device, error)
+	// SetDeviceAsset 改资产分类与标签（wave7 行动 15）。返回 (改动前, 改动后)——
+	// 分类是准入判据，审计必须写得出"从 X 改成 Y"。
+	SetDeviceAsset(ctx context.Context, id, assetClass string, tags []string) (Device, Device, error)
 	// DeleteDevice 删设备登记 + 同删它的 posture 报告（两表口径统一的执行处）。
 	DeleteDevice(ctx context.Context, id string) (Device, error)
 	// PurgeStaleDevices 清理陈旧设备（跳过 revoked，理由见实现顶部）。
@@ -425,10 +428,14 @@ CREATE TABLE IF NOT EXISTS posture_reports (
 -- 账号登录（共用工位机），各账号的授信是各自的事——按指纹全局唯一的话，A 的设备
 -- 被吊销会连带把 B 挡在门外，而页面上完全看不出这两条记录是同一台机器。
 -- 与 posture_reports 的主键 (user, device) 是同一套键，两表按 (账号,指纹) 一一对应。
+-- asset_class 资产分类（enterprise|personal|managed）是**准入判据**：personal 受
+-- 准入设置里的 personalPolicy 约束（api.deviceAdmissionGate）。tags 是自由标签，
+-- **没有任何执行方**，只用于台账筛选/导出/盘点。两列的旧库补列 + 回填见 backfillDeviceAsset。
 CREATE TABLE IF NOT EXISTS trusted_devices (
   id TEXT PRIMARY KEY, account TEXT, fingerprint TEXT, name TEXT, platform TEXT,
   status TEXT, first_seen INTEGER, last_seen INTEGER,
   approved_by TEXT, approved_at INTEGER, approval_id TEXT, revoke_reason TEXT,
+  asset_class TEXT, tags TEXT,
   UNIQUE(account, fingerprint)
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_devices_account ON trusted_devices(account);
@@ -721,6 +728,12 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// email（wave7 行动 2）：外部认证源带回的邮箱。既有行回填空串 = "未知"
 		// （无从推断历史邮箱，猜一个更糟）；本地账号暂无采集入口，恒空是如实的。
 		{"users", "email", "TEXT"},
+		// 终端资产分类与标签（wave7 行动 15）。★回填见 backfillDeviceAsset：
+		// asset_class 必须回填成 enterprise——它是准入判据，留 NULL 的话
+		// 「按分类统计/筛选」在 SQL 侧全部落空，而页面照常显示（读侧有兜底），
+		// 是本项目最怕的那种两边各说一套。tags 回填 '[]'。
+		{"trusted_devices", "asset_class", "TEXT"},
+		{"trusted_devices", "tags", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -766,6 +779,12 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 	// 而是切到 strict 准入的那一刻全体存量终端被判未登记、集体拒发敲门令牌。
 	// 放在 migrate 里安全的理由见 backfillTrustedDevices 顶部（posture_reports 从不播种）。
 	if err := s.backfillTrustedDevices(); err != nil {
+		return err
+	}
+	// 资产分类/标签回填。★必须排在 backfillTrustedDevices **之后**：那一步会用
+	// posture_reports 现造设备行，顺序反了的话它造出来的行赶不上这次回填，
+	// 而回填有一次性标记、下次启动不再跑——那批设备的 asset_class 会永久为 NULL。
+	if err := s.backfillDeviceAsset(); err != nil {
 		return err
 	}
 	if err := s.ensureAccountUnique(); err != nil {

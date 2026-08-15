@@ -115,7 +115,10 @@
 - 改哪里：`control/internal/api`（4 个端点）、`Users.vue`、`Devices.vue`。
 - 为什么值得：设备导入是 strict 准入模式上线前完成预授信的唯一路径（现在只能 observe 模式下逐台上报再批准）；导出服务资产盘点。
 
-**15. 终端资产分类与标签（FR-EP-06~09）— M**
+**15. 终端资产分类与标签（FR-EP-06~09）— M ✅ 已落地**
+- 落地记（2026-08-15）：`trusted_devices` 补 `asset_class`(enterprise|personal|managed) 与 `tags` 两列（回填 enterprise / `[]`，一次性标记 `device.asset.backfill.v1`）。**执行方落在准入闸而非 degrade**——这是本行动最重要的设计决策：degrade 是账号维度的（`PostureUsersByDisposal`→网关 `DenyUsers`），一个人同时有企业机与个人机时按账号并入会把企业机一起误伤；准入闸天然是 (账号,指纹) 粒度。设置项 `personalPolicy` ∈ inherit(默认，行为不变)/strict/deny，`managed` 按企业资产处理。23 条新用例，核心那条是 `TestPersonalDenyDoesNotAffectEnterpriseDevice`。真跑了敲门端到端：同一台机器改标为个人资产后从 200+token 变成 403 且原因点名资产分类。
+- `tags` **没有执行方就如实说没有**：只用于筛选/导出/盘点，页面上分类那栏标「真实判据」、标签那栏标「仅台账属性」，当面区分。
+- 验收抓到一条 blocking 已修，且是本仓库的惯犯形态：`PUT /devices/settings` 缺 `personalPolicy` 字段时收成 inherit，于是任何旧版客户端保存一次准入设置（哪怕只改陈旧阈值）就把已配置的 deny **静默降级**——与 SCOPE ch4 记载的「灰度弹窗恒发 groups:[]」同族。改成缺字段保留当前值（读不到就 fail-closed 拒绝保存），并把那条**把错误行为钉死的测试**改成钉住正确行为。另修三处 nit：弹窗里的 Markdown 星号原样显示、导入侧支持分类的理由与实际不符（存量设备走导入本来就跳过，真实理由是批量预登记 BYOD）、`deny` 不切断在途隧道这件事没说（服务端只拒新令牌，要立刻切断得用「吊销」——前端措辞与文档都已补齐）。
 - 做什么：`trusted_devices` 加 `asset_class`（企业/个人/企业纳管个人）与 `tags` 列（补列+回填，老规矩），Devices 页可编辑；执行方落在**准入闸粒度**——`deviceAdmissionGate` 按分类差异化（如个人资产仅 observe、或对该账号并入 degrade 类摘高敏名单）。
 - 改哪里：`control/internal/store/devices.go`、`api/devices.go`、`Devices.vue`、`deviceAdmissionGate`。
 - 为什么值得：ZTNA「设备支柱」的后半段；对接既有 degrade/sensitivity 机制不必新造执行方。**明确边界**：真按设备区分资源需把指纹贯穿数据面（撤销通道无设备维度），本波只做账号/准入闸粒度，文档如实写。

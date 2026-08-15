@@ -39,6 +39,18 @@
         </div>
       </div>
 
+      <!-- 个人资产策略横幅：只在它真的会改变判定时才出现（inherit 什么都不做，
+           画一条"当前无影响"的横幅只会挤占注意力）。 -->
+      <div v-if="settings.personalPolicy !== 'inherit'" class="bd-mode bd-mode--asset">
+        <icon-user />
+        <div>
+          <b>个人资产策略：{{ personalPolicyMeta(settings.personalPolicy).label }}</b>
+          —— {{ personalPolicyMeta(settings.personalPolicy).desc }}
+          判定粒度是<b>（账号，设备指纹）</b>：同一个人的<b>企业资产</b>终端不受影响；
+          「企业纳管个人」按企业资产处理。
+        </div>
+      </div>
+
       <!-- Tab 切换 -->
       <div class="bd-tabs">
         <span class="bd-tab" :class="{ on: tab === 'list' }" @click="tab = 'list'">设备清单 <em>{{ devices.length }}</em></span>
@@ -56,9 +68,15 @@
             <template v-if="staleCount"> · 陈旧 {{ staleCount }}</template>
           </span>
           <div style="flex: 1" />
-          <a-input v-model="kw" allow-clear size="small" style="width: 240px" placeholder="按账号 / 设备名 / 指纹搜索">
+          <a-input v-model="kw" allow-clear size="small" style="width: 260px" placeholder="按账号 / 设备名 / 指纹 / 标签搜索">
             <template #prefix><icon-search /></template>
           </a-input>
+          <a-select v-model="classFilter" size="small" style="width: 150px">
+            <a-option value="">全部资产分类</a-option>
+            <a-option value="enterprise">企业资产</a-option>
+            <a-option value="personal">个人资产</a-option>
+            <a-option value="managed">企业纳管个人</a-option>
+          </a-select>
           <button class="bd-btn bd-btn--ghost" :disabled="exp.busy" @click="doExport">
             <icon-download />{{ exp.busy ? '导出中…' : '导出 CSV' }}
           </button>
@@ -70,7 +88,7 @@
         <table class="bd-table">
           <thead>
             <tr>
-              <th>设备</th><th>归属账号</th><th>状态</th><th>最近合规判定</th><th>最近上报</th><th class="r">操作</th>
+              <th>设备</th><th>归属账号</th><th>资产分类 / 标签</th><th>状态</th><th>最近合规判定</th><th>最近上报</th><th class="r">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -88,6 +106,15 @@
               </td>
               <td>{{ d.account }}</td>
               <td>
+                <span class="bd-tg" :style="tagStyle(classMeta(d.assetClass).color)">{{ classMeta(d.assetClass).label }}</span>
+                <!-- 当前策略下这台机器会被怎么处置，写在它旁边。分类本身不说明后果：
+                     同一个「个人资产」在 inherit 下什么都没发生、在 deny 下等于连不上。 -->
+                <div v-if="assetEffect(d)" class="bd-sub bd-sub--warn">{{ assetEffect(d) }}</div>
+                <div v-if="d.tags?.length" class="bd-tagrow">
+                  <span v-for="t in d.tags" :key="t" class="bd-tg bd-tg--grey">{{ t }}</span>
+                </div>
+              </td>
+              <td>
                 <span class="bd-tg" :style="tagStyle(statusMeta(d.status).color)">{{ statusMeta(d.status).label }}</span>
                 <div v-if="d.status === 'trusted'" class="bd-sub">{{ approverText(d) }}</div>
                 <div v-else-if="d.status === 'revoked' && d.revokeReason" class="bd-sub">{{ d.revokeReason }}</div>
@@ -102,12 +129,13 @@
               <td class="r">
                 <span v-if="d.status !== 'trusted'" class="bd-link" @click="doApprove(d)">批准</span>
                 <span v-if="d.status !== 'revoked'" class="bd-link bd-link--danger" style="margin-left: 14px" @click="askRevoke(d)">吊销</span>
+                <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askAsset(d)">分类/标签</span>
                 <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askRename(d)">重命名</span>
                 <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askDelete(d)">删除</span>
               </td>
             </tr>
             <tr v-if="!shown.length">
-              <td colspan="6" class="bd-sub" style="padding: 28px; text-align: center">
+              <td colspan="7" class="bd-sub" style="padding: 28px; text-align: center">
                 {{ devices.length ? '没有匹配的设备' : '尚无终端登记：终端首次上报环境报告（posture）时自动入账' }}
               </td>
             </tr>
@@ -191,6 +219,24 @@
       </div>
       <div class="bd-setrow">
         <div class="bd-setrow__main">
+          <div class="bd-setrow__label">个人资产准入策略</div>
+          <div class="bd-setrow__desc">
+            只约束标为<b>个人资产</b>的终端（「企业纳管个人」按企业资产处理）。
+            判定落在敲门令牌闸上，粒度是<b>（账号，设备指纹）</b>——
+            同一个人的企业机<b>不受影响</b>，不会因为他有一台个人机而被一起限制。
+            <br><b>跟随全局</b>：与企业资产一视同仁（默认，不改变任何现有行为）；
+            <b>按严格判</b>：个人资产未批准即拒，即使全局是观察模式；
+            <b>一律拒绝</b>：个人资产全部拒绝接入，<b>含已批准的</b>。
+          </div>
+        </div>
+        <a-radio-group v-model="form.personalPolicy" type="button" size="small">
+          <a-radio value="inherit">跟随全局</a-radio>
+          <a-radio value="strict">按严格判</a-radio>
+          <a-radio value="deny">一律拒绝</a-radio>
+        </a-radio-group>
+      </div>
+      <div class="bd-setrow">
+        <div class="bd-setrow__main">
           <div class="bd-setrow__label">绑定方式</div>
           <div class="bd-setrow__desc">终端首次上报环境报告时，自动置为授信，或先入待批准队列由管理员核验。</div>
         </div>
@@ -250,6 +296,46 @@
       <a-input v-model="renameVal" :max-length="64" allow-clear placeholder="例如：财务-王芳-MBP" />
     </a-modal>
 
+    <!-- 资产分类与标签 -->
+    <a-modal v-model:visible="assetOpen" title="终端资产分类与标签" :width="580" @ok="doSetAsset" ok-text="保存" cancel-text="取消">
+      <div class="bd-reject" style="margin-bottom: 10px">
+        <div>
+          <b>{{ target?.account }}</b> 的终端 <b>「{{ target?.name }}」</b>
+          （<span class="bd-mono">{{ target?.fingerprint }}</span>）
+        </div>
+      </div>
+      <div class="bd-setrow">
+        <div class="bd-setrow__main">
+          <div class="bd-setrow__label">资产分类<span class="bd-real">真实判据</span></div>
+          <div class="bd-setrow__desc">
+            分类由<b>管理员标注</b>——白帝不自动识别设备归属（没有 MDM / 资产系统对接，
+            硬件指纹只能说明"是同一台机器"）。标错就是标错。
+            <br>「企业纳管个人」= 自带但已纳管，<b>按企业资产处理</b>，不受个人资产策略约束。
+          </div>
+        </div>
+        <a-radio-group v-model="assetForm.assetClass" direction="vertical" size="small">
+          <a-radio value="enterprise">企业资产</a-radio>
+          <a-radio value="personal">个人资产</a-radio>
+          <a-radio value="managed">企业纳管个人</a-radio>
+        </a-radio-group>
+      </div>
+      <!-- 改成个人资产时，当前策略下的**实际后果**要在保存之前就说清楚。 -->
+      <div v-if="assetWarn" class="bd-warnbox" :class="{ 'bd-warnbox--red': settings.personalPolicy === 'deny' }">
+        <icon-exclamation-circle-fill />
+        <div>{{ assetWarn }}</div>
+      </div>
+      <div class="bd-setrow" style="display: block">
+        <div class="bd-setrow__label">标签<span class="bd-fake">仅台账属性，不参与判定</span></div>
+        <div class="bd-setrow__desc" style="margin-bottom: 8px">
+          用于筛选、导出与资产盘点。<b>标签没有任何执行方</b>：不影响准入、不影响授权、
+          不影响风险评分——给一台机器打上「禁止外网」不会限制它任何东西。
+          要让某个维度真能控制访问，得给它做一个执行点（像资产分类那样落在准入闸上）。
+          <br>单台最多 {{ MAX_TAGS }} 个、每个 ≤{{ MAX_TAG_LEN }} 字，超出部分保存时会被截掉。
+        </div>
+        <a-input-tag v-model="assetForm.tags" allow-clear :max-tag-count="MAX_TAGS" placeholder="回车添加，例如：研发部、外包、试点" />
+      </div>
+    </a-modal>
+
     <!-- 删除确认 -->
     <a-modal v-model:visible="deleteOpen" title="删除终端登记" :width="540" @ok="doDelete" ok-text="确认删除" cancel-text="取消">
       <div class="bd-reject">
@@ -277,7 +363,8 @@
           <div class="bd-blast__d">
             必需列：<b>账号</b>（account/user）、<b>指纹</b>（fingerprint/device）；
             可选列：<b>设备名</b>、<b>平台</b>（Windows|macOS|Linux）、<b>状态</b>（待批准 / 已授信，
-            <b>留空按「待批准」处理</b>）。「已吊销」不接受——那是对既有设备的处置动作。
+            <b>留空按「待批准」处理</b>）、<b>资产分类</b>（企业资产 / 个人资产 / 企业纳管个人，
+            <b>留空按「企业资产」</b>）、<b>标签</b>（分号分隔）。「已吊销」不接受——那是对既有设备的处置动作。
             <br>单批上限 <b>{{ MAX_ROWS }}</b> 行 / <b>{{ MAX_KIB }} KiB</b>，超限整批拒绝（不会导一半）。
             <br>「导出 CSV」出来的文件可直接当模板：改完再导入，<b>已登记的行会被逐行跳过</b>，
             导入<b>永不改写</b>既有设备的状态（否则一次上传就能静默撤销一条吊销）。
@@ -309,9 +396,23 @@
         <div class="bd-impsum">
           <span class="bd-tg" :style="tagStyle('var(--bd-success)')">已预登记 {{ imp.result.imported.length }} 台</span>
           <span class="bd-tg" :style="tagStyle('var(--bd-primary)')">其中直接授信 {{ imp.result.trusted }} 台</span>
+          <span v-if="imp.result.personal" class="bd-tg" :style="tagStyle('var(--bd-warning)')">
+            个人资产 {{ imp.result.personal }} 台
+          </span>
           <span class="bd-tg" :style="tagStyle(imp.result.skipped.length ? 'var(--bd-warning)' : 'var(--bd-t3)')">
             跳过 {{ imp.result.skipped.length }} 行
           </span>
+        </div>
+        <!-- 与 postureEnforce 同一条理由：在 deny 下这批个人资产导进去照样连不上，
+             不说的话又是一个「台账是绿的、就是连不上」。 -->
+        <div v-if="imp.result.personal && imp.result.personalPolicy && imp.result.personalPolicy !== 'inherit'"
+             class="bd-warnbox" :class="{ 'bd-warnbox--red': imp.result.personalPolicy === 'deny' }">
+          <icon-exclamation-circle-fill />
+          <div>
+            本批有 <b>{{ imp.result.personal }}</b> 台标为<b>个人资产</b>，而当前个人资产策略是
+            <b>{{ personalPolicyMeta(imp.result.personalPolicy).label }}</b>：
+            {{ personalPolicyMeta(imp.result.personalPolicy).desc }}
+          </div>
         </div>
         <div class="bd-warnbox" :class="{ 'bd-warnbox--red': imp.result.postureEnforce === 'strict' }">
           <icon-exclamation-circle-fill />
@@ -337,7 +438,12 @@
           <div v-for="d in imp.result.imported" :key="d.line" class="bd-improw">
             <span class="bd-improw__ln bd-mono">第 {{ d.line }} 行</span>
             <span class="bd-improw__id">{{ d.account }} · {{ d.name }} · <i class="bd-mono">{{ d.fingerprint }}</i></span>
-            <span class="bd-improw__why">{{ d.status === 'trusted' ? '已授信' : '待批准' }}</span>
+            <!-- 回执显示的是**落库后的实际值**（分类留空按企业资产、标签已去重截断），
+                 不是 CSV 原文——省得管理员导完再去台账里逐台核对。 -->
+            <span class="bd-improw__why">
+              {{ d.status === 'trusted' ? '已授信' : '待批准' }} · {{ classMeta(d.assetClass).label }}
+              <template v-if="d.tags?.length"> · 标签 {{ d.tags.join('、') }}</template>
+            </span>
           </div>
         </div>
         <div class="bd-picker">
@@ -366,7 +472,8 @@ import { ref, computed, reactive, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import {
   api, getToken,
-  type DeviceBundle, type Device, type TrustApproval, type DeviceTrustSetting, type DeviceImportResult
+  type DeviceBundle, type Device, type TrustApproval, type DeviceTrustSetting, type DeviceImportResult,
+  type AssetClass, type PersonalAssetPolicy
 } from '@/lib/api';
 
 const tab = ref<'list' | 'approval'>('list');
@@ -376,13 +483,21 @@ const setOpen = ref(false);
 const rejectOpen = ref(false);
 const revokeOpen = ref(false);
 const renameOpen = ref(false);
+const assetOpen = ref(false);
 const deleteOpen = ref(false);
 const cleanupOpen = ref(false);
 const rejectReason = ref('');
 const revokeReason = ref('');
 const renameVal = ref('');
 const kw = ref('');
+const classFilter = ref<'' | AssetClass>('');
 const target = ref<Device | null>(null);
+
+/* 标签上限与后端 store.DeviceTagMaxCount / DeviceTagMaxRunes 同值；
+   仅用于提示与前端截断，**真判定在后端**（前端的数字改了不影响落库）。 */
+const MAX_TAGS = 12;
+const MAX_TAG_LEN = 24;
+const assetForm = reactive<{ assetClass: AssetClass; tags: string[] }>({ assetClass: 'enterprise', tags: [] });
 
 /** 吊销影响面文案：与后端 api.deviceRevokeBlastRadius 同源（后端应答带回来后覆盖）。
  *  界面上写一套、实际做另一套是本项目最不该出现的错误，故默认文案也照实描述。 */
@@ -392,7 +507,9 @@ const DEFAULT_BLAST =
   '封禁到期后，其余已授信终端可正常接入；被吊销的这一台在严格与观察两种模式下都将被持续拒绝。';
 const blastRadius = ref(DEFAULT_BLAST);
 
-const settings = reactive<DeviceTrustSetting>({ mode: 'observe', bindMethod: 'approval', staleDays: 30, perUserQuota: 20 });
+const settings = reactive<DeviceTrustSetting>({
+  mode: 'observe', bindMethod: 'approval', staleDays: 30, perUserQuota: 20, personalPolicy: 'inherit'
+});
 const form = reactive<DeviceTrustSetting>({ ...settings });
 const devices = ref<Device[]>([]);
 const approvals = ref<TrustApproval[]>([]);
@@ -403,9 +520,13 @@ const pendingCount = computed(() => approvals.value.filter((a) => a.status === '
 const staleCount = computed(() => devices.value.filter((d) => d.stale && d.status !== 'revoked').length);
 const shown = computed(() => {
   const q = kw.value.trim().toLowerCase();
-  if (!q) return devices.value;
-  return devices.value.filter((d) =>
-    [d.account, d.name, d.fingerprint, d.platform].some((v) => (v || '').toLowerCase().includes(q)));
+  return devices.value.filter((d) => {
+    if (classFilter.value && (d.assetClass || 'enterprise') !== classFilter.value) return false;
+    if (!q) return true;
+    // 标签一并进搜索：它没有执行方，但"能筛出来"正是它存在的全部意义。
+    return [d.account, d.name, d.fingerprint, d.platform, ...(d.tags ?? [])]
+      .some((v) => (v || '').toLowerCase().includes(q));
+  });
 });
 
 function countBy(s: Device['status']) { return devices.value.filter((d) => d.status === s).length; }
@@ -426,6 +547,36 @@ function verdictMeta(v: Device['verdict']) {
     '': { label: '从未上报', color: 'var(--bd-t3)' }
   }[v] ?? { label: v, color: 'var(--bd-t3)' };
 }
+/** 资产分类的显示口径与后端 store.AssetClassZh 同源（导出件、审计、页面必须是同一套说法）。 */
+function classMeta(c: AssetClass | undefined) {
+  return {
+    enterprise: { label: '企业资产', color: 'var(--bd-t3)' },
+    personal: { label: '个人资产', color: 'var(--bd-warning)' },
+    managed: { label: '企业纳管个人', color: 'var(--bd-primary)' }
+  }[c || 'enterprise'];
+}
+function personalPolicyMeta(p: PersonalAssetPolicy | '') {
+  return {
+    inherit: { label: '跟随全局', desc: '个人资产与企业资产一视同仁，走全局准入模式。' },
+    strict: { label: '按严格准入判定', desc: '个人资产未被批准为「已授信」即拒发敲门令牌，即使全局是观察模式。' },
+    deny: { label: '一律拒绝接入', desc: '个人资产全部拒发敲门令牌，含已批准为「已授信」的。' },
+    '': { label: '未知', desc: '' }
+  }[p || 'inherit'];
+}
+/** 当前策略下这台设备的实际处置。分类本身不说明后果，必须在它旁边写出来。 */
+function assetEffect(d: Device): string {
+  if (!isPersonal(d.assetClass)) return '';
+  // ★措辞与后端一致：deny 拒的是**新的敲门令牌**，不主动切断已建立的隧道
+  //（要立刻切断只有「吊销」——那条走 revoked 通道，网关会 KillUser）。
+  if (settings.personalPolicy === 'deny') return '按当前策略：拒发敲门令牌（含已授信）';
+  if (settings.personalPolicy === 'strict') {
+    return d.status === 'trusted' ? '按当前策略：需保持已授信才可接入' : '按当前策略：未批准，拒绝接入';
+  }
+  return '';
+}
+/** managed 按企业资产处理——与后端 store.IsPersonalAsset 同一条判据。 */
+function isPersonal(c: AssetClass | undefined) { return (c || 'enterprise') === 'personal'; }
+
 function tagStyle(color: string) { return { color, background: `color-mix(in srgb, ${color} 12%, #fff)` }; }
 type ApprovalKind = TrustApproval['timeline'][number]['kind'];
 function dotColor(kind: ApprovalKind): string {
@@ -448,7 +599,10 @@ async function saveSettings() {
   try {
     const saved = await api<DeviceTrustSetting>('/devices/settings', {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ mode: form.mode, bindMethod: form.bindMethod, staleDays: form.staleDays })
+      body: JSON.stringify({
+        mode: form.mode, bindMethod: form.bindMethod, staleDays: form.staleDays,
+        personalPolicy: form.personalPolicy
+      })
     });
     Object.assign(settings, saved);
     setOpen.value = false;
@@ -497,6 +651,52 @@ async function doRename() {
     Message.success('已重命名');
     await load();
   } catch (e) { Message.error(`重命名失败：${(e as Error).message}`); }
+}
+
+/* ── 资产分类与标签 ── */
+function askAsset(d: Device) {
+  target.value = d;
+  assetForm.assetClass = d.assetClass || 'enterprise';
+  assetForm.tags = [...(d.tags ?? [])];
+  assetOpen.value = true;
+}
+/** 保存前把「改成个人资产在当前策略下意味着什么」写在脸上：
+ *  同一次标注在 inherit 下什么都没发生、在 deny 下等于当场断了这台机器的路。 */
+const assetWarn = computed(() => {
+  if (!isPersonal(assetForm.assetClass)) {
+    // 从个人资产改走时也要说一句：约束会随之解除，那同样是一次判定变更。
+    if (target.value && isPersonal(target.value.assetClass) && settings.personalPolicy !== 'inherit') {
+      return '改为该分类后，这台终端将不再受个人资产策略约束，恢复按全局准入模式判定。';
+    }
+    return '';
+  }
+  if (settings.personalPolicy === 'deny') {
+    return '当前个人资产策略是「一律拒绝接入」：保存后这台终端将立刻被拒发敲门令牌，'
+      + '即使它的状态仍是「已授信」。同一账号下的企业资产终端不受影响。'
+      // ★这一句不能省：拒的是**新令牌**，已建立的隧道由客户端收到拒绝后自行断开，
+      //   服务端不主动切断。要立刻切断请用「吊销」（那条会经撤销通道让网关 KillUser）。
+      + '注意：已建立的隧道不会被服务端主动切断——官方客户端收到拒绝后会自行停止数据面，'
+      + '若需要立刻切断，请改用「吊销」。';
+  }
+  if (settings.personalPolicy === 'strict') {
+    return '当前个人资产策略是「按严格准入判定」：保存后这台终端必须处于「已授信」状态才能接入，'
+      + '即使全局准入模式仍是观察。同一账号下的企业资产终端不受影响。';
+  }
+  return '当前个人资产策略是「跟随全局」，本次标注不会改变这台终端的接入判定，'
+    + '只影响台账与筛选。要让它生效，请在「准入设置」里选择「按严格判」或「一律拒绝」。';
+});
+async function doSetAsset() {
+  const d = target.value;
+  assetOpen.value = false;
+  if (!d) return;
+  try {
+    await api(`/devices/${d.id}/asset`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetClass: assetForm.assetClass, tags: assetForm.tags })
+    });
+    Message.success(`已保存「${d.name}」的资产分类：${classMeta(assetForm.assetClass).label}`);
+    await load();
+  } catch (e) { Message.error(`保存失败：${(e as Error).message}`); }
 }
 
 function askDelete(d: Device) { target.value = d; deleteOpen.value = true; }
@@ -651,6 +851,8 @@ onMounted(load);
 .bd-mode--observe :deep(svg) { color: var(--bd-t3); }
 .bd-mode--strict { background: color-mix(in srgb, var(--bd-success) 10%, #fff); color: var(--bd-t1); }
 .bd-mode--strict :deep(svg) { color: var(--bd-success); }
+.bd-mode--asset { background: color-mix(in srgb, var(--bd-warning) 10%, #fff); color: var(--bd-t1); margin-top: -8px; }
+.bd-mode--asset :deep(svg) { color: var(--bd-warning); }
 
 /* tabs */
 .bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
@@ -667,7 +869,17 @@ onMounted(load);
 .bd-cellname { gap: 9px; flex-wrap: wrap; cursor: default; }
 .bd-dmono { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 3px; font-family: ui-monospace, monospace; }
 .bd-sub { font-size: 11.5px; color: var(--bd-t3); }
+.bd-sub--warn { color: var(--bd-warning); }
+.bd-tagrow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
+/* 操作列有五个动作，窄屏下允许在链接之间换行，但不许把一个词拆开（「重命 名」）。 */
+.bd-table .bd-link { white-space: nowrap; }
 .bd-link--danger { color: var(--bd-danger); }
+
+/* 「真实判据」与「仅台账属性」两枚角标：界面上任何一个勾都必须真能生效，
+   反过来说，不生效的东西要当面标明它只是标签。 */
+.bd-real, .bd-fake { font-size: 10.5px; font-weight: 500; padding: 1px 6px; border-radius: 4px; margin-left: 7px; }
+.bd-real { color: var(--bd-primary); background: var(--bd-primary-1); }
+.bd-fake { color: var(--bd-t3); background: var(--bd-fill-2); }
 
 /* 审批两栏 */
 .bd-two { display: flex; gap: 16px; align-items: flex-start; }

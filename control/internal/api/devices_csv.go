@@ -102,9 +102,13 @@ func (s *Server) handleDeviceExport(w http.ResponseWriter, r *http.Request) {
 	// UTF-8 BOM：Excel 打开含中文的 CSV 不乱码。
 	_, _ = w.Write([]byte{0xEF, 0xBB, 0xBF})
 	cw := csv.NewWriter(w)
-	// 前五列与导入的表头识别对齐（账号/指纹/设备名/平台/状态），导出件改完能直接再导入；
-	// 其余列是只读现况，导入时忽略。
-	_ = cw.Write([]string{"账号", "指纹", "设备名", "平台", "状态", "授信来源", "批准时间",
+	// 前七列与导入的表头识别对齐（账号/指纹/设备名/平台/状态/资产分类/标签），
+	// 导出件改完能直接再导入；其余列是只读现况，导入时忽略。
+	//
+	// ★「资产分类」与「标签」必须**同时**出现在导出与导入两侧。只导不认的话，
+	// 「导出→改分类→导入」这条最自然的用法会在分类上静默落空——而分类是准入判据，
+	// 落空意味着一批本该按个人资产收紧的机器以企业资产身份进了台账，接口还回 200。
+	_ = cw.Write([]string{"账号", "指纹", "设备名", "平台", "状态", "资产分类", "标签", "授信来源", "批准时间",
 		"首次登记", "最近上报", "最近合规判定", "风险等级", "操作系统", "客户端版本", "是否陈旧", "吊销理由", "审批单号", "设备ID"})
 	n := 0
 	err = es.ExportDevices(r.Context(), st.StaleDays, func(d store.Device) error {
@@ -113,7 +117,11 @@ func (s *Server) handleDeviceExport(w http.ResponseWriter, r *http.Request) {
 		// 都是用户可控的。逐列判断"哪列可信"没有意义——这份 CSV 就是给人用 Excel 打开的。
 		return cw.Write([]string{
 			csvCell(d.Account), csvCell(d.Fingerprint), csvCell(d.Name), csvCell(d.Platform),
-			csvCell(deviceStatusZh(d.Status)), csvCell(deviceApproverZh(d)), csvCell(fmtUnix(d.ApprovedAt)),
+			csvCell(deviceStatusZh(d.Status)),
+			// 分类导中文（导入侧同时认中文与枚举），标签用「;」拼——逗号会被 CSV 转义成
+			// 引号包裹，Excel 里看着像一整段文本，分号让人一眼看出这是多个标签。
+			csvCell(store.AssetClassZh(d.AssetClass)), csvCell(strings.Join(d.Tags, deviceTagSep)),
+			csvCell(deviceApproverZh(d)), csvCell(fmtUnix(d.ApprovedAt)),
 			csvCell(fmtUnix(d.FirstSeen)), csvCell(fmtUnix(d.LastSeen)),
 			csvCell(deviceVerdictZh(d.Verdict)), csvCell(d.Level), csvCell(d.OS), csvCell(d.ClientVersion),
 			csvCell(boolZh(d.Stale)), csvCell(d.RevokeReason), csvCell(d.ApprovalID), csvCell(d.ID),
@@ -201,6 +209,41 @@ var deviceImportHeader = map[string]string{
 	"设备名": "name", "设备名称": "name", "name": "name",
 	"平台": "platform", "操作系统平台": "platform", "platform": "platform",
 	"状态": "status", "授信状态": "status", "status": "status",
+	// 资产分类与标签（wave7 行动 15）。★理由不是「导出→改→导入」——那条路对**存量**设备
+	// 本来就改不了任何东西（ImportDevice 对已存在的 (账号,指纹) 一律跳过，回 ErrDeviceExists）。
+	// 真正的理由是**批量预登记**：一次导进一批 BYOD 时可以直接标成个人资产，
+	// 否则只能先导进来（默认企业资产）再逐台改，而中间那段窗口里 personalPolicy 管不到它们。
+	"资产分类": "assetClass", "资产归属": "assetClass", "assetclass": "assetClass", "asset_class": "assetClass",
+	"标签": "tags", "资产标签": "tags", "tags": "tags", "tag": "tags",
+}
+
+// deviceTagSep CSV 里多个标签的分隔符。导出用它拼、导入按它拆（同时也认逗号与顿号——
+// 人手填的表格里这三种都会出现，只认一种等于把另外两种整批读成一个超长标签）。
+const deviceTagSep = ";"
+
+// splitDeviceTags 拆 CSV 标签单元格。归一（去空/去重/截长/截数）由 store 侧统一做。
+func splitDeviceTags(cell string) []string {
+	if strings.TrimSpace(cell) == "" {
+		return nil
+	}
+	return strings.FieldsFunc(cell, func(r rune) bool {
+		return r == ';' || r == '；' || r == ',' || r == '，' || r == '、'
+	})
+}
+
+// deviceImportAssetClass 把 CSV 的资产分类列归一成枚举。同时认中文（导出件的写法）
+// 与枚举值；**留空按企业资产**——与"新设备默认企业资产"同一个缺省，漏填一列
+// 不该把一批机器悄悄划成个人资产（那在 deny 策略下等于把它们全部拒之门外）。
+func deviceImportAssetClass(v string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "", "企业资产", "企业", store.AssetClassEnterprise:
+		return store.AssetClassEnterprise, true
+	case "个人资产", "个人", store.AssetClassPersonal:
+		return store.AssetClassPersonal, true
+	case "企业纳管个人", "纳管", "纳管个人", store.AssetClassManaged:
+		return store.AssetClassManaged, true
+	}
+	return "", false
 }
 
 // deviceImportSkip 一行被跳过的记录。
@@ -222,6 +265,11 @@ type deviceImportOK struct {
 	Fingerprint string `json:"fingerprint"`
 	Name        string `json:"name"`
 	Status      string `json:"status"`
+	// AssetClass/Tags 回执必须带回**落库后的实际值**（不是 CSV 里的原文）：
+	// 留空按企业资产、标签被去重截断，都要让管理员在回执里当场看见，
+	// 而不是导完再去台账里逐台核对。
+	AssetClass string   `json:"assetClass"`
+	Tags       []string `json:"tags"`
 }
 
 // handleDeviceImport POST /api/v1/devices/import（PermSecurity，body = CSV 文本）。
@@ -284,6 +332,7 @@ func (s *Server) handleDeviceImport(w http.ResponseWriter, r *http.Request) {
 	imported := []deviceImportOK{}
 	skips := []deviceImportSkip{}
 	trustedN := 0
+	personalN := 0
 	for _, rec := range records {
 		row, reason := normalizeDeviceImportRow(rec, dir)
 		if reason != "" {
@@ -309,27 +358,43 @@ func (s *Server) handleDeviceImport(w http.ResponseWriter, r *http.Request) {
 		if d.Status == store.DeviceStatusTrusted {
 			trustedN++
 		}
+		if store.IsPersonalAsset(d.AssetClass) {
+			personalN++
+		}
 		// 逐台落审计：预登记一台 trusted 设备就是一次准入授予，与设备页点「批准」等价。
 		// 只记一条汇总的话，事后想查"这台机器是谁什么时候放进来的"就只剩一个数字。
+		// 资产分类一并记：它是准入判据，"当初导进来时标的是什么"事后必须查得到。
 		s.audit(r, "security", "批量导入预登记终端："+d.Account+" / "+d.Name+"（指纹 "+shortFP(d.Fingerprint)+
-			"，状态 "+deviceStatusZh(d.Status)+"）。该终端尚未上报过终端环境报告", "ok")
+			"，状态 "+deviceStatusZh(d.Status)+"，资产分类 "+store.AssetClassZh(d.AssetClass)+
+			"）。该终端尚未上报过终端环境报告", "ok")
 		imported = append(imported, deviceImportOK{Line: rec.line, Account: d.Account, Fingerprint: d.Fingerprint,
-			Name: d.Name, Status: d.Status})
+			Name: d.Name, Status: d.Status, AssetClass: d.AssetClass, Tags: d.Tags})
 	}
 
 	enforce := "observe"
 	if s.postureStrict {
 		enforce = "strict"
 	}
+	// 个人资产策略随回执下发，与 postureEnforce 同一条理由：在 deny 下，
+	// 一行"个人资产 + 已授信"导进去照样连不上——不说的话，这就是又一个
+	// 「台账是绿的、就是连不上」。策略读不到时如实回空串，前端不显示这一段。
+	personalPolicy := ""
+	if set, err := s.store.DeviceTrustSetting(r.Context()); err == nil {
+		personalPolicy = set.PersonalPolicy
+	}
 	s.audit(r, "admin", "终端设备批量导入完成："+strconv.Itoa(len(imported))+" 台已预登记（其中 "+
-		strconv.Itoa(trustedN)+" 台直接置为已授信）、"+strconv.Itoa(len(skips))+" 行跳过；"+
+		strconv.Itoa(trustedN)+" 台直接置为已授信、"+strconv.Itoa(personalN)+" 台标为个人资产）、"+
+		strconv.Itoa(len(skips))+" 行跳过；"+
 		"当前 BAIDI_POSTURE_ENFORCE="+enforce+"（strict 下这些终端在首次上报环境前仍会被拒发敲门令牌）", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"ok": true, "imported": imported, "skipped": skips,
 		"trusted": trustedN,
-		// 回执必须带上这两项：管理员看到"导入成功 200 台"之后的下一步动作，
-		// 完全取决于当前是不是 strict——不说的话，他会以为可以切模式了。
+		// 回执必须带上这几项：管理员看到"导入成功 200 台"之后的下一步动作，
+		// 完全取决于当前是不是 strict / 个人资产策略是哪一档——不说的话，
+		// 他会以为可以切模式了。
 		"postureEnforce": enforce,
+		"personal":       personalN,
+		"personalPolicy": personalPolicy,
 		"note":           deviceImportPostureNote,
 	})
 }
@@ -342,6 +407,8 @@ type deviceCSVRecord struct {
 	name        string
 	platform    string
 	status      string
+	assetClass  string
+	tags        string
 }
 
 // parseDeviceCSV 解析上传的 CSV：剥 UTF-8 BOM → 按表头映射列 → 吐出数据行。
@@ -427,6 +494,7 @@ func parseDeviceCSV(raw []byte) ([]deviceCSVRecord, error) {
 		out = append(out, deviceCSVRecord{
 			line: lines[n], account: get(row, "account"), fingerprint: get(row, "fingerprint"),
 			name: get(row, "name"), platform: get(row, "platform"), status: get(row, "status"),
+			assetClass: get(row, "assetClass"), tags: get(row, "tags"),
 		})
 	}
 	return out, nil
@@ -477,10 +545,19 @@ func normalizeDeviceImportRow(rec deviceCSVRecord, dir map[string]store.DirUser)
 		// 他看得到这条回报，截断只会让他以为存进去的就是他写的那个名字）。
 		return store.DeviceImportRow{}, "设备名过长（≤" + strconv.Itoa(store.DeviceNameMaxRunes) + " 字）"
 	}
+	// 资产分类**认不出就拒整行**：它是准入判据，兜成 enterprise 等于把一台管理员
+	// 明确写成个人资产（只是拼错了）的机器当企业资产放进来，而回执里显示导入成功。
+	assetClass, ok := deviceImportAssetClass(rec.assetClass)
+	if !ok {
+		return store.DeviceImportRow{}, "资产分类只接受「企业资产/enterprise」「个人资产/personal」" +
+			"「企业纳管个人/managed」或留空（留空按企业资产）"
+	}
 	// 账号一律用目录里的规范写法落库：CSV 里大小写混写不该在台账里造出两个"看起来不同"的归属。
 	return store.DeviceImportRow{
 		Account: normUser(u.Account), Fingerprint: strings.TrimSpace(rec.fingerprint),
 		Name: name, Platform: platform, Status: status,
+		// 标签只归一不校验（没有执行方，超长/超量截断即可，见 store.NormalizeDeviceTags）。
+		AssetClass: assetClass, Tags: splitDeviceTags(rec.tags),
 	}, ""
 }
 

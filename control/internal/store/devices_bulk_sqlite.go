@@ -44,6 +44,14 @@ type DeviceImportRow struct {
 	Name        string
 	Platform    string
 	Status      string // 只接受 pending | trusted，见 ImportDevice
+	// AssetClass 资产分类（enterprise|personal|managed）。**导入必须支持它**：
+	// 导出件里有这一列，若导入侧忽略，「导出→改分类→导入」这条最自然的用法
+	// 会在分类上静默落空——而分类是准入判据，落空的后果是一批本该按个人资产
+	// 收紧的设备以企业资产身份进了台账，接口还回 200。空串按 enterprise。
+	AssetClass string
+	// Tags 自由标签（无执行方，纯台账属性）。同理接受导入，免得导出件里的
+	// 「标签」列在回流时无声消失。
+	Tags []string
 }
 
 // ExportDevices 逐行流式吐出设备台账（含 posture 现况），供 CSV 导出。
@@ -69,11 +77,12 @@ ORDER BY d.account, d.fingerprint`)
 	cutoff := staleCutoff(staleDays)
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-			&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason,
-			&d.OS, &d.ClientVersion, &d.Verdict, &d.Level, &d.PostureTS); err != nil {
+		var ex deviceExtraCols
+		dst := append(deviceScanDst(&d, &ex), &d.OS, &d.ClientVersion, &d.Verdict, &d.Level, &d.PostureTS)
+		if err := rows.Scan(dst...); err != nil {
 			return err
 		}
+		finishDeviceScan(&d, ex)
 		d.Stale = d.LastSeen < cutoff
 		if err := fn(d); err != nil {
 			return err
@@ -141,14 +150,15 @@ func (s *SQLiteStore) ImportDevice(ctx context.Context, row DeviceImportRow, by 
 		ID: "dev-" + uuid.NewString()[:8], Account: key, Fingerprint: fp,
 		Name: pick(name, shortFingerprint(fp)), Platform: platform,
 		Status: row.Status, FirstSeen: now, LastSeen: now,
+		// 分类留空按 enterprise（NormalizeAssetClass 的兜底方向），与"新设备默认企业资产"一致。
+		AssetClass: NormalizeAssetClass(row.AssetClass), Tags: NormalizeDeviceTags(row.Tags),
 	}
 	if d.Status == DeviceStatusTrusted {
 		// 授信来源如实记为"导入 + 谁导的"，不冒充成某人在设备页逐台批准过。
 		d.ApprovedBy, d.ApprovedAt = DeviceImportApproverPrefix+by, now
 	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_devices(`+deviceCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		d.ID, d.Account, d.Fingerprint, d.Name, d.Platform, d.Status, d.FirstSeen, d.LastSeen,
-		d.ApprovedBy, d.ApprovedAt, d.ApprovalID, d.RevokeReason); err != nil {
+	if _, err := tx.ExecContext(ctx, `INSERT INTO trusted_devices(`+deviceCols+`) VALUES(`+devicePlaceholders+`)`,
+		deviceInsertArgs(d)...); err != nil {
 		return Device{}, err
 	}
 	return d, tx.Commit()

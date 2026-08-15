@@ -444,12 +444,12 @@ func TestDeviceImportStatusNormalize(t *testing.T) {
 	}
 }
 
-// 导出正文里不许出现裸的 CRLF 破坏——顺带钉住列数与表头顺序（前五列要能被导入认回来）。
+// 导出正文里不许出现裸的 CRLF 破坏——顺带钉住列数与表头顺序（前七列要能被导入认回来）。
 func TestDeviceExportHeaderMatchesImportAliases(t *testing.T) {
 	h := newCSVEnv(t)
 	_, body := exportCSV(t, h, adminToken())
 	head := csvCells(t, body)[0]
-	for i, name := range []string{"账号", "指纹", "设备名", "平台", "状态"} {
+	for i, name := range []string{"账号", "指纹", "设备名", "平台", "状态", "资产分类", "标签"} {
 		if head[i] != name {
 			t.Fatalf("表头第 %d 列应为 %s，实得 %s", i+1, name, head[i])
 		}
@@ -459,5 +459,87 @@ func TestDeviceExportHeaderMatchesImportAliases(t *testing.T) {
 	}
 	if !bytes.HasPrefix([]byte(body), []byte("\xEF\xBB\xBF")) {
 		t.Fatal("导出缺 UTF-8 BOM")
+	}
+}
+
+// ── ④ 资产分类与标签的进出（wave7 行动 15）──
+
+// 分类与标签必须**双向**通过 CSV：导出写得出、导入认得回。
+//
+// ★只导不认才是真正的坑：导出件里有「资产分类」这一列，管理员改完再导入，
+// 分类会被静默丢弃 → 一批本该按个人资产收紧的机器以企业资产身份进了台账，
+// 而回执显示「导入成功」。分类是准入判据，这种落空没有任何报错面。
+func TestDeviceImportExportCarriesAssetClassAndTags(t *testing.T) {
+	h := newCSVEnv(t)
+	code, out := importCSV(t, h, "账号,指纹,设备名,平台,状态,资产分类,标签\n"+
+		"li.fang,1122:3344:5566:7788,李芳自带机,macOS,已授信,个人资产,BYOD;研发\n"+
+		"zhang.wei,aabb:ccdd:eeff:0011,张伟纳管机,Windows,已授信,企业纳管个人,\n"+
+		"chen.jing,9900:8877:6655:4433,陈静工位机,Linux,待批准,,\n")
+	if code != http.StatusOK || importedLines(out) != 3 {
+		t.Fatalf("三行都该进，http %d: %v", code, out)
+	}
+	// 回执带回**落库后的实际值**（留空按企业资产；标签已归一）。
+	got := map[string]map[string]any{}
+	arr, _ := out["imported"].([]any)
+	for _, it := range arr {
+		row := it.(map[string]any)
+		got[row["account"].(string)] = row
+	}
+	if got["li.fang"]["assetClass"] != store.AssetClassPersonal {
+		t.Fatalf("个人资产应落 personal，实得 %v", got["li.fang"]["assetClass"])
+	}
+	if tags, _ := got["li.fang"]["tags"].([]any); len(tags) != 2 || tags[0] != "BYOD" {
+		t.Fatalf("标签应按分号拆开，实得 %#v", got["li.fang"]["tags"])
+	}
+	if got["zhang.wei"]["assetClass"] != store.AssetClassManaged {
+		t.Fatalf("企业纳管个人应落 managed，实得 %v", got["zhang.wei"]["assetClass"])
+	}
+	// ★留空按企业资产（最宽松的那一档）：漏填一列不该把一批机器悄悄划成个人资产，
+	// 那在 deny 策略下等于把它们全部拒之门外，而管理员完全不知道自己做了这件事。
+	if got["chen.jing"]["assetClass"] != store.AssetClassEnterprise {
+		t.Fatalf("分类留空应按企业资产，实得 %v", got["chen.jing"]["assetClass"])
+	}
+
+	// 导出件里有中文分类与分号拼接的标签。
+	_, body := exportCSV(t, h, adminToken())
+	if !strings.Contains(body, "个人资产") || !strings.Contains(body, "企业纳管个人") {
+		t.Fatalf("导出应写中文分类，实得：%s", body)
+	}
+	if !strings.Contains(body, "BYOD;研发") {
+		t.Fatalf("导出应用分号拼接标签，实得：%s", body)
+	}
+}
+
+// 认不出的资产分类**拒整行**，不兜成企业资产：兜底等于把一台管理员明确写成
+// 个人资产（只是拼错了）的机器当企业资产放进来，而回执显示导入成功。
+func TestDeviceImportRejectsUnknownAssetClass(t *testing.T) {
+	h := newCSVEnv(t)
+	code, out := importCSV(t, h, "账号,指纹,资产分类\nli.fang,1122:3344:5566:7788,BYOD\n")
+	if code != http.StatusOK {
+		t.Fatalf("整体应 200（逐行回报），http %d", code)
+	}
+	if n := importedLines(out); n != 0 {
+		t.Fatalf("认不出的分类不该落库，实得 %d 台", n)
+	}
+	if r := skipReasons(out)["li.fang|1122:3344:5566:7788"]; !strings.Contains(r, "资产分类") {
+		t.Fatalf("跳过理由应点名资产分类，实得 %q", r)
+	}
+}
+
+// 导入回执必须带上当前生效的个人资产策略：在 deny 下，一行「个人资产 + 已授信」
+// 导进去照样连不上——不说的话，这就是又一个「台账是绿的、就是连不上」。
+func TestDeviceImportReceiptCarriesPersonalPolicy(t *testing.T) {
+	h := newCSVEnv(t)
+	savePersonalPolicy(t, h, store.DeviceTrustObserve, store.PersonalPolicyDeny)
+	code, out := importCSV(t, h, "账号,指纹,状态,资产分类\n"+
+		"li.fang,1122:3344:5566:7788,已授信,个人资产\n")
+	if code != http.StatusOK || importedLines(out) != 1 {
+		t.Fatalf("导入应成功，http %d: %v", code, out)
+	}
+	if out["personalPolicy"] != store.PersonalPolicyDeny {
+		t.Fatalf("回执应带回当前个人资产策略，实得 %v", out["personalPolicy"])
+	}
+	if n, _ := out["personal"].(float64); n != 1 {
+		t.Fatalf("回执应数出本批标为个人资产的台数，实得 %v", out["personal"])
 	}
 }

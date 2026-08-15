@@ -15,7 +15,46 @@ import (
 // deviceTrustSettingKey 准入设置在 settings 表里的键。
 const deviceTrustSettingKey = "device_trust"
 
-const deviceCols = `id,account,fingerprint,name,platform,status,first_seen,last_seen,approved_by,approved_at,approval_id,revoke_reason`
+// deviceCols 是 trusted_devices 的**唯一**列清单：SELECT 与 INSERT 共用它，
+// 且 deviceColsD（导出时带表别名）由它派生。加列只改这一处，扫描目标改
+// deviceScanDst 一处——两处对不上时 Scan 会当场报错，不会静默错位。
+const deviceCols = `id,account,fingerprint,name,platform,status,first_seen,last_seen,approved_by,approved_at,approval_id,revoke_reason,asset_class,tags`
+
+// deviceScanDst 返回与 deviceCols **逐列对应**的 Scan 目标。
+//
+// asset_class / tags 用 sql.NullString 接：旧库补列之后、backfillDeviceAsset 之前
+// 这两列是 NULL，直接扫进 string 会让整条查询报错——而其中一条是
+// DeviceByFingerprint，它在 strict 准入下的失败方向是拒绝接入。
+// 扫完必须调 finishDeviceScan 把中转值解出来。
+func deviceScanDst(d *Device, ex *deviceExtraCols) []any {
+	return []any{&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
+		&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason,
+		&ex.assetClass, &ex.tags}
+}
+
+// devicePlaceholders 与 deviceCols 等长的 "?,?,…"（INSERT 用）。由列清单**算出来**
+// 而不是手写：手写的那串问号是加列时最容易漏掉的一处，且漏了才会在运行期报错。
+var devicePlaceholders = strings.TrimSuffix(strings.Repeat("?,", strings.Count(deviceCols, ",")+1), ",")
+
+// deviceInsertArgs 与 deviceCols 逐列对应的 INSERT 实参。
+func deviceInsertArgs(d Device) []any {
+	return []any{d.ID, d.Account, d.Fingerprint, d.Name, d.Platform, d.Status,
+		d.FirstSeen, d.LastSeen, d.ApprovedBy, d.ApprovedAt, d.ApprovalID, d.RevokeReason,
+		NormalizeAssetClass(d.AssetClass), MarshalDeviceTags(d.Tags)}
+}
+
+// deviceExtraCols 可为 NULL 的两列的 Scan 中转。
+type deviceExtraCols struct {
+	assetClass sql.NullString
+	tags       sql.NullString
+}
+
+// finishDeviceScan 把中转值落进 Device。NULL / 脏值 → enterprise + 空标签
+// （= 回填值，故"回填还没跑"与"回填跑过了"在读侧的表现逐字节一致）。
+func finishDeviceScan(d *Device, ex deviceExtraCols) {
+	d.AssetClass = NormalizeAssetClass(ex.assetClass.String)
+	d.Tags = ParseDeviceTags(ex.tags.String)
+}
 
 // DeviceTrustSetting 读准入设置（未落库 / 解析失败 → 默认值）。
 //
@@ -72,8 +111,7 @@ func (s *SQLiteStore) Devices(ctx context.Context) (DeviceBundle, error) {
 // 却照样参与敲门闸的判定。要么全给，要么给分页，不能悄悄少给。
 func (s *SQLiteStore) listDevices(ctx context.Context, staleDays int) ([]Device, error) {
 	rows, err := s.db.QueryContext(ctx, `
-SELECT d.id,d.account,d.fingerprint,d.name,d.platform,d.status,d.first_seen,d.last_seen,
-       d.approved_by,d.approved_at,d.approval_id,d.revoke_reason,
+SELECT `+deviceColsD+`,
        COALESCE(p.os,''),COALESCE(p.client_version,''),COALESCE(p.verdict,''),COALESCE(p.level,''),COALESCE(p.ts,0)
 FROM trusted_devices d
 LEFT JOIN posture_reports p ON p.user=d.account AND p.device=d.fingerprint
@@ -86,11 +124,12 @@ ORDER BY d.last_seen DESC, d.id`)
 	out := []Device{}
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-			&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason,
-			&d.OS, &d.ClientVersion, &d.Verdict, &d.Level, &d.PostureTS); err != nil {
+		var ex deviceExtraCols
+		dst := append(deviceScanDst(&d, &ex), &d.OS, &d.ClientVersion, &d.Verdict, &d.Level, &d.PostureTS)
+		if err := rows.Scan(dst...); err != nil {
 			return nil, err
 		}
+		finishDeviceScan(&d, ex)
 		d.Stale = d.LastSeen < cutoff
 		out = append(out, d)
 	}
@@ -132,15 +171,16 @@ FROM approvals WHERE status='pending' ORDER BY submitted_at DESC`)
 func (s *SQLiteStore) DeviceByFingerprint(ctx context.Context, account, fingerprint string) (Device, bool, error) {
 	key := normAccount(account)
 	var d Device
+	var ex deviceExtraCols
 	err := s.db.QueryRowContext(ctx, `SELECT `+deviceCols+` FROM trusted_devices WHERE account=? AND fingerprint=?`,
-		key, fingerprint).Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-		&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason)
+		key, fingerprint).Scan(deviceScanDst(&d, &ex)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, false, nil
 	}
 	if err != nil {
 		return Device{}, false, err
 	}
+	finishDeviceScan(&d, ex)
 	return d, true, nil
 }
 
@@ -173,11 +213,15 @@ func (s *SQLiteStore) EnrollDevice(ctx context.Context, account, fingerprint, na
 	defer tx.Rollback() //nolint:errcheck // 成功路径已 Commit
 
 	var d Device
+	var ex deviceExtraCols
 	err = tx.QueryRowContext(ctx, `SELECT `+deviceCols+` FROM trusted_devices WHERE account=? AND fingerprint=?`,
-		key, fingerprint).Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-		&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason)
+		key, fingerprint).Scan(deviceScanDst(&d, &ex)...)
 	switch {
 	case err == nil:
+		finishDeviceScan(&d, ex)
+		// ★这里刻意不动 asset_class / tags：与"状态一律不动"同一条纪律。
+		// 分类是管理员标注的判据，"它又上报了"不构成把一台被标成个人资产的机器
+		// 改回企业资产的理由——那等于给 personalPolicy 开一条静默解除通道。
 		newName := pick(d.Name, name)
 		newPlatform := pick(platform, d.Platform)
 		if _, uerr := tx.ExecContext(ctx,
@@ -203,6 +247,9 @@ func (s *SQLiteStore) EnrollDevice(ctx context.Context, account, fingerprint, na
 		ID: "dev-" + uuid.NewString()[:8], Account: key, Fingerprint: fingerprint,
 		Name: pick(name, shortFingerprint(fingerprint)), Platform: platform,
 		Status: DeviceStatusPending, FirstSeen: now, LastSeen: now,
+		// 新设备一律先落企业资产：终端自报的东西里没有"这台机器是谁买的"，
+		// 猜一个只会让 personalPolicy 作用在一批猜错的设备上。分类由管理员标注。
+		AssetClass: AssetClassEnterprise, Tags: []string{},
 	}
 	if bind == DeviceBindAuto {
 		// 自动绑定：首次上报即授信。批准人如实记为 auto（不是某个管理员）——
@@ -229,9 +276,8 @@ VALUES(?,?,?,?,?,?,?,?,'','')`,
 		}
 		d.ApprovalID = ap.ID
 	}
-	if _, ierr := tx.ExecContext(ctx, `INSERT INTO trusted_devices(`+deviceCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`,
-		d.ID, d.Account, d.Fingerprint, d.Name, d.Platform, d.Status, d.FirstSeen, d.LastSeen,
-		d.ApprovedBy, d.ApprovedAt, d.ApprovalID, d.RevokeReason); ierr != nil {
+	if _, ierr := tx.ExecContext(ctx, `INSERT INTO trusted_devices(`+deviceCols+`) VALUES(`+devicePlaceholders+`)`,
+		deviceInsertArgs(d)...); ierr != nil {
 		return Device{}, false, ierr
 	}
 	return d, true, tx.Commit()
@@ -314,6 +360,39 @@ func (s *SQLiteStore) RenameDevice(ctx context.Context, id, name string) (Device
 	return d, tx.Commit()
 }
 
+// SetDeviceAsset 改一台设备的资产分类与标签（管理员标注，wave7 行动 15）。
+//
+// 返回 (改动前, 改动后)，供调用方写"从 X 改成 Y"的审计——分类是准入判据，
+// 只记新值的话，事后没人说得出"这台机器是什么时候从企业资产改成个人资产的"。
+//
+// ★两列一次写完（而不是拆成两个端点）：分类是判据、标签不是，但它们同属
+// "管理员对这台设备的标注"，拆开会让页面上一次编辑变成两次请求、两条审计，
+// 其中一条失败时台账处在改了一半的状态。端点按更严的那一项（分类）收权。
+func (s *SQLiteStore) SetDeviceAsset(ctx context.Context, id, assetClass string, tags []string) (Device, Device, error) {
+	// 非法分类**拒绝**而不是归一成 enterprise：这是管理员的显式输入，
+	// 静默改成别的值等于页面上选了个人资产、库里躺着企业资产，而接口回 200。
+	if !AssetClassValid(assetClass) {
+		return Device{}, Device{}, errors.New("assetClass 取值须为 enterprise|personal|managed")
+	}
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return Device{}, Device{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	before, err := scanDeviceTx(ctx, tx, id)
+	if err != nil {
+		return Device{}, Device{}, err
+	}
+	after := before
+	after.AssetClass = assetClass
+	after.Tags = NormalizeDeviceTags(tags)
+	if _, err := tx.ExecContext(ctx, `UPDATE trusted_devices SET asset_class=?, tags=? WHERE id=?`,
+		after.AssetClass, MarshalDeviceTags(after.Tags), id); err != nil {
+		return Device{}, Device{}, err
+	}
+	return before, after, tx.Commit()
+}
+
 // DeleteDevice 删除一台设备登记，**连同它的 posture 报告一并删**。
 //
 // ★两表同删是「口径统一」的执行处：上限按 trusted_devices 计数，若只删设备行
@@ -359,11 +438,12 @@ func (s *SQLiteStore) PurgeStaleDevices(ctx context.Context, staleDays int) ([]D
 	var victims []Device
 	for rows.Next() {
 		var d Device
-		if err := rows.Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-			&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason); err != nil {
+		var ex deviceExtraCols
+		if err := rows.Scan(deviceScanDst(&d, &ex)...); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		finishDeviceScan(&d, ex)
 		d.Stale = true
 		victims = append(victims, d)
 	}
@@ -414,15 +494,16 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, decision, reason, 
 		return Device{}, false, err
 	}
 	var d Device
+	var ex deviceExtraCols
 	err = tx.QueryRowContext(ctx, `SELECT `+deviceCols+` FROM trusted_devices WHERE approval_id=?`, id).
-		Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-			&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason)
+		Scan(deviceScanDst(&d, &ex)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, false, tx.Commit()
 	}
 	if err != nil {
 		return Device{}, false, err
 	}
+	finishDeviceScan(&d, ex)
 	if decision == "approved" {
 		d.Status, d.ApprovedBy, d.ApprovedAt, d.RevokeReason = DeviceStatusTrusted, by, time.Now().Unix(), ""
 	} else {
@@ -490,12 +571,13 @@ func closeApprovalTx(ctx context.Context, tx *sql.Tx, id, decision, kind, title,
 
 func scanDeviceTx(ctx context.Context, tx *sql.Tx, id string) (Device, error) {
 	var d Device
+	var ex deviceExtraCols
 	err := tx.QueryRowContext(ctx, `SELECT `+deviceCols+` FROM trusted_devices WHERE id=?`, id).
-		Scan(&d.ID, &d.Account, &d.Fingerprint, &d.Name, &d.Platform, &d.Status,
-			&d.FirstSeen, &d.LastSeen, &d.ApprovedBy, &d.ApprovedAt, &d.ApprovalID, &d.RevokeReason)
+		Scan(deviceScanDst(&d, &ex)...)
 	if errors.Is(err, sql.ErrNoRows) {
 		return Device{}, ErrDeviceNotFound
 	}
+	finishDeviceScan(&d, ex)
 	return d, err
 }
 
@@ -559,14 +641,57 @@ func (s *SQLiteStore) backfillTrustedDevices() error {
 	}
 	for _, sd := range seeds {
 		// 只补缺失的行；已存在的一律不动（幂等，也避免覆盖管理员改过的名字/状态）。
+		// 资产分类回填 enterprise、标签回填空集合，理由同 backfillDeviceAsset。
 		if _, err := s.db.ExecContext(ctx, `INSERT INTO trusted_devices(`+deviceCols+`)
-SELECT ?,?,?,?,?,?,?,?,?,?,'',''
+SELECT ?,?,?,?,?,?,?,?,?,?,'','',?,?
 WHERE NOT EXISTS(SELECT 1 FROM trusted_devices WHERE account=? AND fingerprint=?)`,
 			"dev-"+uuid.NewString()[:8], normAccount(sd.user), sd.device, shortFingerprint(sd.device), sd.platform,
 			DeviceStatusTrusted, sd.ts, sd.ts, DeviceApproverBackfill, sd.ts,
+			AssetClassEnterprise, EmptyDeviceTagsJSON,
 			normAccount(sd.user), sd.device); err != nil {
 			return err
 		}
 	}
 	return s.SetSetting(ctx, trustedDevicesBackfillMarker, nowStr())
+}
+
+// deviceAssetBackfillMarker 资产分类/标签的一次性回填标记。
+const deviceAssetBackfillMarker = "device.asset.backfill.v1"
+
+// backfillDeviceAsset 回填 trusted_devices.asset_class / tags（wave7 行动 15）。
+//
+// ★补列迁移只加列、不填值——`apps.resource_id` 就是这么静默断过一次的。这里不回填的后果：
+//
+//   - asset_class 永久为 NULL。读侧有兜底（NormalizeAssetClass → enterprise），
+//     所以页面看起来完全正常；但任何在 SQL 侧按分类做的筛选/统计（`WHERE asset_class='personal'`）
+//     都会把这批设备整体漏掉，且两边都不报错——「页面显示 200 台企业资产、
+//     按分类统计只有 3 台」这种分歧，正是本项目最难自查的一类。
+//   - tags 为 NULL 时 Scan 目标若是裸 string 会直接报错，而其中一条查询是
+//     DeviceByFingerprint（strict 准入下读失败 = 拒绝接入）。读侧改用 NullString 是
+//     第二道保险，不是免掉回填的理由。
+//
+// 回填值取 **enterprise**：分类是本次新增的维度，既有设备此前都是按企业资产在用的，
+// 回填成 personal 会在升级那一刻改变既有主体的实际接入权（personalPolicy 一开就集体被拒），
+// 与 backfillAdminRoles 把既有 admin 回填成 root 是同一条纪律——迁移不得改变既有行为。
+//
+// 一次性标记堵住另一面：不做成一次性的话，管理员标成个人资产的设备会在下次重启时
+// 被"回填"回企业资产（改了重启就变回去），而 personalPolicy 随之静默失效。
+// 只动 NULL / 空串的行是第二重保险（标记丢了也不至于覆盖人工标注）。
+func (s *SQLiteStore) backfillDeviceAsset() error {
+	ctx := context.Background()
+	if _, done, err := s.Setting(ctx, deviceAssetBackfillMarker); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE trusted_devices SET asset_class=? WHERE asset_class IS NULL OR asset_class=''`,
+		AssetClassEnterprise); err != nil {
+		return err
+	}
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE trusted_devices SET tags=? WHERE tags IS NULL OR tags=''`, EmptyDeviceTagsJSON); err != nil {
+		return err
+	}
+	return s.SetSetting(ctx, deviceAssetBackfillMarker, nowStr())
 }

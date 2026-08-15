@@ -117,14 +117,15 @@ type Server struct {
 	// deviceObserved 授信终端「观察模式放行」审计的节流水位："账号|指纹" → 上次落审计的 Unix 秒。
 	// 与 grayObserved 同一条理由：敲门令牌是每 15s 一次的保活热路径，不节流会把审计冲垮。
 	deviceObserved map[string]int64
-	// deviceTrustModeSeen 最近一次**成功**读到的设备准入模式（observe|strict），空 = 从未读到过。
+	// deviceTrustSeen 最近一次**成功**读到的设备准入设置（Mode 为空 = 从未读到过）。
 	//
 	// ★存在的理由是方向性：设备闸对 DeviceByFingerprint 的读失败在 strict 下 fail-closed，
-	// 但准入设置本身读失败时若回落到默认值（observe），strict 就被一次数据库抖动
+	// 但准入设置本身读失败时若回落到默认值（observe + inherit），strict 就被一次数据库抖动
 	// **整体关掉**了——未登记 / pending / 完全不带指纹的客户端全部拿到敲门令牌，
-	// 而现场唯一的痕迹是一条 slog。宁可沿用上一次已知的模式（多半正是 strict），
+	// 而现场唯一的痕迹是一条 slog。宁可沿用上一次已知的设置（多半正是 strict），
 	// 也不能让一次读失败把闸降到全局最宽的那一档。
-	deviceTrustModeSeen string
+	// 缓存整份而不只是 Mode：personalPolicy 同属收缩方向的开关（见 deviceTrustPolicy）。
+	deviceTrustSeen store.DeviceTrustSetting
 	// standbyAudited 温备**成功**类审计的节流水位：key（节点 id / 节点 id|status）→ 上次落审计的
 	// Unix 秒。失败一条都不节流——「备机连续拉失败」正是这套机制唯一需要被看见的信号。
 	standbyAudited map[string]int64
@@ -390,6 +391,9 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("PUT /api/v1/devices/settings", s.handleSaveDeviceTrustSetting)
 	mux.HandleFunc("POST /api/v1/devices/{id}/status", s.handleSetDeviceStatus) // 批准 / 吊销 / 打回
 	mux.HandleFunc("PUT /api/v1/devices/{id}/name", s.handleRenameDevice)
+	// 资产分类与标签（wave7 行动 15）。分类是准入判据（personal 受 personalPolicy 约束），
+	// 故与批准/吊销同权；标签无执行方，只是台账属性，随分类一起写。
+	mux.HandleFunc("PUT /api/v1/devices/{id}/asset", s.handleSetDeviceAsset)
 	mux.HandleFunc("DELETE /api/v1/devices/{id}", s.handleDeleteDevice)
 	mux.HandleFunc("POST /api/v1/devices/cleanup-stale", s.handleCleanupStaleDevices)
 	// 审计中心：分类聚合 + 磁盘水位 + 日志（admin）+ 防篡改链校验 + CSV 导出

@@ -109,15 +109,27 @@ type deviceAdmissionResult struct {
 // 而 revoked 是管理员显式说过"这台不许进"。若默认配置下连它都放行，「吊销」按钮
 // 就是个空动作——页面变红、审计有记录、设备照常接入，没有任何报错。
 //
+// **资产分类叠加在上面这张表之上**（wave7 行动 15）：已登记设备若是 personal
+// （managed 按企业资产处理，不受约束），再过一道 personalPolicy：
+//
+//	inherit  什么都不做，与上表完全一致（默认，行为与本功能上线前逐字节相同）
+//	strict   该设备恒按 strict 判——即使全局是 observe
+//	deny     直接拒——即使它已经是 trusted
+//
+// ★分类判定必须落在**这里**而不是并入风险降权：degrade 是账号维度的，一个人
+// 同时有企业机与个人机时按账号降权会连他的企业机一起误伤。理由详见
+// store.PersonalPolicyInherit 一节，用例 TestPersonalDenyDoesNotAffectEnterpriseDevice。
+//
 // 设备状态读失败（err != nil）在 strict 下拒、observe 下放行：
 // 与准入模式本身的语义一致，运维选了 strict 就是选了"说不清楚就不放行"。
 //
-// ★**准入模式本身**读失败时沿用上一次成功读到的模式（deviceTrustMode），绝不回落默认值：
-// 默认是 observe，而这里是敲门令牌的签发路径——回落默认等于一次 settings 读失败就把
-// 整道闸静默关掉（strict 配了跟没配一样），且现场只剩一条 slog。这与同一函数里
+// ★**准入设置本身**读失败时沿用上一次成功读到的设置（deviceTrustPolicy），绝不回落默认值：
+// 默认是 observe + inherit，而这里是敲门令牌的签发路径——回落默认等于一次 settings 读失败
+// 就把整道闸静默关掉（strict / deny 配了跟没配一样），且现场只剩一条 slog。这与同一函数里
 // DeviceByFingerprint 读失败在 strict 下拒是同一个方向。
 func (s *Server) deviceAdmissionGate(r *http.Request, account, fingerprint string) deviceAdmissionResult {
-	strict := s.deviceTrustMode(r.Context(), account) == store.DeviceTrustStrict
+	set := s.deviceTrustPolicy(r.Context(), account)
+	strict := set.Mode == store.DeviceTrustStrict
 	fingerprint = strings.TrimSpace(fingerprint)
 
 	if fingerprint == "" {
@@ -135,52 +147,78 @@ func (s *Server) deviceAdmissionGate(r *http.Request, account, fingerprint strin
 		}
 		return deviceAdmissionResult{Allowed: true}
 	}
-	switch {
-	case found && dev.Status == store.DeviceStatusTrusted:
-		return deviceAdmissionResult{Allowed: true}
-	case found && dev.Status == store.DeviceStatusRevoked:
+	// ① 吊销优先于分类：管理员对这台机器的**显式**处置，理由也更具体，
+	//    先判它才能让被拒的人看到"这台被吊销了、理由是 X"而不是一句资产分类。
+	if found && dev.Status == store.DeviceStatusRevoked {
 		reason := "该终端已被吊销"
 		if dev.RevokeReason != "" {
 			reason += "：" + dev.RevokeReason
 		}
 		return deviceAdmissionResult{Reason: reason}
 	}
-	// pending / 未登记
+	// ② 资产分类（只对已登记设备可判——未登记设备连分类都还不存在，走 ③ 的原有分支）。
+	if found && store.IsPersonalAsset(dev.AssetClass) {
+		switch set.PersonalPolicy {
+		case store.PersonalPolicyDeny:
+			// ★拒绝原因必须点名资产分类。回一句泛泛的"终端未授信"，用户会照着
+			// "去找管理员批准"这条错路走，而这台机器批过了也照样进不来。
+			return deviceAdmissionResult{Reason: "该终端登记为「个人资产」，当前策略为「个人资产一律拒绝接入」，" +
+				"已授信也不放行。请改用企业资产终端接入；确需用这台机器，请联系管理员将其纳管后改标为「企业纳管个人」"}
+		case store.PersonalPolicyStrict:
+			// 个人资产按严格准入判：全局 observe 也不放宽。
+			strict = true
+		}
+	}
+	if found && dev.Status == store.DeviceStatusTrusted {
+		return deviceAdmissionResult{Allowed: true}
+	}
+	// ③ pending / 未登记
 	what := "终端未登记"
 	if found {
 		what = "终端待批准（pending）"
 	}
 	if strict {
-		return deviceAdmissionResult{Reason: what + "，严格准入模式下不予接入，请联系管理员批准该终端"}
+		reason := what + "，严格准入模式下不予接入，请联系管理员批准该终端"
+		// 全局是 observe、只因为这台是个人资产才被拒时，必须说清楚是哪条策略在起作用——
+		// 否则管理员对着「准入模式：观察」的页面永远排不出这次拒绝是从哪来的。
+		if set.Mode != store.DeviceTrustStrict {
+			reason = what + "，且该终端登记为「个人资产」，当前策略为「个人资产按严格准入判定」" +
+				"（全局准入模式仍是观察）——请联系管理员批准该终端"
+		}
+		return deviceAdmissionResult{Reason: reason}
 	}
 	s.auditDeviceObserved(r, account, fingerprint, what)
 	return deviceAdmissionResult{Allowed: true}
 }
 
-// deviceTrustMode 取当前生效的准入模式，并把每次**成功**读到的值记为"上次已知"。
+// deviceTrustPolicy 取当前生效的准入设置，并把每次**成功**读到的值记为"上次已知"。
 //
-// 读失败时的取值顺序：上次已知 → 内置默认（observe）。落到内置默认只可能发生在
-// 控制面启动后**一次都没读成功过**的情形（那时库多半整体不可用，敲门链路上游早已失败），
-// 此时按 observe 处理并记 Error；只要成功读到过一次，此后任何抖动都沿用那一次的答案。
-func (s *Server) deviceTrustMode(ctx context.Context, account string) string {
+// 读失败时的取值顺序：上次已知 → 内置默认（observe + inherit）。落到内置默认只可能
+// 发生在控制面启动后**一次都没读成功过**的情形（那时库多半整体不可用，敲门链路上游早已失败），
+// 此时按默认处理并记 Error；只要成功读到过一次，此后任何抖动都沿用那一次的答案。
+//
+// ★缓存的是**整份设置**而不只是 Mode：personalPolicy 与 Mode 一样是收缩方向的开关，
+// 只缓存其一的话，一次读失败会把 deny 静默降级成 inherit——个人资产在那段时间里
+// 全部照常接入，而页面上仍写着"一律拒绝"。
+func (s *Server) deviceTrustPolicy(ctx context.Context, account string) store.DeviceTrustSetting {
 	st, err := s.store.DeviceTrustSetting(ctx)
 	if err == nil {
 		s.mu.Lock()
-		s.deviceTrustModeSeen = st.Mode
+		s.deviceTrustSeen = st
 		s.mu.Unlock()
-		return st.Mode
+		return st
 	}
 	s.mu.Lock()
-	seen := s.deviceTrustModeSeen
+	seen := s.deviceTrustSeen
 	s.mu.Unlock()
-	if seen != "" {
-		slog.Error("授信终端准入设置读取失败，沿用上一次成功读到的准入模式（绝不因一次读失败把闸放宽）",
-			"账号", account, "沿用模式", seen, "err", err.Error())
+	if seen.Mode != "" {
+		slog.Error("授信终端准入设置读取失败，沿用上一次成功读到的设置（绝不因一次读失败把闸放宽）",
+			"账号", account, "沿用模式", seen.Mode, "沿用个人资产策略", seen.PersonalPolicy, "err", err.Error())
 		return seen
 	}
-	fallback := store.DefaultDeviceTrustSetting().Mode
+	fallback := store.DefaultDeviceTrustSetting()
 	slog.Error("授信终端准入设置读取失败，且本进程启动后从未成功读到过，本次按内置默认处理",
-		"账号", account, "默认模式", fallback, "err", err.Error())
+		"账号", account, "默认模式", fallback.Mode, "err", err.Error())
 	return fallback
 }
 
@@ -256,6 +294,32 @@ func (s *Server) handleSaveDeviceTrustSetting(w http.ResponseWriter, r *http.Req
 		httpx.Error(w, http.StatusBadRequest, "staleDays 取值须在 1~3650 天之间")
 		return
 	}
+	// personalPolicy 缺省（旧版控制台 / 按老文档写的脚本不发这个字段）→ **保留当前值**，
+	// 绝不收成 inherit。
+	//
+	// ★"没带这一项"与"把这一项设成 inherit"是两件事，混为一谈就是一次静默降级：
+	// 本 handler 是全量 PUT，于是任何按本功能上线**前**的接口写的客户端，只要保存一次
+	// 准入设置（哪怕只是把陈旧阈值从 30 改成 60），就会把已配置的 deny 无声改回 inherit——
+	// 被挡住的那批个人资产终端下一次敲门全部放行，而页面上写着「跟随全局」，
+	// 没有人会把这两件事联系起来。仓库里已有同款前车之鉴（灰度弹窗恒发 groups:[]，见 SCOPE ch4）。
+	// 方向上也必须与读侧一致：deviceTrustPolicy 为了「绝不因一次读失败把闸放宽」才缓存整份设置，
+	// 写侧就不能留一条把同一个闸放宽的路。
+	if body.PersonalPolicy == "" {
+		cur, cerr := s.store.DeviceTrustSetting(r.Context())
+		if cerr != nil {
+			// 读不到当前值就不敢保存：fail-closed 好过把一个收缩方向的开关猜成 inherit。
+			httpx.Error(w, http.StatusInternalServerError, "读取当前准入设置失败，未做任何改动（请重试）")
+			return
+		}
+		body.PersonalPolicy = cur.PersonalPolicy
+		if !store.PersonalPolicyValid(body.PersonalPolicy) {
+			body.PersonalPolicy = store.PersonalPolicyInherit // 库里是空/脏值时才落回默认
+		}
+	}
+	if !store.PersonalPolicyValid(body.PersonalPolicy) {
+		httpx.Error(w, http.StatusBadRequest, "personalPolicy 取值须为 inherit|strict|deny")
+		return
+	}
 	saved, err := s.writer.SaveDeviceTrustSetting(r.Context(), body)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save device trust setting")
@@ -264,7 +328,8 @@ func (s *Server) handleSaveDeviceTrustSetting(w http.ResponseWriter, r *http.Req
 	modeZh := map[string]string{store.DeviceTrustObserve: "观察（放行并留痕）", store.DeviceTrustStrict: "严格（非授信终端拒发敲门令牌）"}
 	bindZh := map[string]string{store.DeviceBindAuto: "自动绑定", store.DeviceBindApproval: "审批绑定"}
 	s.audit(r, "admin", "保存授信终端准入设置：准入模式="+modeZh[saved.Mode]+
-		"、绑定方式="+bindZh[saved.BindMethod]+"、陈旧阈值="+strconv.Itoa(saved.StaleDays)+" 天", "ok")
+		"、绑定方式="+bindZh[saved.BindMethod]+"、陈旧阈值="+strconv.Itoa(saved.StaleDays)+" 天"+
+		"、个人资产策略="+store.PersonalPolicyZh(saved.PersonalPolicy), "ok")
 	httpx.JSON(w, http.StatusOK, saved)
 }
 
@@ -337,6 +402,84 @@ func (s *Server) handleRenameDevice(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "admin", "重命名终端："+d.Account+" / 指纹 "+shortFP(d.Fingerprint)+" → 「"+d.Name+"」", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "device": d})
+}
+
+// handleSetDeviceAsset 改一台设备的资产分类与标签（PermSecurity，wave7 行动 15）。
+//
+// 权限与「批准 / 吊销」同一档，因为**资产分类是准入判据**：在 personalPolicy=deny 下，
+// 把一台设备标成个人资产等价于吊销它，标回企业资产等价于放行它。标签本身没有执行方，
+// 但它和分类在同一个请求里，端点按更严的那一项收权（低权入口能顺手改判据是常见的越权面）。
+func (s *Server) handleSetDeviceAsset(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
+		return
+	}
+	id := r.PathValue("id")
+	var body struct {
+		AssetClass string   `json:"assetClass"`
+		Tags       []string `json:"tags"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	// 分类必填且必须合法：缺省兜成 enterprise 的话，一次前端字段名写错就会把
+	// 全体被编辑过的设备静默改回企业资产，而 personalPolicy 随之对它们失效。
+	if !store.AssetClassValid(body.AssetClass) {
+		httpx.Error(w, http.StatusBadRequest, "assetClass 取值须为 enterprise|personal|managed")
+		return
+	}
+	// 标签只做归一（去空/去重/截长/截数量），不拒绝：它没有执行方，为一个纯台账字段
+	// 把整次编辑打回去，只会让管理员连分类也改不成。
+	if len(body.Tags) > store.DeviceTagMaxCount*4 {
+		httpx.Error(w, http.StatusBadRequest, "标签数量过多（单台上限 "+strconv.Itoa(store.DeviceTagMaxCount)+" 个）")
+		return
+	}
+	before, after, err := s.writer.SetDeviceAsset(r.Context(), id, body.AssetClass, body.Tags)
+	if errors.Is(err, store.ErrDeviceNotFound) {
+		httpx.Error(w, http.StatusNotFound, "设备不存在")
+		return
+	}
+	if err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	s.audit(r, "security", deviceAssetAudit(before, after, s.deviceTrustPolicy(r.Context(), after.Account)), "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "device": after})
+}
+
+// deviceAssetAudit 资产分类/标签变更的审计文案。
+//
+// ★分类变更要写"从 X 改成 Y"并带上**当前生效的个人资产策略**：分类本身不说明任何后果，
+// 同一次「改成个人资产」在 inherit 下什么都没发生、在 deny 下等于当场吊销这台机器。
+// 事后复盘时没有这半句，就得去翻当时的设置才知道这条记录意味着什么。
+// 标签变更只如实记录，并写明它不参与判定——免得后来人把它读成一次访问控制变更。
+func deviceAssetAudit(before, after store.Device, set store.DeviceTrustSetting) string {
+	txt := "标注终端资产：" + after.Account + " / " + after.Name + "（指纹 " + shortFP(after.Fingerprint) + "）"
+	if before.AssetClass != after.AssetClass {
+		txt += "，资产分类 " + store.AssetClassZh(before.AssetClass) + " → " + store.AssetClassZh(after.AssetClass) +
+			"（当前个人资产策略：" + store.PersonalPolicyZh(set.PersonalPolicy) + "）"
+		switch {
+		case store.IsPersonalAsset(after.AssetClass) && set.PersonalPolicy == store.PersonalPolicyDeny:
+			txt += "。★该终端此后将被拒发敲门令牌（即使状态仍是已授信）"
+		case store.IsPersonalAsset(after.AssetClass) && set.PersonalPolicy == store.PersonalPolicyStrict:
+			txt += "。★该终端此后按严格准入判定，非已授信状态将被拒发敲门令牌"
+		case store.IsPersonalAsset(before.AssetClass) && set.PersonalPolicy != store.PersonalPolicyInherit:
+			txt += "。★该终端此后不再受个人资产策略约束"
+		}
+	} else {
+		txt += "，资产分类未变（" + store.AssetClassZh(after.AssetClass) + "）"
+	}
+	txt += "；标签 " + tagsText(before.Tags) + " → " + tagsText(after.Tags) + "（标签仅用于台账筛选与盘点，不参与任何准入或授权判定）"
+	return txt
+}
+
+// tagsText 标签集合的可读形式（空集合写「（无）」而不是空字符串——审计里
+// "标签  → " 这种句子读不出发生了什么）。
+func tagsText(tags []string) string {
+	if len(tags) == 0 {
+		return "（无）"
+	}
+	return "「" + strings.Join(tags, "、") + "」"
 }
 
 // handleDeleteDevice 删除一台设备登记（PermSecurity）。

@@ -167,12 +167,25 @@ export interface UserImportResp {
 /** 准入模式：observe = 非授信终端照常放行但留痕；strict = 拒发敲门令牌（连不进数据面）。 */
 export type DeviceTrustMode = 'observe' | 'strict';
 export type DeviceStatus = 'pending' | 'trusted' | 'revoked';
+
+/** 资产分类（PRD ch9 FR-EP-06~09）。**是准入判据**：personal 受 personalPolicy 约束，
+ *  managed（企业纳管个人）按企业资产处理——它的语义就是"个人设备但已纳管"。 */
+export type AssetClass = 'enterprise' | 'personal' | 'managed';
+
+/** 个人资产准入策略。执行方是控制面的敲门令牌闸（api.deviceAdmissionGate），
+ *  粒度是 (账号,指纹)：同一个人的企业机不受影响。
+ *  - inherit：与企业资产一视同仁，走全局 mode（**默认，行为与本功能上线前一致**）
+ *  - strict：个人资产恒按严格准入判（即使全局是 observe）
+ *  - deny：个人资产一律拒（即使已批准为已授信） */
+export type PersonalAssetPolicy = 'inherit' | 'strict' | 'deny';
+
 export interface DeviceTrustSetting {
   mode: DeviceTrustMode;
   bindMethod: 'auto' | 'approval';
   staleDays: number;
   /** 单账号设备上限。**只读**：判定写死在原子 SQL 里，前端按它置灰并注明「内置上限」。 */
   perUserQuota: number;
+  personalPolicy: PersonalAssetPolicy;
 }
 /** 一台已登记终端。verdict/os/clientVersion/stale 是后端读时派生，不落库。 */
 export interface Device {
@@ -185,6 +198,11 @@ export interface Device {
   /** 最近一次 posture 判定；**空串 = 从未上报**（不是 allow）。 */
   verdict: '' | 'allow' | 'degrade' | 'gray' | 'block';
   level: string; postureTs: number;
+  /** 资产分类。管理员标注，白帝不自动识别设备归属（没有 MDM / 资产系统对接）。 */
+  assetClass: AssetClass;
+  /** 自由标签。**纯台账属性，没有任何执行方**：不参与准入、授权、风险评分。
+   *  UI 上必须照实说明——不生效的东西要标明它只是标签。 */
+  tags: string[];
 }
 export interface ApprovalEvent { time: string; kind: 'submit' | 'login' | 'review' | 'notify' | 'risk'; title: string; detail: string }
 export interface TrustApproval {
@@ -1061,6 +1079,8 @@ export interface UpgradeCheckResult {
 /** 一行成功预登记的设备。line 是 CSV 文件里的行号（含表头那一行）。 */
 export interface DeviceImportOK {
   line: number; account: string; fingerprint: string; name: string; status: DeviceStatus;
+  /** 落库后的**实际值**（分类留空按企业资产、标签已去重截断）——不是 CSV 里的原文。 */
+  assetClass: AssetClass; tags: string[];
 }
 /** 一行被跳过的记录。reason 是后端原话——它常常是唯一能指导下一步动作的信息，不要改写。 */
 export interface DeviceImportSkip {
@@ -1074,6 +1094,11 @@ export interface DeviceImportResult {
   trusted: number;
   /** 控制面当前的 BAIDI_POSTURE_ENFORCE 取值。strict 时预登记不足以让终端连上。 */
   postureEnforce: 'observe' | 'strict';
+  /** 本批标为个人资产的台数，与当前生效的个人资产策略。★与 postureEnforce 同一条理由：
+   *  在 deny 下，一行「个人资产 + 已授信」导进去照样连不上——不说的话又是一个
+   *  「台账是绿的、就是连不上」。策略读不到时后端回空串，前端不渲染这一段。 */
+  personal: number;
+  personalPolicy: PersonalAssetPolicy | '';
   /** 预登记与终端合规闸的交互说明（后端 api.deviceImportPostureNote，同一份文本）。 */
   note: string;
 }

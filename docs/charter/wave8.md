@@ -35,7 +35,10 @@
 - 为什么值得：这是控制面**第四个**可访问性判定点，而且它谁都不认——不认 ACL、不认组织/用户组、不认 JIT，只看 `sensitivity`。三种失败形态全部无报错，且已被对抗验证用临时用例实测复现：①普通资源未授权用户 → 磁贴恒亮「访问」，点下去 403；②高敏资源**已授权**用户 → 磁贴恒「需申请」，逼他为自己已有的权限走审批，而同一个人经桌面客户端立刻能进（审批成纸面闸）；③高敏 + 未设 ACL → 磁贴锁着、点「申请权限」回 400「无需申请」死路，而该资源经隧道与 Web 票据对**全体登录用户**开放，方向完全相反。第③种由 `backfillResourceSensitivity` 自动造得出来（`apps.category='finance'` 一律抬 high，不问有没有 ACL）。
 - 注意：`api.go:701-702` 现有注释写的是「JIT 闭环的门户侧收口」，读起来像有执行方——改完要把注释同步改对，否则下一个人还会以为它接过。
 
-**2. 安全基线两处会咬人的（FR-SEC-BL-01/02/04/05/14）— S**
+**2. 安全基线两处会咬人的（FR-SEC-BL-01/02/04/05/14）— S ✅ 已落地**
+- 落地记（2026-08-16）：①采集器与基线之间的契约收成**一份** `store.CollectableChecks`（六项，带 label/expect/采集说明），入口校验 `handleSaveBaseline` 与控制台下拉都读它（目录随 `GET /security` 的 `checkCatalog` 下发，前端不另抄一份）；400 文案**列出全部合法 key**，否则管理员只会换个名字再试一次。顺带拒收重复 key（同一项配两遍会重复计分，而页面上是两行长得一样的检测项）。控制台那个写死 `'c-' + Date.now()` 的按钮换成「从目录里选 + 添加」，选中项还会显示采集说明（哪些情况探不到 / 判据在哪一侧）。②`client_version` 从「采集器写死 Pass」改成控制面判：采集器如实报 `unknown` + 原始版本号，`risk.ResolveClientVersion` 按目标版本重算并**写回报告**（不写回则页面与判定两边说不同的话）。目标版本两个真实来源：灰度计划的 `Stable`（优先）→ 下载中心 `available` 条目的版本（兜底）；两个都没有就「无法判定」，绝不假绿。种子基线的 label/expect 同步改准（原来写着「客户端为最新版本 / ≥ v0.1.0」）。
+- 踩到的两个坑，都记在代码注释里：`SaveGrayPlan` 对 `Version==""` 的计划是**整条丢弃**的（「置空版本即撤销灰度」的语义），所以「不跑灰度只声明稳定版」表达不出来——这正是要加下载中心兜底的原因，也是测试夹具必须回读确认落库的原因（接口照回 200，失败是静默的）。另一处是 Rust 侧那条 `assert!(cv.ok && !cv.unknown)` **钉住的正是旧假绿**，改对实现反而是它转红——绿着的测试在替假绿背书，必须跟着改。
+- 变异验证（四个都从绿转红）：去掉 key 白名单校验 / 种子用一个采集器不上报的 key / 删掉 handler 里那行 `ResolveClientVersion` 接线 / 判不了时回落成合规。第三个是照 wave8 行动 1 复核的教训专门补的——只测纯函数时，把接线删掉纯函数用例照样全绿。
 - 做什么：①`POST /security/baselines` 校验每个检测项 `key` 必须落在采集器六键之内（`disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version`），并把这六键做成页面上的下拉；②`client_version` 从「客户端自判」改成「控制面按灰度目标版本判」。
 - 改哪里：`control/internal/api/security.go:51-56`（紧邻的 40-45 行对 `platforms` **已经做过**这道枚举校验，照抄）；`console/src/views/Security.vue:320-328` `addCheck()`（现在把 key 写成 `'c-' + Date.now()`）；`clients/desktop/src-tauri/src/posture.rs:165-171`（`client_version_check` 直接 `return (Tri::Pass, ver)`）；判据搬到 `control/internal/risk` 或复用 `upgrade.handleClientUpdate` 的比较逻辑。
 - 为什么值得：不是「没做」而是「做了且会咬人」——管理员点一次「添加检测项」再保存，该平台**全体终端**下一次 posture 上报即判违规，而种子基线的 disposal 就是 `block`，等于一键全员拒发敲门令牌 + 撤窗断隧道，保存那一刻零报错。反方向同样坏：`client_version` 恒 Pass，终端合规页对跑三个版本前客户端的机器同样亮绿——正是 wave7 行动 10 判过死刑的「假绿替坏链路背书」，只是这次长在合规页上。

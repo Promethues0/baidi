@@ -1811,7 +1811,14 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load security")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, b)
+	// checkCatalog 采集器真的会上报的检查项目录，随基线一起下发。
+	//
+	// ★页面的「添加检测项」必须从它里面选，不能让管理员自由填 key：采集器不报的 key
+	// 会让该基线对全平台终端永远判违规（详见 handleSaveBaseline 里那道入口校验）。
+	// 与入口校验读的是同一份 store.CollectableChecks——前端自己抄一份的话，
+	// 加采集项时前端不跟进，页面上就永远选不到新项。
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"baselines": b.Baselines, "checkCatalog": store.CollectableChecks()})
 }
 
 // handleDevices 已搬到 devices.go（授信终端主线）：它现在有权限闸、有真实数据源、

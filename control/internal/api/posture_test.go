@@ -172,8 +172,13 @@ func TestPostureUnknownChecks(t *testing.T) {
 	if code != http.StatusOK || out["verdict"] != "allow" {
 		t.Fatalf("observe 下不可判定不应拦：%d %v", code, out)
 	}
-	unknowns, _ := out["unknowns"].([]any)
-	if len(unknowns) != 1 || !strings.Contains(unknowns[0].(string), "无法判定") {
+	// ★不再断言"恰好 1 条"：这台测试机没有配灰度稳定版、也没有下载中心清单，
+	// 于是 client_version 也是「无法判定」（控制面判不了目标版本时的正确姿态，
+	// 见 risk.ResolveClientVersion——此前它由采集器写死成合规，那是假绿）。
+	// 断言改成"点名的那一项在里面"，既守住本用例要守的东西，
+	// 又不会在每次新增一个可能不可判定的检查项时误红。
+	unknowns := strSlice(out["unknowns"])
+	if !hasSubstr(unknowns, "磁盘已加密") || !hasSubstr(unknowns, "无法判定") {
 		t.Fatalf("不可判定项必须回传给终端展示，got %v", out["unknowns"])
 	}
 	if len(out["reasons"].([]any)) != 0 {
@@ -418,4 +423,14 @@ func TestDeletePostureReportEndpoint(t *testing.T) {
 	if _, out := doJSON(t, h, "DELETE", "/api/v1/posture/li.fang/CAFE:BABE:1234:5678", adminToken(), nil); out["deleted"] != false {
 		t.Fatalf("重复删应 deleted=false: %v", out)
 	}
+}
+
+// hasSubstr 名单里是否有任一项含该子串。
+func hasSubstr(list []string, want string) bool {
+	for _, s := range list {
+		if strings.Contains(s, want) {
+			return true
+		}
+	}
+	return false
 }

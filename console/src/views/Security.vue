@@ -143,7 +143,31 @@
             </tbody>
           </table>
 
-          <button class="bd-addcheck" @click="addCheck"><icon-plus />添加检测项（{{ plat }}）</button>
+          <!-- ★只能从采集器目录里选，不能自由填 key：采集器不报的 key 会让这条基线
+               对全平台终端永远判违规（接入准入基线默认处置是 block）。目录由后端下发。 -->
+          <div class="bd-addcheck-row">
+            <a-select
+              v-model="pickedCheck"
+              size="small"
+              placeholder="选择要添加的检测项…"
+              :disabled="!addableChecks.length"
+              style="flex: 1; max-width: 340px"
+              allow-clear
+            >
+              <a-option v-for="s in addableChecks" :key="s.key" :value="s.key">
+                {{ s.label }}（{{ s.key }}）
+              </a-option>
+            </a-select>
+            <a-button size="small" type="primary" :disabled="!pickedCheck" @click="addCheck">
+              <icon-plus />添加检测项
+            </a-button>
+            <span v-if="!catalog.length" class="bd-addcheck-note">未连后端，取不到采集项目录</span>
+            <span v-else-if="!addableChecks.length" class="bd-addcheck-note">采集器可上报的 {{ catalog.length }} 项已全部配置</span>
+            <span v-else class="bd-addcheck-note">
+              只列采集器真的会上报的项——配一个采集器不报的 key，这条基线会对全平台终端永远判违规
+            </span>
+          </div>
+          <div v-if="pickedSpec?.note" class="bd-addcheck-hint"><icon-info-circle />{{ pickedSpec.note }}</div>
         </div>
       </div>
     </div>
@@ -202,7 +226,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type PostureRow, type PostureResp } from '@/lib/api';
+import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp } from '@/lib/api';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
@@ -252,6 +276,8 @@ const MOCK_BASELINES: BaselinePolicy[] = [
 // 真实版本在「安全防护 → 网关与隐身 → SPA 服务隐身」，每一项都来自网关注册心跳。
 
 const baselines = ref<BaselinePolicy[]>(MOCK_BASELINES);
+/** 采集器可上报的检查项目录（后端下发，未连库时为空——此时只能删不能加，见 addCheck）。 */
+const catalog = ref<CheckSpec[]>([]);
 const selected = ref(MOCK_BASELINES[0].id);
 const plat = ref<Platform>('Windows');
 
@@ -317,15 +343,35 @@ async function removeBaseline() {
     Message.success('基线已删除');
   } catch { Message.error('删除失败'); }
 }
+/**
+ * 可添加的检测项 = 采集器目录 − 本基线已配的 key。
+ *
+ * ★不能让管理员自由填 key。采集器不上报的 key，风险引擎按「缺失即不合规」判该项失败
+ * （那是防选择性上报的正确设计），于是这条基线对该平台**全体终端**永远违规——
+ * 而接入准入基线的默认处置是 block，等于一键给所有人拒发敲门令牌 + 撤窗断隧道，
+ * 保存那一刻零报错。此前这个按钮 100% 产出这种 key（写死 'c-' + Date.now()）。
+ * 目录由后端随 /security 下发，与入口校验读同一份，前端不另抄一份。
+ */
+const addableChecks = computed(() =>
+  catalog.value.filter((s) => !(cur.value?.checks ?? []).some((c) => c.key === s.key)));
+const pickedCheck = ref('');
+/** 选中项的采集说明（哪些情况会探不到 / 判据在哪一侧）——直接摆在选择器下面，
+ *  免得管理员配完一条 low 严重度的项，事后才发现它在半数终端上恒为「无法判定」。 */
+const pickedSpec = computed(() => catalog.value.find((s) => s.key === pickedCheck.value));
+
 function addCheck() {
-  if (!cur.value) return;
+  const spec = catalog.value.find((s) => s.key === pickedCheck.value);
+  if (!cur.value || !spec) return;
   cur.value.checks.push({
-    key: 'c-' + Date.now(),
-    label: '新检测项',
-    platform: plat.value,
-    expect: '待配置',
+    key: spec.key,
+    label: spec.label,
+    // 采集器六项三平台都采（spec.platform 恒为 All），故按目录声明的适用面写，
+    // 不按当前选中的平台页签写——后者会造出「只在 Windows 生效」的假限定。
+    platform: spec.platform,
+    expect: spec.expect,
     severity: 'medium'
   });
+  pickedCheck.value = '';
 }
 function removeCheck(key: string) {
   if (!cur.value) return;
@@ -356,6 +402,9 @@ onMounted(async () => {
   try {
     const b = await api<SecurityBundle>('/security');
     baselines.value = b.baselines;
+    // 目录取不到就给空数组——宁可「加不了检测项」，也不能回退成自由填 key：
+    // 那正是这次要消灭的、会把全平台终端判违规的入口。
+    catalog.value = b.checkCatalog ?? [];
     if (b.baselines.length) selected.value = b.baselines[0].id;
     live.value = true;
   } catch {
@@ -442,11 +491,14 @@ onMounted(async () => {
 .bd-chktable thead tr { background: var(--bd-fill-1); }
 .bd-empty { text-align: center; color: var(--bd-t3); font-size: 12.5px; padding: 22px 0; }
 
-.bd-addcheck {
-  margin-top: 14px; width: 100%; height: 38px; border: 1px dashed var(--bd-border); background: var(--bd-fill-1);
-  border-radius: 8px; color: var(--bd-primary); font-size: 13px; font-weight: 500; cursor: pointer;
-  display: inline-flex; align-items: center; justify-content: center; gap: 6px; transition: all .12s;
+.bd-addcheck-row {
+  margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--bd-border); background: var(--bd-fill-1);
+  border-radius: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.bd-addcheck:hover { border-color: var(--bd-primary); background: var(--bd-primary-1); }
+.bd-addcheck-note { font-size: 12px; color: var(--bd-t3); flex: 1; min-width: 200px; }
+.bd-addcheck-hint {
+  margin-top: 8px; padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.6;
+  color: var(--bd-t2); background: var(--bd-fill-1); display: flex; align-items: flex-start; gap: 6px;
+}
 
 </style>

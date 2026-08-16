@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -70,9 +71,14 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load baselines")
 		return
 	}
+	// ★client_version 这一项由**控制面**判：目标版本只有控制面知道（灰度发布里配的稳定版），
+	// 终端手里只有自己的版本号。采集器如实报 unknown，这里重算并**写回 checks**，
+	// 于是「终端合规页渲染的那一格」与「风险引擎判定的那一格」是同一个结论——
+	// 只判不写回的话，页面仍会照客户端那份渲染，两边说不同的话。
+	checks := risk.ResolveClientVersion(b.Checks, b.ClientVersion, s.minClientVersion(r.Context(), b.Platform))
 	// StrictUnknown 跟随 postureStrict：strict 已是「说不清楚就不放行」（缺报/过期即拒），
 	// 探不到的检查项同口径处理；observe 下不可判定只单列展示，不误拒真实合规的终端。
-	v := risk.Evaluate(b.Platform, b.Checks, baselines, risk.Options{StrictUnknown: s.postureStrict})
+	v := risk.Evaluate(b.Platform, checks, baselines, risk.Options{StrictUnknown: s.postureStrict})
 
 	user := normUser(c.Name)
 	// 转换审计口径须与执行闸门一致——都用用户级「跨设备最差」判定，而非单设备前值
@@ -80,7 +86,7 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 	prevWorst, hadPrev, _ := s.store.PostureVerdict(r.Context(), user)
 	rep := store.PostureReport{
 		User: user, Device: b.Device, Platform: b.Platform, OS: b.OS, ClientVersion: b.ClientVersion,
-		Checks: b.Checks, Verdict: v.Disposal, Score: v.Score, Level: v.Level, Reasons: v.Reasons,
+		Checks: checks, Verdict: v.Disposal, Score: v.Score, Level: v.Level, Reasons: v.Reasons,
 		TS: time.Now().Unix(),
 	}
 	// ★设备台账登记排在报告落库**之前**：单账号设备上限（MaxDevicesPerAccount）的
@@ -223,4 +229,52 @@ func (s *Server) handleDeletePostureReport(w http.ResponseWriter, r *http.Reques
 			"整台设备退役请在「终端管理」页删除）", "ok")
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "deleted": deleted})
+}
+
+// minClientVersion 该平台「客户端至少要跑到哪一版」——client_version 合规判定的判据。
+//
+// 两个真实来源，按此顺序取第一个有值的：
+//
+//  1. **灰度计划的 Stable**（`升级 → 灰度发布`）。它是管理员的显式声明——「不在灰度内的
+//     账号应该拿这一版」。取 Stable 而不是 Version（灰度版）：灰度的意义是「先小范围
+//     验证再放开」，拿灰度版当合规线会让全体没进灰度批次的终端一夜之间集体不合规，
+//     而他们装的恰恰是管理员让他们装的那一版。
+//  2. **下载中心正在分发的那一版**（manifest 里 available 的条目）。这是兜底，也是绝大多数
+//     部署的真实形态：`SaveGrayPlan` 对 `Version==""` 的计划是**整条丢弃**的
+//     （见 store.SaveGrayPlan，那是「置空版本即撤销灰度」的语义），所以「我没在灰度，
+//     但我想声明稳定版是 0.3.0」这件事今天根本表达不出来。只认来源 1 的话，
+//     没跑灰度的部署里这一项会恒「无法判定」——比假绿好，但仍然等于没做。
+//     「你装的包比我们正在分发的旧」本身就是一句站得住的合规判据。
+//
+// 两个来源都取不到就回空串 → ResolveClientVersion 判「无法判定」而不是「合规」：
+// 该平台既没发布计划也没在分发包时，「是不是最新版」这个问题本身没有答案，
+// 而假绿正是这次要消灭的东西。读失败同理（宁可不可判定，不可假绿）。
+func (s *Server) minClientVersion(ctx context.Context, platform string) string {
+	// 灰度计划的平台键是小写（macos/windows/linux/…），posture 上报是强枚举
+	// Windows|macOS|Linux——两处口径不同，必须归一，否则永远匹配不上而恒「无法判定」。
+	want := strings.ToLower(strings.TrimSpace(platform))
+	if s.upg != nil {
+		plans, err := s.upg.GrayPlans(ctx)
+		if err != nil {
+			// 读失败**直接返回不可判定**，不退到来源 2：此刻我们不知道管理员是不是配了
+			// 一个更高的稳定版，用分发包那一版去判会把「其实已经不合规」说成合规。
+			slog.Warn("读灰度计划失败，本次 client_version 按「无法判定」处理（不假绿）",
+				"平台", platform, "err", err.Error())
+			return ""
+		}
+		for _, p := range plans {
+			if strings.ToLower(strings.TrimSpace(p.Platform)) == want && strings.TrimSpace(p.Stable) != "" {
+				return p.Stable
+			}
+		}
+	}
+	for _, c := range s.loadManifest().Clients {
+		// 只认 available 的条目：占位条目（「构建中，敬请期待」/ UNVERIFIED 不进下载中心）
+		// 的 version 要么为空、要么是个没人能装到的版本号，拿它当合规线是在要求用户
+		// 去装一个下载中心根本不给他的包。
+		if c.Available && strings.ToLower(strings.TrimSpace(c.Platform)) == want {
+			return strings.TrimSpace(c.Version)
+		}
+	}
+	return ""
 }

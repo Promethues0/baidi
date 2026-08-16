@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
@@ -48,11 +49,33 @@ func (s *Server) handleSaveBaseline(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "检测项过多（≤64）")
 		return
 	}
+	seen := map[string]bool{}
 	for _, c := range b.Checks {
 		if c.Key == "" || c.Label == "" || !validCheckPlatform[c.Platform] || !validSeverity[c.Severity] {
 			httpx.Error(w, http.StatusBadRequest, "检测项 key/label 必填，platform/severity 取值非法")
 			return
 		}
+		// ★key 必须是采集器真的会上报的那六个之一。
+		//
+		// 采集器不报的 key，risk.Evaluate 按「缺失即不合规」判该项失败（那是防选择性
+		// 上报的正确设计），于是这条基线对该平台**全体终端**永远违规——而接入准入基线
+		// 的默认处置是 block，等于一键给所有人拒发敲门令牌 + 撤窗断隧道。
+		// 此前页面上唯一的「添加检测项」按钮 100% 产出这种 key（写死 'c-'+时间戳），
+		// 保存那一刻零报错。方向比 platforms 拼错更坏：那个是永不生效（fail-open），
+		// 这个是全员 fail-closed。判据与页面下拉同一份（store.CollectableChecks）。
+		if _, ok := store.CheckSpecOf(c.Key); !ok {
+			httpx.Error(w, http.StatusBadRequest,
+				"检测项 key「"+c.Key+"」不是采集器会上报的项，该基线会对全平台终端永远判违规。"+
+					"可选："+strings.Join(store.CollectableCheckKeys(), " / "))
+			return
+		}
+		if seen[c.Key] {
+			// 同一 key 配两遍：两条都会被判定一次，分数翻倍且理由重复出现，
+			// 而管理员在页面上看到的是两行长得一样的检测项。
+			httpx.Error(w, http.StatusBadRequest, "检测项 key「"+c.Key+"」重复")
+			return
+		}
+		seen[c.Key] = true
 	}
 	saved, err := s.writer.SaveBaseline(r.Context(), b)
 	if err != nil {

@@ -38,6 +38,71 @@ type BaselineCheck struct {
 	Severity string `json:"severity"` // high | medium | low
 }
 
+// CheckSpec 采集器**真的会上报**的一个检查项。
+//
+// 这是安全基线检测项 key 的**唯一合法取值来源**，也是「采集器报什么」与
+// 「基线要求什么」之间那份契约的唯一书面形式。
+type CheckSpec struct {
+	Key    string `json:"key"`
+	Label  string `json:"label"`
+	Expect string `json:"expect"` // 默认期望值描述（页面展示，可由管理员改）
+	// Platform 该项能在哪些平台上被采到。当前六项三平台都采，故恒为 All——
+	// 真出现平台专属项时，入口校验要连这一维一起校（Windows 独有的项配在 macOS 上
+	// 会让那条基线对 Mac 永远判违规，与 key 拼错是同一种坑）。
+	Platform string `json:"platform"`
+	Note     string `json:"note,omitempty"`
+}
+
+// collectableChecks 桌面采集器（clients/desktop/src-tauri/src/posture.rs）实际上报的六项。
+//
+// ★这份清单必须与采集器逐字对齐。基线里配一个采集器**从不上报**的 key，
+// risk.Evaluate 会按「缺失即不合规」判该项失败（防选择性上报的正确设计），
+// 于是那条基线对**该平台全体终端**永远违规——而接入准入基线的默认处置是 block，
+// 等于一键给所有人拒发敲门令牌 + 撤窗断隧道，保存那一刻零报错零提示。
+// 入口拒绝（api.handleSaveBaseline）+ 页面下拉（Security.vue）两道，都读这一份。
+var collectableChecks = []CheckSpec{
+	{Key: "disk_encrypted", Label: "磁盘已加密", Expect: "FileVault / BitLocker = On", Platform: "All",
+		Note: "macOS 读 fdesetup、Windows 读 BitLocker、Linux 看有无 LUKS 块设备"},
+	{Key: "sys_integrity", Label: "系统完整性保护开启", Expect: "SIP / Secure Boot = enabled", Platform: "All",
+		Note: "macOS 读 csrutil、Windows 读 Secure Boot、Linux 看 lockdown/SELinux"},
+	{Key: "firewall_on", Label: "系统防火墙启用", Expect: "firewall = enabled", Platform: "All",
+		Note: "Linux 非 root、Windows 非管理员时探不到，会如实报「无法判定」而不是不合规"},
+	{Key: "os_version", Label: "系统版本合规", Expect: "macOS ≥ 13 / Win ≥ 10", Platform: "All"},
+	{Key: "edr_online", Label: "EDR 终端防护在线", Expect: "EDR 进程存活", Platform: "All",
+		Note: "枚举不到进程时报「无法判定」"},
+	{Key: "client_version", Label: "客户端版本合规", Expect: "≥ 灰度发布里配置的稳定版", Platform: "All",
+		Note: "★判据在控制面：按「升级 → 灰度发布」里该平台的稳定版比对上报版本。" +
+			"该平台没有发布计划、或终端没报版本时一律「无法判定」，不会假绿"},
+}
+
+// CollectableChecks 采集器可上报的检查项目录（副本，调用方改不动内部状态）。
+func CollectableChecks() []CheckSpec {
+	return append([]CheckSpec(nil), collectableChecks...)
+}
+
+// CheckSpecOf 按 key 取采集项定义。
+func CheckSpecOf(key string) (CheckSpec, bool) {
+	for _, c := range collectableChecks {
+		if c.Key == key {
+			return c, true
+		}
+	}
+	return CheckSpec{}, false
+}
+
+// CollectableCheckKeys 全部合法 key（拼错误时原样报给管理员，让他知道能填什么）。
+func CollectableCheckKeys() []string {
+	out := make([]string, 0, len(collectableChecks))
+	for _, c := range collectableChecks {
+		out = append(out, c.Key)
+	}
+	return out
+}
+
+// CheckKeyClientVersion 客户端版本项的 key。判据在控制面（见 risk.ResolveClientVersion），
+// 与其余五项「客户端采集 + 机械布尔化」不同，单独取个常量免得三处各写一遍字面量。
+const CheckKeyClientVersion = "client_version"
+
 func (m *Memory) Security(_ context.Context) (SecurityBundle, error) {
 	return SecurityBundle{
 		// 种子基线：check key 与桌面客户端采集键一致（disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version）。
@@ -55,7 +120,10 @@ func (m *Memory) Security(_ context.Context) (SecurityBundle, error) {
 					{Key: "firewall_on", Label: "系统防火墙启用", Platform: "All", Expect: "firewall = enabled", Severity: "medium"},
 					{Key: "os_version", Label: "系统版本合规", Platform: "All", Expect: "macOS ≥ 13 / Win ≥ 10", Severity: "medium"},
 					{Key: "edr_online", Label: "EDR 终端防护在线", Platform: "All", Expect: "EDR 进程存活", Severity: "low"},
-					{Key: "client_version", Label: "客户端为最新版本", Platform: "All", Expect: "≥ v0.1.0", Severity: "low"},
+					// ★label/expect 与实现对齐：判据是控制面按「升级 → 灰度发布」里该平台的
+					// 稳定版比对（risk.ResolveClientVersion），不是终端自称「我是最新版」。
+					// 没配稳定版时这一项是「无法判定」，observe 下不计分——如实，不假绿。
+					{Key: "client_version", Label: "客户端版本合规", Platform: "All", Expect: "≥ 灰度发布里配置的稳定版", Severity: "low"},
 				}},
 		},
 	}, nil

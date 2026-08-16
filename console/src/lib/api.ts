@@ -610,7 +610,11 @@ export interface BaselinePolicy { id: string; name: string; type: 'app-protect' 
 /** 只有 baselines。原来还有一段 spa（G3 / 已隐身 / 敲门正常）是纯种子——控制面既不实测
  *  端口可见性、也不代数据面宣布敲门是否正常，整段连同安全中心页那张卡片已删除。
  *  真实出处是「网关与隐身」页：那里每一项都来自网关 mTLS 注册心跳。 */
-export interface SecurityBundle { baselines: BaselinePolicy[] }
+/** 采集器**真的会上报**的一个检查项。基线检测项的 key 只能取自这份目录——
+ *  采集器不报的 key 会让该基线对全平台终端永远判违规（接入准入基线默认处置是 block，
+ *  等于一键给所有人拒发敲门令牌）。后端 handleSaveBaseline 与本页下拉读同一份。 */
+export interface CheckSpec { key: string; label: string; expect: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; note?: string }
+export interface SecurityBundle { baselines: BaselinePolicy[]; checkCatalog?: CheckSpec[] }
 
 /* ── 终端 posture（安全中心 · 终端合规） ── */
 /** unknown = 终端探不到该项（权限不足/命令缺失），既非合规也非不合规。

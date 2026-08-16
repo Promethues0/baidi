@@ -37,7 +37,9 @@ export async function collectPosture(): Promise<PostureInfo> {
       // 浏览器里确实探不到 EDR——按 unknown 报，不是 ok:false。
       // 报 false 会让控制面把联调机判成"不合规"，然后开发自己被 block 基线拦在门外。
       { key: 'edr_online', label: 'EDR 终端防护在线', ok: false, unknown: true, value: '无法判定：浏览器无法枚举进程' },
-      { key: 'client_version', label: '客户端为最新版本 v0.1.0', ok: true, value: '0.1.0' }
+      // 客户端版本本地判不了「是不是最新」——判据（目标版本）在控制面的灰度发布配置里。
+      // 与 Rust 采集器同口径报 unknown，由控制面重算后写回；报 ok:true 就是假绿。
+      { key: 'client_version', label: '客户端版本合规', ok: false, unknown: true, value: '0.1.0' }
     ]
   };
 }

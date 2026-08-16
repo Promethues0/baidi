@@ -161,12 +161,22 @@ fn any_proc(list: &str, names: &[&str]) -> bool {
     names.iter().any(|n| low.contains(&n.to_ascii_lowercase()))
 }
 
-/// 客户端版本项：本地永远能取到（编译期常量），故恒为确定值。
+/// 客户端版本项：版本号本地永远取得到（编译期常量），但**「是不是该升级了」本地判不了**
+/// ——判据（目标版本）只有控制面知道，配在「升级 → 灰度发布」里。
+///
+/// 故如实报 Unknown + 原始版本号，由控制面 `risk::ResolveClientVersion` 按该平台的
+/// 稳定版重算后写回报告。此前这里写死 `Tri::Pass`，于是「终端合规」页对跑三个版本
+/// 以前客户端的机器同样亮绿——而管理员看那一栏的目的恰恰是找出老客户端。
+/// 那是本项目在桌面端自助诊断上判过死刑的「假绿」形态：假诊断比没有诊断更糟，
+/// 它替坏链路背书。它也**不属于**「采集不到」那一类：缺的不是数据，是判据。
+///
+/// 对未升级的旧控制面，Unknown 会走既有的三态处理（observe 不计分 / strict 视为不合规），
+/// 方向是 fail-closed，与本文件其余探不到的项同口径。
 fn client_version_check(ver: &str) -> PostureCheck {
     check(
         "client_version",
-        &format!("客户端为最新版本 v{ver}"),
-        (Tri::Pass, ver.to_string()),
+        "客户端版本合规",
+        (Tri::Unknown, ver.to_string()),
     )
 }
 
@@ -758,10 +768,24 @@ mod tests {
                 assert!(!c.ok, "{name}/{k} unknown 时 ok 必须为 false（对旧控制面 fail-closed）");
                 assert!(c.value.starts_with("无法判定："), "{name}/{k} 须说明为什么探不到：{}", c.value);
             }
-            // 客户端版本来自编译期常量，永远探得到
+            // ★客户端版本：版本号本地永远取得到，但**「是不是该升级了」本地判不了**
+            // ——判据（目标版本）只有控制面知道。故这一项恒 unknown + 原始版本号，
+            // 由控制面 risk::ResolveClientVersion 重算后写回报告。
+            //
+            // 这条断言此前写的是 `cv.ok && !cv.unknown`，钉住的正是那个假绿：
+            // 采集器写死 Tri::Pass，于是「终端合规」页对跑三个版本以前客户端的机器也亮绿，
+            // 而管理员看那一栏的目的恰恰是找出老客户端。绿着的测试在替假绿背书，
+            // 所以它必须跟着改——不改的话，改对了实现反而是这条用例转红。
             let cv = one(&checks, "client_version");
-            assert!(cv.ok && !cv.unknown);
-            assert_eq!(cv.value, env!("CARGO_PKG_VERSION"));
+            assert!(
+                cv.unknown && !cv.ok,
+                "{name}/client_version 本地判不了目标版本，必须报 unknown（写死 Pass 即假绿）"
+            );
+            assert_eq!(
+                cv.value,
+                env!("CARGO_PKG_VERSION"),
+                "{name}/client_version 的 value 必须是原始版本号，供控制面比对与页面展示"
+            );
         }
     }
 

@@ -238,43 +238,41 @@ func (s *Server) buildProfile(ctx context.Context, user, role string, apps store
 		if a.Status != "running" {
 			continue // 已停用的应用不进剖面，免得终端接管一个必然连不通的地址
 		}
-		// global 模式（如 *.cnki.net 全网资源）没有确定的内网落点，不参与隧道路由。
-		// 这类应用靠系统默认出口直连，剖面里给出但不写 resmap/route。
-		if a.Mode == "global" {
-			// 没有受控资源就没有敏感度可言（也不经隧道、不受降权约束）：如实标 normal。
-			out = append(out, ProfileApp{
-				ID: a.ID, Name: a.Name, Mode: a.Mode, Sensitivity: store.SensitivityNormal,
-				Backend: a.Addr, URL: a.Addr, Accessible: true,
-			})
-			continue
-		}
-		res, hasRes := byRes[a.ResourceID]
-		if !hasRes {
-			// 应用未桥接到受控资源 → 网关无法按 id 查后端，隧道内报不出目标。
-			// 这类应用是配置缺口，明确告警而不是静默漏掉（此前正是这类缺口被忽略）。
-			warnings = append(warnings, fmt.Sprintf("应用「%s」未关联受控资源，无法经隧道访问（请在资源策略页补齐 resourceId）", a.Name))
-			continue
-		}
-		// ── 可访问性判定：必须与网关侧完全同构 ──
+		// ── 可访问性判定：必须与网关侧、门户侧完全同构 ──
 		// 网关的权威闸是 resource.Authorize(静态 ACL + DenyUsers)，而控制面在下发网关策略时
 		// 会把**组织/用户组展开出的账号**与**有效期内的 JIT 授予**一并并入 AllowUsers、
 		// 把**被降权账号**写进高敏资源的 DenyUsers（见 handleGatewayPolicy → expandForGateway）。
 		// 所以这里的判定也必须是「(静态 ACL ∪ 组织/组展开 ∪ 有效 JIT 授予) ∧ ¬降权否决」
 		// ——少算任何一项的后果都是「策略/审批明明生效了，剖面里却没有该资源的 VIP 与路由」，
-		// 多算则是「剖面排了路由、网关那边照拒」，两个方向都毫无报错。判定只有 accessibleFor 一处。
-		hasGrant := granted[res.ID]
-		accessible := accessibleFor(user, role, res, subjects, hasGrant, degraded)
-		sens := res.Sensitivity
-		degradeHit := degraded && res.HighSensitivity()
+		// 多算则是「剖面排了路由、网关那边照拒」，两个方向都毫无报错。
+		// 判定连同 global / 结构性不可用两个分支一起收在 appAccessState 一处，门户走同一个函数。
+		res, st := appAccessState(user, role, a, byRes, subjects, granted, degraded)
+		// global 模式（如 *.cnki.net 全网资源）没有确定的内网落点，不参与隧道路由。
+		// 这类应用靠系统默认出口直连，剖面里给出但不写 resmap/route。
+		if a.Mode == "global" {
+			out = append(out, ProfileApp{
+				ID: a.ID, Name: a.Name, Mode: a.Mode, Sensitivity: st.Sensitivity,
+				Backend: a.Addr, URL: a.Addr, Accessible: st.Accessible,
+			})
+			continue
+		}
+		if st.Unavailable {
+			// 结构性不可用（未关联受控资源 / 后端不是 host:port）→ 网关按 id 查不到后端，
+			// 或查到了也拨不出去，隧道内报不出目标。这类应用是配置缺口，明确告警而不是静默漏掉。
+			// ★丢弃判据与门户磁贴的 Unavailable **同一处**（appAccessState）：
+			// 两边各判一次的话，剖面丢掉的应用会在门户上继续把按钮亮着。
+			warnings = append(warnings, fmt.Sprintf("应用「%s」无法经隧道访问：%s", a.Name, st.Reason))
+			continue
+		}
+		accessible := st.Accessible
+		sens := st.Sensitivity
+		degradeHit := st.Degraded
 		if degradeHit {
 			degradedApps = append(degradedApps, a.Name)
 		}
 
-		host, portStr, err := net.SplitHostPort(res.Backend)
-		if err != nil {
-			warnings = append(warnings, fmt.Sprintf("资源「%s」后端地址非法（%s），已跳过", res.Name, res.Backend))
-			continue
-		}
+		// Unavailable 已保证这里必然能拆开（同一个 SplitHostPort 判据），err 只是形式上的兜底。
+		host, portStr, _ := net.SplitHostPort(res.Backend)
 		port, _ := strconv.Atoi(portStr)
 		vip := vipOf[res.ID]
 		// 后端是 IP 字面量还是域名，决定了客户端用哪条路接管它：

@@ -46,9 +46,17 @@ export interface PortalLoginResp {
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';
+  /** 服务端算出的授权结论：静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
+   *  ★唯一判据就是它。**不要**按 sensitivity 自己推「要不要申请」——高敏不等于没授权，
+   *  普通也不等于人人可进，这两处推导正是控制面侧被消灭掉的那个第四判定点。 */
   accessible: boolean;
   /** 因终端风险降权而不可访问（而非缺授权）。此时提交访问申请无效——降权否决压过 JIT 授予，
    *  用户该做的是修复终端环境。两种"不可访问"的下一步动作完全不同，提示语必须区分。 */
   degraded?: boolean;
+  /** 结构上不可用（未关联受控资源 / 后端不是 host:port）：配置缺口而非授权结论，
+   *  自助申请同样会被后端拒掉，只能找管理员。 */
+  unavailable?: boolean;
+  /** 不可用的具体原因，直接说给用户听。 */
+  unavailableReason?: string;
 }
 export interface PortalAppsResp { apps: PortalTile[] }

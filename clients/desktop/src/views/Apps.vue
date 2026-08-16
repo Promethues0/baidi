@@ -3,7 +3,7 @@
     <div class="ap__head">
       <div>
         <div class="dk-page__title">应用中心</div>
-        <div class="dk-page__sub">已授权的业务应用 · 经安全隧道一键直达</div>
+        <div class="dk-page__sub">已发布的业务应用 · 已授权的经安全隧道一键直达</div>
       </div>
       <a-tag v-if="live !== null" :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连控制中心' : '未连' }}</a-tag>
     </div>
@@ -16,13 +16,24 @@
       <div v-for="a in apps" :key="a.id" class="dk-card ap__card">
         <div class="ap__top">
           <span class="ap__ic" :style="{ background: meta(a.mode).bg }"><component :is="meta(a.mode).icon" :style="{ color: meta(a.mode).color }" /></span>
-          <span v-if="!a.accessible" class="ap__sens"><icon-lock />需申请</span>
+          <!-- 「被降权」与「没授权」下一步动作不同：前者申请必然被否（降权否决压过 JIT 授予），
+               该做的是修终端。剖面早就下发了 degraded 这一格，这里此前一律画成「需申请」。 -->
+          <span v-if="a.degraded" class="ap__sens ap__sens--deg"><icon-exclamation-circle-fill />终端降级</span>
+          <span v-else-if="!a.accessible" class="ap__sens">
+            <icon-lock />{{ a.sensitivity === 'high' ? '高敏 · 需申请' : '未授权 · 可申请' }}
+          </span>
         </div>
         <div class="ap__name">{{ a.name }}</div>
         <!-- 显示接入地址（VIP），不是内网真实地址：终端只需知道「往哪连」，
              内网拓扑属于最小知悉之外的信息。鼠标悬停可看真实后端，便于排障。 -->
         <div class="ap__addr dk-mono" :title="a.backend ? `真实后端 ${a.backend}` : ''">{{ a.url || a.backend }}</div>
         <button v-if="a.accessible" class="dk-btn ap__btn" @click="openApp(a)"><icon-link />访问</button>
+        <button
+          v-else-if="a.degraded"
+          class="dk-btn dk-btn--ghost ap__btn"
+          disabled
+          title="终端环境不合规，已暂停高敏资源访问。修复后重新上报即自动恢复；此状态下提交申请无效"
+        >请先修复终端</button>
         <button v-else class="dk-btn dk-btn--ghost ap__btn" @click="apply(a)">申请权限</button>
       </div>
       <div v-if="!apps.length" class="ap__empty">{{ loadErr || '暂无可访问应用' }}</div>
@@ -81,7 +92,9 @@ async function openApp(a: ProfileApp) {
 }
 
 function apply(a: ProfileApp) {
-  Message.info(`请到门户「我的申请」提交「${a.name}」的访问申请（高敏资源需审批后临时授予）`);
+  // 不说死「高敏」：走到这里只说明「此刻没有这个资源的访问权」，它可能是高敏，
+  // 也可能只是一条你不在授权名单里的普通资源（服务端判定见 control 侧 appAccessState）。
+  Message.info(`请到门户「我的申请」提交「${a.name}」的访问申请（审批通过后获得限时授予，到期自动回收）`);
 }
 
 /**
@@ -114,6 +127,8 @@ onMounted(async () => {
 .ap__top { display: flex; align-items: center; justify-content: space-between; }
 .ap__ic { width: 40px; height: 40px; border-radius: 10px; display: inline-flex; align-items: center; justify-content: center; font-size: 20px; }
 .ap__sens { font-size: 11px; color: var(--bd-warning); background: var(--bd-tag-gold-bg); padding: 2px 7px; border-radius: 4px; display: inline-flex; align-items: center; gap: 3px; }
+/* 红而非金：降级与"需申请"是两回事——申请审批在这个状态下无效（与门户 PortalApps.vue 同一套配色约定） */
+.ap__sens--deg { color: var(--bd-danger); background: var(--bd-tag-red-bg, #FFECE8); }
 .ap__name { font-size: 14px; font-weight: 600; margin-top: 12px; color: var(--bd-t1); }
 .ap__addr { font-size: 11.5px; color: var(--bd-t3); margin-top: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ap__btn { width: 100%; height: 34px; justify-content: center; margin-top: 14px; }

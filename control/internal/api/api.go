@@ -691,15 +691,27 @@ type PortalTile struct {
 	Mode        string `json:"mode"`
 	Addr        string `json:"addr"`
 	Sensitivity string `json:"sensitivity"` // low | normal | high，取自关联资源的 Sensitivity
-	Accessible  bool   `json:"accessible"`  // false = 需申请，或已被终端风险降权
+	Accessible  bool   `json:"accessible"`  // false = 未获授权（可申请），或已被终端风险降权
 	ResourceID  string `json:"resourceId"`  // 关联受控资源（JIT 申请用；空=不接入自助申请）
 	// Degraded 该磁贴此刻因终端风险降权不可访问（而非缺授权）。申请审批在这种状态下无效，
 	// 门户据此把"申请访问"换成"请先修复终端环境"，免得用户提交必然被否的申请。
 	Degraded bool `json:"degraded,omitempty"`
+	// Unavailable 该应用**结构上不可用**（未关联受控资源 / 后端不是 host:port）——
+	// **配置缺口，不是授权结论**。隧道与七层两条路都必然不通，而 JIT 闸也会以
+	// 「该应用不支持自助申请」拒掉申请，所以它既不能渲染成「可访问」（按钮亮着点了打不开），
+	// 也不能渲染成「需申请」（申请是死路）。剖面对这类应用是「丢弃 + 给管理员一条 warning」，
+	// 门户没有 warnings 通道，故如实标在磁贴上。判据与剖面的丢弃分支同源（appAccessState）。
+	Unavailable bool `json:"unavailable,omitempty"`
+	// UnavailableReason 具体原因，直接渲染给用户看（他要拿这句话去找管理员）。
+	UnavailableReason string `json:"unavailableReason,omitempty"`
 }
 
-// handlePortalApps 返回当前用户可见的应用门户（复用 SQLite 中的已发布应用；高敏类需申请）。
-// 高敏磁贴默认 Accessible=false（需申请）；若当前用户对该资源持有效 JIT 授予，则翻回可访问——JIT 闭环的门户侧收口。
+// handlePortalApps 返回当前用户可见的应用门户。
+//
+// ★可访问性判定与客户端剖面、七层票据**同一个函数**（appAccessState → accessibleFor）：
+// 静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
+// 此前这里自己写了一份只看 sensitivity 的判据（普通恒可访问 / 高敏恒需申请），
+// 那是控制面第四个判定点且方向与另外三处相反，三种失败形态全部无报错——见 appAccessState 的注释。
 func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	// 门户是人机面：只认 admin/user 会话，拒 gateway 身份与 WebAuthn 中间票据(role=mfa)——
 	// 票据只用于换取一次断言，绝不能当会话令牌消费业务数据。
@@ -719,40 +731,33 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
 		return
 	}
-	sensOf := make(map[string]string, len(resources))
+	byRes := make(map[string]store.Resource, len(resources))
 	for _, res := range resources {
-		sensOf[res.ID] = res.Sensitivity
+		byRes[res.ID] = res
 	}
+	user := normUser(c.Name)
+	// 组织/用户组主体的展开索引。与剖面、网关策略下发同一个 store 方法、同一份展开实现
+	// ——门户上「能不能点」与隧道里「放不放行」必须同真同假。
+	subjects := s.subjectIndex(r.Context())
 	// 调用方的有效授予集合（resource_id）：把「需申请」磁贴翻回可访问。best-effort，读失败按未授予处理。
 	granted := map[string]bool{}
-	if gs, err := s.store.ActiveGrantsFor(r.Context(), normUser(c.Name)); err == nil {
+	if gs, err := s.store.ActiveGrantsFor(r.Context(), user); err == nil {
 		for _, g := range gs {
 			granted[g.ResourceID] = true
 		}
 	}
 	// 终端风险降权：高敏磁贴一律标不可访问，且**JIT 授予也翻不回来**——与网关侧
 	// DenyUsers 先于允许集合判定同构，否则门户显示"可访问"而隧道那边照拒。
-	degraded, _ := s.degradeStateOf(r.Context(), normUser(c.Name))
+	degraded, _ := s.degradeStateOf(r.Context(), user)
 	tiles := []PortalTile{}
 	for _, a := range b.Apps {
 		if a.Status != "running" {
 			continue
 		}
-		sens, acc, deg := store.SensitivityNormal, true, false
-		if a.ResourceID != "" {
-			sens = store.NormalizeSensitivity(sensOf[a.ResourceID])
-		}
-		if sens == store.SensitivityHigh {
-			acc = false // 高敏资源默认需走自助申请审批
-			if a.ResourceID != "" && granted[a.ResourceID] {
-				acc = true // 持有效 JIT 授予 → 临时可访问
-			}
-			if degraded {
-				acc, deg = false, true // 降权否决恒胜于 JIT 授予
-			}
-		}
+		_, st := appAccessState(user, c.Role, a, byRes, subjects, granted, degraded)
 		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
-			Sensitivity: sens, Accessible: acc, ResourceID: a.ResourceID, Degraded: deg})
+			Sensitivity: st.Sensitivity, Accessible: st.Accessible, ResourceID: a.ResourceID,
+			Degraded: st.Degraded, Unavailable: st.Unavailable, UnavailableReason: st.Reason})
 	}
 	// 七层入口此刻能不能用，如实随磁贴一起下发：Web 磁贴的「访问」按钮要不要给点、
 	// 点不动时该说什么，都靠它。不下发的话用户只会拿到一个一闪而过的 503。

@@ -839,10 +839,20 @@ export interface TotpEnrollResp { secret: string; uri: string }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';
+  /** 服务端算出的授权结论：静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
+   *  ★与客户端剖面、七层票据同一个判定函数（control 侧 appAccessState）——前端不得再按
+   *  sensitivity 之类的字段自己推一遍，那正是这块曾经的缺陷：门户说「需申请」而客户端直接能进。 */
   accessible: boolean; resourceId: string;
   /** 因终端风险降权而不可访问（而非缺授权）。降权否决压过 JIT 授予，此时提交申请必然无效，
    *  用户该做的是修复终端环境——两种"不可访问"的下一步动作完全不同，必须分开提示。 */
   degraded?: boolean;
+  /** 该应用**结构上不可用**（未关联受控资源 / 后端不是 host:port）——配置缺口，不是授权结论：
+   *  隧道与七层两条路都必然不通，自助申请也会被 JIT 闸以「该应用不支持自助申请」拒掉。
+   *  既不能画成「访问」（点了打不开），也不能画成「需申请」（申请是死路），
+   *  只能如实告诉用户去找管理员。判据与客户端剖面的丢弃分支同源。 */
+  unavailable?: boolean;
+  /** 不可用的具体原因，直接渲染给用户看——他要拿这句话去找管理员。 */
+  unavailableReason?: string;
 }
 /** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线）。
  *  ★门户据此把 Web 磁贴的「访问」按钮置灰并显示原因，而不是让人点了才拿到一个一闪而过的 503。 */

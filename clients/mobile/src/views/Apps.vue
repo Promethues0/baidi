@@ -1,7 +1,9 @@
 <template>
   <div class="m-page">
     <div class="m-page__title">应用门户</div>
-    <div class="m-page__sub">已授权可访问的企业应用 · 高敏类需先申请</div>
+    <!-- 不写「高敏类需先申请」：要不要申请只看**有没有授权**，与敏感度无关
+         （已授权的高敏资源直接可访问，未授权的普通资源同样进不去）。 -->
+    <div class="m-page__sub">已发布的企业应用 · 未获授权的可提交访问申请</div>
 
     <div v-if="!session.connected" class="ap__warn"><icon-info-circle /> 未接入企业内网，隧道类应用需先在「接入」开启</div>
 
@@ -10,7 +12,15 @@
         <span class="ap__ic" :style="{ background: iconBg(a.mode) }"><component :is="modeIcon(a.mode)" /></span>
         <div class="ap__name">{{ a.name }}</div>
         <div class="ap__addr m-mono">{{ a.addr }}</div>
-        <span v-if="a.sensitivity === 'high'" class="ap__tag">高敏 · 需申请</span>
+        <!-- ★徽标按**服务端的授权结论**画，不按 sensitivity 自己推。
+             按 sensitivity 推的老写法有两个方向都错：已授权的高敏应用照样挂着「需申请」
+             （用户会去为自己已有的权限提审批单），而未授权的普通应用一个提示都没有、
+             点下去只会拿到 403。三种"不可访问"的下一步动作也不同，必须分开说。 -->
+        <span v-if="a.degraded" class="ap__tag ap__tag--deg">终端降级 · 暂停</span>
+        <span v-else-if="a.unavailable" class="ap__tag ap__tag--deg">配置缺口 · 不可用</span>
+        <span v-else-if="!a.accessible" class="ap__tag">
+          {{ a.sensitivity === 'high' ? '高敏 · 需申请' : '未授权 · 可申请' }}
+        </span>
       </button>
     </div>
     <div v-if="!apps.length && loaded" class="ap__empty">暂无可访问应用</div>
@@ -31,7 +41,11 @@ function modeIcon(m: string) { return m === 'tunnel' ? IconCodeSquare : m === 'g
 function iconBg(m: string) { return m === 'tunnel' ? '#722ED1' : m === 'global' ? '#00B42A' : '#165DFF'; }
 
 function open(a: PortalTile) {
-  if (!a.accessible) { Message.warning(`「${a.name}」为高敏应用，需提交访问申请审批`); return; }
+  // 提示语必须点名真实原因：三者的下一步动作分别是「修终端」「找管理员」「去门户提申请」，
+  // 统一说成「高敏需审批」会把前两种人支去做一件必然无效的事。
+  if (a.degraded) { Message.warning(`「${a.name}」因终端环境不合规已暂停访问，请先修复终端（此状态下申请审批无效）`); return; }
+  if (a.unavailable) { Message.warning(`「${a.name}」无法访问，请联系管理员：${a.unavailableReason || '配置缺口'}`); return; }
+  if (!a.accessible) { Message.warning(`「${a.name}」你当前未获授权，请到浏览器门户提交访问申请`); return; }
   if (a.mode === 'tunnel' && !session.connected) { Message.warning('请先在「接入」开启企业内网隧道'); return; }
   Message.success(`正在打开「${a.name}」（${a.mode === 'web' ? 'Web 代理' : a.mode === 'global' ? '全网资源' : '隧道访问'}）`);
 }
@@ -57,7 +71,10 @@ onMounted(load);
   color: #fff; font-size: 21px; margin-bottom: 6px; }
 .ap__name { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
 .ap__addr { font-size: 11px; color: var(--bd-t3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 金 = 还有下一步可做（去门户提申请）；红 = 此路不通，做什么都没用（先修终端 / 找管理员）。
+   与门户 PortalApps.vue 的配色约定一致，两端对同一状态给同一个视觉信号。 */
 .ap__tag { margin-top: 4px; align-self: flex-start; font-size: 10px; padding: 1px 7px; border-radius: 4px;
-  background: var(--bd-tag-red-bg, #FFECE8); color: var(--bd-danger); }
+  background: var(--bd-tag-gold-bg, #FFF7E8); color: var(--bd-warning); }
+.ap__tag--deg { background: var(--bd-tag-red-bg, #FFECE8); color: var(--bd-danger); }
 .ap__empty { text-align: center; color: var(--bd-t3); padding: 40px 0; font-size: 13px; }
 </style>

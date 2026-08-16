@@ -49,21 +49,39 @@
                 <span class="bd-tile__icon" :class="'m-' + app.mode">
                   <component :is="modeMeta[app.mode].icon" />
                 </span>
-                <!-- 「被降权」与「没授权」必须分开说：前者申请也没用，得先修终端。 -->
+                <!-- 三种"不可访问"必须分开说，因为用户的下一步动作完全不同：
+                     降权 → 先修终端（申请也没用，降权否决压过 JIT 授予）；
+                     未关联资源 → 配置缺口，找管理员（申请会被后端以「不支持自助申请」拒掉）；
+                     未授权 → 可以走自助申请。
+                     ★徽标文案不再写死「高敏」：不可访问与敏感度是两件事，普通资源没授权同样进不去，
+                     而已授权的高敏资源是能直接访问的（服务端判定见 appAccessState）。 -->
                 <span
                   v-if="app.degraded"
                   class="bd-tile__gold bd-tile__gold--deg"
                 ><icon-exclamation-circle-fill />终端降级 · 暂停访问</span>
                 <span
+                  v-else-if="app.unavailable"
+                  class="bd-tile__gold bd-tile__gold--deg"
+                  :title="app.unavailableReason"
+                ><icon-exclamation-circle-fill />配置缺口 · 不可用</span>
+                <span
                   v-else-if="!app.accessible"
                   class="bd-tile__gold"
-                ><icon-lock />高敏 · 需申请</span>
+                >
+                  <icon-lock />{{ app.sensitivity === 'high' ? '高敏 · 需申请' : '未授权 · 可申请' }}
+                </span>
               </div>
               <div class="bd-tile__name">{{ app.name }}</div>
               <div class="bd-tile__addr bd-mono">{{ app.addr }}</div>
               <div class="bd-tile__meta">
                 <span class="bd-mtag" :class="'mt-' + app.mode">{{ modeMeta[app.mode].label }}</span>
               </div>
+              <!-- ★这一串 v-if/v-else-if 必须**连续**（中间不许插任何别的元素）：
+                   Vue 的 v-else-if 只认紧邻的上一个兄弟节点，此前那条「七层入口不可用」的
+                   <div v-if> 插在中间，把链从这里截断了——于是 v-else-if 挂到了那个 div 上，
+                   一个**可访问**的隧道类应用会同时画出「接入地址」和「申请权限」两个按钮
+                   （给已经有权限的人一个申请入口，点下去后端还会以「无需申请」400 顶回来）。
+                   告警文案改挂在整条链之后，它本来也只是补充说明、不参与状态分支。 -->
               <button
                 v-if="app.accessible"
                 class="bd-tile__btn"
@@ -71,21 +89,30 @@
                 :title="browserOpenable(app) && !webProxy.ready ? webProxy.note : ''"
                 @click="openApp(app)"
               ><icon-link />{{ opening === app.id ? '正在打开…' : (browserOpenable(app) ? '访问' : '接入地址') }}</button>
-              <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
-              <div v-if="app.accessible && browserOpenable(app) && !webProxy.ready" class="bd-tile__warn">
-                <icon-exclamation-circle-fill />{{ webProxy.note }}
-              </div>
               <button
                 v-else-if="app.degraded"
                 class="bd-tile__btn bd-tile__btn--ghost"
                 disabled
                 title="终端环境不合规，已暂停高敏资源访问。修复后重新上报即自动恢复（申请审批在此状态下无效）"
               ><icon-exclamation-circle-fill />请先修复终端</button>
+              <!-- 结构性不可用：按钮必须点不动。给它一个「申请权限」会把人送进死路——
+                   后端 JIT 闸会以「该应用不支持自助申请」400 拒掉，而用户无从知道为什么。
+                   原因由服务端下发（两种成因文案不同，管理员要去改的栏也不同）。 -->
+              <button
+                v-else-if="app.unavailable"
+                class="bd-tile__btn bd-tile__btn--ghost"
+                disabled
+                :title="app.unavailableReason"
+              ><icon-exclamation-circle-fill />请联系管理员</button>
               <button
                 v-else
                 class="bd-tile__btn bd-tile__btn--ghost"
                 @click="requestAccess(app)"
               ><icon-safe />申请权限</button>
+              <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
+              <div v-if="app.accessible && browserOpenable(app) && !webProxy.ready" class="bd-tile__warn">
+                <icon-exclamation-circle-fill />{{ webProxy.note }}
+              </div>
             </div>
           </div>
 
@@ -104,7 +131,12 @@
       :ok-loading="submitting" @ok="submitRequest" ok-text="提交申请" cancel-text="取消">
       <div class="bd-reqtip">
         <icon-safe class="bd-reqtip__ic" />
-        <div>该应用为<b>高敏资源</b>，需管理员审批。批准后你将获得<b>限时访问授予</b>，到期自动回收。</div>
+        <!-- 不再一律写「高敏」：走到这个抽屉只说明「你当前没有这个资源的访问权」，
+             它可能是高敏资源，也可能只是一条你不在授权名单里的普通资源。 -->
+        <div>
+          你当前<b>未获授权</b>访问<b>{{ reqApp?.sensitivity === 'high' ? '该高敏资源' : '该资源' }}</b>，
+          需管理员审批。批准后你将获得<b>限时访问授予</b>，到期自动回收。
+        </div>
       </div>
       <div class="bd-reqfield">
         <label>期望时长（分钟）</label>
@@ -154,7 +186,10 @@ const modeMeta: Record<PortalTile['mode'], { label: string; icon: string }> = {
 
 const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
 const accessibleCount = computed(() => apps.value.filter(a => a.accessible).length);
-const pendingCount = computed(() => apps.value.filter(a => !a.accessible).length);
+// 「待申请」只数**真的能去申请**的那些：被降权的申请必然被否（降权否决压过 JIT 授予），
+// 未关联受控资源的会被后端以「该应用不支持自助申请」拒掉。把这两类算进来，
+// 这个数字就在替一批点不动的磁贴承诺「你还有 N 件事可做」——与磁贴上写的字自相矛盾。
+const pendingCount = computed(() => apps.value.filter(a => !a.accessible && !a.degraded && !a.unavailable).length);
 
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase();

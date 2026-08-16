@@ -1042,11 +1042,45 @@ export interface GatewayIface {
   gatewayId: string; name: string; type: IfaceType; addrs: string[]; up: boolean; updatedAt?: string;
 }
 
+/** 一台网关的地址转换回执：它现在**真的**在执行这些规则吗。
+ *
+ *  ★与 policy.enabled（管理意图）是两件事，页面必须分栏呈现。合成一格的话，
+ *  「网关没带 -nat 启动」和「规则灌入内核失败」与正常完全同形——而这两种失效
+ *  网关侧一行日志都不打，症状只是「发布的业务公网打不开 / 内网上不了网」。
+ *  同一条纪律已在 IPSec 上执行过（ipsec_sites.status 废弃、运行态改读 ipsec_sa_state）。 */
+export interface NATReceipt {
+  gatewayId: string;
+  /** unreported=旧网关没报过 · disabled=网关没开 -nat · failed=灌内核失败
+   *  · dryrun=只生成不灌 · applied=已生效 */
+  status: 'unreported' | 'disabled' | 'failed' | 'dryrun' | 'applied';
+  /** 一句话结论，直接渲染（后端保证它给得出下一步动作，前端不自行编写）。 */
+  say: string;
+  online: boolean;
+  backend?: string;
+  applied: number;
+  /** 内核 IP 转发。★三态：缺席=读不到（不是「关着」）。转发关着时规则全部正确
+   *  但一个包都过不去，且没有任何报错。 */
+  forwarding?: boolean;
+  lastError?: string;
+  lastAt?: number;
+  at?: number;
+}
+/** 一条规则的命中计数（FR-NAT-17）。 */
+export interface NATHit { policyId: string; packets: number; bytes: number }
+
 export interface NATBundle {
   policies: NATPolicy[];
   ifaces: GatewayIface[];
-  /** 后端下发的风险提示（SPA 互斥 / 回程路由 / 带宽）。PRD 把它列为强需求，前端不得自行编写。 */
+  /** 后端下发的风险提示（SPA 互斥 / 回程路由 / 带宽 + 回执侧「配了却不会生效」）。
+   *  PRD 把它列为强需求，前端不得自行编写。 */
   warnings: string[];
+  /** 逐网关回执，key=gatewayId。只含本页策略真的落在其上的网关。 */
+  receipts?: Record<string, NATReceipt>;
+  /** 逐策略命中计数，key=policyId。 */
+  hits?: Record<string, NATHit>;
+  /** 有没有任何一台网关报得出计数。★false 时必须显示「不可判定」而不是 0——
+   *  「规则没灌进去」与「灌进去了但没流量命中」排障方向完全相反。 */
+  hitsKnown?: boolean;
 }
 
 /* ── 产品升级管理（PRD 第 4 章，internal/upgrade）──────────────────────── */

@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 )
 
 // backend 内核后端。与 darkfw 同款探测方式，但两者的表互不相干。
@@ -40,6 +41,37 @@ type Applier struct {
 	Exempt  Exempt
 	DryRun  bool // 只生成不执行（无 root 时的自检模式）
 	applied int
+	// lastErr/lastAt 上一次**尝试**灌入的结果与时刻。
+	//
+	// ★这两个字段存在的全部理由是回执：此前灌入失败只 slog.Error 就 return，
+	// 而控制台上那条策略仍然显示「已启用」——「管理员想让它开」与「它现在真的开着」
+	// 由同一个开关表达，正是 store/ipsec.go 注释里白纸黑字批判过、并为此拆出
+	// ipsec_sa_state 的那个形态。NAT 这边原样重犯了一遍。
+	lastErr string
+	lastAt  int64
+}
+
+// State 本机地址转换的运行态快照（随心跳上报给控制面，见 cplane.NATState）。
+//
+// ★所有"读不到"的项一律如实回不可判定，绝不补好值：补 0 会让「规则一条没灌进去」
+// 与「灌进去了但没有流量命中」在页面上长得一模一样，而这两者的排障方向完全相反。
+type State struct {
+	Backend   string // 内核后端名（"无（未找到 nft / pfctl）" 也是一个真实答案）
+	Available bool   // 本机是否具备内核后端
+	DryRun    bool
+	Applied   int    // 上一次成功灌入的策略条数
+	LastError string // 上一次灌入失败的原因（空 = 上次成功或还没灌过）
+	LastAt    int64  // 上一次尝试灌入的时刻（0 = 从未尝试）
+}
+
+// State 读运行态快照。
+func (a *Applier) State() State {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return State{
+		Backend: a.Backend(), Available: a.be != none, DryRun: a.DryRun,
+		Applied: a.applied, LastError: a.lastErr, LastAt: a.lastAt,
+	}
 }
 
 func New(ex Exempt) *Applier { return &Applier{be: detect(), Exempt: ex} }
@@ -78,16 +110,23 @@ func (a *Applier) Apply(policies []Policy) (bool, error) {
 	if rs == a.last {
 		return false, nil
 	}
+	a.lastAt = time.Now().Unix()
 	if a.DryRun || a.be == none {
 		a.last = rs
+		a.applied = len(policies)
+		a.lastErr = ""
 		return true, nil
 	}
 	if err := a.load(rs, len(policies)); err != nil {
 		// 失败不更新 last：下一轮还会重试，而不是记成「已经灌进去了」。
+		// 但**要记住这次失败**——它是控制台上「网关回执」那一栏唯一的信息来源，
+		// 少了它，灌不进内核这件事只活在网关本机日志里，管理员在页面上看到的仍是绿的。
+		a.lastErr = err.Error()
 		return false, err
 	}
 	a.last = rs
 	a.applied = len(policies)
+	a.lastErr = ""
 	return true, nil
 }
 

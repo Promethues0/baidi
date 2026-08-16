@@ -44,7 +44,11 @@
 - 为什么值得：不是「没做」而是「做了且会咬人」——管理员点一次「添加检测项」再保存，该平台**全体终端**下一次 posture 上报即判违规，而种子基线的 disposal 就是 `block`，等于一键全员拒发敲门令牌 + 撤窗断隧道，保存那一刻零报错。反方向同样坏：`client_version` 恒 Pass，终端合规页对跑三个版本前客户端的机器同样亮绿——正是 wave7 行动 10 判过死刑的「假绿替坏链路背书」，只是这次长在合规页上。
 - 注意：这两项失败方向相反（key 填错 = 全员 fail-closed，platform 填错 = 永不生效 fail-open），文案与告警要分开写；`client_version` 若判定不接真，就该把它从种子基线里**摘掉**而不是留着恒绿。
 
-**3. NAT 生效回执（FR-NAT-02/11/17）— M**
+**3. NAT 生效回执（FR-NAT-02/11/17）— M ✅ 已落地**
+- 落地记（2026-08-16）：与 wave7 行动 9 逐字同构。`natfw.Applier` 记住 `lastErr/lastAt/applied` 并导出 `State()`（此前灌入失败只 `slog.Error` 就 return，那次失败只活在网关本机日志里）；`cplane.NATState` 随心跳上报 → 控制面 `gwNAT` 内存态 → `GET /nat` 的 `receipts`/`hits`/`hitsKnown`；`Nat.vue` 的「状态」列拆成**管理意图 / 网关回执 / 命中**三栏；`natReceiptWarnings` 出顶部告警；`/diag` 加 `nat` 检查项。顺带把 `natfw.Applier.Hits()` 接上了——它写得很完整、注释直接标着 FR-NAT-17，而在此之前**全仓零调用方**。
+- 最要紧的一条设计：**新网关无论开没开 `-nat` 都上报**（没开时 `enabled:false`）。只在开了 NAT 时才上报的话，「这台网关没开」与「这台网关版本旧、不会报」在控制面看来完全一样，而前者恰恰是最常见的失效——`deploy/install-remote.sh` 生成的 `baidi-gateway.env` 里根本没有 `-nat` 这一项。控制面侧对应把 `nat` 解成指针：`nil`（缺席）不覆盖不清空已有运行态，与 `reach`/`ifaces` 同一条三态纪律。
+- 三态另外两处：内核 IP 转发关闭时规则全部正确、一个包不通、零报错，故那句话**追加**在「已灌入内核」之后而不是覆盖它；命中计数读不到时页面显示「不可判定」而不是 0（pf 拆不到规则粒度、`nft -j` 可能失败，而「规则没灌进去」与「灌进去了但没流量」排障方向完全相反）。
+- 变异验证（四个都从绿转红）：缺 `nat` 字段的心跳去覆盖已有运行态 / 把「未上报」说成「网关没开」/ 转发关着被「已灌入内核」盖住 / 读不到计数报成 known。本机用模拟心跳跑过五种形态（旧网关未上报 · 网关没开 · 灌入失败 · 转发关闭 · 一切正常带真实命中数），页面与 `/diag` 逐条对上。
 - 做什么：与 wave7 行动 9（reachprobe→心跳→资源页可达列）**逐字同构**：心跳加 `nat` 字段（能力有无 / 后端 nft|pf / 已灌条数 / lastError / 命中计数）→ 控制面聚合 → `Nat.vue` 把「状态」列拆成「管理意图 / 网关回执」两栏 → `/diag` 加一项。
 - 改哪里：`gateway/cmd/baidi-gateway/main.go:372-389`（`applyNAT()` 首行 `if natApp == nil { return }` 静默返回、失败分支只 `slog.Error` 就 return，**只有成功那一支**才 `QueueEvent`）；`gateway/internal/cplane/cplane.go:270-300`；`gateway/internal/natfw/apply.go:134-188` 的 `Applier.Hits()`（**全仓零调用方**，规则里那个 counter 纯属白算）；`control/internal/api`、`console/src/views/Nat.vue:72/95-97`、`api/diag.go`。
 - 为什么值得：`store/ipsec.go:22-31` 的注释白纸黑字批判过这个形态——「status 一列同时表达『管理员想让它开』和『它现在真的开着』」，IPSec 为此拆出了 `ipsec_sa_state`；NAT 的 `enabled` 开关**现在承担的正是那个被批判的双重语义**。而 `deploy/install-remote.sh` 生成的 `baidi-gateway.env` 不含任何 `-nat` 相关项，即按参考流程装出来的系统，管理员配好 DNAT 发布、页面绿灯、网关侧一行日志都不打，症状是「发布的业务公网打不开」。FR-NAT-17 更是**做了一半没接线**——最贵的那半（内核 counter + JSON 解析回填 PolicyID）已经写完了。

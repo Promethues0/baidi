@@ -33,6 +33,23 @@ func (s *Server) natReady(w http.ResponseWriter) bool {
 	return true
 }
 
+// natView 页面视图 = 配置（管理意图）+ 网关回执（它现在真的开着吗）。
+//
+// ★两者必须**分栏呈现**，不能合成一个「状态」。此前页面上的「状态」列渲染的只是
+// `enabled` 开关本身，即管理员的意图；而「网关没带 -nat 启动」「规则灌入内核失败」
+// 这两种失效在同一格里与正常完全同形。同一条纪律已在 IPSec 上执行过一遍
+// （`ipsec_sites.status` 废弃、运行态改读 `ipsec_sa_state`），见 store/ipsec.go 的注释。
+type natView struct {
+	store.NATBundle
+	// Receipts 逐网关回执（key = gatewayId）。只含**本页策略真的落在其上**的网关。
+	Receipts map[string]NATReceipt `json:"receipts"`
+	// Hits 逐策略命中计数（key = policyId，FR-NAT-17）。
+	Hits map[string]gwNATHit `json:"hits"`
+	// HitsKnown 有没有任何一台网关报得出计数。★false 时页面必须显示「不可判定」
+	// 而不是 0——「规则没灌进去」与「灌进去了但没流量命中」排障方向完全相反。
+	HitsKnown bool `json:"hitsKnown"`
+}
+
 func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) || !s.natReady(w) {
 		return
@@ -42,7 +59,12 @@ func (s *Server) handleNAT(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load nat policies")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, b)
+	rcpts := s.natReceipts(b.Policies)
+	hits, known := s.natHits(b.Policies)
+	// 回执侧的告警与配置侧的（NATWarnings：SPA 互斥、回程路由）并列，都摆在页面顶部。
+	// 前者说「这条规则不会生效」，后者说「这条规则生效了、但有你该知道的副作用」。
+	b.Warnings = append(b.Warnings, natReceiptWarnings(b.Policies, rcpts)...)
+	httpx.JSON(w, http.StatusOK, natView{NATBundle: b, Receipts: rcpts, Hits: hits, HitsKnown: known})
 }
 
 func (s *Server) natBundle(r *http.Request) (store.NATBundle, error) {

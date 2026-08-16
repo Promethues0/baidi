@@ -69,7 +69,11 @@
         <table class="bd-table">
           <thead>
             <tr>
-              <th>策略名称</th><th>类型</th><th>网关</th><th>匹配</th><th>转换后</th><th>状态</th><th class="r">操作</th>
+              <!-- ★「管理意图」与「网关回执」必须分成两栏。合成一个「状态」的话，
+                   开关本身就是渲染内容，而「网关没开 -nat」「规则灌不进内核」这两种
+                   失效与正常完全同形——网关侧还一行日志都不打。 -->
+              <th>策略名称</th><th>类型</th><th>网关</th><th>匹配</th><th>转换后</th>
+              <th>管理意图</th><th>网关回执</th><th>命中</th><th class="r">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -97,13 +101,28 @@
                 <a-switch :model-value="p.enabled" size="small" :disabled="busy"
                   @update:model-value="(v: unknown) => toggle(p, Boolean(v))" />
               </td>
+              <!-- 网关回执：这条规则此刻在那台网关的内核里到底是什么状态。
+                   策略停用时不渲染回执——管理员本来就不指望它生效，报「没生效」是噪声。 -->
+              <td>
+                <span v-if="!p.enabled" class="bd-dim">—</span>
+                <span v-else class="bd-tg" :style="tagStyle(rcptColor(p))" :title="rcptSay(p)">
+                  {{ rcptText(p) }}
+                </span>
+              </td>
+              <!-- 命中计数（FR-NAT-17）。★读不到时显示「不可判定」而不是 0：
+                   「规则没灌进去」与「灌进去了但没流量」排障方向完全相反。 -->
+              <td class="bd-mono">
+                <span v-if="!hitsKnown" class="bd-dim" title="没有任何网关报得出计数（pf 拆不到规则粒度 / nft -j 读失败 / 网关版本旧）">不可判定</span>
+                <span v-else-if="hits[p.id]">{{ hits[p.id].packets }} 包</span>
+                <span v-else class="bd-dim" title="网关报得出计数，但这条规则一次都没被命中">0 包</span>
+              </td>
               <td class="r">
                 <button type="button" class="bd-link" @click="openWizard(p)">编辑</button>
                 <button type="button" class="bd-link bd-link--danger" style="margin-left: 12px" @click="askRemove(p)">删除</button>
               </td>
             </tr>
             <tr v-if="!policies.length">
-              <td colspan="7" class="bd-natempty">
+              <td colspan="9" class="bd-natempty">
                 尚无地址转换策略。<template v-if="!ifaceReady">先在左侧给网关网卡指定 LAN/WAN 类型，才能新增策略。</template>
               </td>
             </tr>
@@ -203,7 +222,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type NATBundle, type NATPolicy, type GatewayIface, type NATType, type NATProto } from '@/lib/api';
+import { api, type NATBundle, type NATPolicy, type NATReceipt, type NATHit, type GatewayIface, type NATType, type NATProto } from '@/lib/api';
 
 const live = ref(false);
 const busy = ref(false);
@@ -211,6 +230,38 @@ const err = ref('');
 const policies = ref<NATPolicy[]>([]);
 const ifaces = ref<GatewayIface[]>([]);
 const warnings = ref<string[]>([]);
+/* ── 网关回执（wave8 行动 3）── */
+const receipts = ref<Record<string, NATReceipt>>({});
+const hits = ref<Record<string, NATHit>>({});
+const hitsKnown = ref(false);
+
+/** 某条策略所在网关的回执。缺失（旧控制面 / 该网关未涉及）按「未上报」处理。 */
+function rcptOf(p: NATPolicy): NATReceipt | undefined { return receipts.value[p.gatewayId]; }
+/** 回执一句话（挂 title，管理员悬停即知下一步做什么）。 */
+function rcptSay(p: NATPolicy): string {
+  return rcptOf(p)?.say || '控制面尚未收到该网关的地址转换运行态回报';
+}
+/** 回执短标签。★「未上报」不是「已生效」——两者必须用不同的字和不同的颜色。 */
+function rcptText(p: NATPolicy): string {
+  const r = rcptOf(p);
+  if (!r) return '未上报';
+  const base = ({
+    unreported: '未上报', disabled: '网关未开启', failed: '灌入失败',
+    dryrun: '仅生成未灌入', applied: '已灌入内核'
+  } as Record<string, string>)[r.status] ?? r.status;
+  // 转发关着时规则全部正确但一个包都不通，且没有任何报错——这一格必须说出来，
+  // 不能被「已灌入内核」这四个字盖住。
+  if (r.status === 'applied' && r.forwarding === false) return '已灌入 · 转发未开';
+  if (!r.online) return base + ' · 网关离线';
+  return base;
+}
+function rcptColor(p: NATPolicy): string {
+  const r = rcptOf(p);
+  if (!r || r.status === 'unreported') return '#86909C';  // 灰 = 不可判定
+  if (r.status === 'applied' && r.forwarding !== false && r.online) return '#00B42A'; // 绿 = 真的生效了
+  if (r.status === 'dryrun') return '#FF7D00';            // 橙 = 有意的自检模式
+  return '#F53F3F';                                        // 红 = 配了但不会生效
+}
 
 /* 这一页刻意没有降级演示数据：编造的 NAT 策略与真实规则在页面上无法区分，
    而它决定的是「哪些内网端口对公网可达」。连不上就说连不上。 */
@@ -333,6 +384,11 @@ async function load() {
     policies.value = b.policies ?? [];
     ifaces.value = b.ifaces ?? [];
     warnings.value = b.warnings ?? [];
+    receipts.value = b.receipts ?? {};
+    hits.value = b.hits ?? {};
+    // ★缺字段一律按「不可判定」，不是按 0：旧控制面不下发 hitsKnown 时，
+    // 显示「0 包」等于替一份我们根本没有的读数背书。
+    hitsKnown.value = b.hitsKnown === true;
     live.value = true;
   } catch (e) {
     live.value = false;

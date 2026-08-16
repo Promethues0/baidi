@@ -109,6 +109,10 @@ type Server struct {
 	gwTunnelFP map[string]string
 	// gwReach 各网关最近心跳捎带的后端拨测快照（wave7 行动 9；心跳刷新态，不落库）。
 	gwReach map[string]gwReachInfo
+	// gwNAT 各网关最近心跳捎带的地址转换运行态（wave8 行动 3；心跳刷新态，不落库）。
+	// ★不落库是有意的：它是「此刻内核里是什么样」的读数，重启控制面后重新收心跳
+	// 才有意义——把陈值存下来会让一台已经下线的网关在页面上继续显示「已灌入内核」。
+	gwNAT map[string]gwNATInfo
 	kicked     map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
 	revoked    map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
@@ -244,6 +248,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
+		gwNAT: map[string]gwNATInfo{},
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
 		standbyAudited:  map[string]int64{},
@@ -1208,6 +1213,11 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// Reach 后端可达性拨测结果（wave7 行动 9）。★指针：nil（字段缺席，旧网关）
 		// = 该网关不会测，聚合时按「未探测」；空数组 = 测了但当前零资源。
 		Reach *[]gwReachResult `json:"reach"`
+		// NAT 地址转换运行态回执（wave8 行动 3）。★指针：nil（字段缺席）= 旧网关，
+		// 它对 NAT 什么都没说；非 nil 且 enabled=false = 新网关明确说「我没开 -nat」。
+		// 这两者必须分得开——后者是最常见的失效（deploy 生成的 env 不含 -nat 项，
+		// 管理员在控制台配好 DNAT、页面绿灯，而网关侧 applyNAT 首行就 return 了）。
+		NAT *gwNATState `json:"nat"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -1257,6 +1267,11 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	// 后端拨测快照：旧网关（nil）不覆盖不清空——它没说任何事。
 	if b.Reach != nil {
 		s.gwReach[id] = gwReachInfo{Results: *b.Reach, At: time.Now().Unix()}
+	}
+	// 地址转换运行态：同款三态——nil（旧网关，字段缺席）不覆盖不清空。
+	// 覆盖的话，一台旧网关的心跳会把同 id 新网关刚报过的运行态抹成「从未上报」。
+	if b.NAT != nil {
+		s.gwNAT[id] = gwNATInfo{State: *b.NAT, At: time.Now().Unix()}
 	}
 	s.mu.Unlock()
 

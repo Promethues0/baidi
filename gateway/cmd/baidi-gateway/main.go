@@ -367,6 +367,36 @@ func main() {
 				"exempt_tunnel", portOf(*proxyAddr), "exempt_spa", portOf(*spaAddr))
 			defer natApp.Flush() //nolint:errcheck // 退出即清规则，别把 NAT 留在内核里
 		}
+		// ── 地址转换运行态回执（wave8 行动 3）──
+		//
+		// ★**无论开没开 -nat 都装上这个源**。只在开了 NAT 时才上报的话，
+		// 「这台网关没带 -nat 启动」与「这台网关版本旧、根本不会上报」在控制面看来
+		// 完全一样——而前者恰恰是最常见的那种失效：deploy/install-remote.sh 生成的
+		// baidi-gateway.env 里根本没有 -nat 相关项，管理员在控制台配好 DNAT、
+		// 页面绿灯，而网关这边 applyNAT() 首行就 return 了，一行日志都不打。
+		cp.SetNAT(func() cplane.NATState {
+			if natApp == nil {
+				return cplane.NATState{Enabled: false, Backend: "未启用（本网关未带 -nat 启动）"}
+			}
+			st := natApp.State()
+			ns := cplane.NATState{
+				Enabled: true, DryRun: st.DryRun, Backend: st.Backend,
+				Applied: st.Applied, LastError: st.LastError, LastAt: st.LastAt,
+			}
+			// 转发状态三态：读不到就不带这个字段（指针 nil），绝不当成「关着」。
+			if on, known := natfw.ForwardingEnabled(); known {
+				ns.Forwarding = &on
+			}
+			// 命中计数三态：pf 拆不到规则粒度、nft -j 失败，都如实回不可判定。
+			if hits, ok := natApp.Hits(); ok {
+				out := make([]cplane.NATHit, 0, len(hits))
+				for _, h := range hits {
+					out = append(out, cplane.NATHit{PolicyID: h.PolicyID, Packets: h.Packets, Bytes: h.Bytes})
+				}
+				ns.Hits = &out
+			}
+			return ns
+		})
 		// applyNAT 把本轮下发的策略灌进内核。控制面**没下发** nat 字段（旧控制面）时
 		// 保持现状不动——把「缺字段」读成「清空」会在升级控制面的瞬间抹掉生产 NAT 规则。
 		applyNAT := func() {
@@ -380,6 +410,9 @@ func main() {
 			changed, err := natApp.Apply(ps)
 			if err != nil {
 				slog.Error("地址转换规则灌入内核失败（保留上一版规则，下轮重试）", "err", err.Error())
+				// 失败也要有回执：只记本机日志的话，管理员在控制台上看到的仍是「已启用」。
+				// 措辞只陈述已发生的事实，控制面会原样落审计。
+				cp.QueueEvent("nat-applied", fmt.Sprintf("地址转换规则灌入内核失败（保留上一版规则，下轮重试）：%s", err.Error()))
 				return
 			}
 			if changed {

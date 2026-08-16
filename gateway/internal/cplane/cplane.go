@@ -58,7 +58,10 @@ type Client struct {
 	// reach 后端可达性拨测快照源（wave7 行动 9）。nil = 不上报，报文里无 reach 字段——
 	// 控制面据此区分「旧网关不会测」与「新网关测了但当前零资源」（空数组）。
 	reach func() []ReachResult
-	httpc *http.Client
+	// natState 地址转换运行态快照源（wave8 行动 3）。nil = 不上报——
+	// 但新网关**无论开没开 -nat 都要装上它**，见 NATState.Enabled 的注释。
+	natState func() NATState
+	httpc    *http.Client
 
 	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
 	// 两者分开存是必须的：nil（旧控制面不认识 NAT）与空数组（本网关无策略）
@@ -95,6 +98,51 @@ type ReachResult struct {
 
 // SetReach 装上后端可达性快照源；不调用即不上报（旧网关形态）。
 func (c *Client) SetReach(fn func() []ReachResult) { c.reach = fn }
+
+// NATHit 一条 NAT 规则的命中计数（与 natfw.Hit 同构，理由同 ReachResult）。
+type NATHit struct {
+	PolicyID string `json:"policyId"`
+	Packets  int64  `json:"packets"`
+	Bytes    int64  `json:"bytes"`
+}
+
+// NATState 本网关地址转换的**运行态回执**（wave8 行动 3）。
+//
+// 此前控制面对 NAT 一无所知：`enabled` 那个开关同时表达「管理员想让它开」和
+// 「它现在真的开着」，于是两种失效在页面上与正常完全同形——
+//   - 网关没带 -nat 启动（deploy 生成的 baidi-gateway.env 就不含这一项）：
+//     applyNAT() 首行 `if natApp == nil { return }` 静默返回，一行日志都不打；
+//   - 有后端但 nft 语法/权限出错：规则从未进内核，只有网关本机 slog。
+//
+// 症状分别是「发布的业务公网打不开」和「内网网段上不了网」，而控制台上一切正常。
+// 这正是 IPSec 已经识别并修掉（拆出 ipsec_sa_state + 四态）、NAT 却原样重犯的形态。
+type NATState struct {
+	// Enabled 本进程是否带 -nat / -nat-dryrun 启动。
+	//
+	// ★**没开也要上报**（false），这是本结构最要紧的一条：只在开了 NAT 时才上报的话，
+	// 「新网关但没开 NAT」与「旧网关根本不会报」在控制面看来完全一样，
+	// 而前者恰恰是最常见、也最需要被指出来的那种失效。
+	Enabled bool   `json:"enabled"`
+	DryRun  bool   `json:"dryrun,omitempty"`
+	Backend string `json:"backend"` // nftables(Linux) / pf(macOS) / 无（未找到 nft / pfctl）
+	// Applied 上一次成功灌入内核的策略条数；LastError 上一次灌入失败的原因（空=上次成功）。
+	Applied   int    `json:"applied"`
+	LastError string `json:"lastError,omitempty"`
+	LastAt    int64  `json:"lastAt,omitempty"` // 上一次尝试灌入的时刻（0=从未尝试）
+	// Forwarding 内核 IP 转发状态。★指针三态：nil = 读不到（不是「关着」）。
+	// 转发关着时规则全部正确但一个包都过不去，且没有任何报错——这一格必须能说话。
+	Forwarding *bool `json:"forwarding,omitempty"`
+	// Hits 逐规则命中计数（FR-NAT-17）。★指针三态：nil = 读不到
+	// （pf 的计数按锚点聚合、拆不到规则粒度；nft -j 失败）。
+	// 空数组 = 读到了、但一条规则都没有。补 0 会让「规则没灌进去」与
+	// 「灌进去了但没流量」长得一模一样，而排障方向完全相反。
+	Hits *[]NATHit `json:"hits,omitempty"`
+}
+
+// SetNAT 装上地址转换运行态快照源。
+//
+// ★新网关**一律**要调它（哪怕没开 -nat），理由见 NATState.Enabled 的注释。
+func (c *Client) SetNAT(fn func() NATState) { c.natState = fn }
 
 // Event 一条数据面回执：网关报告某个控制面指令**已实际执行**的事实，
 // 或一次**已实际发生**的拒绝（安全事件，kind=sec-deny）。
@@ -301,6 +349,11 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	// 后端可达性拨测结果（wave7 行动 9）：同款三态兼容——未装拨测源连字段都不出现。
 	if c.reach != nil {
 		payload["reach"] = c.reach()
+	}
+	// 地址转换运行态回执（wave8 行动 3）：同款三态兼容。★新网关一律上报，
+	// 没开 -nat 时报 enabled=false——否则控制面分不出「没开」与「旧网关不会报」。
+	if c.natState != nil {
+		payload["nat"] = c.natState()
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)

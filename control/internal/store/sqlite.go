@@ -616,6 +616,17 @@ CREATE TABLE IF NOT EXISTS gateway_ifaces (
   gateway_id TEXT, name TEXT, if_type TEXT, addrs_json TEXT, up INTEGER, updated_at TEXT,
   PRIMARY KEY(gateway_id, name)
 );
+
+-- 网关对外接入地址（PRD FR-SCEN-08/17，wave8 行动 4）。**管理员登记**，不是网关自报：
+-- 网关无从知道自己在 NAT / 负载均衡后面对外是什么地址（与 gateway_ifaces 的
+-- LAN/WAN 定性同一条理由）。两栏都可空；都空即不留行（见 SetGatewayAccess）。
+--
+-- ★没有这张表之前，剖面里的落点主机名是从网关自报的**监听地址**反推的，而网关默认
+-- 监听 ':18201' 不带 host，于是必然落进全局兜底 127.0.0.1——客户端拨号超时，
+-- 而控制台显示在线、剖面 warnings 一条不报。
+CREATE TABLE IF NOT EXISTS gateway_access (
+  gateway_id TEXT PRIMARY KEY, lan_host TEXT, wan_host TEXT, updated_at TEXT
+);
 -- ── 审计日志外送（PRD ch16 + ch21.6）──
 -- 配置与凭据**物理分表**（与 notify_channel_secrets / auth_source_secrets 同一条推理）。
 -- last_status/last_detail/last_at/last_ok_at/dropped 只由**真正发出那一次**（或真的丢弃那一次）

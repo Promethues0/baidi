@@ -75,6 +75,8 @@ type Server struct {
 	// 纯 Memory 后端（未连库的降级演示栈）拿不到它，端点如实回 503 而不是空列表——
 	// 空列表会让「没配 NAT 策略」与「这个后端根本不支持 NAT」长得一模一样。
 	nat store.NATStore
+	// gwAccess 网关对外接入地址登记（SQLite 后端才有；纯内存栈为 nil，剖面退回自报+兜底）。
+	gwAccess store.GatewayAccessStore
 	// upg 升级配置持久化（灰度计划 + 校验规则）。同 nat：纯内存后端拿不到，端点如实回 503。
 	upg store.UpgradeStore
 	// upgradeKeys 升级包发布公钥（BAIDI_UPGRADE_PUBKEY，base64，逗号分隔可多把供轮换）。
@@ -112,9 +114,9 @@ type Server struct {
 	// gwNAT 各网关最近心跳捎带的地址转换运行态（wave8 行动 3；心跳刷新态，不落库）。
 	// ★不落库是有意的：它是「此刻内核里是什么样」的读数，重启控制面后重新收心跳
 	// 才有意义——把陈值存下来会让一台已经下线的网关在页面上继续显示「已灌入内核」。
-	gwNAT map[string]gwNATInfo
-	kicked     map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
-	revoked    map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	gwNAT   map[string]gwNATInfo
+	kicked  map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	revoked map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
 	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
 	grayObserved map[string]int64
@@ -248,7 +250,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
 		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
-		gwNAT: map[string]gwNATInfo{},
+		gwNAT:           map[string]gwNATInfo{},
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
 		standbyAudited:  map[string]int64{},
@@ -261,6 +263,9 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	s.lockout = lockout.New(ls)
 	if v, ok := wr.(store.NATStore); ok {
 		s.nat = v
+	}
+	if v, ok := wr.(store.GatewayAccessStore); ok {
+		s.gwAccess = v
 	}
 	if v, ok := wr.(store.UpgradeStore); ok {
 		s.upg = v
@@ -423,6 +428,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/audit/forward/{id}/flush", s.handleFlushAuditForwardTarget)
 	// 网关与隐身：已注册网关节点 + 敲门口径（数据源 = mTLS 注册心跳，见 gatewaypage.go）
 	mux.HandleFunc("GET /api/v1/gateway", s.handleGateway)
+	mux.HandleFunc("PUT /api/v1/gateway/{id}/access", s.handleSetGatewayAccess) // 登记对外接入地址（PermSystem）
 
 	// 系统管理：三权分立（管理员角色 + 管理员账号）+ 集群状态。
 	// 读=任意 admin（审计管理员要能监督权限分布）；写=PermAdmins（只有超管持有）。
@@ -534,14 +540,14 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
 
 	// ── 写操作（落 SQLite）──
-	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                         // 发布应用
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)   // 设备绑定审批
-	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)              // 保存用户策略覆盖
-	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)               // 读取用户策略覆盖
-	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                       // 新增用户
-	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)        // 禁用/启用/解锁
-	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword)  // 管理员重置口令
-	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)       // 管理员清除 TOTP（丢认证器）
+	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                        // 发布应用
+	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)  // 设备绑定审批
+	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)             // 保存用户策略覆盖
+	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)              // 读取用户策略覆盖
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                      // 新增用户
+	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)       // 禁用/启用/解锁
+	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
+	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)      // 管理员清除 TOTP（丢认证器）
 	// 闲置账号治理：识别（读=任意管理员）+ 批量锁定（写=PermSecurity，管理员目标逐个抬 PermAdmins）
 	mux.HandleFunc("GET /api/v1/users/idle", s.handleIdleAccounts)
 	mux.HandleFunc("POST /api/v1/users/idle/lock", s.handleIdleLock)
@@ -584,7 +590,7 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/pki/gateway-certs/{fingerprint}/revoke", s.handleRevokeGatewayCert)
 	mux.HandleFunc("GET /api/v1/gateways", s.handleGateways)                // 在线网关清单（管理）
 	mux.HandleFunc("GET /api/v1/resources", s.handleResources)              // 资源清单（管理）
-	mux.HandleFunc("GET /api/v1/resources/reach", s.handleResourceReach)   // 逐资源后端可达性（网关拨测聚合）
+	mux.HandleFunc("GET /api/v1/resources/reach", s.handleResourceReach)    // 逐资源后端可达性（网关拨测聚合）
 	mux.HandleFunc("POST /api/v1/resources", s.handleSaveResource)          // 新增/改资源
 	mux.HandleFunc("DELETE /api/v1/resources/{id}", s.handleDeleteResource) // 删资源
 

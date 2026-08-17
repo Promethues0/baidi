@@ -169,13 +169,26 @@
           <table class="bd-table">
             <thead>
               <tr>
-                <th>网关</th><th>敲门口</th><th>隧道口</th><th>状态</th>
+                <!-- ★「对外接入地址」与「敲门口/隧道口」是两回事：后者是网关自报的**监听**地址
+                     （默认 ':18201' 不带 host），前者才是客户端真正会去拨的地址。
+                     没登记时剖面只能拿全局兜底去猜，症状是「显示在线却连不上」。 -->
+                <th>网关</th><th>对外接入地址</th><th>敲门口</th><th>隧道口</th><th>状态</th>
                 <th>会话</th><th>隧道</th><th>放行源</th><th>版本</th><th>时钟偏差</th><th>运行时长</th><th>最后心跳</th>
               </tr>
             </thead>
             <tbody>
               <tr v-for="n in nodes" :key="n.id">
                 <td><b style="color: var(--bd-t1); font-weight: 500">{{ n.id }}</b></td>
+                <td>
+                  <template v-if="n.accessConfigured">
+                    <div v-if="n.lanHost" class="bd-mono bd-acc"><i>内网</i>{{ n.lanHost }}</div>
+                    <div v-if="n.wanHost" class="bd-mono bd-acc"><i>互联网</i>{{ n.wanHost }}</div>
+                  </template>
+                  <span v-else class="bd-acc__none" title="未登记时客户端拿到的是全局兜底地址（多为 127.0.0.1），会拨号超时——而这一页仍显示在线">
+                    <icon-exclamation-circle-fill />未登记
+                  </span>
+                  <button type="button" class="bd-link bd-acc__edit" @click="openAccess(n)">编辑</button>
+                </td>
                 <td><span class="bd-mono">{{ n.spa || '—' }}</span></td>
                 <td><span class="bd-mono">{{ n.proxy || '—' }}</span></td>
                 <td>
@@ -205,6 +218,28 @@
       </div>
     </template>
   </div>
+    <!-- 对外接入地址（PRD FR-SCEN-08/17）。★两栏都可留空，都空即撤销登记。
+         端口刻意不收：它的权威来源是网关自报的监听地址，收第二份就会有两个真相，
+         而不一致时症状是「敲门发到 A 口、隧道拨到 B 口」，两边日志都正常。 -->
+    <a-modal v-model:visible="acc.open" :title="`网关「${acc.id}」的对外接入地址`" :width="520"
+      :ok-loading="acc.busy" ok-text="保存" cancel-text="取消" @ok="saveAccess">
+      <div class="bd-accnote">
+        客户端会照这两个地址拨号。它与网关自报的<b>监听地址</b>是两回事——网关默认监听
+        <code>:18201</code>，无从知道自己在 NAT / 负载均衡后面对外是什么地址。
+        两栏都填时，客户端按<b>内网优先</b>的顺序依次尝试（拨不通自动切下一个）。
+      </div>
+      <div class="bd-accfld">
+        <label>局域网访问地址</label>
+        <a-input v-model="acc.lan" placeholder="如 10.0.0.9 或 gw-lan.corp.internal" allow-clear />
+        <span class="bd-accfld__d">内网终端用的地址。只填主机名或 IP，不要带端口和协议。</span>
+      </div>
+      <div class="bd-accfld">
+        <label>互联网访问地址</label>
+        <a-input v-model="acc.wan" placeholder="如 gw.example.com 或 203.0.113.9" allow-clear />
+        <span class="bd-accfld__d">公网终端用的地址。内外网想用同一个域名（分区 DNS）时，两栏填一样即可。</span>
+      </div>
+      <div v-if="acc.err" class="bd-accerr"><icon-close-circle-fill />{{ acc.err }}</div>
+    </a-modal>
 </template>
 
 <script setup lang="ts">
@@ -224,7 +259,8 @@
  *  - 主/备角色：没有选主机制；
  *  - 负载百分比：不采集网关负载（宿主机指标另有「设备状态」页，走 metrics 时序）。
  */
-import { ref, computed, onMounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
+import { Message } from '@arco-design/web-vue';
 import { api, type GatewayBundle, type GwNode } from '@/lib/api';
 
 const tab = ref<'topo' | 'spa' | 'node'>('topo');
@@ -273,6 +309,27 @@ async function load(): Promise<void> {
     bundle.value = EMPTY;
     live.value = false;
   }
+}
+
+/* ── 对外接入地址（wave8 行动 4）── */
+const acc = reactive({ open: false, busy: false, id: '', lan: '', wan: '', err: '' });
+function openAccess(n: GwNode) {
+  Object.assign(acc, { open: true, busy: false, id: n.id, lan: n.lanHost ?? '', wan: n.wanHost ?? '', err: '' });
+}
+async function saveAccess() {
+  acc.busy = true; acc.err = '';
+  try {
+    await api(`/gateway/${encodeURIComponent(acc.id)}/access`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ lanHost: acc.lan.trim(), wanHost: acc.wan.trim() })
+    });
+    acc.open = false;
+    Message.success('接入地址已保存，客户端下次拉取剖面即生效');
+    await load();
+  } catch (e) {
+    // 后端的校验文案要原样透出：它说清了为什么这个地址必然连不通（回环 / 带端口 / 带协议）
+    acc.err = (e as Error).message || '保存失败';
+  } finally { acc.busy = false; }
 }
 
 onMounted(load);
@@ -329,4 +386,17 @@ onMounted(load);
 .bd-cmp__foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--bd-fill-2); font-size: 12.5px; font-weight: 600; }
 .bd-cmp__foot.bad { color: var(--bd-danger); }
 .bd-cmp__foot.good { color: #0B8235; }
+/* 对外接入地址列 */
+.bd-acc { font-size: 12px; line-height: 1.7; white-space: nowrap; }
+.bd-acc i { display: inline-block; min-width: 42px; margin-right: 6px; font-style: normal; color: var(--bd-t3); font-size: 11px; }
+.bd-acc__none { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--bd-warning, #FF7D00); }
+.bd-acc__edit { margin-left: 10px; font-size: 12px; }
+.bd-accnote { font-size: 12.5px; line-height: 1.8; color: var(--bd-t2); background: var(--bd-fill-1);
+  padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; }
+.bd-accnote code { font-family: var(--bd-mono, monospace); background: var(--bd-fill-2, #f2f3f5); padding: 0 4px; border-radius: 3px; }
+.bd-accfld { margin-bottom: 14px; }
+.bd-accfld label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 6px; }
+.bd-accfld__d { display: block; margin-top: 5px; font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
+.bd-accerr { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-danger);
+  background: var(--bd-tag-red-bg, #FFECE8); padding: 8px 12px; border-radius: 6px; }
 </style>

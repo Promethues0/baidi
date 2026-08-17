@@ -19,11 +19,15 @@ package api
 // 敲门校验是否正常）如实缺席，由页面说明"控制面不从外部实测端口可见性"。
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"baidi.dev/control/internal/httpx"
+	"baidi.dev/control/internal/store"
 )
 
 // GatewayPageBundle 网关与隐身页。
@@ -57,6 +61,16 @@ type GatewayNodeView struct {
 	// SkewSec 该网关时钟相对控制面的偏差（秒，正=网关快）；null = 未上报（旧网关），
 	// 页面必须显示"未上报"而不是 0——语义见 GatewayInfo.SkewSec。
 	SkewSec *int64 `json:"skewSec"`
+	// LANHost / WANHost 管理员登记的对外接入地址（PRD FR-SCEN-08/17，wave8 行动 4）。
+	//
+	// ★这是**客户端真正会去拨的地址**，与上面 Proxy/SPA 那两个网关自报的**监听地址**
+	// 是两回事：网关默认监听 ':18201'（不带 host），无从知道自己在 NAT / 负载均衡
+	// 后面对外是什么地址。两栏都空时剖面只能拿自报地址或全局兜底去猜，
+	// 而猜错的症状是「控制台显示在线、客户端拨号超时」——故页面要能填、也要标出没填。
+	LANHost string `json:"lanHost"`
+	WANHost string `json:"wanHost"`
+	// AccessConfigured 是否登记过至少一栏。false 时页面要显著提示（见上）。
+	AccessConfigured bool `json:"accessConfigured"`
 }
 
 // handleGateway 返回网关与隐身页的聚合视图。
@@ -76,9 +90,12 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		OnlineWindowSec:  int(window),
 		KnockTokenTTLSec: int(knockTTL.Seconds()),
 	}
+	access := s.gatewayAccessMap()
 	s.mu.Lock()
 	for id, g := range s.gateways {
+		a := access[id]
 		n := GatewayNodeView{
+			LANHost: a.LANHost, WANHost: a.WANHost, AccessConfigured: a.Configured(),
 			ID: id, Proxy: g.Proxy, SPA: g.SPA, LastSeen: g.LastSeen, Uptime: g.Uptime,
 			Clients: g.Clients, Tunnels: g.Tunnels, Sessions: len(s.gwSess[id]), Version: g.Version,
 			SkewSec: g.SkewSec,
@@ -104,4 +121,61 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		return out.Nodes[i].ID < out.Nodes[j].ID
 	})
 	httpx.JSON(w, http.StatusOK, out)
+}
+
+// handleSetGatewayAccess 登记一台网关的对外接入地址（PermSystem，PRD FR-SCEN-08/17）。
+//
+// body {lanHost, wanHost}，两栏都可留空（都空 = 撤销登记）。
+// 权限归 PermSystem 而不是 PermSecurity：接入地址是网络部署配置，与网关证书、
+// 组网同属系统管理员职责；而且改错它等于让全体终端连不上，不该由第二个人能动。
+func (s *Server) handleSetGatewayAccess(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePerm(w, r, store.PermSystem) {
+		return
+	}
+	if s.gwAccess == nil {
+		httpx.Error(w, http.StatusServiceUnavailable,
+			"当前后端不支持登记网关接入地址（需要 SQLite 存储；纯内存演示栈无此能力）")
+		return
+	}
+	id := strings.TrimSpace(r.PathValue("id"))
+	if id == "" {
+		httpx.Error(w, http.StatusBadRequest, "网关 id 不能为空")
+		return
+	}
+	// ★必须是**已注册**的网关：给一个不存在的 id 登记地址，页面上什么也不会出现
+	// （网关页只列注册过的），而管理员会以为自己配好了。这与 NAT 策略要求接口
+	// 必须是实测枚举过的是同一条纪律。
+	s.mu.Lock()
+	_, known := s.gateways[id]
+	s.mu.Unlock()
+	if !known {
+		httpx.Error(w, http.StatusNotFound,
+			"网关「"+id+"」尚未注册到控制面（id 必须与网关 mTLS 证书 CN 逐字符一致）")
+		return
+	}
+	var b struct {
+		LANHost string `json:"lanHost"`
+		WANHost string `json:"wanHost"`
+	}
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<10)).Decode(&b); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	saved, err := s.gwAccess.SetGatewayAccess(r.Context(),
+		store.GatewayAccess{GatewayID: id, LANHost: b.LANHost, WANHost: b.WANHost})
+	if err != nil {
+		if errors.Is(err, store.ErrBadAccessHost) {
+			httpx.Error(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpx.Error(w, http.StatusInternalServerError, "failed to save gateway access")
+		return
+	}
+	// 审计：这条配置直接决定全体终端往哪拨号，改动必须留痕。
+	desc := "撤销登记"
+	if saved.Configured() {
+		desc = "内网=" + orDefault(saved.LANHost, "—") + " 互联网=" + orDefault(saved.WANHost, "—")
+	}
+	s.audit(r, "policy", "设置网关「"+id+"」的对外接入地址："+desc, "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "access": saved})
 }

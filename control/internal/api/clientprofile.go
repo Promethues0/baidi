@@ -644,35 +644,82 @@ func validDNSName(s string) bool {
 // 网关会永远留在落点清单里、连指纹一起下发，客户端钉扎照样通过、每轮还主动给它发一次
 // 有效敲门令牌，首选落点一抖就把业务流量送进那台已失陷的机器。改这两处任何一处，
 // 都要同时看另一处。
+// epKind 落点地址的来源。排序与告警都要用它，故与 ProfileGateway 分开存
+// （它是控制面的内部账，不进下发给客户端的线上契约）。
+type epKind int
+
+const (
+	epLAN      epKind = iota // 管理员登记的局域网访问地址
+	epWAN                    // 管理员登记的互联网访问地址
+	epReported               // 网关自报监听地址里带的 host（少数部署会显式 bind 公网 IP）
+	epFallback               // 谁都没有 → 全局兜底 BAIDI_CLIENT_GW_HOST（默认 127.0.0.1）
+)
+
+type gwEndpoint struct {
+	ProfileGateway
+	kind epKind
+}
+
 func (s *Server) profileGateways() ([]ProfileGateway, []string) {
 	now := time.Now()
+	// 管理员登记的对外接入地址。读失败/纯内存栈 → 空表，退回自报+兜底那条老路
+	// （并由下面的告警把「这是猜的」说出来），绝不因为读不到配置就不下发落点。
+	access := s.gatewayAccessMap()
 
 	s.mu.Lock()
-	list := make([]ProfileGateway, 0, len(s.gateways))
+	eps := make([]gwEndpoint, 0, len(s.gateways))
 	for id, g := range s.gateways {
-		spaHost, spaPort := splitHostPortLoose(g.SPA)
+		reportedHost, spaPort := splitHostPortLoose(g.SPA)
 		_, proxyPort := splitHostPortLoose(g.Proxy)
-		// 网关上报的可能是 0.0.0.0/:port 这类监听地址，对客户端没有意义。
-		// 这种情况回退到环境变量里配置的对外可达主机名。
-		if spaHost == "" || spaHost == "0.0.0.0" || spaHost == "::" {
-			spaHost = envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1")
-		}
-		list = append(list, ProfileGateway{
-			ID: id, Host: spaHost,
+		base := ProfileGateway{
+			ID:      id,
 			SPAPort: orDefault(spaPort, "18201"), ProxyPort: orDefault(proxyPort, "18443"),
 			TunnelPin: s.gwTunnelFP[id], Online: gatewayFresh(g.LastSeen, now),
-		})
+		}
+		add := func(host string, k epKind) {
+			ep := base
+			ep.Host = host
+			eps = append(eps, gwEndpoint{ProfileGateway: ep, kind: k})
+		}
+		a := access[id]
+		// ★两个地址都登记时**各下发一个落点**（同一个 id、同一份指纹、不同 host）。
+		// 客户端的落点清单本来就是「按序尝试 + 失败切下一个」，这正是它该表达的事：
+		// 一台网关确实有两个可达地址。内网在前是因为企业部署里绝大多数终端在内网，
+		// 而代价有上界——picker 每轮敲全部落点、切过去之后粘住，外网终端只多付一次拨号超时。
+		// 我们**无从判断客户端在哪一侧**（这是事实，不是偷懒）；真正的统一解是
+		// FR-SCEN-09 的内外网分区 DNS：两栏填同一个域名即可。
+		switch {
+		case a.LANHost != "" || a.WANHost != "":
+			if a.LANHost != "" {
+				add(a.LANHost, epLAN)
+			}
+			if a.WANHost != "" && a.WANHost != a.LANHost {
+				add(a.WANHost, epWAN)
+			}
+		case reportedHost != "" && reportedHost != "0.0.0.0" && reportedHost != "::":
+			// 网关显式 bind 了某个地址：它至少是个真实地址，比全局兜底可信。
+			add(reportedHost, epReported)
+		default:
+			// 网关自报的是 ':18201' 这类通配监听——**这是默认配置下的必然路径**。
+			// 兜底值对客户端多半没有意义，故这一支一定要在 warnings 里点名（见下）。
+			add(envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1"), epFallback)
+		}
 	}
 	s.mu.Unlock()
 
-	sort.Slice(list, func(i, j int) bool {
-		if list[i].Online != list[j].Online {
-			return list[i].Online // 在线优先
+	sort.Slice(eps, func(i, j int) bool {
+		if eps[i].Online != eps[j].Online {
+			return eps[i].Online // 在线优先
 		}
-		return list[i].ID < list[j].ID // 同健康度按 id 字典序：唯一的稳定序
+		if eps[i].ID != eps[j].ID {
+			return eps[i].ID < eps[j].ID // 同健康度按 id 字典序：唯一的稳定序
+		}
+		// 同一台网关的两个地址：内网在前。也必须是确定序，否则客户端每次拉剖面
+		// 都可能换首选地址，表现为隧道莫名重连（与①同一个理由）。
+		return eps[i].kind < eps[j].kind
 	})
 
-	if len(list) == 0 {
+	if len(eps) == 0 {
 		return []ProfileGateway{{
 			Host:      envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1"),
 			SPAPort:   envOr("BAIDI_CLIENT_GW_SPA_PORT", "18201"),
@@ -680,7 +727,92 @@ func (s *Server) profileGateways() ([]ProfileGateway, []string) {
 			Online:    false,
 		}}, []string{"没有网关在线上报，已回退到默认落点配置；若接入失败请先确认网关已注册到控制面"}
 	}
-	return list, gatewayWarnings(list)
+	list := make([]ProfileGateway, 0, len(eps))
+	for _, ep := range eps {
+		list = append(list, ep.ProfileGateway)
+	}
+	return list, append(gatewayWarnings(list), endpointWarnings(eps)...)
+}
+
+// gatewayAccessMap 管理员登记的对外接入地址，按网关 id 索引。
+// 读失败只记日志回空表：落点该照发（客户端至少还能试自报地址），
+// 但「这是猜的」会由 endpointWarnings 说出来。
+func (s *Server) gatewayAccessMap() map[string]store.GatewayAccess {
+	out := map[string]store.GatewayAccess{}
+	if s.gwAccess == nil {
+		return out
+	}
+	list, err := s.gwAccess.GatewayAccessList(context.Background())
+	if err != nil {
+		slog.Error("网关接入地址读取失败，本次剖面退回「自报地址 + 全局兜底」", "err", err.Error())
+		return out
+	}
+	for _, a := range list {
+		out[a.GatewayID] = a
+	}
+	return out
+}
+
+// endpointWarnings 把「落点地址多半连不上」的三种形态说出来。
+//
+// ★这一组告警是本次改造的**要害**：缺陷本身（host 折叠成 127.0.0.1、多落点同址）
+// 此前一直存在，真正致命的是它**完全无声**——gatewayWarnings 只管指纹与在线数，
+// 于是客户端拨号超时而控制台一切正常。有没有配置面是次要的，有没有信号才是主要的。
+func endpointWarnings(eps []gwEndpoint) []string {
+	var out []string
+	// ① 落进全局兜底：默认部署的必然路径。
+	var guessed []string
+	for _, ep := range eps {
+		if ep.kind == epFallback {
+			guessed = append(guessed, fmt.Sprintf("%s（当前用 %s）", orDefault(ep.ID, "未命名网关"), ep.Host))
+		}
+	}
+	if len(guessed) > 0 {
+		out = append(out, fmt.Sprintf("以下网关未登记对外接入地址，落点地址是全局兜底值而非该网关的真实地址：%s。"+
+			"请在「网关与隐身」页给它们填上局域网/互联网访问地址——客户端会照这个地址拨号，填错或不填都表现为「显示已接入却连不上」。",
+			strings.Join(guessed, "、")))
+	}
+	// ② 回环地址：只有网关本机连得上。单独说，因为它比①更确定地不通。
+	var loop []string
+	for _, ep := range eps {
+		if ip := net.ParseIP(ep.Host); ip != nil && ip.IsLoopback() {
+			loop = append(loop, gatewayLabel(ep.ProfileGateway))
+		}
+	}
+	if len(loop) > 0 {
+		out = append(out, fmt.Sprintf("落点 %s 的地址是回环地址，只有网关本机连得上：任何终端都拨不到它。",
+			strings.Join(loop, "、")))
+	}
+	// ③ 多台网关共用同一地址：故障转移在页面上可见、在网络上不存在。
+	byHost := map[string]map[string]bool{}
+	for _, ep := range eps {
+		if ep.ID == "" {
+			continue
+		}
+		if byHost[ep.Host] == nil {
+			byHost[ep.Host] = map[string]bool{}
+		}
+		byHost[ep.Host][ep.ID] = true
+	}
+	hosts := make([]string, 0, len(byHost))
+	for h := range byHost {
+		hosts = append(hosts, h)
+	}
+	sort.Strings(hosts) // 稳定顺序：告警每次刷新乱跳会让人以为状态在变
+	for _, h := range hosts {
+		if len(byHost[h]) < 2 {
+			continue
+		}
+		ids := make([]string, 0, len(byHost[h]))
+		for id := range byHost[h] {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		out = append(out, fmt.Sprintf("网关 %s 的落点地址相同（都是 %s）：客户端「切换落点」时拨的还是同一台机器，"+
+			"故障转移只在界面上成立。请给它们分别登记真实的对外接入地址。",
+			strings.Join(ids, "、"), h))
+	}
+	return out
 }
 
 // gatewayWarnings 逐落点体检，把「能连上但打了折扣」的降级说清楚。

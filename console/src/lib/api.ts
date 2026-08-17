@@ -254,6 +254,14 @@ export interface GwNode {
   clients: number; tunnels: number; sessions: number;
   /** 网关二进制版本；旧网关不上报则为空串。 */
   version: string;
+  /** 管理员登记的对外接入地址（PRD FR-SCEN-08/17）。
+   *  ★与上面 spa/proxy 那两个**监听地址**是两回事：网关默认监听 ':18201'（不带 host），
+   *  无从知道自己在 NAT / 负载均衡后面对外是什么地址。这两栏才是客户端真正会去拨的地址。 */
+  lanHost?: string;
+  wanHost?: string;
+  /** 是否登记过至少一栏。false 时剖面只能拿自报地址或全局兜底去猜，
+   *  而猜错的症状是「控制台显示在线、客户端拨号超时」——页面必须显著提示。 */
+  accessConfigured?: boolean;
   /**
    * 网关时钟相对控制面的偏差（秒，正=网关快）；null = 旧网关未上报（不可判定）。
    * ★渲染纪律与 posture/设备指标一致：null 显示「未上报」，绝不显示 0——

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -106,6 +107,36 @@ func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
 	cfg := "{}"
 	if len(b.Config) > 0 {
 		cfg = string(b.Config)
+	}
+	// ★准入设置入口校验（wave8 行动 10）：与 platforms 那道枚举校验同一条纪律。
+	// 不校验的话，admitPolicy 填 "Approval"（大写 A）会被 NormalizeAdmitPolicy
+	// 归成 auto——管理员在页面上看着「需要审批」，实际每个人照样自动建号进来，
+	// 全程零报错。这是本项目最怕的那种"配了却不生效"。
+	if kind != authsrc.KindLocal {
+		var ac struct {
+			AdmitPolicy    string   `json:"admitPolicy"`
+			AllowedDomains []string `json:"allowedDomains"`
+			AllowedGroups  []string `json:"allowedGroups"`
+		}
+		// ★解析不出对象时**跳过**这道校验，不拒绝保存：本函数下面那段
+		// 「构造失败不拒绝保存（管理员可能正分几步填），但把原因带回去」是既定取舍，
+		// 在这里改成硬拒会与它自相矛盾。配置真的不可用时，buildProvider 那条
+		// warning 会说出来。这里只负责「配置是个对象、而 admitPolicy 填错了」这一种。
+		if err := json.Unmarshal([]byte(cfg), &ac); err != nil {
+			slog.Warn("认证源配置不是 JSON 对象，跳过准入设置校验（保存照常，可用性由 buildProvider 回警告）",
+				"源", b.Name, "id", b.ID)
+		} else if !store.ValidAdmitPolicy(ac.AdmitPolicy) {
+			httpx.Error(w, http.StatusBadRequest,
+				"admitPolicy 取值须为 auto（认证通过即建号）或 approval（首登需管理员批准），得到："+ac.AdmitPolicy)
+			return
+		} else {
+			// 白名单清洗后写回：去空去重，免得一个多敲的空行让「配了却匹配不上」。
+			ac.AllowedDomains = store.NormalizeAdmitList(ac.AllowedDomains)
+			ac.AllowedGroups = store.NormalizeAdmitList(ac.AllowedGroups)
+			if merged, merr := mergeAdmitCfg(cfg, ac.AdmitPolicy, ac.AllowedDomains, ac.AllowedGroups); merr == nil {
+				cfg = merged
+			}
+		}
 	}
 	rec, err := aw.SaveAuthSource(r.Context(), store.AuthSourceRec{
 		ID: b.ID, Name: b.Name, Kind: string(kind), Enabled: b.Enabled, Priority: b.Priority, Config: cfg,

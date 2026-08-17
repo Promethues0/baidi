@@ -92,6 +92,12 @@ type Server struct {
 	testRedirectAuth func(store.AuthSourceRec) (authsrc.RedirectAuthenticator, error)
 	// testStatusChecker 外部账号回验的测试注入缝（同上：LDAP 协议路径另有真服务端用例）。
 	testStatusChecker func(store.AuthSourceRec) (authsrc.StatusChecker, error)
+	// testPasswordAuth 口令式外部认证的测试注入缝（同上）。
+	//
+	// ★它存在的理由是准入闸的**位置**必须被端到端钉住：闸判得对（纯函数用例覆盖了）
+	// 但接在 BindExternalUser 之后的话，账号照建不误——而那正是要防的。
+	// 只有走完整条 authenticateExternal 才验得到"被拒时 users 表里没多出行"。
+	testPasswordAuth func(store.AuthSourceRec) (authsrc.PasswordAuthenticator, error)
 	// sb 温备节点台账（PRD 15.5）。同 nat/upg：纯内存后端拿不到，集群视图如实回
 	// 「不可判定」而不是「未配置备机」——后者是另一件事（确实没配 vs 记不下来）。
 	sb store.StandbyStore
@@ -458,6 +464,10 @@ func (s *Server) Routes() http.Handler {
 	// 认证源接入（真落库、真探测、真参与登录）：
 	mux.HandleFunc("GET /api/v1/authsrc/sources", s.handleAuthSources)
 	mux.HandleFunc("POST /api/v1/authsrc/sources", s.handleSaveAuthSource)
+	// 外部身份准入（wave8 行动 10）：待批清单 + 处置。归 PermSecurity——
+	// 「谁能进来」与认证源、策略、资源授权同属安全管理员职责。
+	mux.HandleFunc("GET /api/v1/authsrc/admissions", s.handlePendingExtAdmissions)
+	mux.HandleFunc("POST /api/v1/authsrc/admissions/{id}/decide", s.handleDecideExtAdmission)
 	mux.HandleFunc("DELETE /api/v1/authsrc/sources/{id}", s.handleDeleteAuthSource)
 	mux.HandleFunc("PUT /api/v1/authsrc/sources/{id}/secret", s.handleSetAuthSourceSecret)
 	mux.HandleFunc("POST /api/v1/authsrc/sources/{id}/probe", s.handleProbeAuthSource)
@@ -660,8 +670,18 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		//
 		// ★顺序是「先本地、后外部」而不是反过来：本地目录里有 admin 这种
 		// 高权账号，把它交给外部目录先答，等于把本地管理员的认证权外包出去。
-		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r.Context(), b.Username, b.Password)
+		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r, b.Username, b.Password)
 		switch {
+		case asAdmitDenied(aerr) != nil:
+			// ★准入闸拒绝：口令是**对的**，只是这个人不准进（未获批准 / 不在域组白名单）。
+			// 与「口令错」分开有三处后果都要紧：① 不计入爆破锁定——用户什么都没做错，
+			// 计进去他连申诉的机会都没有；② 回给用户的话必须说清是"等批准"还是"被拒"，
+			// 否则他会一直重试一个永远不会成功的口令；③ 审计已在准入闸里落好，
+			// 这里不再重复记一条"口令错误"（那会是一条与事实不符的审计）。
+			d := asAdmitDenied(aerr)
+			slog.Warn("外部身份被准入闸拒绝", "账号", b.Username, "待批", d.Pending(), "原因", d.Error())
+			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": d.Error()})
+			return
 		case aerr != nil:
 			// ★认证源故障绝不能回「用户名或密码错误」：那会让运维去查用户而不是查目录，
 			// 也不该计入账号锁定计数（用户什么都没做错）。

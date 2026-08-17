@@ -84,6 +84,39 @@
         </div>
         <div v-if="!recs.length" class="bd-srcempty">尚未接入任何认证源</div>
       </div>
+
+      <!-- ── 待批准入（wave8 行动 10）──
+           ★没有这一块，「需管理员批准」那档就是个死路：闸挡住了人，
+           而管理员在界面上没有任何地方能批。 -->
+      <div v-if="admissions.length" class="bd-admit">
+        <div class="bd-section-title">
+          待批外部身份准入
+          <span class="bd-admit__count">{{ admissions.length }} 条</span>
+        </div>
+        <div class="bd-admit__hint">
+          这些身份已通过所属目录的认证，但该认证源配置了「需管理员批准后才建号」。
+          批准后他们**下次登录**才会建号（用登录那一刻的真实身份，不是申请时的快照）。
+        </div>
+        <div v-for="a in admissions" :key="a.approvalId" class="bd-card bd-admit__row">
+          <div class="bd-admit__who">
+            <b>{{ a.displayName || a.username || '—' }}</b>
+            <span class="bd-admit__acct">{{ a.username || '—' }}</span>
+            <span class="bd-tg">{{ a.sourceName }}</span>
+          </div>
+          <div class="bd-admit__meta">
+            <span v-if="a.email">{{ a.email }}</span>
+            <span v-if="a.groups?.length">组：{{ a.groups.join('、') }}</span>
+            <span class="bd-mono bd-admit__sub" :title="a.subject">{{ a.subject }}</span>
+            <span>申请于 {{ a.createdAt }}</span>
+          </div>
+          <div class="bd-admit__act">
+            <a-button size="mini" type="primary" :loading="admitBusy === a.approvalId"
+              @click="decideAdmission(a, 'approved')">批准</a-button>
+            <a-button size="mini" status="danger" :loading="admitBusy === a.approvalId"
+              @click="decideAdmission(a, 'rejected')">拒绝</a-button>
+          </div>
+        </div>
+      </div>
     </div>
 
     <!-- ============ 认证策略（FR-AUTH-12：PC/WEB 与 移动端 分栏认证）============ -->
@@ -563,6 +596,34 @@
           </div>
         </template>
 
+        <!-- ── 外部身份准入（wave8 行动 10）──
+             ★这一段是真判定，不是提示：改造前认证通过即自动建号，
+             而自动建号的账号落进「外部目录」单元，其父是根组织——
+             把资源授权给根组织就把这批人全覆盖了。 -->
+        <template v-if="srcForm.kind !== 'local'">
+          <div class="bd-srcform__sec">外部身份准入</div>
+          <div class="bd-srcform__row"><label>未导入用户</label>
+            <a-select v-model="admit.admitPolicy">
+              <a-option value="auto">认证通过即自动建号</a-option>
+              <a-option value="approval">需管理员批准后才建号（推荐）</a-option>
+            </a-select>
+          </div>
+          <div v-if="admit.admitPolicy !== 'approval'" class="bd-srcform__warn">
+            当前为自动建号：该目录里**任何**能通过认证的条目（服务账号、承包商、刚建的号）
+            首登即获得白帝账号与门户会话，无审批。若已把资源授权给上级组织，他们即刻拥有该资源的访问权。
+          </div>
+          <div class="bd-srcform__row"><label>允许邮箱域</label>
+            <a-input-tag v-model="admitDomains" placeholder="corp.example（回车添加；留空=不限）" allow-clear />
+          </div>
+          <div class="bd-srcform__row"><label>允许的组</label>
+            <a-input-tag v-model="admitGroups" placeholder="vpn-users（回车添加；留空=不限）" allow-clear />
+          </div>
+          <div class="bd-srcform__hint">
+            白名单**每次登录都判**——目录侧把人移出允许组后，他下次登录即被拒（审批只判首次建号）。
+            两项都填则两项都要过。配了域白名单但认证源没返回邮箱时按拒绝处理（准入闸 fail-closed）。
+          </div>
+        </template>
+
         <!-- ── 凭据（只写不读）── -->
         <template v-if="srcForm.kind !== 'local'">
           <div class="bd-srcform__sec">凭据</div>
@@ -595,7 +656,7 @@ import {
   type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthMethodCapability, type AuthDirectory, type EnhanceRule,
   type PrimaryMethod, type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
-  type LdapConfig, type OidcConfig
+  type LdapConfig, type OidcConfig, type AdmitConfig, type ExtAdmission
 } from '@/lib/api';
 
 /** 目录/源类型的图标与配色键。★页面本地定义，刻意不再从 API 类型推导：
@@ -702,11 +763,18 @@ const srcForm = reactive<{
 }>({ id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false });
 const ldap = reactive<LdapConfig>({ host: '', port: 0, tlsMode: 'ldaps', baseDn: '' });
 const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '' });
+/* 准入设置（两类源共用）。默认 auto = 与改造前行为一致，升级不把人挡在门外。 */
+const admit = reactive<AdmitConfig>({ admitPolicy: 'auto' });
+const admitDomains = ref<string[]>([]);
+const admitGroups = ref<string[]>([]);
 
 function resetSrcForm() {
   Object.assign(srcForm, { id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false, secretFingerprint: undefined });
   Object.assign(ldap, { host: '', port: 0, tlsMode: 'ldaps', caCert: '', insecureSkipVerify: false, bindDn: '', baseDn: '', userFilter: '', usernameAttr: '' });
   Object.assign(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined });
+  Object.assign(admit, { admitPolicy: 'auto' });
+  admitDomains.value = [];
+  admitGroups.value = [];
   srcSecret.value = '';
 }
 
@@ -724,10 +792,54 @@ function openSrcEdit(r: AuthSourceRec) {
     const cfg = JSON.parse(r.config || '{}');
     if (r.kind === 'oidc') Object.assign(oidc, cfg);
     else Object.assign(ldap, cfg);
+    // 准入设置回填。★缺省 'auto' 而不是留空：存量配置没有这一项，
+    // 留空会让下拉显示为未选中，管理员随手一保存就把它写成空串——
+    // 后端归一回 auto 是对的，但页面上那一刻显示的是"没配"，与实际不符。
+    admit.admitPolicy = cfg.admitPolicy === 'approval' ? 'approval' : 'auto';
+    admitDomains.value = Array.isArray(cfg.allowedDomains) ? cfg.allowedDomains : [];
+    admitGroups.value = Array.isArray(cfg.allowedGroups) ? cfg.allowedGroups : [];
   } catch {
     Message.warning('该认证源的配置不是合法 JSON，已按空白载入——保存会覆盖原配置');
   }
   srcDrawer.value = true;
+}
+
+/* 待批外部身份准入。★空列表就整块不画——常态零噪声；
+   拿不到（旧后端 / 无权限）也是空，与"确实没有待批"同形，这里可接受：
+   两者对管理员的下一步动作相同（没有要批的东西）。 */
+const admissions = ref<ExtAdmission[]>([]);
+const admitBusy = ref('');
+
+async function loadAdmissions() {
+  try {
+    const r = await api<{ admissions: ExtAdmission[] }>('/authsrc/admissions');
+    admissions.value = r.admissions ?? [];
+  } catch {
+    admissions.value = [];
+  }
+}
+
+async function decideAdmission(a: ExtAdmission, decision: 'approved' | 'rejected') {
+  const zh = decision === 'approved' ? '批准' : '拒绝';
+  let reason = '';
+  if (decision === 'rejected') {
+    reason = window.prompt(`拒绝 ${a.username || a.subject} 的准入申请，理由（会记入审计并回给该用户）：`) ?? '';
+  }
+  admitBusy.value = a.approvalId;
+  try {
+    await api(`/authsrc/admissions/${encodeURIComponent(a.approvalId)}/decide`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ decision, reason })
+    });
+    Message.success(decision === 'approved'
+      ? `已批准；该身份下次登录时才会建号`
+      : `已拒绝 ${a.username || a.subject} 的准入`);
+    await loadAdmissions();
+  } catch (e) {
+    Message.error(`${zh}失败：${String((e as Error)?.message ?? e)}`);
+  } finally {
+    admitBusy.value = '';
+  }
 }
 
 async function loadSources() {
@@ -750,7 +862,15 @@ async function saveSource() {
   }
   srcSaving.value = true;
   try {
-    const config = srcForm.kind === 'oidc' ? { ...oidc } : { ...ldap };
+    // 准入设置并进 config：后端两类源共用同一组键（admitPolicy/allowedDomains/allowedGroups）。
+    const config = {
+      ...(srcForm.kind === 'oidc' ? { ...oidc } : { ...ldap }),
+      ...(srcForm.kind === 'local' ? {} : {
+        admitPolicy: admit.admitPolicy ?? 'auto',
+        allowedDomains: admitDomains.value,
+        allowedGroups: admitGroups.value
+      })
+    };
     const resp = await api<SaveSourceResp>('/authsrc/sources', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
@@ -771,6 +891,7 @@ async function saveSource() {
     else Message.success('认证源已保存');
     srcDrawer.value = false;
     await loadSources();
+    await loadAdmissions();
   } catch (e) {
     Message.error(`保存失败：${String((e as Error)?.message ?? e)}`);
   } finally {
@@ -1178,6 +1299,7 @@ onMounted(async () => {
   }
   await loadPolicies();
   await loadSources();
+  await loadAdmissions();
 });
 </script>
 
@@ -1381,4 +1503,15 @@ onMounted(async () => {
 .bd-rulerow__cfg { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; padding-left: 24px; margin-top: 4px; }
 .bd-form__hint { font-size: 11.5px; color: var(--bd-t3); line-height: 1.6; }
 .bd-form__hint.bad { color: var(--bd-warning); }
+
+/* 待批外部身份准入 */
+.bd-admit { margin-top: 18px; }
+.bd-admit__count { margin-left: 10px; font-size: 12px; font-weight: 400; color: var(--bd-t3); }
+.bd-admit__hint { font-size: 12.5px; color: var(--bd-t3); line-height: 1.6; margin: 6px 0 10px; }
+.bd-admit__row { display: flex; align-items: center; gap: 14px; padding: 12px 14px; margin-bottom: 8px; }
+.bd-admit__who { display: flex; align-items: center; gap: 8px; font-size: 13.5px; min-width: 260px; }
+.bd-admit__acct { color: var(--bd-t3); font-size: 12px; }
+.bd-admit__meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--bd-t3); flex: 1; }
+.bd-admit__sub { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-admit__act { display: flex; gap: 8px; flex: none; }
 </style>

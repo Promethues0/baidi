@@ -604,6 +604,25 @@ export interface OidcConfig {
   scopes?: string[];
 }
 
+/** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC 共用；wave8 行动 10）。
+ *  ★两项的判定时机不同：白名单**每次登录都判**（目录侧移出组后下次登录就该被拒），
+ *  审批**只判首次建号**（已批过的账号不必天天再批）。 */
+export interface AdmitConfig {
+  /** auto = 认证通过即建号（改造前的行为）；approval = 首登只登记待批单。 */
+  admitPolicy?: 'auto' | 'approval';
+  allowedDomains?: string[];
+  allowedGroups?: string[];
+}
+
+/** ExtAdmission 一条待批的外部身份准入登记。 */
+export interface ExtAdmission {
+  sourceId: string; sourceName: string; subject: string;
+  username: string; displayName: string; email: string; groups: string[];
+  status: 'pending' | 'approved' | 'rejected';
+  approvalId: string; createdAt: string;
+  decidedAt?: string; decidedBy?: string; reason?: string;
+}
+
 export interface ProbeResp { ok: boolean; detail: string; elapsedMs?: number }
 export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: string }
 

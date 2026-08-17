@@ -490,6 +490,16 @@ CREATE TABLE IF NOT EXISTS auth_source_secrets (
 -- 外部身份 → 本地用户绑定。主键是 (源, subject) 而**不是** username：
 -- 按用户名绑定的话，外部目录里新建一个与本地管理员同名的账号即可冒充，
 -- 而审计日志里看起来是一次完全正常的登录。
+-- 外部身份准入登记（wave8 行动 10）。与 approvals 的 kind=extuser 单子按 approval_id 关联。
+-- ★独立成表而不是往 approvals 里塞：那张表的列是设备形状的（usr/device/fingerprint），
+-- 把源名塞进 device、subject 塞进 fingerprint 会让列名说谎。
+CREATE TABLE IF NOT EXISTS ext_admissions (
+  source_id TEXT, source_name TEXT, subject TEXT, username TEXT, display_name TEXT, email TEXT,
+  groups_json TEXT, status TEXT, approval_id TEXT, created_at TEXT,
+  decided_at TEXT, decided_by TEXT, reason TEXT,
+  PRIMARY KEY(source_id, subject)
+);
+CREATE INDEX IF NOT EXISTS idx_extadmit_approval ON ext_admissions(approval_id);
 CREATE TABLE IF NOT EXISTS auth_source_bindings (
   source_id TEXT, subject TEXT, user_id TEXT, username TEXT, created_at TEXT,
   PRIMARY KEY(source_id, subject)
@@ -745,12 +755,20 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// 是本项目最怕的那种两边各说一套。tags 回填 '[]'。
 		{"trusted_devices", "asset_class", "TEXT"},
 		{"trusted_devices", "tags", "TEXT"},
+		// 审批单种类（wave8 行动 10）：device（设备绑定）| extuser（外部身份准入）。
+		// ★回填见 backfillApprovalKind：**必须**回填成 device，留 NULL 的话
+		// DecideApproval 那道 kind 闸会把既有设备审批单一律拒掉——升级那一刻
+		// 所有待批设备都批不了，而报错说的是「这不是设备审批单」。
+		{"approvals", "kind", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
 		}
 	}
 	if err := s.backfillAppResourceID(); err != nil {
+		return err
+	}
+	if err := s.backfillApprovalKind(); err != nil {
 		return err
 	}
 	// ★两条回填并列挂在这里不是排版偏好：补列迁移只加列不填值，是本项目

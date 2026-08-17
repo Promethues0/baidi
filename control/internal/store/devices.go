@@ -256,6 +256,10 @@ var ErrApprovalNotFound = errors.New("审批单不存在")
 // 「这台终端当初怎么了」的唯一依据与设备的实际授信状态永久矛盾。
 var ErrApprovalDecided = errors.New("审批单已处置，不能重复处置")
 
+// ErrApprovalWrongKind 审批单种类与处置路径不符（如拿设备处置去批一条外部准入单）。
+// 由 handler 按 kind 路由到正确的处置实现；能走到这个错误说明路由漏了一种。
+var ErrApprovalWrongKind = errors.New("审批单种类与处置方式不符")
+
 // DeviceNameMaxRunes 设备名长度上界（字符）。
 //
 // ★同一列的写入口径只能有一份：RenameDevice（管理员改名）与 EnrollDevice

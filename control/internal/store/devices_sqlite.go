@@ -490,6 +490,21 @@ func (s *SQLiteStore) DecideApproval(ctx context.Context, id, decision, reason, 
 		return Device{}, false, err
 	}
 	defer tx.Rollback() //nolint:errcheck
+	// ★种类闸（wave8 行动 10）：approvals 表现在同时装设备绑定单与外部身份准入单。
+	// 不判 kind 的话，管理员在同一个审批页点「批准」一条**外部准入单**时会走到这里，
+	// 下面那句按 approval_id 查设备的 SELECT 查不到行 → 按「auto 绑定或迁移前遗留」
+	// 返回 found=false → handler 照常回 200 并落一条「审批通过」的审计，
+	// 而那个人**仍然进不来**（准入登记还是 pending）。两侧都不报错。
+	var kind string
+	if err := tx.QueryRowContext(ctx, `SELECT COALESCE(kind,?) FROM approvals WHERE id=?`,
+		ApprovalKindDevice, id).Scan(&kind); errors.Is(err, sql.ErrNoRows) {
+		return Device{}, false, ErrApprovalNotFound
+	} else if err != nil {
+		return Device{}, false, err
+	}
+	if kind != ApprovalKindDevice {
+		return Device{}, false, ErrApprovalWrongKind
+	}
 	if err := appendApprovalDecisionTx(ctx, tx, id, decision, reason); err != nil {
 		return Device{}, false, err
 	}

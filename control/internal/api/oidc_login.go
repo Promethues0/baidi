@@ -268,6 +268,22 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		s.oidcFail(w, r, rec.Name, "当前部署不支持外部认证源")
 		return
 	}
+	// ★准入闸（wave8 行动 10）：与口令登录**同一个判定函数**，同样在 BindExternalUser
+	// 之前。OIDC 这一侧尤其要紧——一个允许任意公有云账号完成授权码流的 IdP 配置，
+	// 没有域/组白名单就等于对全互联网开放自动建号。
+	_, bound, berr := as.UserBySubject(r.Context(), rec.ID, ident.Subject)
+	if berr != nil {
+		slog.Error("OIDC 绑定查询失败", "源", rec.Name, "err", berr.Error())
+		s.oidcFail(w, r, rec.Name, "账号绑定失败，请联系管理员")
+		return
+	}
+	if v := s.admitExternal(r.Context(), rec, ident, bound); !v.Allowed {
+		if !v.Pending || v.NewTicket {
+			s.auditAdmitDenied(r, rec, ident, v)
+		}
+		s.oidcFail(w, r, rec.Name, v.Reason)
+		return
+	}
 	cred, err := as.BindExternalUser(r.Context(), rec.ID, store.ExternalIdentity{
 		Subject: ident.Subject, Username: ident.Username,
 		DisplayName: ident.DisplayName, Email: ident.Email, Groups: ident.Groups,
@@ -276,6 +292,9 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 		slog.Error("OIDC 外部身份绑定失败", "源", rec.Name, "subject", ident.Subject, "err", err.Error())
 		s.oidcFail(w, r, rec.Name, "账号绑定失败，请联系管理员")
 		return
+	}
+	if !bound {
+		s.auditExtUserCreated(r, rec, ident, cred.Account)
 	}
 	if accountBlocked(cred.Status) {
 		s.auditAs(r, cred.Account, "auth", "OIDC 登录被拒（账号已"+statusZh[cred.Status]+"，源 "+rec.Name+"）", "deny")
@@ -363,4 +382,3 @@ func (s *Server) oidcFail(w http.ResponseWriter, r *http.Request, srcName, msg s
 func (s *Server) oidcRedirect(w http.ResponseWriter, r *http.Request, q url.Values) {
 	http.Redirect(w, r, portalLoginPath+"?"+q.Encode(), http.StatusFound)
 }
-

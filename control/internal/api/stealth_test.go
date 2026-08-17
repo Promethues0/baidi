@@ -161,7 +161,9 @@ func TestStealthWarningsCoverEveryNonArmedState(t *testing.T) {
 		StealthUnknown:       "不可判定",
 	}
 	for st, anchor := range all {
-		w := stealthWarnings([]StealthReceipt{{GatewayID: "gw-1", Status: st, ProxyAddr: "10.0.0.5:18443"}})
+		// 带上 Summary：unknown 那条的告警直接引用它（两处各写一份结论必有一处说错）。
+		w := stealthWarnings([]StealthReceipt{{GatewayID: "gw-1", Status: st,
+			ProxyAddr: "10.0.0.5:18443", Summary: "（摘要）不可判定"}})
 		if len(w) != 1 {
 			t.Errorf("形态 %q 应产生 1 条告警，得到 %d 条", st, len(w))
 			continue
@@ -379,5 +381,37 @@ func TestDiagStealthUndecidedIsNotCalledOff(t *testing.T) {
 	}
 	if m := spa["metric"].(string); !strings.Contains(m, "不可判定 1") {
 		t.Fatalf("指标应单列不可判定台数，得到 %q", m)
+	}
+}
+
+// TestStealthWarningAgreesWithSummary 告警与摘要**不得自相矛盾**。
+//
+// ★这条是部署到演示站实测时抓到的：unknown 那条告警原本写死「开启了 -pf」，
+// 而复核后 unknown 同时覆盖 wanted 的两种取值，于是同一张卡片上
+// summary 说「未开启 -pf」、告警说「开启了 -pf」。两处各写一份结论，
+// 迟早有一处说错——现在告警直接引用 Summary。
+func TestStealthWarningAgreesWithSummary(t *testing.T) {
+	for _, wanted := range []bool{true, false} {
+		r := stealthReceiptOf("gw-1", "10.0.0.5:18443", gwStealthInfo{State: gwStealthState{
+			Wanted: wanted, Backend: "nftables(Linux)", Root: false, Ruleset: nil,
+			Detail: "非 root 运行，读不到内核规则集",
+		}}, true)
+		if r.Status != StealthUnknown {
+			t.Fatalf("探不到规则集应为 unknown，得到 %q", r.Status)
+		}
+		w := stealthWarnings([]StealthReceipt{r})
+		if len(w) != 1 {
+			t.Fatalf("应产生 1 条告警，得到 %d", len(w))
+		}
+		// 告警里出现的「开没开 -pf」必须与摘要一致。
+		wantOn := strings.Contains(r.Summary, "已开启 -pf")
+		gotOn := strings.Contains(w[0], "已开启 -pf")
+		if wantOn != gotOn {
+			t.Fatalf("wanted=%v 时告警与摘要对「开没开 -pf」说法不一致\n  摘要：%s\n  告警：%s",
+				wanted, r.Summary, w[0])
+		}
+		if strings.Contains(w[0], "开启了 -pf") && !wanted {
+			t.Fatalf("wanted=false 却在告警里说「开启了 -pf」：%s", w[0])
+		}
 	}
 }

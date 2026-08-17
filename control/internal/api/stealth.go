@@ -283,9 +283,13 @@ func stealthWarnings(rs []StealthReceipt) []string {
 				"网关「%s」未启用内核态隐身：未敲门的 TCP 连接会先完成三次握手再被断开，"+
 					"端口对扫描器表现为 open 而非 filtered。", r.GatewayID))
 		case StealthUnknown:
-			out = append(out, fmt.Sprintf(
-				"网关「%s」开启了 -pf，但探不到内核规则集，隐身是否生效不可判定：%s",
-				r.GatewayID, orElse(r.Detail, "网关未说明原因")))
+			// ★措辞直接引用回执自己的 Summary，不在这里重写一遍「开没开 -pf」。
+			// 这条原本写死「开启了 -pf」，而复核后 unknown 同时覆盖 wanted 的两种取值——
+			// 于是同一张卡片上 summary 说「未开启 -pf」、告警说「开启了 -pf」，
+			// 自相矛盾。两处各写一份结论，迟早有一处说错（这一处就是部署到演示站
+			// 实测时抓到的）。
+			out = append(out, fmt.Sprintf("网关「%s」：%s。%s",
+				r.GatewayID, r.Summary, orElse(r.Detail, "网关未说明原因")))
 		case StealthUnreported:
 			out = append(out, fmt.Sprintf(
 				"网关「%s」版本较旧，不上报隐身实测状态：控制面无从判断它是否真的隐身。", r.GatewayID))

@@ -136,7 +136,11 @@
 - 为什么值得：外部账号落进「外部目录」单元，其父是**第一个顶层组织**（种子里就是根 `root`），而 `OrgAccounts` 是含全部后代的展平——于是把任一资源授权给根组织，即刻覆盖全部自动建号的外部账号。失败场景：接入公司 AD 或 IdP 后，管理员把 OA 授权给根组织「全员可访问」，此后 AD 森林里任意能过 `userFilter` 的条目（服务账号、承包商、刚被 HR 建的号）或 IdP 里任意能完成一次授权码流的账号，首登即自动获得白帝账号 + 门户会话 + OA 访问权，全程无审批、无告警。
 - 注意：这与「目录全量同步」（wave7 D 组第二步，L 级延后）**不是一回事**——准入闸不依赖同步。建号本身现在也不单独落审计，一并补上。
 
-**11. 状态回验补全：LDAP 状态属性映射 + OIDC 回验通道（FR-USER-10、FR-AUTH-04/08）— M**
+**11. 状态回验补全：LDAP 状态属性映射 + 覆盖面校准（FR-USER-10、FR-AUTH-04/08）— M ✅ 已落地（OIDC 那半刻意不做，理由见下）**
+- 落地记（2026-08-17）：①可配 `statusAttr` + `statusDisabledValues`（大小写不敏感），控制台给三个预设并写明各自语义——IDTrust `accountEnable=FALSE`、389DS `nsAccountLock=true`、OpenLDAP `pwdAccountLockedTime` **存在即锁**（只填属性名不填值 = 属性存在即禁用）。**属性不存在判「未决」而不是 active**：可能只是属性名配错了，据此判 active 与判 disabled 都是在替目录说话，交回给 AD 内置位/存在性接手。未配时页面当面告警说清「此时只能识别删除」。
+- ②顺带修了一条**charter 没提、读代码时发现**的：回验只按 DN base-scope 直查，条目被**挪出 BaseDN** 时照样查得到 → 永远 active。而 AD 上把离职员工移进独立 Disabled OU、甚至移出本域，是比设置 UAC 禁用位**更常见**的做法。加了纯字符串的范围判定（不多一次查询），且判不准时倾向「还在范围内」——绝不因一次 DN 格式差异把人判成 Gone。
+- ③**OIDC 回验通道刻意不做**，并把对外口径按目录类型改成三档（此前 SCOPE 笼统写「LDAP/AD 禁用/过期/删除」，而通用 LDAP 只有删除）。不做的理由不是工作量：唯一可行的 refresh_token 轮询要求把一把「能持续替用户向 IdP 换令牌」的长效凭据落到本地库，库一旦泄露，攻击者拿到的是每个 OIDC 用户在 IdP 侧的持续访问能力——**攻击面比它要解决的问题大得多**，换来的还只是个间接信号。而实际暴露窗口比听起来小：OIDC 账号每次登录都由 IdP 天然重校验（被停用的人完不成授权码流），缺的只是**会话中途**吊销，上界 = 会话有效期；要覆盖它，标准做法是缩短会话有效期或给同一目录再配一条 LDAP 源专做回验。
+- 变异验证五条全红：属性缺席判成 active / 只填属性名时"存在即锁"失效 / 范围判定漏掉分隔逗号 / BaseDN 为空判成出范围 / 值比对区分大小写。**第三条第一次是逃逸的**：我原本的「NotPeople」用例根本区分不了带不带逗号，得构造一条 RDN 属性名尾巴恰好与 BaseDN 首段拼上的 DN（`CN=li,OUdc=corp,DC=example`）才验得到。
 - 做什么：①认证源配置补两个字段（账号状态属性 + 表示停用的值，按服务器类型预填：AD `userAccountControl`、IDTrust `accountEnable`），沿用既有 `usernameAttr/groupAttr` 的模式；②OIDC 侧补回验通道（登录时留存 refresh_token → 周期做一次 refresh grant 或 UserInfo 探活）。
 - 改哪里：`control/internal/authsrc/ldapsrc/recheck.go:42-46`（只请求 AD 那两个属性、filter 写死 `(objectClass=*)`，**连配置里的 userFilter 都不用**）、`:72-87`（uac 为空即返回 `StateActive`）；`control/internal/api/login_authsrc.go:50-63` `ldapConfigDTO`；`authsrc.StatusChecker` 的注释即写死「LDAP/AD：subject = entryDN」，`oidcsrc` 无对应实现。
 - 为什么值得：这条链路的存在意义就是把「目录侧禁号」传导成「白帝断连」，而它现在**只覆盖了一半的一半**：OpenLDAP/IDTrust 部署下只剩「条目被删除」一种触发条件，OIDC 部署下一种都没有。HR 在目录里停用离职员工后，该账号的会话、敲门令牌、隧道继续有效到自然过期，回验循环每轮都判 active、不留任何痕迹（fail-open 方向的静默失效）。

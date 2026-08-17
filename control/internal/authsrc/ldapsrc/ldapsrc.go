@@ -128,6 +128,23 @@ type Config struct {
 	EmailAttr       string // 邮箱，默认 mail
 	GroupAttr       string // 组成员，默认 memberOf
 
+	// ── 账号状态回验（wave8 行动 11）──
+	//
+	// ★为什么需要它：AD 的禁用是 userAccountControl 的一个**位**，代码内置了；
+	// 而通用 LDAP **协议里根本没有"禁用"这个语义**，各家用各家的属性
+	// （IDTrust `accountEnable=FALSE`、389DS `nsAccountLock=true`、
+	// OpenLDAP 常用 `pwdAccountLockedTime` 存在即锁）。不给这两个字段的话，
+	// 非 AD 部署下回验**只剩「条目被删除」一种触发条件**——HR 在目录里停用离职员工后，
+	// 该账号的会话、敲门令牌、隧道继续有效到自然过期，回验循环每轮都判 active、
+	// 不留任何痕迹（fail-open 方向的静默失效）。
+	//
+	// StatusAttr 账号状态属性名（留空 = 不按属性判，回退到 AD 内置位 + 存在性）。
+	StatusAttr string
+	// StatusDisabledValues 该属性取这些值之一即视为**已禁用**（大小写不敏感）。
+	// 与 StatusAttr 成对使用；只填属性名不填值 = 只要该属性**存在**即视为禁用
+	// （覆盖 pwdAccountLockedTime 这种"有这个属性就是被锁了"的用法）。
+	StatusDisabledValues []string
+
 	// ── 超时 ──
 	ConnectTimeout time.Duration // 默认 5s
 	RequestTimeout time.Duration // 默认 10s

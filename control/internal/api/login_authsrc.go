@@ -79,6 +79,11 @@ type ldapConfigDTO struct {
 	DisplayNameAttr    string `json:"displayNameAttr"`
 	EmailAttr          string `json:"emailAttr"`
 	GroupAttr          string `json:"groupAttr"`
+	// StatusAttr / StatusDisabledValues 账号状态回验的属性映射（wave8 行动 11）。
+	// AD 的禁用是 userAccountControl 的位（内置）；通用 LDAP 协议里没有"禁用"语义，
+	// 各家用各家的属性——不给这两项的话，非 AD 部署下回验只剩「条目被删除」一种触发条件。
+	StatusAttr           string   `json:"statusAttr"`
+	StatusDisabledValues []string `json:"statusDisabledValues"`
 	admitConfigDTO
 }
 
@@ -140,6 +145,7 @@ func (s *Server) buildProvider(ctx context.Context, rec store.AuthSourceRec) (an
 			BaseDN: c.BaseDN, UserFilter: c.UserFilter,
 			UsernameAttr: c.UsernameAttr, DisplayNameAttr: c.DisplayNameAttr,
 			EmailAttr: c.EmailAttr, GroupAttr: c.GroupAttr,
+			StatusAttr: c.StatusAttr, StatusDisabledValues: c.StatusDisabledValues,
 		})
 	case authsrc.KindOIDC:
 		var c oidcConfigDTO

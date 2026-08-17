@@ -99,3 +99,80 @@ func TestCheckAccountAgainstRealServer(t *testing.T) {
 		t.Fatalf("源不可用必须报错且可识别，实得 %s / %v", st, err)
 	}
 }
+
+// ── wave8 行动 11：可配状态属性 + 搜索范围判定 ──
+//
+// 被修的坏形态：回验只认 AD 的 userAccountControl 位。通用 LDAP **协议里根本没有
+// "禁用"这个语义**，各家用各家的属性——于是 OpenLDAP/IDTrust 部署下回验只剩
+// 「条目被删除」一种触发条件。HR 在目录里停用离职员工后，该账号的会话、敲门令牌、
+// 隧道继续有效到自然过期，回验循环每轮都判 active、不留任何痕迹。
+
+func TestClassifyStatusAttr(t *testing.T) {
+	cases := []struct {
+		name     string
+		values   []string
+		disabled []string
+		want     authsrc.AccountState
+		decided  bool
+	}{
+		// 属性不存在 → 未决。★不是 active：可能只是属性名配错了，
+		// 据此判 active 与判 disabled 都是在替目录说话。
+		{"属性不存在", nil, []string{"FALSE"}, "", false},
+		{"IDTrust accountEnable=FALSE", []string{"FALSE"}, []string{"FALSE"}, authsrc.StateDisabled, true},
+		{"IDTrust accountEnable=TRUE", []string{"TRUE"}, []string{"FALSE"}, authsrc.StateActive, true},
+		{"大小写不敏感", []string{"false"}, []string{"FALSE"}, authsrc.StateDisabled, true},
+		{"389DS nsAccountLock=true", []string{"true"}, []string{"true"}, authsrc.StateDisabled, true},
+		{"多值命中其一", []string{"ok", "LOCKED"}, []string{"locked"}, authsrc.StateDisabled, true},
+		// 只配属性名不配值：属性存在即禁用（pwdAccountLockedTime 那种用法）。
+		{"存在即锁", []string{"20260101000000Z"}, nil, authsrc.StateDisabled, true},
+		{"存在即锁-属性缺席", nil, nil, "", false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got, decided := classifyStatusAttr(c.values, c.disabled)
+			if decided != c.decided || got != c.want {
+				t.Fatalf("得到 (%q,%v)，期望 (%q,%v)", got, decided, c.want, c.decided)
+			}
+		})
+	}
+}
+
+// TestDNWithinBase 条目被挪出 BaseDN = 判 Gone。
+//
+// ★AD 上把离职员工移进独立的 Disabled OU、甚至移出本域，是比设置 UAC 禁用位
+// **更常见**的做法。只按 DN base-scope 直查是查得到的——那个人在白帝这边
+// 永远是 active，而目录管理员认为自己已经把他停掉了。
+func TestDNWithinBase(t *testing.T) {
+	base := "OU=People,DC=corp,DC=example"
+	cases := []struct {
+		dn   string
+		want bool
+	}{
+		{"CN=li,OU=People,DC=corp,DC=example", true},
+		{"CN=li,OU=Dev,OU=People,DC=corp,DC=example", true},
+		{"ou=people,dc=corp,dc=example", true},           // 大小写不敏感 + 等于自身
+		{"CN=li,OU=Disabled,DC=corp,DC=example", false},  // 移出 People
+		{"CN=li,OU=People,DC=other,DC=example", false},   // 移出本域
+		{"CN=li,OU=NotPeople,DC=corp,DC=example", false}, // 前缀相似但不是子树
+		{" CN=li,OU=People,DC=corp,DC=example ", true},   // 两侧空白
+	}
+	for _, c := range cases {
+		if got := dnWithinBase(c.dn, base); got != c.want {
+			t.Errorf("dnWithinBase(%q) = %v，期望 %v", c.dn, got, c.want)
+		}
+	}
+
+	// ★分隔逗号不能省。少了它就成了裸后缀比对：某个 RDN 的**属性名**尾巴恰好
+	// 与 BaseDN 首段拼上时会被误判成子树。下面这条 DN 的组件是
+	// CN=li / OUdc=corp / DC=example，父链是 DC=example，**不在**
+	// DC=corp,DC=example 之下；而不带逗号的 HasSuffix 会判成 true——
+	// 一个本该判 Gone 的账号就此永远 active。
+	if dnWithinBase("CN=li,OUdc=corp,DC=example", "DC=corp,DC=example") {
+		t.Error("裸后缀比对把非子树判成了子树：分隔逗号被省了")
+	}
+	// ★BaseDN 为空 = 不限。判不准时倾向「还在范围内」，绝不因一次字符串差异
+	// 就把人判成 Gone——方向与整个回验一致：只在目录明确说了的时候才动手。
+	if !dnWithinBase("CN=x,DC=anything", "") {
+		t.Error("BaseDN 为空时不该判出范围")
+	}
+}

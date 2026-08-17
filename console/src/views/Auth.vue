@@ -596,6 +596,36 @@
           </div>
         </template>
 
+        <!-- ── 账号状态回验（wave8 行动 11）── -->
+        <template v-if="srcForm.kind === 'ldap' || srcForm.kind === 'ad'">
+          <div class="bd-srcform__sec">账号状态回验</div>
+          <div class="bd-srcform__row"><label>状态属性</label>
+            <a-input v-model="ldap.statusAttr" allow-clear
+              :placeholder="srcForm.kind === 'ad' ? '留空即可（AD 用内置的 userAccountControl 位）' : 'accountEnable / nsAccountLock / pwdAccountLockedTime'" />
+          </div>
+          <div class="bd-srcform__row"><label>表示停用的值</label>
+            <a-input-tag v-model="statusDisabledValues" allow-clear
+              placeholder="FALSE（回车添加；留空 = 该属性存在即视为停用）" />
+          </div>
+          <div class="bd-srcform__row"><label>常见预设</label>
+            <a-space wrap>
+              <a-button size="mini" @click="applyStatusPreset('idtrust')">IDTrust accountEnable=FALSE</a-button>
+              <a-button size="mini" @click="applyStatusPreset('389ds')">389DS nsAccountLock=true</a-button>
+              <a-button size="mini" @click="applyStatusPreset('ppolicy')">OpenLDAP pwdAccountLockedTime 存在即锁</a-button>
+              <a-button size="mini" @click="applyStatusPreset('clear')">清空</a-button>
+            </a-space>
+          </div>
+          <div v-if="srcForm.kind !== 'ad' && !ldap.statusAttr" class="bd-srcform__warn">
+            未配置状态属性：通用 LDAP 协议里**没有**"禁用"这个语义，回验此时只能识别
+            「条目被删除或移出 BaseDN」。目录侧把人停用（而不是删除）时，白帝这边不会禁号——
+            他的会话与隧道会一直有效到自然过期。
+          </div>
+          <div class="bd-srcform__hint">
+            回验按 entryDN 周期直查；条目被挪出 BaseDN 也判为已失效。
+            源不可用（网络/绑定失败）绝不动手——那是运维故障，不是账号的问题。
+          </div>
+        </template>
+
         <!-- ── 外部身份准入（wave8 行动 10）──
              ★这一段是真判定，不是提示：改造前认证通过即自动建号，
              而自动建号的账号落进「外部目录」单元，其父是根组织——
@@ -765,6 +795,23 @@ const ldap = reactive<LdapConfig>({ host: '', port: 0, tlsMode: 'ldaps', baseDn:
 const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '' });
 /* 准入设置（两类源共用）。默认 auto = 与改造前行为一致，升级不把人挡在门外。 */
 const admit = reactive<AdmitConfig>({ admitPolicy: 'auto' });
+const statusDisabledValues = ref<string[]>([]);
+
+/* 常见目录的状态属性预设。★这不是"帮你填个默认值"，是把各家的方言写在界面上——
+   通用 LDAP 没有统一的禁用属性，管理员不查文档根本不知道该填什么，
+   而填错的后果是静默的（回验永远判 active）。 */
+function applyStatusPreset(kind: 'idtrust' | '389ds' | 'ppolicy' | 'clear') {
+  const presets: Record<string, [string, string[]]> = {
+    idtrust: ['accountEnable', ['FALSE']],
+    '389ds': ['nsAccountLock', ['true']],
+    ppolicy: ['pwdAccountLockedTime', []],
+    clear: ['', []]
+  };
+  const [attr, vals] = presets[kind];
+  ldap.statusAttr = attr;
+  statusDisabledValues.value = vals;
+}
+
 const admitDomains = ref<string[]>([]);
 const admitGroups = ref<string[]>([]);
 
@@ -773,6 +820,7 @@ function resetSrcForm() {
   Object.assign(ldap, { host: '', port: 0, tlsMode: 'ldaps', caCert: '', insecureSkipVerify: false, bindDn: '', baseDn: '', userFilter: '', usernameAttr: '' });
   Object.assign(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined });
   Object.assign(admit, { admitPolicy: 'auto' });
+  statusDisabledValues.value = [];
   admitDomains.value = [];
   admitGroups.value = [];
   srcSecret.value = '';
@@ -796,6 +844,7 @@ function openSrcEdit(r: AuthSourceRec) {
     // 留空会让下拉显示为未选中，管理员随手一保存就把它写成空串——
     // 后端归一回 auto 是对的，但页面上那一刻显示的是"没配"，与实际不符。
     admit.admitPolicy = cfg.admitPolicy === 'approval' ? 'approval' : 'auto';
+    statusDisabledValues.value = Array.isArray(cfg.statusDisabledValues) ? cfg.statusDisabledValues : [];
     admitDomains.value = Array.isArray(cfg.allowedDomains) ? cfg.allowedDomains : [];
     admitGroups.value = Array.isArray(cfg.allowedGroups) ? cfg.allowedGroups : [];
   } catch {
@@ -864,7 +913,7 @@ async function saveSource() {
   try {
     // 准入设置并进 config：后端两类源共用同一组键（admitPolicy/allowedDomains/allowedGroups）。
     const config = {
-      ...(srcForm.kind === 'oidc' ? { ...oidc } : { ...ldap }),
+      ...(srcForm.kind === 'oidc' ? { ...oidc } : { ...ldap, statusDisabledValues: statusDisabledValues.value }),
       ...(srcForm.kind === 'local' ? {} : {
         admitPolicy: admit.admitPolicy ?? 'auto',
         allowedDomains: admitDomains.value,

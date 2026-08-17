@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"encoding/json"
+	"strings"
 
 	"github.com/google/uuid"
 )
@@ -82,4 +83,58 @@ func (s *SQLiteStore) Security(ctx context.Context) (SecurityBundle, error) {
 		return SecurityBundle{}, err
 	}
 	return SecurityBundle{Baselines: bls}, nil
+}
+
+// clientVersionLabelMarker 一次性回填标记（wave8 行动 2）。
+const clientVersionLabelMarker = "baseline.clientversion.label.v1"
+
+// backfillClientVersionCheckLabel 把既有库里 client_version 检测项的 label/expect 改准。
+//
+// ★为什么必须有这道回填：改 seedApps/Memory 里的种子**只影响全新库**。既有部署
+// （含在线演示站）那一行是首启时落库的，此后没有任何 UPDATE——于是行为改成了
+// 「控制面按灰度稳定版判」，而页面上那一格仍写着「客户端为最新版本 / ≥ v0.1.0」。
+// 后者现在是错的：判据既不是「最新」，也不是 v0.1.0。这正是 CLAUDE.md 记的
+// 「补列迁移必须配回填」同一条坑，只是这次踩在种子行的**语义**上而不是新列上。
+//
+// 只改这一个 key 的 label/expect，其余检测项与管理员改过的东西一律不碰；
+// 一次性标记保证管理员之后自己改的文案不会被下次启动覆盖回去。
+func (s *SQLiteStore) backfillClientVersionCheckLabel() error {
+	ctx := context.Background()
+	if _, done, err := s.Setting(ctx, clientVersionLabelMarker); err != nil {
+		return err
+	} else if done {
+		return nil
+	}
+	spec, ok := CheckSpecOf(CheckKeyClientVersion)
+	if !ok {
+		return nil // 目录里没有这一项就没什么可回填的
+	}
+	bls, err := s.Baselines(ctx)
+	if err != nil {
+		return err
+	}
+	for _, b := range bls {
+		changed := false
+		for i := range b.Checks {
+			c := &b.Checks[i]
+			if c.Key != CheckKeyClientVersion {
+				continue
+			}
+			// 只改**旧种子那两个字面值**。管理员若已自行改过文案，保持原样——
+			// 回填是修历史遗留，不是把所有人的配置拉回出厂设置。
+			if c.Label == "客户端为最新版本" {
+				c.Label, changed = spec.Label, true
+			}
+			if strings.HasPrefix(c.Expect, "≥ v") {
+				c.Expect, changed = spec.Expect, true
+			}
+		}
+		if !changed {
+			continue
+		}
+		if _, err := s.SaveBaseline(ctx, b); err != nil {
+			return err
+		}
+	}
+	return s.SetSetting(ctx, clientVersionLabelMarker, "1")
 }

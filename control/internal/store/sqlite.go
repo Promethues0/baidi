@@ -787,6 +787,11 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 	if err := s.backfillDeviceAsset(); err != nil {
 		return err
 	}
+	// 一次性把 client_version 检测项的 label/expect 改准（wave8 行动 2）。
+	// 改种子只影响全新库；既有部署那一行是首启落的，不回填就永远写着「客户端为最新版本 / ≥ v0.1.0」。
+	if err := s.backfillClientVersionCheckLabel(); err != nil {
+		return err
+	}
 	if err := s.ensureAccountUnique(); err != nil {
 		return err
 	}

@@ -10,9 +10,9 @@ import "context"
 
 // TotpRecord 一条 TOTP 注册（密文行原样，解密在 api 层）。
 type TotpRecord struct {
-	Account   string
-	Nonce     []byte
-	Cipher    []byte
+	Account string
+	Nonce   []byte
+	Cipher  []byte
 	// Confirmed 用户是否已用一个正确验证码完成确认。未确认的行不参与登录判定：
 	// 「点了注册但没扫码」不该把人锁在门外。
 	Confirmed   bool

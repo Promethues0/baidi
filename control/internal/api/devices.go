@@ -600,3 +600,46 @@ func actorOf(r *http.Request) string {
 	}
 	return "system"
 }
+
+// ── 敲门令牌签发留痕（wave8 行动 8，FR-AUDIT-01/02/05 + FR-MON-04）──
+
+// knockIssuedInterval 同一 (账号,指纹) 两条「已签发敲门令牌」审计的最小间隔。
+//
+// ★必须节流，理由与 deviceObserveInterval 逐字相同：敲门令牌是保活热路径
+// （baidi-tun 每 15s 一次 reknock），不节流的话一个终端一天产出约 5700 条
+// 内容相同的审计，真正的处置事件会被冲刷掉。5 分钟足以让「这个人正在接入」
+// 这件事在时间线上连续可见。
+const knockIssuedInterval = 5 * time.Minute
+
+// auditKnockIssued 为一次**成功签发**的敲门令牌落 access 审计（按 (账号,指纹) 节流）。
+//
+// 措辞只陈述已发生的事实：签了令牌、给谁、哪台设备。不写"已接入""已建立隧道"——
+// 拿到令牌只是拿到敲门的资格，敲不敲得开、隧道建不建得起来是数据面那边的事，
+// 由网关的 tunnel-allow 回执另记一条。
+func (s *Server) auditKnockIssued(r *http.Request, account, fingerprint string) {
+	key := normUser(account) + "|" + fingerprint
+	now := time.Now().Unix()
+	s.mu.Lock()
+	// 水位表的键含**客户端自报**的指纹，攻击者可控（同 auditDeviceObserved）：
+	// 持一个合法会话每次换随机指纹敲门就能让表无界增长。超上界整张清空——
+	// 最坏结果只是接下来多记几条放行审计，而那本来就是该被看见的。
+	if len(s.knockIssued) > deviceObserveMaxKeys {
+		s.knockIssued = map[string]int64{}
+	}
+	last, seen := s.knockIssued[key]
+	due := !seen || now-last >= int64(knockIssuedInterval.Seconds())
+	if due {
+		s.knockIssued[key] = now
+	}
+	s.mu.Unlock()
+	if !due {
+		return
+	}
+	fp := "（未上报指纹）"
+	if fingerprint != "" {
+		fp = "指纹 " + shortFP(fingerprint)
+	}
+	s.auditAs(r, account, "access", "已签发敲门令牌："+account+"（"+fp+"，有效期 "+
+		strconv.Itoa(int(knockTTL.Seconds()))+"s、一次性）。"+
+		"后续「经哪台网关访问了哪个资源」由网关的放行回执另记", "allow")
+}

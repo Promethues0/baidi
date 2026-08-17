@@ -11,6 +11,7 @@ import (
 type rec struct {
 	cat, src, detail string
 	count            int
+	allow            bool
 }
 
 type sinkRec struct {
@@ -18,10 +19,10 @@ type sinkRec struct {
 	recs []rec
 }
 
-func (s *sinkRec) fn(cat, src, detail string, count int) {
+func (s *sinkRec) fn(cat, src, detail string, count int, allow bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.recs = append(s.recs, rec{cat, src, detail, count})
+	s.recs = append(s.recs, rec{cat, src, detail, count, allow})
 }
 
 func (s *sinkRec) list() []rec {
@@ -124,4 +125,96 @@ func TestNilSinkNoop(t *testing.T) {
 	var rp *Reporter
 	rp.Report("a", "b", "c") // nil Reporter 也安全（调用方无需判空）
 	rp.Flush()
+}
+
+// ── wave8 行动 8：放行留痕 ──
+
+// TestReportAllowMarksAllow 放行事件必须带 allow 标记：控制面据此落 verdict=allow
+// 且**不**计入攻击源统计。丢了这个标记，一次正常访问会被数进「攻击源 TOP」。
+func TestReportAllowMarksAllow(t *testing.T) {
+	r, sk, _ := newTestReporter()
+	r.ReportAllow("tunnel-allow", "10.0.0.9", "zhang|res-1", "隧道放行：账号 zhang 访问 res-1")
+	r.Report("proxy-unauth", "10.0.0.9", "未敲门直连")
+	got := sk.list()
+	if len(got) != 2 {
+		t.Fatalf("应上报 2 条，得到 %d", len(got))
+	}
+	if !got[0].allow {
+		t.Error("放行事件的 allow 标记丢了——控制面会把它当拒绝，计进攻击源 TOP")
+	}
+	if got[1].allow {
+		t.Error("拒绝事件不该带 allow 标记")
+	}
+}
+
+// TestAllowThrottledByAccountAndResource 放行按 (账号,资源) 节流，**不是**按源 IP。
+//
+// ★同一个人从同一个 IP 访问三个资源是三件事。按源 IP 折叠会把其中两件抹掉，
+// 而那正是 FR-AUDIT-05 要查的维度（「某账号访问了哪个资源」）。
+func TestAllowThrottledByAccountAndResource(t *testing.T) {
+	r, sk, _ := newTestReporter()
+	for _, res := range []string{"res-1", "res-2", "res-3"} {
+		r.ReportAllow("tunnel-allow", "10.0.0.9", "zhang|"+res, "隧道放行：zhang → "+res)
+	}
+	// 同一 (账号,资源) 再来一次：这次要被节流。
+	r.ReportAllow("tunnel-allow", "10.0.0.9", "zhang|res-1", "隧道放行：zhang → res-1")
+
+	got := sk.list()
+	if len(got) != 3 {
+		t.Fatalf("三个资源应各上报一条、重复的那条被节流，得到 %d 条：%+v", len(got), got)
+	}
+	for i, want := range []string{"res-1", "res-2", "res-3"} {
+		if !strings.Contains(got[i].detail, want) {
+			t.Errorf("第 %d 条应是 %s，得到 %q", i, want, got[i].detail)
+		}
+	}
+}
+
+// TestAllowAndDenyThrottleIndependently 同一 (类别,键) 的放行与拒绝各自独立节流。
+//
+// ★共用一个键的话，一条放行会把紧随其后的拒绝压掉五分钟——而那正是最该
+// 立刻可见的一条（「这个人刚还能进，现在被拒了」）。
+func TestAllowAndDenyThrottleIndependently(t *testing.T) {
+	r, sk, _ := newTestReporter()
+	r.ReportAllow("x", "1.2.3.4", "1.2.3.4", "放行")
+	r.Report("x", "1.2.3.4", "拒绝")
+	got := sk.list()
+	if len(got) != 2 {
+		t.Fatalf("放行与拒绝应各上报一条，得到 %d 条：%+v", len(got), got)
+	}
+	if !got[0].allow || got[1].allow {
+		t.Fatalf("顺序或标记不对：%+v", got)
+	}
+}
+
+// TestAllowAggregateSuffixSaysAllow 聚合补报的措辞要分放行/拒绝。
+// 审计里写「拒绝被聚合」而实际是放行，比不写更坏。
+func TestAllowAggregateSuffixSaysAllow(t *testing.T) {
+	r, sk, now := newTestReporter()
+	r.ReportAllow("tunnel-allow", "10.0.0.9", "zhang|res-1", "放行 1")
+	for i := 0; i < 4; i++ {
+		r.ReportAllow("tunnel-allow", "10.0.0.9", "zhang|res-1", "放行 N")
+	}
+	*now = now.Add(Window + time.Second)
+	r.Flush()
+
+	got := sk.list()
+	if len(got) != 2 {
+		t.Fatalf("首条 + 补报共 2 条，得到 %d：%+v", len(got), got)
+	}
+	agg := got[1]
+	if !agg.allow {
+		t.Error("补报也必须带 allow 标记")
+	}
+	if !strings.Contains(agg.detail, "同类放行被聚合") {
+		t.Errorf("补报措辞应说「放行」，得到 %q", agg.detail)
+	}
+	if agg.count != 4 {
+		t.Errorf("聚合计数应为 4，得到 %d", agg.count)
+	}
+	// ★源必须是 IP，不是节流键里的账号。此前 Flush 从 key 反解 src，
+	// 而放行的键是 "+类别|账号|资源"，反解出来的"源"会是账号名。
+	if agg.src != "10.0.0.9" {
+		t.Errorf("补报的源应是 IP 而不是节流键的一段，得到 %q", agg.src)
+	}
 }

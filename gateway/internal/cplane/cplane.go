@@ -192,11 +192,18 @@ func (c *Client) QueueEvent(kind, detail string) {
 	c.events.push(Event{TS: time.Now().Unix(), Kind: kind, Detail: detail})
 }
 
-// QueueSecEvent 把一条**已节流**的安全事件（拒绝）入队。调用方是 internal/secevent
+// QueueSecEvent 把一条**已节流**的数据面访问事件（拒绝或放行）入队。调用方是 internal/secevent
 // 的上报器——绝不要绕过它直接调这里：SPA 收任意 UDP，不节流的洪泛会把 64 条
 // 队列冲成全噪声，挤掉真正该留痕的回执与第一现场。
-func (c *Client) QueueSecEvent(cat, src, detail string, count int) {
-	c.events.push(Event{TS: time.Now().Unix(), Kind: "sec-deny", Detail: detail, Src: src, Cat: cat, Count: count})
+// allow=true 时 Kind 是 sec-allow：控制面据此落 verdict=allow，且**不**计入攻击源统计
+// （把一次正常访问数进「攻击源 TOP」是最容易误导排障的一种错记）。
+// 旧控制面不认识 sec-allow → 落 verdict=ok、同样不计攻击源，向后兼容。
+func (c *Client) QueueSecEvent(cat, src, detail string, count int, allow bool) {
+	kind := "sec-deny"
+	if allow {
+		kind = "sec-allow"
+	}
+	c.events.push(Event{TS: time.Now().Unix(), Kind: kind, Detail: detail, Src: src, Cat: cat, Count: count})
 }
 
 // DroppedEvents 返回因队列溢出被丢弃的回执累计条数（观测/测试用）。

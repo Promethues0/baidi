@@ -258,6 +258,11 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   int(s.cfg.SessionTTL.Seconds()),
 	})
 	slog.Info("L7 会话已建立", "src", ip, "user", c.Name, "resource", c.Res, "ttl", s.cfg.SessionTTL.String())
+	// 放行留痕（wave8 行动 8）：与 L4 同一条纪律。落在**会话建立**而不是逐请求上——
+	// 逐请求是每个 HTTP 请求一次，节流窗内绝大多数会被折叠成一个计数，
+	// 而会话建立本就是「这个人开始访问这个应用」这件事的自然粒度。
+	s.cfg.SecEvents.ReportAllow("web-allow", ip, c.Name+"|"+c.Res,
+		"七层放行：账号 "+c.Name+" 建立 Web 会话访问资源 "+c.Res)
 	http.Redirect(w, r, prefix, http.StatusFound)
 }
 

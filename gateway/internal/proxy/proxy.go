@@ -187,6 +187,11 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 		}
 		backend = res.Backend
 		slog.Info("隧道路由命中", "src", ip, "user", user, "role", role, "resource", rid, "backend", backend)
+		// ★放行也要留痕（wave8 行动 8）。此前这一行只进本机 slog——网关一重启即灭失，
+		// 「某账号何时经哪台网关访问了哪个资源」在中心侧查不到，外送 SIEM 的证据链只有半边。
+		// 节流键是 (账号,资源) 而不是源 IP：同一个人访问三个资源是三件事。
+		rep.ReportAllow("tunnel-allow", ip, user+"|"+rid,
+			"隧道放行：账号 "+user+" 经隧道访问资源 "+rid+"（后端 "+backend+"）")
 	} else {
 		slog.Info("隧道无前导 · 回退默认后端", "src", ip, "user", user, "backend", backend)
 	}

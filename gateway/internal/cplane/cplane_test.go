@@ -162,7 +162,7 @@ func TestRegisterCarriesSecEventFields(t *testing.T) {
 		_ = json.NewDecoder(r.Body).Decode(&got)
 		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
 	})
-	c.QueueSecEvent("knock-replay", "203.0.113.9", "SPA 敲门拒绝（一次性令牌已用）", 37)
+	c.QueueSecEvent("knock-replay", "203.0.113.9", "SPA 敲门拒绝（一次性令牌已用）", 37, false)
 
 	if err := c.Register(0, 0, 1, nil); err != nil {
 		t.Fatalf("注册失败：%v", err)
@@ -237,5 +237,33 @@ func TestRegisterCarriesReach(t *testing.T) {
 	}
 	if _, present := got["reach"]; present {
 		t.Fatal("未装拨测源不应出现 reach 字段")
+	}
+}
+
+// TestQueueSecEventAllowKind 放行事件的 Kind 是 sec-allow（wave8 行动 8）。
+//
+// ★控制面按 Kind 分流：sec-deny 落 verdict=deny 并计入攻击源，sec-allow 落
+// verdict=allow 且**不**计攻击源。Kind 弄错的话，一次正常访问会被数进
+// 「攻击源 TOP」——最容易误导排障的一种错记，而两侧都不报错。
+func TestQueueSecEventAllowKind(t *testing.T) {
+	var got map[string]any
+	c := newTestClient(t, func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&got)
+		fmt.Fprint(w, `{"ok":true,"id":"gw-1"}`)
+	})
+	c.QueueSecEvent("tunnel-allow", "10.0.0.9", "隧道放行：账号 zhang 访问 res-git", 1, true)
+	if err := c.Register(0, 0, 1, nil); err != nil {
+		t.Fatalf("注册失败：%v", err)
+	}
+	evs, _ := got["events"].([]any)
+	if len(evs) != 1 {
+		t.Fatalf("events 长度 %d，期望 1", len(evs))
+	}
+	ev, _ := evs[0].(map[string]any)
+	if ev["kind"] != "sec-allow" {
+		t.Fatalf("放行事件的 kind 应为 sec-allow，得到 %v", ev["kind"])
+	}
+	if ev["src"] != "10.0.0.9" || ev["cat"] != "tunnel-allow" {
+		t.Fatalf("字段丢失：%v", ev)
 	}
 }

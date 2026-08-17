@@ -127,6 +127,9 @@ type Server struct {
 	gwStealth map[string]gwStealthInfo
 	kicked    map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
 	revoked   map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	// knockIssued 敲门令牌签发审计的节流水位：(账号|指纹) → 上次落审计的 Unix 秒。
+	// 敲门是 15s 一次的保活热路径，不节流会把审计冲成噪声（见 auditKnockIssued）。
+	knockIssued map[string]int64
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
 	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
 	grayObserved map[string]int64
@@ -262,6 +265,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
 		gwNAT:           map[string]gwNATInfo{},
 		gwStealth:       map[string]gwStealthInfo{},
+		knockIssued:     map[string]int64{},
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
 		standbyAudited:  map[string]int64{},
@@ -1114,6 +1118,11 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	tok := s.keys.Sign(auth.Claims{
 		Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI(), Use: auth.UseKnock,
 	}, knockTTL)
+	// ★放行也要留痕（wave8 行动 8）。此前这条**主路径**成功时零审计，而同一函数与
+	// entryGates 里五处拒绝全部落审计——于是审计里只有拒绝没有放行。
+	// 对照最刺眼的是：过同一道 entryGates 的 B/S 路径**签票时是落审计的**。
+	// wave7 那句「拒绝比放行更需要留痕」是排序不是排除。
+	s.auditKnockIssued(r, c.Name, kb.Device)
 	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
 }
 
@@ -1322,11 +1331,12 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		if detail == "" {
 			detail = ev.Kind // 空 detail 至少留下事件种类，不落一条空话
 		}
-		// ★verdict 按事件种类：安全事件（拒绝）落 deny，回执类落 ok。
+		// ★verdict 按事件种类：拒绝落 deny，放行落 allow，回执类落 ok。
 		// 此前一律硬编码 "ok"——「网关报告了一次拒绝」在审计判定分布里被数成"允许"，
 		// 安全概览的"拒绝"计数对数据面事件永远为零。
 		verdict := "ok"
-		if ev.Kind == "sec-deny" {
+		switch ev.Kind {
+		case "sec-deny":
 			verdict = "deny"
 			if ev.Src != "" && ev.Cat != "" && as != nil {
 				// 机读半边：按 (网关, 源IP, 类别) 计入攻击源小时桶。落库失败只记日志——
@@ -1335,8 +1345,16 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 					slog.Warn("攻击源计数落库失败（审计已留痕）", "gw", id, "src", ev.Src, "err", err.Error())
 				}
 			}
+		case "sec-allow":
+			// ★放行**绝不**进攻击源统计：把一次正常访问数进「攻击源 TOP」，
+			// 是最容易误导排障的一种错记。
+			verdict = "allow"
 		}
-		s.auditAs(r, actor, "dataplane", "网关 "+id+" 报告："+detail, verdict)
+		// ★源 IP：数据面事件的真实来源是网关报上来的那个（攻击者 / 访问者的地址），
+		// 不是网关自己的地址。此前一律记 clientIP(r) = 网关地址，于是按 src_ip 检索
+		// 审计根本找不到攻击者，那个地址只活在事件正文的自由文本里；
+		// FR-AUDIT-05 的「出向四元组检索」也就没有数据源。
+		s.auditDataplane(r, actor, ev.Src, "网关 "+id+" 报告："+detail, verdict)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }

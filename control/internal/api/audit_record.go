@@ -132,3 +132,27 @@ func (s *Server) audit(r *http.Request, category, event, verdict string) {
 	}
 	s.auditAs(r, actor, category, event, verdict)
 }
+
+// auditDataplane 落一条**网关报告的**数据面事件审计。
+//
+// 与 auditAs 的唯一区别是**源 IP 由调用方给**：这类事件的真实来源是网关报上来的
+// 那个地址（攻击者 / 访问者），而不是网关自己。此前一律记 clientIP(r)——那是网关的
+// 地址，于是按 src_ip 检索审计永远找不到攻击者，那个地址只活在事件正文的自由文本里，
+// FR-AUDIT-05 的「出向四元组检索」连数据源都没有。
+//
+// srcIP 为空（网关没报来源，如策略下发这类回执）时回落 clientIP(r)：那时"来源"
+// 确实就是网关自己，不是不可判定。
+func (s *Server) auditDataplane(r *http.Request, actor, srcIP, event, verdict string) {
+	if strings.TrimSpace(srcIP) == "" {
+		s.auditAs(r, actor, "dataplane", event, verdict)
+		return
+	}
+	s.recordAudit(r.Context(), store.AuditEntry{
+		Time:     time.Now().Format("2006-01-02 15:04:05"),
+		Category: "dataplane",
+		User:     actor,
+		SrcIP:    srcIP,
+		Event:    event,
+		Verdict:  verdict,
+	})
+}

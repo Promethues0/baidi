@@ -286,7 +286,26 @@ func main() {
 		// 本地时钟快于控制面时会把 until 判过期而返回 false，若据此 continue 会连撤窗/断隧道
 		// 一并跳过（安全动作静默失效）。这里无论 until 是否"已过期"都执行一次撤窗+断隧道。
 		applied := map[string]int64{}
+		// reported 已经报过一次「已撤销」回执的账号。
+		//
+		// ★这张表是回执**去重**用的，与 applied（处置去重）分开，因为两者的判据不同：
+		// 控制面对 disabled/locked 与 posture-blocked 账号是**滚动续期**下发的
+		// （until = now + kickBanTTL，每轮都是新值，见 api.handleGatewayPolicy 的注释）——
+		// 那是对的，账号一直禁用就该一直拒。但 applied 按 until 去重，于是每轮都判成
+		// 「新窗口」而重新执行 + **重新入队一条回执**：一个被禁账号每 15s 产出一条
+		// 「已撤销…撤销放行 0 个源IP、切断 0 条隧道」的审计，一天约 5760 条，
+		// 而这些行记录的是**什么都没发生**。50 个离职账号就是每天 28 万条，
+		// 真正该被看见的放行/拒绝会被整段冲走（wave8 行动 8 加的放行留痕首当其冲）。
+		//
+		// 处置本身照旧每轮执行（幂等且便宜，时钟漂移下也不能跳过）；改的只是**回执**：
+		// 只有「真的切断了什么」或「这个账号第一次被封」才报。
+		reported := revokeReportSet{}
 		applyRevoked := func(revoked []cplane.Revoked) {
+			live := make(map[string]bool, len(revoked))
+			for _, rv := range revoked {
+				live[rv.User] = true
+			}
+			reported.retain(live)
 			for _, rv := range revoked {
 				if applied[rv.User] >= rv.Until {
 					continue // 该账号该封禁窗口已处置过
@@ -302,18 +321,27 @@ func main() {
 				if webSrv != nil {
 					nw = webSrv.KillUser(rv.User)
 				}
+				// 本机日志每轮都打（排障要看得见"闸一直在执行"），审计不。
 				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
 					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n, "killed_web_conns", nw,
 					"until", until.Format("15:04:05"))
 				// 数据面回执：三元组动作**已执行完毕**才入队（措辞是已发生的事实，
 				// 控制面原样落审计——「已下发」与「已生效」从此可区分）。
-				webPart := ""
-				if webSrv != nil {
-					webPart = fmt.Sprintf("、切断 %d 条七层长连接", nw)
+				//
+				// ★只在「真切断了什么」或「首次封禁」时报，理由见上面 reported 的注释。
+				//
+				// 刻意写成 if 而不是 continue：continue 会连带跳过后面那段 pf 放行回收。
+				// 今天它恰好安全（effect==0 蕴含 len(ips)==0，那个循环本就是空转），
+				// 但下一个在这后面加动作的人不会知道这层依赖。
+				if reported.should(rv.User, len(ips)+n+nw) {
+					webPart := ""
+					if webSrv != nil {
+						webPart = fmt.Sprintf("、切断 %d 条七层长连接", nw)
+					}
+					cp.QueueEvent("revoke-applied", fmt.Sprintf(
+						"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道%s",
+						rv.User, until.Format("15:04:05"), len(ips), n, webPart))
 				}
-				cp.QueueEvent("revoke-applied", fmt.Sprintf(
-					"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道%s",
-					rv.User, until.Format("15:04:05"), len(ips), n, webPart))
 				if *pf {
 					for _, ip := range ips {
 						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过
@@ -635,4 +663,33 @@ func portMatches(addr string, want int) bool {
 		return true
 	}
 	return n == want
+}
+
+// revokeReportSet 记录哪些账号已经报过一次「已撤销」回执。
+//
+// 抽成具名类型是为了可测：这段逻辑真正微妙的不是"有没有切断东西"，
+// 而是**解禁后再被封要能重新报一次**——漏了 retain，一个账号解禁又被封时
+// 第二次封禁在审计里完全不存在。
+type revokeReportSet map[string]bool
+
+// retain 丢弃已不在撤销名单里的账号（它们解禁了；将来再被封要能重新报）。
+func (s revokeReportSet) retain(live map[string]bool) {
+	for u := range s {
+		if !live[u] {
+			delete(s, u)
+		}
+	}
+}
+
+// should 报告这一轮要不要给该账号入队回执，并在要报时记下。
+//
+// 判据：真切断了什么（effect>0）或这个账号第一次被封。控制面对 disabled/locked
+// 与 posture-blocked 账号是滚动续期下发的，每轮 until 都是新值——不加这道闸，
+// 一个被禁账号每 15s 产出一条「撤销 0 个源IP、切断 0 条隧道」的审计。
+func (s revokeReportSet) should(user string, effect int) bool {
+	if effect == 0 && s[user] {
+		return false
+	}
+	s[user] = true
+	return true
 }

@@ -86,7 +86,14 @@
 - 为什么值得：磁盘写满或库写锁失败时，管理操作照常回 200、审计静默停写、**链校验仍全绿**（`VerifyAuditChain` 只重算已存在行的前缀连续性，尾部整段没写进去不构成断链）、告警一条不响——审计中心「全量留痕、事后可举证」的第一性主张恰在最需要它的时刻失效且无人知晓。项目自己在外送队列上界那里论证过「磁盘写满会让审计本身落不了库」，但那条论证只用来给外送队列加上界，没有反过来保护审计写入本身。
 - 注意：**「best-effort 不影响主操作」是对的取舍，别改成回滚**——缺的不是回滚而是信号。同一仓库里外送入队失败尚且 `slog.Error`，主审计写失败连一行日志都没有，这个不对称本身就是判据。
 
-**7. SPA 隐身真实态回执（NFR-SEC-01、NFR-OBS-01、FR-OPS-10）— M**
+**7. SPA 隐身真实态回执（NFR-SEC-01、NFR-OBS-01、FR-OPS-10）— M ✅ 已落地**
+- 落地记（2026-08-17）：`darkfw.Probe()` 实测规则集（`nft list table inet baidi` / `pfctl -a baidi-gw -T show`）→ 心跳上报 → 控制面折算成**七态**回执 → 网关页逐台呈现 + `/diag` 同源。**只有 armed 计入生效**，不可判定与未上报都不算。
+- **判据刻意不用 `darkfw.Available()`**：它只查 nft/pfctl 二进制在不在 PATH 上，几乎所有 Linux 都装了 nft——拿它当「隐身已启用」跟写死一个 true 没区别。真正要回答的是**规则集到底装没装**，而那是能探的。顺带做了**端口比对**（setup 脚本 PROXY_PORT 默认 18443，网关换端口后规则集保护的是别人，隧道口照样可见，与 wintun 架构错配同族）。
+- **本机起真网关实测了前提**：未敲门直连隧道口 → TCP 三次握手完成（0.2 ms）→ 随后 EOF。握手完成即 nmap 判 open，页面上那句「端口扫描全程超时」是错的。四条断言改为跟随 `allArmed` 渲染，页脚从「攻击面 = 0」改成「端口可见 · 业务不可达 —— 先认证后连接成立，隐身尚未成立」；**零台在线时 allArmed 恒假**（空集恒真会让没有网关的部署把最强那段画出来）。
+- **写测试时挖出第七态 `orphan-ruleset`**：规则集装着 + 网关没带 -pf = 内核 DROP 在生效但放行集合永远为空 = **全员连不上**，而敲门成功、控制台显示在线、客户端只是拨号超时。这也是 `Probe` 在 `wanted=false` 时照样探的原因。
+- 一条**替假绿背书的旧测试**跟着改：`TestDiagStealthReportsRegisteredGateway` 断言的正是「有在线网关时 stealth 应 pass」——改对实现反而是它转红（与行动 2 的 Rust 用例同一形态）。
+- 变异验证八条全红：恒 pass / Armed 放宽 / 不可判定当生效 / 未启用不告警 / 端口错配不判 / 旧网关心跳抹掉实测态 / 网关页不下发回执 / 解析不出端口时猜 18443。
+- **收工前 86-agent 对抗式复核，27 条候选存活 8 条，全部已修**，两条 HIGH 由四五个视角各自独立命中：① `GuardedPort==nil` 落进 default 判成 **armed**——正是本行动要杀的假绿，还带着「规则集实测在位」的措辞（`parseNftDropPort` 那句「绝不猜默认端口」在消费端被破坏了一遍），现已独立成 `no-drop-rule` 态；② 同一形态在网关启动期 `*st.GuardedPort` 空指针 **panic**，落在监听拉起之前 + systemd `Restart=on-failure` = 崩溃重启循环；③ **`orphan-ruleset` 在它真正高发的形态里是死判据**——非 root 时 Ruleset 恒 nil，那支直接断言「未启用、端口 open」，而真实状态可能是全员拨号超时，方向与后果两句全反；④ `/diag` 汇总把不可判定并进「未启用」；⑤ 前端漏 `orphan-ruleset`（后端判 fail、页面画成中性灰）+ `unreported` 的零值被渲染成「-pf 未开启 · 非 root」；⑥ 三处测试被实测证明能逃逸（在线过滤零覆盖 / 告警换成反向措辞不红 / 严重度只钉一态）。补了七条新变异，逐条转红。
 - 做什么：与 metrics/posture 的三态纪律同款——心跳加一个隐身后端字段（`darkfw.Available()` / `-pf` 实况）→ 网关页与 `/diag` 分「内核态 nftables/pf」与「仅用户态（端口对扫描器可见）」两态呈现 → 对比卡片文案跟随真实态 → deploy 侧要么装 nft ruleset、要么在安装输出里当面写清为什么没装。
 - 改哪里：`gateway/cmd/baidi-gateway/main.go:54`（`-pf` **默认关**）、`gateway/internal/cplane/cplane.go:271-303`（payload 无隐身字段）；`console/src/views/Gateway.vue:121/144-146/149`（写死「内核态默认丢弃」「端口扫描全程超时」「攻击面 = 0」）；`control/internal/api/diag.go:363-399` `checkStealth`（只要有网关在线就恒 pass）。
 - 为什么值得：隐身是白帝第一卖点，NFR-SEC-01 的验收就是「外部扫描结果端口全闭」。能力在（`darkfw` + 两个 setup 脚本），但**参考部署与在线演示站都没启用**——`deploy/systemd/baidi-gateway.service:3` 明写「默认不开 -pf」，`install-remote.sh` 全程不执行 `baidi-nft.sh`；未开时未敲门的连接走 `proxy.go:129-134` 的 accept-then-close，**TCP 三次握手已经完成，nmap 判 open**。「握手后被断开」与页面断言的「等同于不存在」是两种安全等级。更关键的是形态复发：第七节刚记功删掉过 Security 页那个恒 true 的「已隐身」，理由原文是「在替一台可能压根没配防火墙规则的网关打包票」——`Gateway.vue` 那四条断言与 `checkStealth` 的恒 pass 正在做同一件事，只是换了个页面。

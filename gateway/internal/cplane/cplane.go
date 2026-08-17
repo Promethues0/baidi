@@ -61,6 +61,7 @@ type Client struct {
 	// natState 地址转换运行态快照源（wave8 行动 3）。nil = 不上报——
 	// 但新网关**无论开没开 -nat 都要装上它**，见 NATState.Enabled 的注释。
 	natState func() NATState
+	stealth  func() StealthState
 	httpc    *http.Client
 
 	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
@@ -138,6 +139,27 @@ type NATState struct {
 	// 「灌进去了但没流量」长得一模一样，而排障方向完全相反。
 	Hits *[]NATHit `json:"hits,omitempty"`
 }
+
+// StealthState 内核态隐身的实测回执（wave8 行动 7）。字段语义与 darkfw.State 一一对应，
+// 刻意在这里重声明而不是 import darkfw——cplane 是数据面到控制面的**协议层**，
+// 让它依赖某个具体实现包，下一个后端（比如 Windows 防火墙）就得改协议。
+//
+// ★三态纪律与 nat/metrics 完全同款：
+//   - **新网关一律上报**（哪怕没开 -pf，报 wanted=false）：只在开了才报的话，
+//     「这台没开」与「这台版本旧、不会报」在控制面看来一模一样，而前者恰恰是
+//     参考部署的默认形态（deploy/systemd/baidi-gateway.service 明写默认不开）。
+//   - ruleset/guardedPort 用**指针**：探不到就缺席，不补 false / 不补 0。
+type StealthState struct {
+	Wanted      bool   `json:"wanted"`
+	Backend     string `json:"backend"`
+	Root        bool   `json:"root"`
+	Ruleset     *bool  `json:"ruleset,omitempty"`
+	GuardedPort *int   `json:"guardedPort,omitempty"`
+	Detail      string `json:"detail,omitempty"`
+}
+
+// SetStealth 装上内核态隐身回执源。**新网关一律要调它**，理由见 StealthState 注释。
+func (c *Client) SetStealth(fn func() StealthState) { c.stealth = fn }
 
 // SetNAT 装上地址转换运行态快照源。
 //
@@ -354,6 +376,11 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	// 没开 -nat 时报 enabled=false——否则控制面分不出「没开」与「旧网关不会报」。
 	if c.natState != nil {
 		payload["nat"] = c.natState()
+	}
+	// 内核态隐身实测回执（wave8 行动 7）：同款三态兼容。★新网关一律上报，
+	// 没开 -pf 时报 wanted=false——控制面必须分得出「没开」与「旧网关不会报」。
+	if c.stealth != nil {
+		payload["stealth"] = c.stealth()
 	}
 	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)

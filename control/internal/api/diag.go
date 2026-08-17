@@ -371,49 +371,6 @@ func (s *Server) checkClockSkew() DiagCheck {
 	return c
 }
 
-// checkStealth 检查 SPA 服务隐身。数据源与 GET /gateways 同一份：经 mTLS 注册心跳
-// 上报的在线网关清单（s.gateways）。此前读的是 Memory.Gateway 种子拓扑——
-// 网关一台没起，诊断页也能画出"隐身生效"，运维对着编造的拓扑什么都排查不了。
-// 控制面并不从外部实测端口可见性，所以只陈述网关上报的事实：谁在线、隐身口在哪。
-func (s *Server) checkStealth() DiagCheck {
-	c := DiagCheck{Key: "spa", Category: "stealth", Name: "SPA 服务隐身"}
-	now := time.Now().Unix()
-	window := int64(gatewayOnlineWindow / time.Second)
-	s.mu.Lock()
-	total := len(s.gateways)
-	online := 0
-	for id, g := range s.gateways {
-		up := now-g.LastSeen <= window
-		st, state := "pass", "在线"
-		if up {
-			online++
-		} else {
-			st, state = "warn", "心跳超时"
-		}
-		c.Items = append(c.Items, DiagItem{
-			Label:  id,
-			Value:  fmt.Sprintf("%s · SPA 敲门口 %s · 隧道口 %s", state, g.SPA, g.Proxy),
-			Status: st,
-		})
-	}
-	s.mu.Unlock()
-	c.Metric = fmt.Sprintf("在线 %d / 注册 %d", online, total)
-	switch {
-	case total == 0:
-		c.Status = "warn"
-		c.Summary = "无网关经 mTLS 注册，隐身状态未知"
-		c.Hint = "以 -control + mTLS 证书启动 baidi-gateway，注册后此处才有事实可报"
-	case online == 0:
-		c.Status = "warn"
-		c.Summary = "已注册网关全部心跳超时，隐身状态未知"
-		c.Hint = "检查网关进程与到控制面的网络连通"
-	default:
-		c.Status = "pass"
-		c.Summary = fmt.Sprintf("%d 台在线网关上报了 SPA 敲门端口（未授权包默认丢弃）；控制面不从外部实测端口可见性", online)
-	}
-	return c
-}
-
 // checkCluster 控制面温备（PRD 15.5 / FR-ARCH-03）。
 //
 // 这项检查从前读 Memory.System 种子拓扑输出"主备冗余就绪"，是给不存在的能力背书；

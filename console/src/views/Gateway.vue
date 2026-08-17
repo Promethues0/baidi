@@ -3,7 +3,7 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">网关与隐身</div>
-        <div class="bd-page__sub">已注册数据面网关 · SPA 服务隐身：先认证后连接、攻击面收敛至零</div>
+        <div class="bd-page__sub">已注册数据面网关 · SPA 服务隐身：先认证后连接（隐身是否真的生效见逐台实测回执）</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '后端未连接' }}</a-tag>
@@ -118,7 +118,7 @@
 
             <div class="bd-spa__ports">
               <div class="bd-spa__portshead">
-                各网关上报的监听口（未通过敲门时由内核态规则默认丢弃）
+                各网关上报的监听口（未敲门时会不会被内核丢弃，见下方逐台回执）
               </div>
               <div class="bd-spa__portslist">
                 <span v-for="n in nodes" :key="n.id" class="bd-tg bd-port">
@@ -130,9 +130,36 @@
                    原实现里那个恒为 true 的「已隐身」开关就是在替一台可能压根没配
                    防火墙规则的网关打包票。 -->
               <div class="bd-spa__note">
-                控制面不从外部实测端口可见性：以上为网关自报的监听地址。隐身是否真的生效，
-                请从外网侧扫描验证（未敲门时应表现为超时而非拒绝）。
+                控制面不从外部实测端口可见性：以上为网关自报的监听地址。
+                <b>但「内核规则集装没装、保护的是哪个端口」网关自己知道</b>，已随心跳上报，见下方逐台回执。
+                最终确认仍请从外网侧扫描（未敲门时应表现为超时/filtered 而非拒绝或握手成功）。
               </div>
+            </div>
+          </div>
+
+          <!-- 隐身实测回执（wave8 行动 7）。文案全部由后端下发：这是安全结论，
+               前端自己编就会与后端实际判定脱节（与 Nat.vue 的 warnings 同纪律）。 -->
+          <div class="bd-section-title" style="margin-top: 22px">
+            内核态隐身 · 逐台实测回执
+            <span class="bd-stealth__count">{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台生效</span>
+          </div>
+          <div v-for="(w, i) in bundle.stealthWarnings" :key="'sw' + i" class="bd-stealthwarn">
+            <icon-exclamation-circle-fill /><span>{{ w }}</span>
+          </div>
+          <div v-if="!bundle.stealth.length" class="bd-spa__note">无在线网关，隐身状态无从判定。</div>
+          <div v-for="rc in bundle.stealth" :key="rc.gatewayId" class="bd-card bd-stealth">
+            <div class="bd-stealth__h">
+              <b>{{ rc.gatewayId }}</b>
+              <span class="bd-tg" :class="stealthTagClass(rc.status)">{{ stealthLabel(rc.status) }}</span>
+              <!-- 管理意图与实测态分列：一列同时表达"想开"和"真的开着"正是被批判的形态。 -->
+              <span class="bd-stealth__intent">-pf {{ triText(rc.wanted, '已开启', '未开启') }}</span>
+            </div>
+            <div class="bd-stealth__sum">{{ rc.summary }}</div>
+            <div class="bd-stealth__scan"><b>攻击者视角：</b>{{ rc.scannerView }}</div>
+            <div class="bd-stealth__meta">
+              后端 {{ rc.backend || '—' }} · {{ triText(rc.root, 'root', '非 root') }} ·
+              隧道口 {{ rc.proxyAddr || '—' }} ·
+              规则集保护端口 {{ rc.guardedPort ?? '不可判定' }}
             </div>
           </div>
 
@@ -140,13 +167,25 @@
           <div class="bd-cmp">
             <div class="bd-card bd-cmp__c bd-cmp__c--bad">
               <div class="bd-cmp__h"><icon-close-circle-fill class="bd-cmp__ic bad" />未装专属客户端</div>
-              <ul class="bd-cmp__list">
+              <!-- ★这四条此前是写死的断言。它们只有在**内核态隐身实测生效**时才成立；
+                   参考部署默认不开 -pf，那时未敲门的连接会先完成 TCP 三次握手再被
+                   用户态断开（proxy.go 的 accept-then-close），nmap 判 open——
+                   「握手后被断开」与「等同于不存在」是两种安全等级，不能用同一段文案。 -->
+              <ul v-if="allArmed" class="bd-cmp__list">
                 <li><icon-info-circle />端口扫描全程超时，<b>无任何端口可探测</b></li>
-                <li><icon-info-circle />未通过 SPA 敲门，网关<b>静默丢弃</b>所有报文</li>
+                <li><icon-info-circle />未通过 SPA 敲门，网关在<b>内核态丢弃</b>所有报文</li>
                 <li><icon-info-circle />无法建立 TCP 连接，<b>无法接入</b>任何业务</li>
                 <li><icon-info-circle />在攻击者视角下，网关与业务<b>等同于不存在</b></li>
               </ul>
-              <div class="bd-cmp__foot bad">攻击面 = 0 · 先认证后连接</div>
+              <ul v-else class="bd-cmp__list">
+                <li><icon-info-circle />当前<b>未确认内核态隐身生效</b>（{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台）</li>
+                <li><icon-info-circle />未敲门的 TCP 连接会<b>先完成三次握手</b>，再由用户态立即断开</li>
+                <li><icon-info-circle />端口对扫描器表现为 <b>open</b> 而非 filtered：能确认这里有服务在监听</li>
+                <li><icon-info-circle />业务仍<b>接入不了</b>（无 SPA 授权即断连），但网关本身并未隐身</li>
+              </ul>
+              <div class="bd-cmp__foot bad">
+                {{ allArmed ? '攻击面 = 0 · 先认证后连接' : '端口可见 · 业务不可达 —— 先认证后连接成立，隐身尚未成立' }}
+              </div>
             </div>
 
             <div class="bd-card bd-cmp__c bd-cmp__c--good">
@@ -267,11 +306,57 @@ const tab = ref<'topo' | 'spa' | 'node'>('topo');
 const live = ref(false);
 
 const EMPTY: GatewayBundle = {
-  nodes: [], total: 0, online: 0, sessions: 0, onlineWindowSec: 0, knockTokenTtlSec: 0
+  nodes: [], total: 0, online: 0, sessions: 0, onlineWindowSec: 0, knockTokenTtlSec: 0,
+  stealth: [], stealthArmed: 0, stealthWarnings: []
 };
 const bundle = ref<GatewayBundle>(EMPTY);
 const nodes = computed<GwNode[]>(() => bundle.value.nodes ?? []);
 const totalTunnels = computed(() => nodes.value.filter((n) => n.online).reduce((s, n) => s + n.tunnels, 0));
+
+/* ── 内核态隐身回执（wave8 行动 7）── */
+
+/* allArmed 是否**全部**在线网关都实测生效。
+ * ★零台在线时为 false：那时没有任何事实支撑「攻击面 = 0」，
+ * 空集恒真会让一台网关都没有的部署把最强的那段断言画出来。 */
+const allArmed = computed(() => {
+  const rs = bundle.value.stealth ?? [];
+  return rs.length > 0 && rs.every((r) => r.status === 'armed');
+});
+
+/* 后端 stealth.go 的**七态**必须在这里全部有名字。漏一个的后果不是报错，
+   是那一态在页面上显示成生英文 key + 走兜底的灰色样式——而灰色在本项目里
+   专表「我们不知道」。orphan-ruleset 就漏过一次：它在后端是 fail（全员连不上），
+   在页面上却与「不可判定」同色同形。 */
+const STEALTH_ZH: Record<string, string> = {
+  armed: '内核态生效',
+  off: '未启用（端口可见）',
+  'no-ruleset': '已开启但规则集缺失',
+  'no-drop-rule': '规则集缺默认丢弃规则',
+  'orphan-ruleset': '规则集在但未启用（全员连不上）',
+  'port-mismatch': '规则集保护了别的端口',
+  unknown: '不可判定',
+  unreported: '网关未上报'
+};
+function stealthLabel(st: string) { return STEALTH_ZH[st] ?? st; }
+
+/* 只有 armed 是绿的。不可判定与未上报走**灰**而不是暖色——
+ * 它们不是"轻微问题"，是"我们不知道"（与在线用户页的 unknown 同一条纪律）。 */
+const STEALTH_BAD = ['no-ruleset', 'no-drop-rule', 'orphan-ruleset', 'port-mismatch'];
+function stealthTagClass(st: string) {
+  if (st === 'armed') return 'bd-tg--ok';
+  /* 与后端 checkStealth 的 fail 分桶**同一份名单**：两处分头维护就会出现
+     「后端判 fail、页面画成中性灰」。 */
+  if (STEALTH_BAD.includes(st)) return 'bd-tg--bad';
+  if (st === 'off') return 'bd-tg--warn';
+  return 'bd-tg--muted';
+}
+
+/* triText 三态布尔渲染：undefined = 网关没说过这件事，显示「不可判定」。
+   ★用三元式 `rc.wanted ? 'A' : 'B'` 会把「没上报」渲染成确定结论 B——
+   同一张卡片上标签写着「网关未上报」，meta 行却并排给出「-pf 未开启 · 非 root」。 */
+function triText(v: boolean | undefined, yes: string, no: string) {
+  return v === undefined || v === null ? '不可判定' : v ? yes : no;
+}
 
 /* ── SVG 布局 ── */
 const nodeH = 86;
@@ -399,4 +484,24 @@ onMounted(load);
 .bd-accfld__d { display: block; margin-top: 5px; font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
 .bd-accerr { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-danger);
   background: var(--bd-tag-red-bg, #FFECE8); padding: 8px 12px; border-radius: 6px; }
+
+/* ── 内核态隐身回执 ── */
+.bd-stealth__count { margin-left: 10px; font-size: 12px; font-weight: 400; color: var(--bd-t3); }
+.bd-stealthwarn {
+  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; padding: 10px 12px;
+  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
+  color: #A8620E; background: #FFF7E8; border: 1px solid #FFD08A;
+}
+.bd-stealthwarn > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
+.bd-stealth { padding: 14px 16px; margin-bottom: 10px; }
+.bd-stealth__h { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-bottom: 8px; }
+.bd-stealth__intent { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
+.bd-stealth__sum { font-size: 13px; color: var(--bd-t1); line-height: 1.6; }
+.bd-stealth__scan { margin-top: 6px; font-size: 12.5px; color: var(--bd-t2); line-height: 1.7; }
+.bd-stealth__meta { margin-top: 8px; font-size: 12px; color: var(--bd-t3); }
+/* 只有 armed 是绿的；不可判定/未上报走灰——它们不是"轻微问题"，是"我们不知道"。 */
+.bd-tg--ok { color: var(--bd-success); background: var(--bd-tag-green-bg); }
+.bd-tg--bad { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
+.bd-tg--warn { color: #A8620E; background: #FFF7E8; }
+.bd-tg--muted { color: var(--bd-t3); background: var(--bd-fill2); }
 </style>

@@ -252,7 +252,7 @@ func main() {
 		// 安全事件从此有了去处：拒绝经节流后随心跳带给控制面（落审计 + 攻击源统计）。
 		secRep.Bind(cp.QueueSecEvent)
 		secRep.StartFlusher(time.Minute)
-		cp.SetVersion(version)   // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		cp.SetVersion(version) // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
 		// 七层落点随心跳上报：控制面据此拼出浏览器该跳的入口 URL。没开就不上报，
 		// 控制面于是能对门户如实回「本网关未开启七层 Web 代理」，而不是发一张跳不通的票。
 		cp.SetWeb(*webAddr, *webCert != "" && *webKey != "")
@@ -374,6 +374,18 @@ func main() {
 		// 完全一样——而前者恰恰是最常见的那种失效：deploy/install-remote.sh 生成的
 		// baidi-gateway.env 里根本没有 -nat 相关项，管理员在控制台配好 DNAT、
 		// 页面绿灯，而网关这边 applyNAT() 首行就 return 了，一行日志都不打。
+		// 内核态隐身实测回执（wave8 行动 7）。★同样**无论开没开 -pf 都装上**。
+		//
+		// 这里刻意不用 darkfw.Available() 当判据：它只查 nft/pfctl 二进制在不在 PATH 上，
+		// 而几乎所有 Linux 都装了 nft——拿它当"隐身已启用"跟写死一个 true 没区别。
+		// Probe() 探的是**规则集到底装没装**，以及那条默认 DROP 保护的是哪个端口。
+		cp.SetStealth(func() cplane.StealthState {
+			st := darkfw.Probe(*pf)
+			return cplane.StealthState{
+				Wanted: st.Wanted, Backend: st.Backend, Root: st.Root,
+				Ruleset: st.Ruleset, GuardedPort: st.GuardedPort, Detail: st.Detail,
+			}
+		})
 		cp.SetNAT(func() cplane.NATState {
 			if natApp == nil {
 				return cplane.NATState{Enabled: false, Backend: "未启用（本网关未带 -nat 启动）"}
@@ -473,7 +485,44 @@ func main() {
 				}
 			}
 		}()
-		slog.Info("内核态隐身：默认 DROP + 动态放行集合", "backend", darkfw.Backend(), "set", darkfw.Table)
+		// ★启动就实测一次并当面说清：`-pf` 开着但规则集没装，是本项目最坏的一种形态——
+		// AllowIP 每次敲门都失败（表不存在），而**默认 DROP 那条规则同样不存在**，
+		// 于是隧道口对全世界敞开、退回用户态兜底，管理侧看起来却是"隐身已配置"。
+		switch st := darkfw.Probe(true); {
+		case st.Ruleset == nil:
+			slog.Warn("⚠ 内核态隐身状态不可判定（探不到规则集），无法确认隐身是否真的生效",
+				"backend", st.Backend, "root", st.Root, "detail", st.Detail)
+		case !*st.Ruleset:
+			slog.Error("⚠ -pf 已开启，但内核里没有白帝的规则集——隐身实际未生效，"+
+				"隧道口此刻对全世界可见（退回用户态 accept-then-close，nmap 判 open）",
+				"backend", st.Backend, "detail", st.Detail,
+				"修复", "先跑 sudo gateway/firewall/baidi-nft.sh setup（macOS 用 setup-pf.sh）再启动网关")
+		case st.GuardedPort == nil:
+			// ★规则集在、却找不到那条默认 DROP 规则 = 没有任何东西在丢包。
+			// 此前这一支落进 default，而 default 里无条件 `*st.GuardedPort` ——
+			// slog 的参数在调用点求值，日志级别过滤救不了，网关在启动路径上直接 panic
+			// （systemd Restart=on-failure 下就是崩溃重启循环，SPA 与隧道口全不监听）。
+			// 触发很实在：setup 脚本在 set -euo pipefail 下中途失败、有人 flush 过这条链、
+			// 或规则被写成 `dport { a, b } drop` 这类正则匹配不上的形状。
+			slog.Error("⚠ 规则集在位，但里面找不到默认 DROP 规则——没有任何东西在丢包，隐身未生效",
+				"backend", st.Backend,
+				"排查", "sudo nft list table inet baidi（macOS：sudo pfctl -a baidi-gw -sr）",
+				"修复", "确认后重跑 setup 脚本")
+		case !portMatches(*proxyAddr, *st.GuardedPort):
+			slog.Error("⚠ 规则集保护的端口与本网关的隧道口不是同一个——隧道口未被隐身保护",
+				"规则集保护", *st.GuardedPort, "本网关隧道口", *proxyAddr,
+				"修复", "以 PROXY_PORT=<本网关隧道口> 重跑 setup 脚本")
+		default:
+			slog.Info("内核态隐身：默认 DROP + 动态放行集合（规则集已实测在位）",
+				"backend", st.Backend, "set", darkfw.Table, "保护端口", *st.GuardedPort)
+		}
+	}
+	if !*pf {
+		// 未开 -pf 是**参考部署的默认形态**（deploy/systemd/baidi-gateway.service 明写默认不开）。
+		// 这一行必须打：未敲门的连接走 proxy.go 的 accept-then-close，
+		// **TCP 三次握手已经完成**，nmap 判 open——与"端口在网络层不存在"是两种安全等级。
+		slog.Warn("⚠ 未启用内核态隐身（-pf）：未敲门的 TCP 连接会先完成三次握手再被立即断开，" +
+			"端口对扫描器表现为 open 而非 filtered。要真隐身请先跑 firewall/baidi-nft.sh setup 再以 root 带 -pf 启动")
 	}
 
 	if webSrv != nil {
@@ -571,4 +620,19 @@ func portOf(addr string) int {
 		return 0
 	}
 	return n
+}
+
+// portMatches 报告监听地址 addr（形如 ":18443" / "0.0.0.0:18443"）的端口是否等于 want。
+// 解析不出端口时回 true——**不可判定不报警**：把一个解析失败渲染成"端口对不上"
+// 会让运维去追一个不存在的错配（与 posture 的 unknown 同口径）。
+func portMatches(addr string, want int) bool {
+	_, p, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	n, err := strconv.Atoi(p)
+	if err != nil {
+		return true
+	}
+	return n == want
 }

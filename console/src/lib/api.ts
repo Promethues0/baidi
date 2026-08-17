@@ -290,6 +290,35 @@ export interface GatewayBundle {
   onlineWindowSec: number;
   /** 控制面签发的敲门令牌有效期（秒）。 */
   knockTokenTtlSec: number;
+  /** 逐台在线网关的**隐身实测回执**（wave8 行动 7）。
+   *  ★页面上那四条「端口扫描全程超时 / 攻击面 = 0」此前是写死的，而参考部署根本
+   *  不开 -pf——未敲门的 TCP 会先完成三次握手再被用户态断开，nmap 判 open。
+   *  现在改成跟随这里的真实态渲染。 */
+  stealth: StealthReceipt[];
+  /** 内核态隐身**实测生效**的台数（只有 armed 计入；不可判定与未上报都不算）。 */
+  stealthArmed: number;
+  /** 要顶到页面上的隐身告警。文案由后端下发——这是安全结论，前端自己编就会与
+   *  后端实际判定脱节（与 Nat.vue 的 warnings 同一条纪律）。 */
+  stealthWarnings: string[];
+}
+
+/** StealthReceipt 一台网关的隐身回执。status 六态见后端 api/stealth.go。 */
+export interface StealthReceipt {
+  gatewayId: string;
+  /** unreported | off | orphan-ruleset | no-ruleset | no-drop-rule | port-mismatch | unknown | armed */
+  status: string;
+  /** wanted = -pf 管理意图，与 status（实测态）分开——一列同时表达"想开"和
+   *  "真的开着"正是 ipsec 那段注释批判过的形态。 */
+  /** ★可选 = 该网关根本没上报（旧版本）。用 boolean 的话零值会在页面上渲染成
+   *  确定结论「-pf 未开启 · 非 root」，与「控制面无从判断」的措辞直接打架。 */
+  wanted?: boolean;
+  backend: string; root?: boolean;
+  proxyAddr: string; guardedPort?: number;
+  summary: string; detail?: string;
+  /** scannerView **未敲门的攻击者从外部看到什么**——把配置状态翻译成安全后果，
+   *  而后者才是 NFR-SEC-01 验收的东西。 */
+  scannerView: string;
+  at: number;
 }
 
 /* ── 系统管理 · 三权分立（store.SystemBundle）──

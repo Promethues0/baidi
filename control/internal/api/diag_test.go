@@ -54,8 +54,13 @@ func TestDiagStealthWarnWithoutGateways(t *testing.T) {
 	}
 }
 
-// 有在线网关时：stealth 报网关数与隐身端口事实（来自 mTLS 注册心跳，与 GET /gateways 同源）。
-func TestDiagStealthReportsRegisteredGateway(t *testing.T) {
+// 有在线网关、但它**没上报隐身实测态**（旧版网关）时：绝不能报 pass。
+//
+// ★这条用例此前断言的正是被修掉的假绿：「有在线网关时 stealth 应 pass」。
+// 一台在线网关只说明它在跑，说明不了它有没有隐身——参考部署默认不开 -pf，
+// 未敲门的 TCP 会先完成三次握手再被用户态断开，nmap 判 open。
+// 绿着的测试在替那句断言背书，改对实现反而是它转红，所以它必须跟着改。
+func TestDiagStealthUnreportedIsNotPass(t *testing.T) {
 	h := newTestServer(t)
 	// 测试栈开着 gwPlaintextCompat，register 挂在主 mux 上（生产收口在 mTLS 独立口）。
 	code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(), map[string]any{
@@ -66,15 +71,18 @@ func TestDiagStealthReportsRegisteredGateway(t *testing.T) {
 	}
 
 	spa := diagCheck(t, getDiag(t, h), "spa")
-	if spa["status"] != "pass" {
-		t.Fatalf("有在线网关时 stealth 应 pass, got %v", spa["status"])
+	if spa["status"] == "pass" {
+		t.Fatalf("网关没上报隐身实测态就报 pass = 替一台可能裸奔的网关打包票, got %v", spa)
 	}
-	if m := spa["metric"].(string); !strings.Contains(m, "在线 1 / 注册 1") {
-		t.Fatalf("stealth 指标应报真实网关数, got %q", m)
+	if m := spa["metric"].(string); !strings.Contains(m, "内核态隐身生效 0 / 在线 1") {
+		t.Fatalf("指标应分开报「生效台数」与「在线台数」, got %q", m)
 	}
 	items := spa["items"].([]any)
-	if len(items) != 1 || !strings.Contains(items[0].(map[string]any)["value"].(string), "10.0.0.5:18201") {
-		t.Fatalf("stealth 明细应含上报的隐身端口, got %v", items)
+	if len(items) != 1 {
+		t.Fatalf("应逐台列出, got %v", items)
+	}
+	if v := items[0].(map[string]any)["value"].(string); !strings.Contains(v, "未上报") {
+		t.Fatalf("旧网关应如实说「未上报」, got %q", v)
 	}
 }
 

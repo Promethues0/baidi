@@ -568,6 +568,20 @@ echo "  需在腾讯云安全组放行 TCP ${BD_HTTPS_PORT}（如要公网客户
 if [ "${WITH_IPSEC:-0}" = "1" ]; then
   echo "  站点组网还需放行 UDP ${IKE_PORT} + UDP ${NATT_PORT}（IKE 与 NAT-T，缺一不可）"
 fi
+# ★内核态隐身（NFR-SEC-01）当面交代：不装就不装，但不能让人以为装了。
+# 未开 -pf 时未敲门的 TCP 连接会先完成三次握手再被用户态断开（proxy.go 的
+# accept-then-close），nmap 判 open——与「端口在网络层不存在」是两种安全等级。
+# 网关页与 /diag 现在会逐台如实标出这一点，这里同步说一遍，免得部署完就忘。
+if [ "${WITH_GATEWAY:-0}" = "1" ]; then
+  echo ""
+  echo "  ⚠ 内核态隐身（SPA 真隐身）**未启用**：本脚本不装 nftables 规则集，网关也不带 -pf。"
+  echo "    现状：未敲门的 TCP 连接会先完成三次握手再被立即断开，端口对扫描器表现为 open 而非 filtered。"
+  echo "    业务仍然接入不了（无 SPA 授权即断连），但网关本身并未隐身。"
+  echo "    不默认启用的原因：该机 strongSwan-gm 也用 nft，两套 ruleset 需先评审避免互相覆盖。"
+  echo "    要启用： sudo PROXY_PORT=18443 SPA_PORT=18201 gateway/firewall/baidi-nft.sh setup"
+  echo "             然后给 baidi-gateway.service 的启动参数加 -pf 并以 root 运行（重启后规则集需重新装）。"
+  echo "    生效与否可在「网关与隐身」页逐台核对（回执来自网关实测，不是配置回显）。"
+fi
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
 echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
 systemctl --no-pager status baidi-control | head -5 || true

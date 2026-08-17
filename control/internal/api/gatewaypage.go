@@ -44,6 +44,17 @@ type GatewayPageBundle struct {
 	KnockTokenTTLSec int `json:"knockTokenTtlSec"`
 	// Sessions 全部在线网关上报的活跃会话总数（与在线用户页同源：gwSess）。
 	Sessions int `json:"sessions"`
+	// Stealth 逐台在线网关的**隐身实测回执**（wave8 行动 7）。
+	//
+	// ★这一段存在的理由：页面此前写死「端口扫描全程超时 / 静默丢弃所有报文 /
+	// 攻击面 = 0」，而参考部署根本不开 -pf——未敲门的连接会先完成 TCP 三次握手
+	// 再被用户态断开，nmap 判 open。那四条断言从此改为**跟随这里的真实态渲染**。
+	Stealth []StealthReceipt `json:"stealth"`
+	// StealthArmed 内核态隐身实测生效的台数。**只有 armed 计入**——
+	// 不可判定与未上报都不算，那正是被修掉的假绿。
+	StealthArmed int `json:"stealthArmed"`
+	// StealthWarnings 要顶到页面上的隐身告警（文案由后端下发，前端不自己编）。
+	StealthWarnings []string `json:"stealthWarnings"`
 }
 
 // GatewayNodeView 一台已注册网关的页面投影。字段与注册心跳一一对应。
@@ -112,6 +123,17 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 		out.Nodes = append(out.Nodes, n)
 	}
 	s.mu.Unlock()
+	// 隐身回执：只覆盖在线网关（离线那台的隐身态是陈旧读数）。
+	out.Stealth = s.stealthReceipts()
+	for _, rc := range out.Stealth {
+		if rc.Armed() {
+			out.StealthArmed++
+		}
+	}
+	out.StealthWarnings = stealthWarnings(out.Stealth)
+	if out.StealthWarnings == nil {
+		out.StealthWarnings = []string{}
+	}
 	// 确定性排序（在线优先、其次 id 字典序）：map 遍历顺序随机，
 	// 每次刷新节点跳位会让人以为拓扑真的在变。
 	sort.Slice(out.Nodes, func(i, j int) bool {

@@ -86,13 +86,14 @@ func (s *Server) clientIP(r *http.Request) string {
 	return host
 }
 
-// auditAs 以指定行为人落一条审计日志（best-effort：写失败绝不影响主操作）。
+// auditAs 以指定行为人落一条审计日志。
+// best-effort：写失败**不影响主操作**，但一定发信号（三层，见 audit_health.go）。
 // 用于尚无 JWT 上下文的场景（如登录，行为人即提交的用户名）。
 func (s *Server) auditAs(r *http.Request, actor, category, event, verdict string) {
 	if actor == "" {
 		actor = "—"
 	}
-	_ = s.writer.RecordAudit(r.Context(), store.AuditEntry{
+	s.recordAudit(r.Context(), store.AuditEntry{
 		Time:     time.Now().Format("2006-01-02 15:04:05"),
 		Category: category,
 		User:     actor,
@@ -108,7 +109,7 @@ func (s *Server) auditAs(r *http.Request, actor, category, event, verdict string
 // 把异步动作记到某个管理员头上，会让审计里出现"他当时根本没点这个按钮"的行为，
 // 而这类错记在事后追责时是最难自证的一种。
 func (s *Server) auditBG(ctx context.Context, category, event, verdict string) {
-	_ = s.writer.RecordAudit(ctx, store.AuditEntry{
+	s.recordAudit(ctx, store.AuditEntry{
 		Time:     time.Now().Format("2006-01-02 15:04:05"),
 		Category: category,
 		User:     "system",

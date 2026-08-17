@@ -179,7 +179,15 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 			Gateways: gateways, MaxGateways: ls.Manifest.MaxGateways,
 		}
 	}
-	// 安全 ④：审计防篡改链自检。
+	// 安全 ④：控制面自身的审计写入健康。**唯一一条不查库的信号**——
+	// 库正是可能坏掉的那一环，再去查它只会一起失败（见 audit_health.go 的三层信号）。
+	if h := s.auditWrite.snapshot(); h.Failures > 0 {
+		snap.AuditWrite = &alerting.AuditWriteStat{
+			Failures: h.Failures, FirstAt: h.FirstAt, LastAt: h.LastAt,
+			LastErr: h.LastErr, LastEvent: h.LastEvent,
+		}
+	}
+	// 安全 ⑤：审计防篡改链自检。
 	if withChain {
 		snap.AuditChain = s.verifyChainForAlert(ctx)
 	}

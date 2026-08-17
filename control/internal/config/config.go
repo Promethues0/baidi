@@ -38,6 +38,9 @@ type Config struct {
 	MTLSAddr           string        // 网关接口的 mTLS 监听地址（如 127.0.0.1:8092）；空=不监听
 	GwPlaintextCompat  bool          // 明文口是否仍挂网关接口（阶段4 起默认 false；=1 为过渡逃生舱）
 	AuditRetentionDays int           // 审计日志留存天数（超期滚动清理并锚定防篡改链）；0=不清理
+	// AuditMaxDiskPercent 审计库允许占文件系统的百分比上限（0 = 不启用按水位回收）。
+	// ★与留存天数是**或**的关系（PRD FR-AUDIT-10），任一条件满足即回收最早一天。
+	AuditMaxDiskPercent int
 	// AlertInterval 业务告警周期评估间隔；<=0 关闭周期评估（只剩管理员手动「立即检测」）。
 	AlertInterval time.Duration
 	// AlertChainInterval 审计防篡改链自检间隔（全链重算比其余信号贵，单独节流）。
@@ -125,6 +128,11 @@ func Load() Config {
 		GwPlaintextCompat: envBool("BAIDI_GW_PLAINTEXT_COMPAT", false),
 		// 审计留存：启动时 + 每 24h 清理超期行，清理段末的链锚点写 audit_meta（见 store.PurgeExpiredAudit）。
 		AuditRetentionDays: envInt("BAIDI_AUDIT_RETENTION_DAYS", 180),
+		// 审计磁盘水位上限（FR-AUDIT-10 的另一半）：审计库文件占文件系统超过这个
+		// 百分比时，额外按天回收最早的记录。**默认 0 = 不启用**——自动删审计是破坏性
+		// 策略，得由部署方明确要求；不配时唯一的上界仍是保留天数。
+		// 判据是"审计库占了多大"而不是"文件系统满没满"，理由见 store.PurgeAuditByDisk。
+		AuditMaxDiskPercent: clampDiskPct(envInt("BAIDI_AUDIT_MAX_DISK_PERCENT", 0)),
 		// 业务告警：默认每分钟评估一轮，审计链自检每 15 分钟一次。
 		AlertInterval:      envDuration("BAIDI_ALERT_INTERVAL", time.Minute),
 		AlertChainInterval: envDuration("BAIDI_ALERT_CHAIN_INTERVAL", 15*time.Minute),
@@ -204,4 +212,17 @@ func clampMetricsRetention(h int) int {
 		return DefaultMetricsRetentionHours
 	}
 	return h
+}
+
+// clampDiskPct 把审计磁盘水位上限钳进 [1,95]；<=0 视为不启用（回 0）。
+// 上限 95 是防呆：填 100 等于永不触发（那就别配），填 0 以下已由 <=0 归零。
+func clampDiskPct(v int) int {
+	switch {
+	case v <= 0:
+		return 0
+	case v > 95:
+		return 95
+	default:
+		return v
+	}
 }

@@ -93,6 +93,15 @@ const (
 	AlertKindLicenseExpiry = "license_expiry"
 	// AlertKindLicenseSeats License 席位将满（用户/网关任一维占用率超阈值）。
 	AlertKindLicenseSeats = "license_seats"
+	// AlertKindAuditWriteFail 控制面**自己**没能把审计写进库。
+	// ★信号是 api 层的进程内计数（每次 RecordAudit 返回错误 +1），不是查库得来的——
+	// 恰恰因为库可能正是坏掉的那一环。这也是本组唯一一条看控制面自身存储的规则：
+	// 此前 11 条规则里，gateway_load 看的是**数据面**的盘，没有一条看控制面。
+	//
+	// ★这条规则有一段自己够不着的盲区，必须写下来：整盘写满时 RaiseAlert 同样落不了库，
+	// 告警产生不出来。它覆盖的是可恢复的那半（写锁争用、单表权限、瞬时 I/O 错误）。
+	// 不可恢复的那半由 slog.Error 与 /diag 的 audit-write 兜底（都不依赖写库）。
+	AlertKindAuditWriteFail = "audit_write_fail"
 	// AlertKindAuditChain 审计防篡改链周期性自检失败。
 	// ★这条是本组里最该存在的一条：防篡改链没人定期查就等于没有——
 	// 篡改发生到被发现之间的窗口，取决于有没有人手动点那个「校验」按钮。
@@ -153,6 +162,7 @@ const (
 	ThreshSkewSec      = "skewSec"
 	ThreshExpireDays   = "expireDays"
 	ThreshSeatPercent  = "seatPercent"
+	ThreshWithinMin    = "withinMinutes"
 )
 
 // alertKindSpecs 全部规则种类。**新增一项前先回答：它读的那份数据现在真的存在吗？**
@@ -241,6 +251,15 @@ var alertKindSpecs = []AlertKindSpec{
 			"与 GET /api/v1/license 的 usage 同口径；该维不限（0）时不判",
 		Thresholds:  map[string]float64{ThreshSeatPercent: 90},
 		ThresholdZh: map[string]string{ThreshSeatPercent: "占用率提醒（%）"},
+	},
+	{
+		Kind: AlertKindAuditWriteFail, Name: "审计写入失败", Category: AlertCategorySecurity,
+		Severity: AlertSevCritical,
+		Signal: "控制面进程内计数：auditAs/auditBG 调 RecordAudit 返回错误的次数（= 丢失的审计条数）。" +
+			"★不查库——库本身可能就是坏掉的那一环；也正因如此，整盘写满时这条规则自己也产生不出来，" +
+			"那种情况看进程日志与 /diag 的「审计写入链路」",
+		Thresholds:  map[string]float64{ThreshWithinMin: 60},
+		ThresholdZh: map[string]string{ThreshWithinMin: "最近多少分钟内失败才报（分钟）"},
 	},
 	{
 		Kind: AlertKindAuditChain, Name: "审计防篡改链校验失败", Category: AlertCategorySecurity,

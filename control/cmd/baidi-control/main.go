@@ -46,26 +46,8 @@ func main() {
 	// 把留存天数注入展示层：审计页/诊断页显示的就是下面 purge 循环真正消费的这一份，
 	// 不是种子编的 180，也不是 store 里再读一遍环境变量的副本。
 	st.SetAuditRetentionDays(cfg.AuditRetentionDays)
-	// 审计留存轮转：启动时清一次 + 每 24h 清一次超期行。
-	// 清理段末的链锚点由 PurgeExpiredAudit 落 audit_meta，防篡改链不因轮转断裂。
-	if cfg.AuditRetentionDays > 0 {
-		purge := func() {
-			n, perr := st.PurgeExpiredAudit(context.Background(), cfg.AuditRetentionDays)
-			if perr != nil {
-				slog.Error("审计留存轮转失败", "err", perr)
-			} else if n > 0 {
-				slog.Info("审计留存轮转完成", "deleted", n, "retentionDays", cfg.AuditRetentionDays)
-			}
-		}
-		purge()
-		go func() {
-			t := time.NewTicker(24 * time.Hour)
-			defer t.Stop()
-			for range t.C {
-				purge()
-			}
-		}()
-	}
+	// ★审计留存轮转已搬到 srv 之后（srv.StartAuditPurgeLoop）：按磁盘水位的那一半
+	// 要**落审计**，而写审计的能力在 Server 上。
 	// 业务告警留存轮转：启动清一次 + 每 24h 清一次**已处置**的超期行。
 	//
 	// ★没有它这张表就只增不减：多条规则的触发条件是长期成立的（网关持续离线、
@@ -180,6 +162,9 @@ func main() {
 	// ★与告警循环共用 alertCtx 的取消信号（关服时一起停）；在途的那一批发完即止，
 	// 没发完的留在队列里，下次启动继续——这正是持久化队列存在的意义。
 	srv.StartAuditForwardLoop(alertCtx, cfg.AuditForwardInterval)
+	// 审计留存轮转（PRD FR-AUDIT-10）：按保留天数 + 按磁盘水位，启动清一次 + 每 24h 一次。
+	// 清理段末的链锚点由 store 侧共用实现落 audit_meta，防篡改链不因轮转断裂。
+	srv.StartAuditPurgeLoop(alertCtx, cfg.AuditRetentionDays, cfg.AuditMaxDiskPercent)
 	srv.StartExternalRecheckLoop(alertCtx, cfg.ExtRecheckInterval)
 
 	handler := httpx.Chain(srv.Routes(),

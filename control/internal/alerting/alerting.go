@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"baidi.dev/control/internal/store"
 )
@@ -50,6 +51,9 @@ type Snapshot struct {
 	UnlinkedApps    []AppRef
 	Lockouts        []store.Lockout
 	PostureBlocked  []string
+	// AuditWrite 控制面自身的审计写入健康；nil = 调用方没注入（不产生候选）。
+	// ★与其余信号不同，它不是查库得来的——见 store.AlertKindAuditWriteFail 的注释。
+	AuditWrite *AuditWriteStat
 	// AuditChain 审计链自检结论；nil = 本轮没查（存储不支持，或还没到自检周期）。
 	// ★nil 与「查了、没问题」必须区分：把没查当成没问题，正是"防篡改链没人查等于没有"。
 	AuditChain *ChainStatus
@@ -69,6 +73,17 @@ type LicenseStat struct {
 	DaysLeft  int    // 距到期天数（含当日；过期为负）
 	// 占用/上限。上限 0 = 该维不限；占用 -1 = 读不出（不可判定，该维不判）。
 	Users, MaxUsers, Gateways, MaxGateways int
+}
+
+// AuditWriteStat 审计写入失败的累计读数（进程内，重启归零）。
+type AuditWriteStat struct {
+	Failures int64
+	FirstAt  int64
+	LastAt   int64
+	LastErr  string
+	// LastEvent 最近一条没能落库的审计内容，直接进告警正文——
+	// 只报"丢了 3 条"，管理员无从判断该不该启动取证。
+	LastEvent string
 }
 
 // AppRef 一个未关联受控资源的应用。
@@ -114,6 +129,14 @@ func Evaluate(rules []store.AlertRule, snap Snapshot) []Candidate {
 		out = append(out, cs...)
 	}
 	return out
+}
+
+// tsOf Unix 秒转本地时刻文本（告警正文用）；0 回破折号。
+func tsOf(sec int64) string {
+	if sec == 0 {
+		return "—"
+	}
+	return time.Unix(sec, 0).Format("2006-01-02 15:04:05")
 }
 
 // thresh 取规则阈值；规则里没有该键时回落到 kind 的默认值。
@@ -311,6 +334,25 @@ func evalRule(rule store.AlertRule, spec store.AlertKindSpec, snap Snapshot) []C
 		}
 		check("users", l.Users, l.MaxUsers)
 		check("gateways", l.Gateways, l.MaxGateways)
+
+	case store.AlertKindAuditWriteFail:
+		st := snap.AuditWrite
+		if st == nil || st.Failures == 0 {
+			break // 没注入 / 一次都没失败过
+		}
+		// ★时间窗只管"要不要再叫一次"，不改变"已经丢了"这个事实——
+		// 窗口外不报，但 /diag 与审计页上的累计数一直在，直到进程重启。
+		within := int64(thresh(rule, spec, store.ThreshWithinMin) * 60)
+		if within > 0 && snap.Now-st.LastAt > within {
+			break
+		}
+		out = append(out, mk("control-plane",
+			fmt.Sprintf("审计写入失败：已丢失 %d 条记录", st.Failures),
+			fmt.Sprintf("控制面未能把 %d 条审计写入数据库（首次 %s，最近 %s）。"+
+				"这些记录**不在库里**，防篡改链校验查不出它们的缺失——链重算的是已存在行的连续性。"+
+				"最近一次错误：%s。最近一条丢失的记录：%s。"+
+				"完整内容只在进程日志的「审计写入失败」行里，请立即取回并排查磁盘余量与库文件可写性。",
+				st.Failures, tsOf(st.FirstAt), tsOf(st.LastAt), st.LastErr, st.LastEvent)))
 
 	case store.AlertKindAuditChain:
 		st := snap.AuditChain

@@ -14,6 +14,13 @@ type DiskStat struct {
 	UsedPct    int `json:"usedPct"`
 	TotalGB    int `json:"totalGB"`
 	RetainDays int `json:"retainDays"`
+	// ★DBBytes / SelfPct 是**审计库自己**的占用与它占文件系统的比例。
+	// 与 UsedPct（整个文件系统的占用率）必须分开呈现：审计页上只画一个 88%
+	// 会被读成「审计日志吃了 88% 的盘」，而真实情况可能是审计库只有 1.7 MB、
+	// 那 88% 全是别的东西。两者的处置动作也完全不同——前者缩留存，后者清磁盘。
+	// 按水位回收的判据是 SelfPct，理由见 store.PurgeAuditByDisk 的文件头 ①。
+	DBBytes int64 `json:"dbBytes"`
+	SelfPct int   `json:"selfPct"`
 }
 
 // AuditDiskStat 审计存储的实测水位（运维诊断/审计页共用）：
@@ -41,10 +48,13 @@ func (d AuditDiskStat) UsedPct() int {
 
 // ToDiskStat 折算成审计页磁贴的口径（平台不支持容量探测时两项为 0，如实示弱）。
 func (d AuditDiskStat) ToDiskStat() DiskStat {
-	ds := DiskStat{RetainDays: d.RetainDays}
+	ds := DiskStat{RetainDays: d.RetainDays, DBBytes: d.DBBytes}
 	if d.FSSupported {
 		ds.UsedPct = d.UsedPct()
 		ds.TotalGB = int(d.FSTotalBytes >> 30)
+		if d.FSTotalBytes > 0 {
+			ds.SelfPct = int(float64(d.DBBytes)/float64(d.FSTotalBytes)*100 + 0.5)
+		}
 	}
 	return ds
 }
@@ -90,7 +100,7 @@ func (m *Memory) Audit(_ context.Context) (AuditBundle, error) {
 			{Name: "安全事件", Value: 41},
 		},
 		TodayTotal: 2040,
-		Disk:       DiskStat{UsedPct: 62, TotalGB: 512, RetainDays: 180},
+		Disk:       DiskStat{UsedPct: 62, TotalGB: 512, RetainDays: 180, DBBytes: 48 << 20, SelfPct: 0},
 		Logs: []AuditEntry{
 			{Time: "2026-06-22 20:11:03", Category: "access", User: "zhang.wei", SrcIP: "10.8.2.31", Event: "访问 研发 Git 仓库", Verdict: "allow"},
 			{Time: "2026-06-22 20:10:48", Category: "auth", User: "li.fang", SrcIP: "10.8.5.12", Event: "SAML SSO 登录成功", Verdict: "ok"},

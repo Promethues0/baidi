@@ -236,7 +236,13 @@ func (s *SQLiteStore) PurgeExpiredAudit(ctx context.Context, days int) (int64, e
 	if days <= 0 {
 		return 0, nil
 	}
-	cutoff := time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05")
+	return s.purgeAuditBefore(ctx, time.Now().AddDate(0, 0, -days).Format("2006-01-02 15:04:05"))
+}
+
+// purgeAuditBefore 删除 ts < cutoff 的整段并落链锚点（按天留存与按水位轮转共用）。
+// 划界与锚点的理由见 PurgeExpiredAudit 的注释——两条路径必须**共用**这一处实现，
+// 各写一份的话总有一条会忘记落锚点，而症状是 verify 把首条留存行报成篡改。
+func (s *SQLiteStore) purgeAuditBefore(ctx context.Context, cutoff string) (int64, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return 0, err

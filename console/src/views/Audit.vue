@@ -17,6 +17,21 @@
       </div>
     </div>
 
+    <!-- 审计写入失败（wave8 行动 6）：控制面没能把审计写进库。
+         ★这条红条只在真出事时出现（后端零失败即整段不下发），常态零噪声。
+         文案里必须说清"链校验查不出它们"——否则管理员看到防篡改链全绿会以为没事，
+         而链重算的是**已存在行**的连续性，压根没写进去的行不在链上。 -->
+    <div v-if="bundle.writeHealth" class="bd-auditwarn">
+      <icon-close-circle-fill />
+      <span>
+        控制面已有 <b>{{ bundle.writeHealth.failures }}</b> 条审计<b>未能写入数据库</b>（首次
+        {{ tsText(bundle.writeHealth.firstAt) }}，最近 {{ tsText(bundle.writeHealth.lastAt) }}）。
+        这些记录不在库里，防篡改链校验查不出它们的缺失——链重算的是已存在行的连续性。
+        错误：{{ bundle.writeHealth.lastErr }}；最近一条丢失的记录：{{ bundle.writeHealth.lastEvent }}。
+        完整内容只在控制面进程日志的「审计写入失败」行里，请立即取回并排查磁盘余量与库文件可写性。
+      </span>
+    </div>
+
     <!-- P10 聚合头 -->
     <div class="bd-aggrow">
       <!-- 四个分类计数卡 -->
@@ -39,19 +54,24 @@
         <div class="bd-mcard__sub">条 · 较昨日 <span style="color: var(--bd-success)">+6.2%</span></div>
       </div>
 
-      <!-- 磁盘水位卡 -->
+      <!-- 审计库占用卡。★主数是**审计库自己**有多大，不是文件系统占用率——
+           在审计页上画一个「88%」，读到的人会以为是审计日志吃掉的，
+           而这台机器上审计库只有 1.7 MB，那 88% 全是别的东西。
+           两者的处置动作完全不同：前者缩留存，后者清磁盘。 -->
       <div class="bd-card bd-mcard bd-disk">
         <div class="bd-mcard__top">
           <icon-storage class="bd-mcard__ic" />
-          <span class="bd-mcard__label">磁盘水位</span>
-          <span class="bd-disk__tag" :style="{ color: diskColor, background: diskColor + '14' }">{{ diskLabel }}</span>
+          <span class="bd-mcard__label">审计库占用</span>
+          <span class="bd-disk__tag" :style="{ color: diskColor, background: diskColor + '14' }">所在磁盘{{ diskLabel }}</span>
         </div>
         <div class="bd-disk__main">
-          <b :style="{ color: diskColor }">{{ bundle.disk.usedPct }}%</b>
-          <span class="bd-disk__cap">/ {{ bundle.disk.totalGB }} GB</span>
+          <b>{{ dbSize }}</b>
+          <span class="bd-disk__cap">占文件系统 {{ bundle.disk.selfPct }}%</span>
         </div>
         <div class="bd-disk__track"><span class="bd-disk__fill" :style="{ width: bundle.disk.usedPct + '%', background: diskColor }" /></div>
-        <div class="bd-mcard__sub">保留 {{ bundle.disk.retainDays }} 天 · 滚动清理</div>
+        <div class="bd-mcard__sub">
+          所在磁盘已用 {{ bundle.disk.usedPct }}% / {{ bundle.disk.totalGB }} GB · 保留 {{ bundle.disk.retainDays }} 天
+        </div>
       </div>
     </div>
 
@@ -156,7 +176,7 @@ const MOCK: AuditBundle = {
     { name: '安全事件', value: 2360 }
   ],
   todayTotal: 8642,
-  disk: { usedPct: 72, totalGB: 512, retainDays: 90 },
+  disk: { usedPct: 72, totalGB: 512, retainDays: 90, dbBytes: 1.4 * 1024 ** 3, selfPct: 0 },
   logs: [
     { time: '2026-06-22 14:32:08', category: 'access', user: '张伟', srcIp: '192.168.10.24', event: '访问内部应用「OA 协同」', verdict: 'allow' },
     { time: '2026-06-22 14:31:55', category: 'auth', user: '李娜', srcIp: '10.1.2.33', event: '客户端登录 · 设备指纹校验', verdict: 'mfa' },
@@ -172,6 +192,14 @@ const MOCK: AuditBundle = {
 };
 const bundle = ref<AuditBundle>(MOCK);
 
+/* tsText Unix 秒 → 本地时刻；缺席回破折号（0/undefined 都是"没有这个时刻"）。 */
+function tsText(sec?: number) {
+  if (!sec) return '—';
+  const d = new Date(sec * 1000);
+  const p = (n: number) => String(n).padStart(2, '0');
+  return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 /* ── P10 分类卡 ── */
 const CAT_COLOR: Record<string, string> = { '访问决策': '#165DFF', '登录认证': '#722ED1', '管理操作': '#00B42A', '安全事件': '#FF7D00' };
 const catCards = computed(() =>
@@ -179,7 +207,17 @@ const catCards = computed(() =>
 );
 function fmtNum(n: number) { return n.toLocaleString('en-US'); }
 
-/* ── 磁盘水位上色 ── */
+/* dbSize 审计库文件大小（人话）。 */
+const dbSize = computed(() => {
+  const b = bundle.value.disk.dbBytes ?? 0;
+  if (b <= 0) return '—';
+  const u = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let i = 0, v = b;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
+});
+
+/* ── 所在磁盘水位上色（进度条与标签说的都是**文件系统**，不是审计库）── */
 const diskColor = computed(() => {
   const p = bundle.value.disk.usedPct;
   return p >= 80 ? 'var(--bd-danger)' : p >= 60 ? 'var(--bd-warning)' : 'var(--bd-success)';
@@ -355,4 +393,12 @@ onMounted(async () => {
 
 .bd-wfoot { display: flex; align-items: center; gap: 10px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
 .bd-btn[disabled] { cursor: not-allowed; }
+
+/* 审计写入失败红条：出现即代表已经丢了记录，用最强的告警色。 */
+.bd-auditwarn {
+  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; padding: 10px 12px;
+  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
+  color: var(--bd-danger); background: var(--bd-tag-red-bg); border: 1px solid #FFC2C2;
+}
+.bd-auditwarn > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
 </style>

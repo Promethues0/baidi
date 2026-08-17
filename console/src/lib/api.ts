@@ -212,11 +212,25 @@ export interface TrustApproval {
 export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[]; approvals: TrustApproval[] }
 
 /* ── 审计中心（store.AuditBundle）── */
-export interface DiskStat { usedPct: number; totalGB: number; retainDays: number }
+/* DiskStat 审计存储水位。★两个百分比是两件事：
+   usedPct = 整个文件系统的占用率（谁占的都算）；
+   selfPct = **审计库自己**占文件系统的比例（按水位回收的判据）。
+   审计页上只画 usedPct 会被读成「审计日志吃了这么多盘」，而它可能只有几 MB。 */
+export interface DiskStat { usedPct: number; totalGB: number; retainDays: number; dbBytes: number; selfPct: number }
 /** 一条审计记录。★seq/mac 是防篡改链的序号与链式 MAC：列表、CSV 导出、
  *  syslog/SIEM 外送三个出口同源（后端就是同一个 store.AuditEntry）。 */
 export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
-export interface AuditBundle { categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[] }
+/* AuditWriteHealth 控制面**自己**没能把审计写进库的读数（api.auditWriteHealth）。
+   ★零失败时后端整段不下发（omitempty），所以 undefined = 一切正常，不是"取不到"。
+   它挂在**读**响应上是有意的：审计写不进去的时候读路径通常还活着，
+   这一格就是那种状态下唯一还能自曝家丑的地方。 */
+export interface AuditWriteHealth {
+  failures: number; firstAt?: number; lastAt?: number; lastErr?: string; lastEvent?: string;
+}
+export interface AuditBundle {
+  categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[];
+  writeHealth?: AuditWriteHealth;
+}
 
 /* ── License（GET/POST /api/v1/license）──
  * mode: demo=未导入（容量不限，如实标注）| licensed | expired | invalid。

@@ -86,10 +86,10 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 		},
 		s.checkDatabase(ctx),
 		s.checkAuditDisk(ctx),
+		s.checkAuditWrite(),
 		s.checkGateways(),
 		s.checkClockSkew(),
 		s.checkBackendReach(),
-		s.checkNAT(ctx),
 		s.checkNAT(ctx),
 		s.checkStealth(),
 		s.checkCluster(ctx),
@@ -191,8 +191,21 @@ func (s *Server) checkAuditDisk(ctx context.Context) DiagCheck {
 		return c
 	}
 	usedPct := d.UsedPct()
-	c.Metric = fmt.Sprintf("审计 %d 行 · 库文件 %s · 磁盘余 %s / %s（占用 %d%%）· %s",
-		d.Rows, humanBytes(uint64(d.DBBytes)), humanBytes(d.FSFreeBytes), humanBytes(d.FSTotalBytes), usedPct, retain)
+	// ★两个百分比是两件事，必须分开显示：
+	//   「磁盘占用」= 整个文件系统满没满（谁占的都算，扩容/清理由运维决定）；
+	//   「审计自占」= 审计库占了文件系统多大——**按水位回收的判据是后者**，
+	// 因为删审计只能改善后者。混成一个数会让人以为"删日志能救磁盘"。
+	selfPct := 0
+	if d.FSTotalBytes > 0 {
+		selfPct = int(float64(d.DBBytes)/float64(d.FSTotalBytes)*100 + 0.5)
+	}
+	capText := "未配置水位上限"
+	if s.auditMaxDiskPct > 0 {
+		capText = fmt.Sprintf("水位上限 %d%%", s.auditMaxDiskPct)
+	}
+	c.Metric = fmt.Sprintf("审计 %d 行 · 库文件 %s（占文件系统 %d%%，%s）· 磁盘余 %s / %s（占用 %d%%）· %s",
+		d.Rows, humanBytes(uint64(d.DBBytes)), selfPct, capText,
+		humanBytes(d.FSFreeBytes), humanBytes(d.FSTotalBytes), usedPct, retain)
 	switch {
 	case usedPct >= 90:
 		c.Status = "fail"
@@ -202,10 +215,10 @@ func (s *Server) checkAuditDisk(ctx context.Context) DiagCheck {
 		c.Status = "warn"
 		c.Summary = "审计库所在磁盘水位偏高"
 		c.Hint = "关注增长趋势，规划扩容或归档"
-	case d.RetainDays <= 0:
+	case d.RetainDays <= 0 && s.auditMaxDiskPct <= 0:
 		c.Status = "warn"
-		c.Summary = "磁盘水位健康，但未配置审计滚动清理，审计库会无界增长"
-		c.Hint = "设置 BAIDI_AUDIT_RETENTION_DAYS（默认 180）启用超期轮转"
+		c.Summary = "磁盘水位健康，但审计既没有保留天数也没有水位上限，审计库会无界增长"
+		c.Hint = "设置 BAIDI_AUDIT_RETENTION_DAYS（默认 180）或 BAIDI_AUDIT_MAX_DISK_PERCENT 启用轮转"
 	default:
 		c.Status = "pass"
 		c.Summary = "审计日志留存正常，磁盘水位健康"

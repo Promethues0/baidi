@@ -102,6 +102,14 @@ type Server struct {
 	// 逐节点实际阈值 = max(它, 3×备机自报间隔) 并封顶，见 standby.Evaluate。
 	standbyStale time.Duration
 
+	// auditMaxDiskPct 审计磁盘水位上限（BAIDI_AUDIT_MAX_DISK_PERCENT，0=未启用），
+	// 由 StartAuditPurgeLoop 注入——/diag 显示的必须是**轮转循环真正消费的那一份**，
+	// 而不是在展示侧再读一遍环境变量（与 SetAuditRetentionDays 同一条纪律）。
+	auditMaxDiskPct int
+	// auditWrite 审计写入失败的进程内计数（自带锁，见 audit_health.go）。
+	// 刻意不挂在 s.mu 下：那把锁保护网关热数据，两组无关争用不该互相干扰。
+	auditWrite auditWriteTracker
+
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
 	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
@@ -1887,7 +1895,27 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load audit")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, b)
+	// ★writeHealth 挂在**读**响应上是有意的：审计写不进去的时候，读路径通常还活着，
+	// 这一格就是那种状态下唯一还能自曝家丑的地方。健康时（零失败）整段不下发，
+	// 页面上不占位——常态零噪声，出事才现身。
+	httpx.JSON(w, http.StatusOK, auditResponse{AuditBundle: b, WriteHealth: s.auditWriteOrNil()})
+}
+
+// auditResponse 审计首屏 = 原 AuditBundle + 控制面自身的审计写入健康。
+// 用嵌入而不是往 store.AuditBundle 加字段：那是存储层的数据模型，
+// 「本进程写失败了几次」是 api 层的运行态，不该混进去。
+type auditResponse struct {
+	store.AuditBundle
+	WriteHealth *auditWriteHealth `json:"writeHealth,omitempty"`
+}
+
+// auditWriteOrNil 零失败时回 nil（omitempty 整段不下发）。
+func (s *Server) auditWriteOrNil() *auditWriteHealth {
+	h := s.auditWrite.snapshot()
+	if h.Failures == 0 {
+		return nil
+	}
+	return &h
 }
 
 // auditSearcher 审计在线检索能力（SQLiteStore 实现）。

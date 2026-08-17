@@ -3,9 +3,16 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">安全监控大屏</div>
-        <div class="bd-page__sub">三道防线 · 在线会话 · 实时判定态势 · 数据时间 {{ stamp }}</div>
+        <div class="bd-page__sub">三道防线 · 在线会话 · 数据时间 {{ stamp }}</div>
       </div>
       <a-space>
+        <!-- 时间窗：审计派生统计与攻击源共用它。★对账号/终端两条防线不生效，
+             逐卡片标出（见 DefenseLine.scope）——悄悄不生效的筛选比没有更坏。 -->
+        <a-radio-group v-model="hours" type="button" size="small" @change="load">
+          <a-radio :value="24">24 小时</a-radio>
+          <a-radio :value="168">7 天</a-radio>
+          <a-radio :value="720">30 天</a-radio>
+        </a-radio-group>
         <a-tag :color="live ? 'green' : 'orange'" bordered>
           <template #icon><icon-cloud /></template>
           {{ live ? '已连 baidi-control' : '降级演示 · 内置数据' }}
@@ -14,6 +21,12 @@
           <template #icon><icon-refresh /></template>刷新
         </a-button>
       </a-space>
+    </div>
+
+    <!-- 口径说明：后端下发，前端不自己编——它要说清「哪些数按窗口算、
+         哪些是当前状态、实际能回溯多久」，任何一处与后端脱节都会变成误导。 -->
+    <div v-if="ov.windowNote" class="bd-scopebar" :class="{ 'bd-scopebar--warn': ov.truncated }">
+      <icon-info-circle-fill /><span>{{ ov.windowNote }}</span>
     </div>
 
     <!-- KPI 行 -->
@@ -56,6 +69,10 @@
         <a-card class="bd-line" :bordered="false">
           <div class="bd-line__head">
             <span class="bd-line__name">{{ d.name }}</span>
+            <!-- 口径标签：window = 按所选时间窗；current = 当前状态，与时间窗无关。 -->
+            <a-tag size="small" :color="d.scope === 'window' ? 'arcoblue' : 'gray'">
+              {{ d.scope === 'window' ? scopeText : '当前状态' }}
+            </a-tag>
             <a-tag :color="riskColor(d.risk)" size="small">{{ riskLabel(d.risk) }}</a-tag>
           </div>
           <div class="bd-line__risk">
@@ -70,6 +87,7 @@
             </div>
             <div v-if="!d.top.length" class="bd-line__none">暂无风险实体</div>
           </div>
+          <div v-if="d.note" class="bd-line__note">{{ d.note }}</div>
         </a-card>
       </a-grid-item>
     </a-grid>
@@ -96,11 +114,12 @@
       </a-grid-item>
     </a-grid>
 
-    <!-- 攻击源（24h）：数据面拒绝事件的真实聚合（网关心跳上报，attack_sources 表）。
-         后端没有该字段（内存种子模式）就整块不画——绝不造种子攻击。 -->
+    <!-- 攻击源：数据面拒绝事件的真实聚合（网关心跳上报，attack_sources 表）。
+         后端没有该字段（内存种子模式）就整块不画——绝不造种子攻击。
+         ★标题里的窗口跟随选择器：写死「24 小时」而数据按 30 天算，就是又一次口径错标。 -->
     <a-card v-if="ov.attack" class="bd-atk" :bordered="false" style="margin-top: 16px">
       <template #title>
-        SPA 攻击源（24 小时）
+        SPA 攻击源（{{ scopeText.replace('近 ', '') }}）
         <span class="bd-atk__sub">隐身在挡谁——敲门 / 隧道 / Web 三个面的拒绝聚合</span>
       </template>
       <div class="bd-atk__grid">
@@ -126,7 +145,7 @@
             <span class="bd-atk__cat">{{ t2.cat }}</span>
             <span class="bd-atk__cnt">×{{ t2.count }}</span>
           </div>
-          <div v-if="!ov.attack.top.length" class="bd-line__none">24 小时内没有任何拒绝——面上很安静</div>
+          <div v-if="!ov.attack.top.length" class="bd-line__none">{{ scopeText }}内没有任何拒绝——面上很安静</div>
         </div>
       </div>
     </a-card>
@@ -153,10 +172,12 @@ const MOCK: Overview = {
     { name: '允许', value: 1102 }, { name: '二次鉴权', value: 128 },
     { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
   ],
+  windowHours: 24,
+  windowNote: '（降级演示数据）审计派生统计按最近 24 小时聚合；账号与终端两条防线是当前状态，与时间窗无关',
   defense: [
-    { key: 'attack', name: '隐身防线', risk: 28, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'] },
-    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
-    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] }
+    { key: 'attack', name: '隐身防线', risk: 28, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'] , scope: 'window', note: '按所选时间窗聚合' },
+    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] , scope: 'current', note: '当前状态，与所选时间窗无关' },
+    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] , scope: 'current', note: '当前状态，与所选时间窗无关' }
   ],
   attack: {
     sources: 6, denies: 87,
@@ -172,13 +193,21 @@ const ov = ref<Overview>(MOCK);
 const live = ref(false);
 const loading = ref(false);
 
+/* hours 态势统计的时间窗。默认 24h——与改造前"攻击源 24h"那一半口径一致，
+   页面不会在升级那一刻突然换语义。 */
+const hours = ref(24);
+/* scopeText 窗口标签文案（跟随 hours，不写死）。 */
+const scopeText = computed(() =>
+  hours.value >= 720 ? '近 30 天' : hours.value >= 168 ? '近 7 天' : '近 24 小时'
+);
+
 const stamp = computed(() => (ov.value.generatedAt ? ov.value.generatedAt.replace('T', ' ').slice(0, 19) : '—'));
 const threats = computed(() => ov.value.threats.rejected + ov.value.threats.failed + ov.value.threats.secondary);
 const auditMax = computed(() => Math.max(...ov.value.auditByKind.map((b) => b.value), 1));
 const verdictMax = computed(() => Math.max(...ov.value.verdicts.map((b) => b.value), 1));
 
 function pct(v: number, max: number) { return `${Math.round((v / max) * 100)}%`; }
-/** 攻击趋势柱高（相对 24h 内最大桶；零桶给 2px 底线示意"这一小时确实没有"）。 */
+/** 攻击趋势柱高（相对窗口内最大桶；零桶给 2px 底线示意"这一小时确实没有"）。 */
 const atkMax = computed(() => Math.max(...(ov.value.attack?.trend ?? []).map((k) => k.value), 1));
 function colH(v: number) { return v ? `${Math.max(8, Math.round((v / atkMax.value) * 100))}%` : '2px'; }
 function riskColor(r: number) { return r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
@@ -191,7 +220,7 @@ function verdictColor(name: string) {
 async function load() {
   loading.value = true;
   try {
-    ov.value = await api<Overview>('/overview');
+    ov.value = await api<Overview>(`/overview?hours=${hours.value}`);
     live.value = true;
   } catch {
     ov.value = { ...MOCK, generatedAt: new Date().toISOString() };
@@ -254,4 +283,14 @@ onMounted(load);
 .bd-bar__track { flex: 1; height: 10px; background: var(--color-fill-2); border-radius: 6px; overflow: hidden; }
 .bd-bar__fill { display: block; height: 100%; border-radius: 6px; transition: width 0.4s ease; }
 .bd-bar__val { width: 48px; text-align: right; font-size: 13px; font-variant-numeric: tabular-nums; color: var(--color-text-1); }
+
+/* 口径说明条：常态是中性提示，被留存期截断时转警示色。 */
+.bd-scopebar {
+  display: flex; align-items: flex-start; gap: 8px; margin: 12px 0; padding: 9px 12px;
+  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
+  color: var(--bd-t2); background: var(--bd-fill2); border: 1px solid var(--bd-border);
+}
+.bd-scopebar--warn { color: #A8620E; background: #FFF7E8; border-color: #FFD08A; }
+.bd-scopebar > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
+.bd-line__note { margin-top: 8px; font-size: 11.5px; color: var(--bd-t3); line-height: 1.55; }
 </style>

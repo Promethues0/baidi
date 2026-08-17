@@ -202,3 +202,60 @@ func TestDataplaneEventUsesReportedSrcIP(t *testing.T) {
 		t.Fatalf("无来源的回执应回落到请求方地址，得到 %q", p.SrcIP)
 	}
 }
+
+// ── wave8 行动 9：态势总览时间窗的接线断言 ──
+
+// TestOverviewHonorsHoursParam ?hours= 真的传到了 store。
+// ★只测 store 的话，把 handler 里那个查询参数删掉用例照样全绿。
+func TestOverviewHonorsHoursParam(t *testing.T) {
+	h := newTestServer(t)
+	for _, c := range []struct {
+		q    string
+		want float64
+	}{
+		{"", 24},                   // 不传 = 默认 24h
+		{"?hours=168", 168},        // 7 天
+		{"?hours=720", 720},        // 30 天
+		{"?hours=0", 24},           // 0 视为未指定
+		{"?hours=999999", 24 * 90}, // 超上界钳到 90 天
+	} {
+		code, out := doJSON(t, h, "GET", "/api/v1/overview"+c.q, adminToken(), nil)
+		if code != http.StatusOK {
+			t.Fatalf("GET /overview%s = %d", c.q, code)
+		}
+		if got := out["windowHours"].(float64); got != c.want {
+			t.Errorf("%q → windowHours=%v，期望 %v", c.q, got, c.want)
+		}
+		if str(out["windowNote"]) == "" {
+			t.Errorf("%q 缺口径说明——页面无从标注哪些数按窗口算", c.q)
+		}
+	}
+}
+
+// TestOverviewDefenseScopeReachesAPI 防线口径要一路下发到 API。
+func TestOverviewDefenseScopeReachesAPI(t *testing.T) {
+	h := newTestServer(t)
+	_, out := doJSON(t, h, "GET", "/api/v1/overview", adminToken(), nil)
+	lines, _ := out["defense"].([]any)
+	if len(lines) == 0 {
+		t.Fatal("没有防线数据")
+	}
+	seen := map[string]string{}
+	for _, it := range lines {
+		m, _ := it.(map[string]any)
+		seen[str(m["key"])] = str(m["scope"])
+		if str(m["note"]) == "" {
+			t.Errorf("防线 %q 缺口径说明", str(m["key"]))
+		}
+	}
+	if seen["attack"] != "window" {
+		t.Errorf("隐身防线应按窗口算，得到 %q", seen["attack"])
+	}
+	// ★这两条是当前状态。标成 window 的话，管理员切到「近 7 天」会以为看到的是
+	// 七天内的情况，而它们压根没变——悄悄不生效的筛选比没有筛选更坏。
+	for _, k := range []string{"account", "endpoint"} {
+		if seen[k] != "current" {
+			t.Errorf("防线 %q 是当前状态快照，应标 current，得到 %q", k, seen[k])
+		}
+	}
+}

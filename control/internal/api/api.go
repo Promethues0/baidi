@@ -2004,7 +2004,9 @@ func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
-	ov, err := s.store.Overview(r.Context())
+	// 时间窗（?hours=）：审计派生统计与攻击源共用它，钳边界在 store 一处。
+	// 不传就是默认 24h——与改造前"攻击源 24h"那一半口径一致，页面不会突然换语义。
+	ov, err := s.store.Overview(r.Context(), atoiDefault(r.URL.Query().Get("hours"), 0))
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load overview")
 		return

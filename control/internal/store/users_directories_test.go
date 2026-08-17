@@ -109,7 +109,7 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 	st := newAuthSrcStore(t)
 	ctx := context.Background()
 
-	ov, err := st.Overview(ctx)
+	ov, err := st.Overview(ctx, 0)
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
@@ -129,7 +129,7 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 	if _, _, err := st.EnrollDevice(ctx, "li.fang", "fp-3", "ThinkPad", "Windows", DeviceBindApproval); err != nil {
 		t.Fatalf("登记待审批设备失败：%v", err)
 	}
-	ov, err = st.Overview(ctx)
+	ov, err = st.Overview(ctx, 0)
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
@@ -159,7 +159,7 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 	if err := st.RecordAttack(ctx, "gw-1", "203.0.113.9", "knock-token", 12, time.Now().Unix()); err != nil {
 		t.Fatalf("RecordAttack: %v", err)
 	}
-	ov, err = st.Overview(ctx)
+	ov, err = st.Overview(ctx, 0)
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}

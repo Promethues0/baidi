@@ -11,7 +11,7 @@ func TestOverviewUsersFromRealTable(t *testing.T) {
 	st := openTestStore(t)
 	ctx := context.Background()
 
-	ov, err := st.Overview(ctx)
+	ov, err := st.Overview(ctx, 0)
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}
@@ -38,7 +38,7 @@ func TestOverviewAuditAggregatesReal(t *testing.T) {
 	_ = st.RecordAudit(ctx, AuditEntry{Category: "auth", User: "u", Event: "e", Verdict: "fail"})
 	_ = st.RecordAudit(ctx, AuditEntry{Category: "security", User: "u", Event: "e", Verdict: "mfa"})
 
-	ov, err := st.Overview(ctx)
+	ov, err := st.Overview(ctx, 0)
 	if err != nil {
 		t.Fatalf("Overview: %v", err)
 	}

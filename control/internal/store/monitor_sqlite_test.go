@@ -67,7 +67,7 @@ func TestOverviewWithPosture(t *testing.T) {
 	ctx := context.Background()
 	_ = s.SavePostureReport(ctx, PostureReport{User: "li.fang", Device: "DEV-A", Platform: "macOS",
 		Verdict: "block", Score: 25, Level: "high", Reasons: []string{"磁盘已加密"}, TS: time.Now().Unix()})
-	ov, err := s.Overview(ctx)
+	ov, err := s.Overview(ctx, 0)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -6,7 +6,10 @@ import "context"
 
 // Store 控制中心数据访问接口。模块处理器只依赖此接口，便于切换持久化后端。
 type Store interface {
-	Overview(ctx context.Context) (Overview, error)
+	// Overview 态势总览。windowHours 是审计派生统计的时间窗（<=0 取默认 24h）。
+	// ★窗口只对审计派生的那几项生效；账号/终端两条防线是当前状态快照，
+	// 由 DefenseLine.Scope 逐条标出（见那里的注释）。
+	Overview(ctx context.Context, windowHours int) (Overview, error)
 	PolicyBundle(ctx context.Context) (PolicyBundle, error)
 	Apps(ctx context.Context) (AppBundle, error)
 	// AppCategories 应用分类字典（app_categories 表，含各分类下的应用数）。
@@ -112,6 +115,21 @@ type Overview struct {
 	// ★指针：nil = 本后端没有攻击表（Memory 种子模式），前端整块面板不画——
 	// 绝不造种子攻击源，「有没有人在打」这件事只有真实数据有资格回答。
 	Attack *AttackStat `json:"attack,omitempty"`
+	// ── 统计口径（wave8 行动 9）──
+	//
+	// ★这一段存在的理由：改造前同一屏上「威胁事件 N」是**建库以来累计**
+	// （auditAggregates 那两条 SQL 一个 WHERE 都没有），而「攻击源」是**严格 24 小时**，
+	// 标题却写着「实时判定态势」。两个不同口径的数字并排显示、页面一处不标，
+	// 而且 BAIDI_AUDIT_RETENTION_DAYS 轮转一到期，那个累计数还会无缘由地往下掉。
+	//
+	// WindowHours 本次统计的时间窗（小时）。审计派生的那几项（AuditByKind /
+	// Verdicts / Threats / Attack）都按它算，只有一个窗口。
+	WindowHours int `json:"windowHours"`
+	// WindowNote 口径说明，含"实际能覆盖多久"——审计留存期短于所选窗口时，
+	// 数据只能回溯到留存期为止，页面必须说出来而不是让人以为查的是全期。
+	WindowNote string `json:"windowNote"`
+	// Truncated 所选窗口被审计留存期截断了（页面据此加提示）。
+	Truncated bool `json:"truncated"`
 }
 
 // DeviceStat 授信终端台账统计（trusted_devices 真实计数）。
@@ -158,4 +176,53 @@ type DefenseLine struct {
 	Name string   `json:"name"` // 隐身防线 / 账号防线 / 终端防线
 	Risk int      `json:"risk"` // 0-100 风险分（由真实计数粗算，单调可解释，见 riskScore）
 	Top  []string `json:"top"`  // TOP 风险实体（真实账号 / 设备，没有就是空）
+	// Scope 这条防线的数是**窗口内累计**还是**当前状态**（wave8 行动 9）。
+	//
+	// ★三条线里只有隐身防线真的按时间窗算：账号防线读的是 users 表的当前状态
+	// （锁定/禁用是此刻的属性，不是"这段时间内发生过几次"），终端防线读的是
+	// posture_reports 的最新一份（每个 (账号,设备) 只存一行，压根没有历史）。
+	// 时间选择器对后两条**不生效**——不标出来的话，管理员切到「近 7 天」看到的
+	// 是当前状态，却以为那是七天内的情况。**一个悄悄不生效的筛选比没有筛选更坏。**
+	Scope string `json:"scope"` // window | current
+	// Note 口径的人话说明（页面挂在卡片上）。
+	Note string `json:"note"`
+}
+
+// 防线统计口径。
+const (
+	// ScopeWindow 按所选时间窗聚合。
+	ScopeWindow = "window"
+	// ScopeCurrent 当前状态快照，与时间窗无关。
+	ScopeCurrent = "current"
+)
+
+// ── 态势总览的时间窗与 TOP 条数（wave8 行动 9）──
+
+// OverviewTopN 各防线 TOP 风险实体的条数。
+// 3 条太少：一台网关下 3 个攻击源在真实扫描里一分钟就填满，看不出面上的形状。
+const OverviewTopN = 5
+
+// 态势总览时间窗边界（小时）。
+const (
+	DefaultOverviewWindowHours = 24
+	MinOverviewWindowHours     = 1
+	MaxOverviewWindowHours     = 24 * 90
+)
+
+// ClampOverviewWindow 把时间窗钳进 [Min,Max]；<=0（未指定）取默认 24h。
+//
+// ★上界 90 天不是随口定的：审计留存默认 180 天，攻击源小时桶另有留存
+// （BAIDI_ATTACK_RETENTION_DAYS 默认 30）——窗口开得比数据存在的时间还长，
+// 只会得到一个"越往前越少"的假趋势。真实覆盖范围由 Overview.WindowNote 说明。
+func ClampOverviewWindow(h int) int {
+	switch {
+	case h <= 0:
+		return DefaultOverviewWindowHours
+	case h < MinOverviewWindowHours:
+		return MinOverviewWindowHours
+	case h > MaxOverviewWindowHours:
+		return MaxOverviewWindowHours
+	default:
+		return h
+	}
 }

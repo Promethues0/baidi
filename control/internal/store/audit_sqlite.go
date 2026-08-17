@@ -123,6 +123,13 @@ func (s *SQLiteStore) RecordAudit(ctx context.Context, e AuditEntry) error {
 	if err != nil {
 		return err
 	}
+	// ★时刻缺失就补服务端当前时间。空 ts 是一种很坏的行：它对**所有按时间窗的查询**
+	// 不可见（`ts >= cutoff` 恒假），却会被留存轮转删掉（`ts < cutoff` 恒真）——
+	// 也就是"查不到但会消失"。自 wave8 行动 9 起态势总览按窗口聚合，这条路径必须堵上。
+	// 补的是落库时刻而不是拒绝写入：审计是 best-effort 通道，宁可时间略有偏差也不能丢记录。
+	if strings.TrimSpace(e.Time) == "" {
+		e.Time = time.Now().Format("2006-01-02 15:04:05")
+	}
 	e.Seq = prevSeq + 1
 	e.MAC = auditMAC(s.auditKey, prevMac, e.Time, e.Category, e.User, e.SrcIP, e.Event, e.Verdict)
 	res, err := tx.ExecContext(ctx,

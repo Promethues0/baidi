@@ -46,7 +46,16 @@ async function errText(res: Response): Promise<string> {
 /* ── 与 baidi-control internal/store.Overview 同构 ── */
 export interface KV { name: string; value: number }
 /** 三道防线之一。刻意没有 trend：趋势要有历史快照才算得出来，后端一张历史态势表都没有。 */
-export interface DefenseLine { key: string; name: string; risk: number; top: string[] }
+export interface DefenseLine {
+  key: string; name: string; risk: number; top: string[];
+  /** scope 这条防线的数是**窗口内累计**（window）还是**当前状态**（current）。
+   *  ★三条线里只有隐身防线真按时间窗算：账号防线读 users 表的当前状态，
+   *  终端防线读 posture_reports 的最新一份（压根没有历史）。时间选择器对后两条
+   *  不生效——不标出来的话，切到「近 7 天」看到的是当前状态却以为是七天内的情况。
+   *  一个悄悄不生效的筛选比没有筛选更坏。 */
+  scope?: 'window' | 'current';
+  note?: string;
+}
 /** 近 24h 攻击源统计（数据面拒绝事件的聚合，attack_sources 表）。
  *  trend 的 0 是真实的「这一小时没有拒绝」——与设备指标的 NULL 语义不同。 */
 export interface AttackStat {
@@ -67,6 +76,14 @@ export interface Overview {
   defense: DefenseLine[];
   /** 缺席 = 后端没有攻击表（内存种子模式），整块面板不画。 */
   attack?: AttackStat;
+  /** 审计派生统计（访问决策/判定分布/威胁事件/攻击源）的时间窗（小时）。
+   *  ★改造前它们是**建库以来累计**，而攻击源是严格 24h，两个口径并排显示在
+   *  标着「实时判定态势」的同一屏上，页面一处不标。 */
+  windowHours?: number;
+  /** 口径说明（含"实际能覆盖多久"）。 */
+  windowNote?: string;
+  /** 所选窗口被审计留存期截断了（页面据此加提示）。 */
+  truncated?: boolean;
 }
 
 /* ── 与 store.PolicyBundle 同构（策略继承树） ── */

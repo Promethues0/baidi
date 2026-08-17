@@ -22,9 +22,11 @@ import (
 //   - Defense  → 设备线取台账、账号线取 users + posture、终端线取 posture
 //
 // 数据源为空时给出的是 0 与空列表——那是"确实没有"，不是"暂时先显示个数"。
-func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
+func (s *SQLiteStore) Overview(ctx context.Context, windowHours int) (Overview, error) {
+	windowHours = ClampOverviewWindow(windowHours)
 	ov := Overview{
 		GeneratedAt: time.Now().Format(time.RFC3339),
+		WindowHours: windowHours,
 		AuditByKind: []KV{},
 		Verdicts:    []KV{},
 		Defense:     []DefenseLine{},
@@ -51,13 +53,13 @@ func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
 		case "locked":
 			ov.Users.Locked++
 		}
-		if u.Risk == "high" && len(highRisk) < 3 {
+		if u.Risk == "high" && len(highRisk) < OverviewTopN {
 			highRisk = append(highRisk, u.Account)
 		}
 	}
 
 	// 3) 审计分类 / 判定 / 威胁：真实 audit_log 聚合
-	byCat, byVerdict, err := s.auditAggregates(ctx)
+	byCat, byVerdict, err := s.auditAggregates(ctx, windowHours)
 	if err != nil {
 		return Overview{}, err
 	}
@@ -90,37 +92,76 @@ func (s *SQLiteStore) Overview(ctx context.Context) (Overview, error) {
 		seen[a] = true
 	}
 	for _, a := range epTop {
-		if !seen[a] && len(acctTop) < 3 {
+		if !seen[a] && len(acctTop) < OverviewTopN {
 			acctTop = append(acctTop, a)
 			seen[a] = true
 		}
 	}
 
-	// 5) 攻击源统计（wave7 行动 5）：数据面拒绝事件的 24h 聚合。
+	// 5) 攻击源统计（wave7 行动 5）：数据面拒绝事件的聚合，**与审计派生统计同一个窗口**。
+	//    此前这里写死 24——于是同一屏上两个数字口径不同且都不标（wave8 行动 9 修）。
 	// 第一格防线从「设备台账顶包」换成它——SPA 隐身在挡谁，这里是唯一能回答的地方。
-	atk, err := s.AttackStats(ctx, 24)
+	atk, err := s.AttackStats(ctx, windowHours)
 	if err != nil {
 		return Overview{}, err
 	}
 	ov.Attack = &atk
 	atkTop := []string{}
 	for _, t := range atk.Top {
-		if len(atkTop) >= 3 {
+		if len(atkTop) >= OverviewTopN {
 			break
 		}
 		atkTop = append(atkTop, fmt.Sprintf("%s · %s ×%d", t.IP, t.Cat, t.Count))
 	}
 	_ = devTop // 设备台账 TOP 不再上第一格防线（台账数字仍在 ov.Devices）
 
+	// ★三条防线的口径**不一样**，必须逐条标出来（Scope）：
+	// 只有隐身防线真按时间窗算；账号防线读 users 表的当前状态（"锁定/禁用"是此刻的
+	// 属性，不是"这段时间内发生过几次"）；终端防线读 posture_reports 的最新一份
+	// （每个 (账号,设备) 只存一行，压根没有历史）。时间选择器对后两条不生效——
+	// 不标的话，切到「近 7 天」看到的是当前状态，却以为那是七天内的情况。
 	ov.Defense = []DefenseLine{
-		// 隐身防线：24h 内被网关拒之门外的来源（敲门/隧道/L7 三个面）。
+		// 隐身防线：窗口内被网关拒之门外的来源（敲门/隧道/L7 三个面）。
 		// 风险分口径：来源数是主信号（多来源=面上有扫描），总量是次信号。
-		{Key: "attack", Name: "隐身防线", Risk: riskScore(atk.Sources, atk.Denies/50), Top: atkTop},
-		{Key: "account", Name: "账号防线", Risk: riskScore(ov.Users.Locked+ov.Users.Disabled, len(highRisk)), Top: acctTop},
+		{Key: "attack", Name: "隐身防线", Risk: riskScore(atk.Sources, atk.Denies/50), Top: atkTop,
+			Scope: ScopeWindow, Note: "按所选时间窗聚合数据面拒绝事件（attack_sources 小时桶）"},
+		{Key: "account", Name: "账号防线", Risk: riskScore(ov.Users.Locked+ov.Users.Disabled, len(highRisk)), Top: acctTop,
+			Scope: ScopeCurrent, Note: "当前状态：此刻处于锁定/禁用的账号数，与所选时间窗无关"},
 		// 终端防线的分值直接用最差 posture 报告的真实分（不再二次加工）。
-		{Key: "endpoint", Name: "终端防线", Risk: epRisk, Top: epTop},
+		{Key: "endpoint", Name: "终端防线", Risk: epRisk, Top: epTop,
+			Scope: ScopeCurrent, Note: "当前状态：posture_reports 每个 (账号,设备) 只存最新一份，" +
+				"没有历史可回溯，与所选时间窗无关"},
 	}
+	ov.WindowNote, ov.Truncated = s.overviewWindowNote(windowHours)
 	return ov, nil
+}
+
+// overviewWindowNote 口径说明 + 是否被审计留存期截断。
+//
+// ★留存期短于所选窗口时，审计派生的数只能回溯到留存期为止。不说的话，
+// 选「近 30 天」而留存 7 天，看到的是 7 天的数却以为是 30 天的——
+// 与「设备状态时间窗按 metricsRetentionHours 截断」同一条纪律。
+func (s *SQLiteStore) overviewWindowNote(windowHours int) (string, bool) {
+	base := fmt.Sprintf("审计派生统计（访问决策/判定分布/威胁事件/攻击源）按最近 %s聚合；"+
+		"设备与用户台账、账号与终端两条防线是当前状态，与时间窗无关", humanWindow(windowHours))
+	retainH := s.auditRetainDays * 24
+	if s.auditRetainDays > 0 && retainH < windowHours {
+		return base + fmt.Sprintf("。★审计留存期只有 %d 天，本窗口内早于留存期的记录已被轮转清理，"+
+			"实际只覆盖最近 %d 天", s.auditRetainDays, s.auditRetainDays), true
+	}
+	return base, false
+}
+
+// humanWindow 时间窗的人话形式。
+//
+// ★措辞必须与页面上的时间选择器逐字一致（「24 小时 / 7 天 / 30 天」）：
+// 口径说明里冒出「1 周」或「1 天」，会让人以为那是**另一个**窗口。
+// 同一件事只能有一个名字——不满 48 小时说小时，其余整天说天。
+func humanWindow(h int) string {
+	if h >= 48 && h%24 == 0 {
+		return fmt.Sprintf("%d 天", h/24)
+	}
+	return fmt.Sprintf("%d 小时", h)
 }
 
 // deviceStat 授信终端台账统计 + 设备防线 TOP。
@@ -162,7 +203,7 @@ func (s *SQLiteStore) deviceStat(ctx context.Context) (DeviceStat, []string, err
 	top := []string{}
 	trows, err := s.db.QueryContext(ctx,
 		`SELECT account, COALESCE(NULLIF(name,''),fingerprint) FROM trusted_devices
-		 WHERE status<>? ORDER BY last_seen DESC, id LIMIT 3`, DeviceStatusTrusted)
+		 WHERE status<>? ORDER BY last_seen DESC, id LIMIT 5`, DeviceStatusTrusted)
 	if err != nil {
 		return DeviceStat{}, nil, err
 	}
@@ -196,7 +237,7 @@ func (s *SQLiteStore) postureDefense(ctx context.Context) ([]string, int, error)
 	top := []string{}
 	risk := 0
 	for _, r := range worstUser {
-		if (r.Verdict == DisposalBlock || r.Level == "high") && len(top) < 3 {
+		if (r.Verdict == DisposalBlock || r.Level == "high") && len(top) < OverviewTopN {
 			top = append(top, r.User)
 		}
 		if r.Score > risk {
@@ -206,18 +247,25 @@ func (s *SQLiteStore) postureDefense(ctx context.Context) ([]string, int, error)
 	return top, risk, nil
 }
 
-// auditAggregates 返回 audit_log 按 category 与 verdict 的全表计数。
-func (s *SQLiteStore) auditAggregates(ctx context.Context) (byCat, byVerdict map[string]int, err error) {
+// auditAggregates 返回 audit_log 在 windowHours 窗口内按 category 与 verdict 的计数。
+//
+// ★此前这两条 SQL **一个 WHERE 都没有**，是建库以来的累计，却与严格 24h 的攻击源
+// 并排显示在标着「实时判定态势」的同一屏上。而且 BAIDI_AUDIT_RETENTION_DAYS
+// 轮转一到期，那个"累计"还会无缘由地往下掉——看的人无从知道是威胁少了还是日志被清了。
+func (s *SQLiteStore) auditAggregates(ctx context.Context, windowHours int) (byCat, byVerdict map[string]int, err error) {
 	byCat, byVerdict = map[string]int{}, map[string]int{}
-	if err = scanCounts(ctx, s, `SELECT category, COUNT(*) FROM audit_log GROUP BY category`, byCat); err != nil {
+	cutoff := time.Now().Add(-time.Duration(windowHours) * time.Hour).Format("2006-01-02 15:04:05")
+	if err = scanCounts(ctx, s, `SELECT category, COUNT(*) FROM audit_log WHERE ts >= ? GROUP BY category`,
+		byCat, cutoff); err != nil {
 		return
 	}
-	err = scanCounts(ctx, s, `SELECT verdict, COUNT(*) FROM audit_log GROUP BY verdict`, byVerdict)
+	err = scanCounts(ctx, s, `SELECT verdict, COUNT(*) FROM audit_log WHERE ts >= ? GROUP BY verdict`,
+		byVerdict, cutoff)
 	return
 }
 
-func scanCounts(ctx context.Context, s *SQLiteStore, q string, into map[string]int) error {
-	rows, err := s.db.QueryContext(ctx, q)
+func scanCounts(ctx context.Context, s *SQLiteStore, q string, into map[string]int, args ...any) error {
+	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
 	}

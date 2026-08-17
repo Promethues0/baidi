@@ -473,7 +473,9 @@ func (s *Server) checkPosture(ctx context.Context) DiagCheck {
 		c.Hint = "以 SQLite 持久化启动控制面后重新体检"
 		return c
 	}
-	ov, err := s.store.Overview(ctx)
+	// 体检用默认窗口（24h）：这项看的是"此刻的访问威胁压力"，
+	// 不该随管理员在概览页上选的窗口变化。
+	ov, err := s.store.Overview(ctx, 0)
 	if err != nil {
 		c.Status, c.Metric = "warn", "—"
 		c.Summary = "态势数据读取失败"

@@ -675,13 +675,29 @@ export interface GatewayReg { id: string; proxy: string; spa: string; lastSeen: 
 export interface GatewaysResp { gateways: GatewayReg[] }
 
 /* ── 监控中心 · 在线用户（store.OnlineSession）── */
+/** 一条真实接入会话。**唯一来源**是网关注册心跳里的 sessions。
+ *
+ *  ★网关按会话上报的只有 {IP, 账号, 角色, 建立时刻}。此前这里还有
+ *  location / device / os / app 四个字段，由后端逐条填 "—"，页面上并排渲染成四列
+ *  永远空着的表头；而「异地·公网接入」KPI 与筛选页签因此**结构性恒为 0**。
+ *  四个字段连同那个 KPI 已整体删除——白帝没有 GeoIP 库，网关也不按会话上报
+ *  设备与当前应用。org / trust / risk 三格改由控制面按账号从库里现取真值。 */
 export interface OnlineSession {
   id: string; user: string; account: string; org: string;
-  ip: string; location: string; device: string; os: string;
-  auth: string; app: string; gateway: string;
+  ip: string;
+  /** 接入方式（恒为「SPA 敲门 + 隧道」）。**不是**登录因子：那发生在控制面登录时，
+   *  与这条隧道会话不同源，网关也无从得知。 */
+  auth: string; gateway: string;
   loginAt: string; duration: string;
+  /** 该**账号**名下终端的授信态（会话上报里没有设备指纹，定位不到具体哪一台）。
+   *  一台都没登记 = unknown，不是 trusted。 */
   trust: 'trusted' | 'untrusted' | 'unknown';
-  risk: 'none' | 'low' | 'high';
+  /** 该账号的终端合规风险档，判据是 posture 跨设备最差判定（与降权/阻断同一份）。
+   *  从未上报 = unknown。 */
+  risk: 'none' | 'low' | 'high' | 'unknown';
+  /** 上面两个结论的依据，页面挂 title。只给结论不给依据，管理员没法判断该不该处置。 */
+  trustNote?: string;
+  riskNote?: string;
   status: 'online' | 'offline';
   kickReason?: string;
 }

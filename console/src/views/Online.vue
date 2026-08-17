@@ -35,11 +35,15 @@
           <div class="bd-kpi__foot">risk = high · 建议优先处置</div>
         </a-card>
       </a-grid-item>
+      <!-- ★这一格原来是「异地·公网接入」，判据是 location 含「异地」或「公网」——
+           而 location 对每条真实会话恒为 "—"，于是它**结构性恒为 0**、筛选页签永远空。
+           一个永远匹配不到东西的筛选比没有筛选更坏：它让人以为「查过了，没有异地接入」。
+           白帝没有 GeoIP 库（SCOPE 也不打算做），故整格换成一个真有数的读数。 -->
       <a-grid-item>
-        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'geo' }" :bordered="false" hoverable @click="setFilter('geo')">
-          <div class="bd-kpi__label">异地·公网接入</div>
-          <div class="bd-kpi__value" :style="{ color: C.warning }">{{ geoCount }}</div>
-          <div class="bd-kpi__foot">非常用地点 / 公网来源</div>
+        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'unknown' }" :bordered="false" hoverable @click="setFilter('unknown')">
+          <div class="bd-kpi__label">风险不可判定</div>
+          <div class="bd-kpi__value" :style="{ color: C.warning }">{{ unknownCount }}</div>
+          <div class="bd-kpi__foot">未登记终端 / 从未上报环境</div>
         </a-card>
       </a-grid-item>
       <a-grid-item>
@@ -59,7 +63,7 @@
           <a-radio value="all">全部</a-radio>
           <a-radio value="high">高风险</a-radio>
           <a-radio value="untrusted">未授信</a-radio>
-          <a-radio value="geo">异地公网</a-radio>
+          <a-radio value="unknown">不可判定</a-radio>
         </a-radio-group>
         <div style="flex: 1" />
         <div class="bd-searchbox" style="width: 260px">
@@ -71,12 +75,15 @@
       <table class="bd-table">
         <thead>
           <tr>
+            <!-- ★删掉了「接入地点 / 终端 / 当前应用」三列：网关按会话上报的只有
+                 {IP, 账号, 角色, 建立时刻}，这三格此前对每条真实会话都渲染成 "—"。
+                 三列永远空着的表头不是"暂无数据"，是在暗示这些维度存在而恰好没取到。
+                 「认证方式」同理改名为「接入方式」：会话经 SPA 敲门 + 隧道建立是它唯一
+                 确定的事实，登录因子（口令/MFA/证书）发生在控制面登录时，网关不知道。 -->
             <th>用户</th>
             <th>组织</th>
-            <th>接入地点</th>
-            <th>终端</th>
-            <th>认证方式</th>
-            <th>当前应用</th>
+            <th>来源 IP</th>
+            <th>接入方式</th>
             <th>网关</th>
             <th>在线时长</th>
             <th>信任 &amp; 风险</th>
@@ -95,24 +102,20 @@
               </div>
             </td>
             <td>{{ s.org || '—' }}</td>
-            <td>
-              <div><span class="bd-mono">{{ s.ip }}</span></div>
-              <div class="bd-cellsub" :style="isRemote(s.location) ? { color: C.warning } : {}">{{ s.location }}</div>
-            </td>
-            <td>
-              <div>{{ s.device }}</div>
-              <div class="bd-cellsub">{{ s.os }}</div>
-            </td>
+            <td><span class="bd-mono">{{ s.ip }}</span></td>
             <td>{{ s.auth }}</td>
-            <td>{{ s.app || '—' }}</td>
             <td><span class="bd-mono">{{ s.gateway }}</span></td>
             <td>
               <div class="bd-cellsub">{{ loginStamp(s.loginAt) }} 起</div>
               <div>· {{ s.duration }}</div>
             </td>
             <td>
-              <span class="bd-tg" :style="tagStyle(trustColor(s.trust))">{{ trustLabel(s.trust) }}</span>
-              <span v-if="s.risk !== 'none'" class="bd-tg" :style="[tagStyle(riskColor(s.risk)), { marginLeft: '6px' }]">{{ riskLabel(s.risk) }}</span>
+              <!-- ★依据挂 title：这两格是**账号级**结论（会话上报里没有设备指纹），
+                   只给结论不给依据，管理员没法判断该不该处置。
+                   ★risk=unknown 也必须显示——此前只在 risk!=='none' 时渲染，
+                   于是「不可判定」与「无风险」在页面上长得一模一样。 -->
+              <span class="bd-tg" :style="tagStyle(trustColor(s.trust))" :title="s.trustNote">{{ trustLabel(s.trust) }}</span>
+              <span v-if="s.risk !== 'none'" class="bd-tg" :style="[tagStyle(riskColor(s.risk)), { marginLeft: '6px' }]" :title="s.riskNote">{{ riskLabel(s.risk) }}</span>
             </td>
             <td class="r">
               <template v-if="s.status === 'online'">
@@ -146,7 +149,7 @@ import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type OnlineSession, type OnlineResp } from '@/lib/api';
 
-type Filter = 'all' | 'high' | 'untrusted' | 'geo';
+type Filter = 'all' | 'high' | 'untrusted' | 'unknown';
 
 const C = {
   brand: '#165DFF',
@@ -159,17 +162,20 @@ const C = {
 
 const PALETTE = [C.brand, C.success, C.warning, C.danger, C.purple, '#0FC6C2'];
 
+// 降级演示数据（仅在**连不上后端**时渲染，页头会打「降级演示」标）。
+// 字段与真实响应同构：location/device/os/app 四列已随后端一并删除——
+// 演示数据比真实响应多几列的话，页面会按演示数据的形状设计，而真机上那几列永远空着。
 const MOCK: OnlineResp = {
   generatedAt: '2026-06-24T10:42:18',
   sessions: [
-    { id: 'sess-1001', user: '李明', account: 'li.ming', org: '研发中心 / 平台组', ip: '10.20.3.14', location: '杭州 · 内网', device: 'MacBook Pro', os: 'macOS 15.4', auth: '口令 + 短信', app: 'OA 协同办公', gateway: 'gw-hz-01', loginAt: '2026-06-24T08:55:02', duration: '1h47m', trust: 'trusted', risk: 'none', status: 'online' },
-    { id: 'sess-1002', user: '赵磊', account: 'waibao-zhao', org: '外包 / 实施', ip: '203.0.113.77', location: '上海 · 公网（异地）', device: 'Surface Laptop', os: 'Windows 11', auth: '口令', app: '运维堡垒机', gateway: 'gw-sh-02', loginAt: '2026-06-24T10:31:40', duration: '10m', trust: 'untrusted', risk: 'high', status: 'online' },
-    { id: 'sess-1003', user: '王芳', account: 'wang.fang', org: '财务部', ip: '10.20.5.31', location: '杭州 · 内网', device: 'ThinkPad X1', os: 'Windows 11', auth: '口令 + UKey', app: '财务核算系统', gateway: 'gw-hz-01', loginAt: '2026-06-24T09:12:55', duration: '1h29m', trust: 'trusted', risk: 'low', status: 'online' },
-    { id: 'sess-1004', user: '陈晨', account: 'chen.chen', org: '研发中心 / 算法组', ip: '198.51.100.22', location: '深圳 · 公网（异地）', device: 'iPad Air', os: 'iPadOS 18', auth: '口令', app: '代码评审平台', gateway: 'gw-sz-03', loginAt: '2026-06-24T10:05:11', duration: '37m', trust: 'unknown', risk: 'high', status: 'online' },
-    { id: 'sess-1005', user: '孙倩', account: 'sun.qian', org: '市场部', ip: '10.20.8.66', location: '杭州 · 内网', device: 'HUAWEI MateBook', os: 'Windows 11', auth: '口令 + 短信', app: 'CRM 客户管理', gateway: 'gw-hz-01', loginAt: '2026-06-24T08:30:19', duration: '2h11m', trust: 'trusted', risk: 'none', status: 'online' },
-    { id: 'sess-1006', user: '周强', account: 'zhou.qiang', org: '研发中心 / 测试组', ip: '172.16.4.9', location: '北京 · 分支专线', device: 'Android Phone', os: 'Android 14', auth: '口令', app: '缺陷跟踪系统', gateway: 'gw-bj-04', loginAt: '2026-06-24T10:38:02', duration: '4m', trust: 'untrusted', risk: 'low', status: 'online' },
-    { id: 'sess-1007', user: '吴霜', account: 'wu.shuang', org: '人力资源部', ip: '203.0.113.140', location: '广州 · 公网（异地）', device: 'iPhone 15', os: 'iOS 18.3', auth: '口令 + 短信', app: 'HR 自助门户', gateway: 'gw-gz-05', loginAt: '2026-06-24T09:48:27', duration: '53m', trust: 'unknown', risk: 'none', status: 'online' },
-    { id: 'sess-1008', user: '郑昊', account: 'svc-bot-04', org: '系统 / 服务账号', ip: '10.20.1.200', location: '杭州 · 内网', device: 'Linux Host', os: 'Ubuntu 24.04', auth: '证书', app: '数据同步服务', gateway: 'gw-hz-01', loginAt: '2026-06-24T07:10:00', duration: '—', trust: 'trusted', risk: 'none', status: 'offline', kickReason: '管理员手动下线 · 09:55' }
+    { id: 'sess-1001', user: '李明', account: 'li.ming', org: '研发中心 / 平台组', ip: '10.20.3.14', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T08:55:02', duration: '1h47m', trust: 'trusted', risk: 'none', trustNote: '该账号名下 2 台终端：2 台已授信', riskNote: '终端合规判定 allow：无失败项', status: 'online' },
+    { id: 'sess-1002', user: '赵磊', account: 'waibao-zhao', org: '外包 / 实施', ip: '203.0.113.77', auth: 'SPA 敲门 + 隧道', gateway: 'gw-sh-02', loginAt: '2026-06-24T10:31:40', duration: '10m', trust: 'untrusted', risk: 'high', trustNote: '该账号名下 1 台终端：1 台已吊销', riskNote: '终端合规判定 block（已拒发敲门令牌 / 撤窗断隧道）：磁盘已加密 未通过', status: 'online' },
+    { id: 'sess-1003', user: '王芳', account: 'wang.fang', org: '财务部', ip: '10.20.5.31', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T09:12:55', duration: '1h29m', trust: 'trusted', risk: 'low', trustNote: '该账号名下 1 台终端：1 台已授信', riskNote: '终端合规判定 gray（观察中，访问权未变更）：EDR 终端防护在线 未通过', status: 'online' },
+    { id: 'sess-1004', user: '陈晨', account: 'chen.chen', org: '研发中心 / 算法组', ip: '198.51.100.22', auth: 'SPA 敲门 + 隧道', gateway: 'gw-sz-03', loginAt: '2026-06-24T10:05:11', duration: '37m', trust: 'unknown', risk: 'unknown', trustNote: '该账号名下没有任何已登记终端', riskNote: '该账号从未上报过终端环境（observe 模式下仍可接入）', status: 'online' },
+    { id: 'sess-1005', user: '孙倩', account: 'sun.qian', org: '市场部', ip: '10.20.8.66', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T08:30:19', duration: '2h11m', trust: 'trusted', risk: 'none', status: 'online' },
+    { id: 'sess-1006', user: '周强', account: 'zhou.qiang', org: '研发中心 / 测试组', ip: '172.16.4.9', auth: 'SPA 敲门 + 隧道', gateway: 'gw-bj-04', loginAt: '2026-06-24T10:38:02', duration: '4m', trust: 'untrusted', risk: 'low', trustNote: '该账号名下 2 台终端：1 台已授信 / 1 台待审批', status: 'online' },
+    { id: 'sess-1007', user: '吴霜', account: 'wu.shuang', org: '人力资源部', ip: '203.0.113.140', auth: 'SPA 敲门 + 隧道', gateway: 'gw-gz-05', loginAt: '2026-06-24T09:48:27', duration: '53m', trust: 'unknown', risk: 'unknown', status: 'online' },
+    { id: 'sess-1008', user: '郑昊', account: 'svc-bot-04', org: '系统 / 服务账号', ip: '10.20.1.200', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T07:10:00', duration: '—', trust: 'trusted', risk: 'none', status: 'offline', kickReason: '管理员手动下线 · 09:55' }
   ]
 };
 
@@ -182,23 +188,23 @@ const keyword = ref<string>('');
 
 const stamp = computed<string>(() => (generatedAt.value ? generatedAt.value.replace('T', ' ').slice(0, 19) : '—'));
 
-function isRemote(loc: string): boolean {
-  return loc.includes('异地') || loc.includes('公网');
-}
-
 const onlineCount = computed<number>(() => sessions.value.filter((s) => s.status === 'online').length);
 const highCount = computed<number>(() => sessions.value.filter((s) => s.risk === 'high').length);
-const geoCount = computed<number>(() => sessions.value.filter((s) => isRemote(s.location)).length);
 const untrustedCount = computed<number>(() => sessions.value.filter((s) => s.trust === 'untrusted').length);
+/** 风险不可判定：账号一台终端都没登记，或从未上报过终端环境。
+ *  ★这两种恰恰是 observe 准入模式下最常见的形态——他们照样能接入，而控制面对他们
+ *  的终端一无所知。此前这一格显示成「授信 / 无风险」，等于替一台完全未知的机器背书。 */
+const unknownCount = computed<number>(() =>
+  sessions.value.filter((s) => s.trust === 'unknown' || s.risk === 'unknown').length);
 
 const shown = computed<OnlineSession[]>(() => {
   const kw = keyword.value.trim().toLowerCase();
   return sessions.value.filter((s) => {
     if (filter.value === 'high' && s.risk !== 'high') return false;
     if (filter.value === 'untrusted' && s.trust !== 'untrusted') return false;
-    if (filter.value === 'geo' && !isRemote(s.location)) return false;
+    if (filter.value === 'unknown' && s.trust !== 'unknown' && s.risk !== 'unknown') return false;
     if (kw) {
-      const hay = `${s.user} ${s.account} ${s.ip} ${s.app}`.toLowerCase();
+      const hay = `${s.user} ${s.account} ${s.ip} ${s.gateway}`.toLowerCase();
       if (!hay.includes(kw)) return false;
     }
     return true;
@@ -224,13 +230,15 @@ function trustColor(t: OnlineSession['trust']): string {
   return t === 'trusted' ? C.success : t === 'untrusted' ? C.danger : C.grey;
 }
 function trustLabel(t: OnlineSession['trust']): string {
-  return t === 'trusted' ? '已授信' : t === 'untrusted' ? '未授信' : '未知';
+  return t === 'trusted' ? '已授信' : t === 'untrusted' ? '未授信' : '终端不可判定';
 }
+/** ★unknown 用灰色而不是橙色：它不是"低风险"，是"我们不知道"。
+ *  用暖色会让人以为已经评估过、只是不严重。 */
 function riskColor(r: OnlineSession['risk']): string {
-  return r === 'high' ? C.danger : C.warning;
+  return r === 'high' ? C.danger : r === 'unknown' ? C.grey : C.warning;
 }
 function riskLabel(r: OnlineSession['risk']): string {
-  return r === 'high' ? '高风险' : '低风险';
+  return r === 'high' ? '高风险' : r === 'unknown' ? '风险不可判定' : '低风险';
 }
 function loginStamp(t: string): string {
   return t ? t.replace('T', ' ').slice(11, 16) : '—';

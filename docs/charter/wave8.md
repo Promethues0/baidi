@@ -66,7 +66,10 @@
 
 ### 第二梯队：监控与留痕正在替坏状态背书
 
-**5. 在线用户页脱壳（FR-MON-10/12/04）— S**
+**5. 在线用户页脱壳（FR-MON-10/12/04）— S ✅ 已落地**
+- 落地记（2026-08-17）：`api.enrichSessions` 按账号真取数——`Org` 取 `DirUser.Org`、`Trust` 按 `trusted_devices` 聚合、`Risk` 取 `PostureVerdict` 的跨设备最差判定（与降权/撤销名单同一份）。**unknown 是一等取值**：一台终端都没登记 → trust=unknown，从未上报环境 → risk=unknown，页面用灰色而不是暖色（它不是「低风险」，是「我们不知道」）。结论必带依据（`trustNote`/`riskNote` 挂 title），因为这三格是**账号级**的——会话上报里没有设备指纹。
+- 顺带删掉四个没有来源的字段（`Location`/`Device`/`OS`/`App`）与「异地·公网接入」KPI + 筛选页签：判据是 `location` 含「异地」或「公网」，而它永远是破折号，于是**结构性恒为 0**。一个永远匹配不到东西的筛选比没有筛选更坏——它让人以为「查过了，没有异地接入」。换成「风险不可判定」。大屏「接入来源 TOP 地域」同样按 location 分组，改成按接入网关分组。
+- 变异验证四条：未登记终端回落成 trusted / 从未上报回落成 none / degrade 不算高风险 / 把无来源字段填回 "—"——都从绿转红。本机造三种账号状态实测，页面 KPI（3 / 1 / 1 / 2）与每格 tooltip 逐条对上。
 - 做什么：`monitor_objects.go:46-49` 那批硬编码字段改成真取数——`Org` 取 `users.org_id`、`Trust` 取 `trusted_devices` 状态（pending/revoked → untrusted，取不到 → unknown）、`Risk` 取最新 posture 判定档；取不到的一律 `unknown` 而不是好值。
 - 改哪里：`control/internal/api/monitor_objects.go`、`console/src/views/Online.vue:174-176`（三个 KPI 与三个筛选 tab 在 live 模式下恒 0 / 恒空）。
 - 为什么值得：wave7 删掉的是「无网关时回退 10 条演示会话」那条种子路径，**live 路径本身从未脱壳**。而硬编码 `trusted`/`none` 比补 0 更严重——它是**正向断言**：observe 模式下被放行的未授信终端、被 degrade 降权的账号，在监控中心这一页全部显示为「授信 / 无风险」，与项目自己在网关指标与 posture 上立的「采不到就报不可判定、绝不补 0」纪律方向相反。`org` 恒 `—` 还让 FR-MON-12 的「按组织架构搜索」不可能命中，而 `users.org_id` 就在库里。

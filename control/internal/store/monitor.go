@@ -5,25 +5,63 @@ import "context"
 // ── 监控中心 · 在线用户（实时会话）──
 
 // OnlineSession 一条实时在线会话。监控中心据此做"就近处置"（强制下线）。
+// OnlineSession 一条真实接入会话（唯一来源：网关注册心跳里的 sessions）。
+//
+// ★网关按会话上报的只有四样东西：`{IP, User, Role, Since}`（见 api.GwSession）。
+// 其余每一格要么由控制面**按账号**从库里取真值，要么就不该存在——
+// 曾经这里有 Location / Device / OS / App 四个字段，全部由 api.handleOnline
+// 逐条填 "—"，页面上并排渲染成四列永远空着的表头；而「异地·公网接入」那个 KPI
+// 与筛选页签因此**结构性恒为 0**（判据是 location 含「异地」或「公网」，
+// 而 location 永远是那个破折号）。一个永远匹配不到东西的筛选比没有筛选更坏：
+// 它让人以为「查过了，没有异地接入」。四个字段连同那个 KPI 已整体删除——
+// 白帝没有 GeoIP 库（SCOPE 也不打算做），网关也不按会话上报设备与当前应用。
 type OnlineSession struct {
-	ID         string `json:"id"`
-	User       string `json:"user"`    // 显示名
-	Account    string `json:"account"` // 登录账号
-	Org        string `json:"org"`
-	IP         string `json:"ip"`
-	Location   string `json:"location"` // 接入地点（GeoIP 推断）
-	Device     string `json:"device"`
-	OS         string `json:"os"`
-	Auth       string `json:"auth"`    // 认证方式
-	App        string `json:"app"`     // 当前访问应用
-	Gateway    string `json:"gateway"` // 接入网关
-	LoginAt    string `json:"loginAt"`
-	Duration   string `json:"duration"` // 在线时长
-	Trust      string `json:"trust"`    // trusted | untrusted | unknown
-	Risk       string `json:"risk"`     // none | low | high
-	Status     string `json:"status"`   // online | offline（已被强制下线）
+	ID      string `json:"id"`
+	User    string `json:"user"`    // 显示名
+	Account string `json:"account"` // 登录账号
+	// Org 该账号所属组织（users.org_id → 组织名）。取不到显示「—」，那是真的没归属。
+	Org string `json:"org"`
+	IP  string `json:"ip"`
+	// Auth 接入方式。会话经 SPA 敲门 + 隧道建立，这是它唯一确定的事实——
+	// **不是**登录因子（口令/MFA/证书）：那发生在控制面登录时，与这条隧道会话不同源，
+	// 网关也无从得知。页面表头据此写「接入方式」而不是「认证方式」。
+	Auth     string `json:"auth"`
+	Gateway  string `json:"gateway"` // 接入网关
+	LoginAt  string `json:"loginAt"`
+	Duration string `json:"duration"` // 在线时长
+	// Trust 该**账号**名下终端的授信态：trusted | untrusted | unknown。
+	//
+	// ★这是账号级判断，不是"这条会话背后那台机器"——网关的会话上报里没有设备指纹，
+	// 控制面无从知道是哪台机器建的这条隧道。判据：名下有 revoked/pending 的设备即
+	// untrusted；全部 trusted 才是 trusted；**一台都没登记过就是 unknown**。
+	// 此前这一格对每条真实会话硬编码 "trusted"——那不是补 0，是**正向断言**：
+	// observe 模式下被放行的未授信终端在这一页上显示为「授信」，
+	// 与项目在网关指标与 posture 上立的「采不到就报不可判定」纪律方向相反。
+	Trust string `json:"trust"`
+	// TrustNote 上面那个结论的依据（"名下 3 台终端：2 已授信 / 1 已吊销"），
+	// 页面挂 title。只给结论不给依据，管理员没法判断该不该处置。
+	TrustNote string `json:"trustNote,omitempty"`
+	// Risk 该账号的终端合规风险档：none | low | high | unknown。
+	// 判据是 posture 的跨设备最差判定（与降权/阻断执行的是同一份）：
+	// block/degrade → high，gray → low，allow → none，**从未上报 → unknown**。
+	Risk string `json:"risk"`
+	// RiskNote 判定理由（posture 的 reasons），页面挂 title。
+	RiskNote   string `json:"riskNote,omitempty"`
+	Status     string `json:"status"` // online | offline（已被强制下线）
 	KickReason string `json:"kickReason,omitempty"`
 }
+
+// 在线会话的授信态与风险档取值。unknown 是**一等取值**，不是缺省占位。
+const (
+	SessionTrustTrusted   = "trusted"
+	SessionTrustUntrusted = "untrusted"
+	SessionTrustUnknown   = "unknown"
+
+	SessionRiskNone    = "none"
+	SessionRiskLow     = "low"
+	SessionRiskHigh    = "high"
+	SessionRiskUnknown = "unknown"
+)
 
 // ★曾经这里有一份 10 条的演示会话种子（李明/王芳/外包-赵磊…），由
 // api.handleOnline 在「没有网关上报真实会话」时回退渲染。已整体删除：

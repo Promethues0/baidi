@@ -169,7 +169,7 @@
         </div>
 
         <div class="panel panel--regions pop" style="--d: .22s">
-          <div class="panel__h"><i class="panel__bar" />接入来源 TOP 地域</div>
+          <div class="panel__h"><i class="panel__bar" />接入网关分布</div>
           <div class="regions">
             <div v-for="(r, i) in topRegions" :key="r.name" class="rg">
               <span class="rg__rk" :class="{ hot: i < 3 }">{{ i + 1 }}</span>
@@ -215,9 +215,9 @@ const MOCK_OV: Overview = {
   ]
 };
 const MOCK_SESS: OnlineSession[] = [
-  { id: 's1', user: '张-研发', account: 'zhang', org: '研发部', ip: '10.2.3.4', location: '杭州', device: 'MAC-08', os: 'macOS', auth: 'AD', app: 'GitLab', gateway: 'GW-1', loginAt: '', duration: '2h', trust: 'trusted', risk: 'none', status: 'online' },
-  { id: 's2', user: 'li.fang', account: 'li.fang', org: '财务部', ip: '203.0.113.7', location: '北京', device: 'WIN-12', os: 'Windows', auth: 'LDAP', app: 'ERP', gateway: 'GW-1', loginAt: '', duration: '11m', trust: 'untrusted', risk: 'high', status: 'online' },
-  { id: 's3', user: '外包-zhao', account: 'zhao', org: '外包', ip: '198.51.100.22', location: '深圳', device: 'Android-3', os: 'Android', auth: 'SMS', app: 'OA', gateway: 'GW-2', loginAt: '', duration: '34m', trust: 'unknown', risk: 'low', status: 'online' }
+  { id: 's1', user: '张-研发', account: 'zhang', org: '研发部', ip: '10.2.3.4', auth: 'SPA 敲门 + 隧道', gateway: 'GW-1', loginAt: '', duration: '2h', trust: 'trusted', risk: 'none', status: 'online' },
+  { id: 's2', user: 'li.fang', account: 'li.fang', org: '财务部', ip: '203.0.113.7', auth: 'SPA 敲门 + 隧道', gateway: 'GW-1', loginAt: '', duration: '11m', trust: 'untrusted', risk: 'high', status: 'online' },
+  { id: 's3', user: '外包-zhao', account: 'zhao', org: '外包', ip: '198.51.100.22', auth: 'SPA 敲门 + 隧道', gateway: 'GW-2', loginAt: '', duration: '34m', trust: 'unknown', risk: 'unknown', status: 'online' }
 ];
 const MOCK_AUDIT: AuditEntry[] = [
   { time: '19:24:31', category: 'access', user: 'li.fang', srcIp: '203.0.113.7', event: '访问 ERP·财务报表', verdict: 'deny' },
@@ -338,11 +338,16 @@ const tickerLoop = computed<AuditEntry[]>(() => {
   return a.length >= 6 ? [...a, ...a] : a;
 });
 
-/* 接入来源 TOP 地域 */
+/* 接入网关分布。
+ *
+ * ★这一格原来是「接入来源 TOP 地域」，按 s.location 分组——而 location 对每条真实
+ * 会话恒为 "—"（白帝没有 GeoIP 库），于是这块大屏面板永远只有一根标着「—」的柱子，
+ * 却顶着一个"我们知道用户从哪接入"的标题。改成按接入网关分组：那是网关上报里
+ * 真实存在的一维，且在大屏上更有用——哪台网关在扛流量。 */
 const topRegions = computed(() => {
   const m = new Map<string, number>();
   sessions.value.forEach((s) => {
-    const k = (s.location || '未知').trim() || '未知';
+    const k = (s.gateway || '未知').trim() || '未知';
     m.set(k, (m.get(k) || 0) + 1);
   });
   return [...m.entries()].map(([name, count]) => ({ name, count })).sort((a, b) => b.count - a.count).slice(0, 7);
@@ -601,7 +606,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .ev--allow .ev__vd, .ev--ok .ev__vd { color: #36e29b; }
 .ev__sub { font-size: 11.5px; color: var(--c-t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
-/* TOP 地域 */
+/* 接入网关分布 */
 .panel--regions { flex: none; }
 .regions { display: flex; flex-direction: column; gap: 11px; }
 .rg { display: flex; align-items: center; gap: 10px; }

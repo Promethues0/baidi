@@ -43,14 +43,18 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 			loginT := time.Unix(se.Since, 0)
 			sessions = append(sessions, store.OnlineSession{
 				ID: id + ":" + se.IP, User: se.User, Account: se.User,
-				Org: "—", IP: se.IP, Location: "—", Device: "—", OS: "—",
-				Auth: "SPA 敲门", App: "—", Gateway: id,
+				IP: se.IP, Auth: "SPA 敲门 + 隧道", Gateway: id,
 				LoginAt: loginT.Format("15:04"), Duration: humanizeDuration(now.Sub(loginT)),
-				Trust: "trusted", Risk: "none", Status: "online",
+				Status: "online",
 			})
 		}
 	}
 	s.mu.Unlock()
+	// ★组织 / 授信态 / 风险档由控制面**按账号**从库里现取，绝不硬编码。
+	// 此前这三格分别是 "—" / "trusted" / "none"，其中后两个是**正向断言**：
+	// observe 模式下被放行的未授信终端、被 degrade 降权的账号，在这一页上
+	// 全部显示成「授信 / 无风险」——比补 0 更坏，因为它替一个已知为坏的状态背书。
+	s.enrichSessions(r.Context(), sessions)
 
 	s.mu.Lock()
 	for i := range sessions {

@@ -251,8 +251,8 @@ func TestSaveAuthPolicyRejectsFrozenMethods(t *testing.T) {
 	h := totpFixture(t)
 	body := map[string]any{
 		"name": "测试策略", "directory": "local", "isDefault": false, "enabled": true,
-		"pc":     map[string]any{"primary": "local", "secondary": []string{"sms"}},
-		"mobile": map[string]any{"primary": "local", "secondary": []string{}},
+		"pc":        map[string]any{"primary": "local", "secondary": []string{"sms"}},
+		"mobile":    map[string]any{"primary": "local", "secondary": []string{}},
 		"scopeOrgs": []string{"ext"}, "scopeGroups": []string{},
 	}
 	code, out := doJSON(t, h, "POST", "/api/v1/authpolicy", adminToken(), body)

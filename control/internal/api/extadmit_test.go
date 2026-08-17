@@ -360,7 +360,7 @@ func TestAdmitGateBlocksAccountCreation(t *testing.T) {
 
 	before := countUsers(t, s)
 	_, _, _, hit, err := s.authenticateExternal(
-		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw")
+		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw", "")
 	if hit {
 		t.Fatal("准入未获批准，不该认定为登录成功")
 	}
@@ -399,7 +399,7 @@ func TestAdmitGateBlocksAccountCreation(t *testing.T) {
 		t.Fatalf("批准失败：%v", err)
 	}
 	cred, _, _, hit2, err2 := s.authenticateExternal(
-		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw")
+		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw", "")
 	if !hit2 || err2 != nil {
 		t.Fatalf("批准后应登录成功：hit=%v err=%v", hit2, err2)
 	}

@@ -316,7 +316,8 @@ func (s *Server) Close() {
 // IsOpen 报告某路径是否免认证（登录/健康检查/门户登录/下载中心清单/安装包分发）。供 auth 中间件使用。
 func (s *Server) IsOpen(_, path string) bool {
 	switch path {
-	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads":
+	case "/healthz", "/api/v1/auth/login", "/api/v1/portal/login", "/api/v1/portal/downloads",
+		"/api/v1/auth/domains":
 		return true
 	// WebAuthn 登录断言两回合 / TOTP 登录第二回合：此时尚无会话令牌，身份由
 	// 「口令已验」的一次性 mfaTicket 承载（handler 内 verifyMfaTicket 强校验，
@@ -466,6 +467,8 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("POST /api/v1/authsrc/sources", s.handleSaveAuthSource)
 	// 外部身份准入（wave8 行动 10）：待批清单 + 处置。归 PermSecurity——
 	// 「谁能进来」与认证源、策略、资源授权同属安全管理员职责。
+	// 认证域候选（免认证：登录页要在登录之前拿到）。只在配了 ≥2 个外部源时回非空。
+	mux.HandleFunc("GET /api/v1/auth/domains", s.handleAuthDomains)
 	mux.HandleFunc("GET /api/v1/authsrc/admissions", s.handlePendingExtAdmissions)
 	mux.HandleFunc("POST /api/v1/authsrc/admissions/{id}/decide", s.handleDecideExtAdmission)
 	mux.HandleFunc("DELETE /api/v1/authsrc/sources/{id}", s.handleDeleteAuthSource)
@@ -647,6 +650,10 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		// 消费方是认证策略的「授信终端」豁免：这台设备以本账号上报过 posture 且判定通过时，
 		// 可免掉策略驱动的二次认证。浏览器登录不带它 = 未知设备 = 不给豁免（fail-closed）。
 		DeviceID string `json:"deviceId"`
+		// Directory 认证域（外部认证源 id）。配了多个外部源时**必填**——
+		// 不填就挨个去问，等于把明文口令逐台投递给每一个排在前面的目录服务器
+		// （wave8 行动 12）。单源部署不必填，老客户端因此完全不受影响。
+		Directory string `json:"directory"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&b); err != nil || b.Username == "" || b.Password == "" {
 		httpx.Error(w, http.StatusBadRequest, "用户名/密码不能为空")
@@ -670,8 +677,16 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		//
 		// ★顺序是「先本地、后外部」而不是反过来：本地目录里有 admin 这种
 		// 高权账号，把它交给外部目录先答，等于把本地管理员的认证权外包出去。
-		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r, b.Username, b.Password)
+		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r, b.Username, b.Password, b.Directory)
 		switch {
+		case asAmbiguousDirectory(aerr) != nil:
+			// ★配了多个认证域又没说要用哪一个：拒绝并把候选带回去，让前端渲染下拉。
+			// **不挨个去问**——挨个问正是本行动要消灭的凭据外溢。
+			// 不计入爆破锁定：用户什么都没输错，是我们还不知道该问谁。
+			amb := asAmbiguousDirectory(aerr)
+			httpx.JSON(w, http.StatusOK, map[string]any{
+				"ok": false, "reason": amb.Error(), "needDirectory": true, "domains": amb.Domains()})
+			return
 		case asAdmitDenied(aerr) != nil:
 			// ★准入闸拒绝：口令是**对的**，只是这个人不准进（未获批准 / 不在域组白名单）。
 			// 与「口令错」分开有三处后果都要紧：① 不计入爆破锁定——用户什么都没做错，

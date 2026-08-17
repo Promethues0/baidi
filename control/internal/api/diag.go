@@ -281,8 +281,10 @@ func (s *Server) checkGateways() DiagCheck {
 // 都会以「令牌过期」被拒——SPA 单包无回应，客户端看不到错误；控制面签发日志
 // 一切正常；网关只会累积"验签失败"。三处都不指向时钟。这项检查是那种事故
 // 唯一的前置可见信号。判据阈值分两档：
-//   |偏差| ≥ knockTTL     → fail（敲门此刻就已经在失败）
-//   |偏差| >  10s          → warn（继续漂就会失败）
+//
+//	|偏差| ≥ knockTTL     → fail（敲门此刻就已经在失败）
+//	|偏差| >  10s          → warn（继续漂就会失败）
+//
 // 未上报时钟的旧网关单列 warn（不可判定 ≠ 一致，也 ≠ 异常）。
 func (s *Server) checkClockSkew() DiagCheck {
 	c := DiagCheck{Key: "clock", Category: "dataplane", Name: "控制面与网关时钟一致性"}

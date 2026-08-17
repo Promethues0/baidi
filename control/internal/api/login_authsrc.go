@@ -164,15 +164,23 @@ func (s *Server) buildProvider(ctx context.Context, rec store.AuthSourceRec) (an
 //
 // 返回 (凭据, 命中的源, 是否命中, 错误)。错误只在「所有源都不可用」这类
 // 运维故障时非 nil——调用方据此区分「密码错」与「目录挂了」。
-func (s *Server) authenticateExternal(r *http.Request, username, password string) (store.Credential, string, string, bool, error) {
+func (s *Server) authenticateExternal(r *http.Request, username, password, directory string) (store.Credential, string, string, bool, error) {
 	ctx := r.Context()
 	as := s.authSrcStore()
 	if as == nil {
 		return store.Credential{}, "", "", false, nil
 	}
-	srcs, err := as.AuthSources(ctx)
+	all, err := as.AuthSources(ctx)
 	if err != nil {
 		return store.Credential{}, "", "", false, err
+	}
+	// ★认证域路由（wave8 行动 12）：命中即**只问该源**。
+	// 这不是性能优化——遍历全部源意味着把用户的明文口令逐台投递给每一个排在
+	// 前面的 LDAP 服务器去 bind，而它们中的大多数不该看到这份口令。
+	// 返回的切片长度恒 ≤1，见 routeDirectory 的注释。
+	srcs, rerr := routeDirectory(all, directory)
+	if rerr != nil {
+		return store.Credential{}, "", "", false, rerr
 	}
 
 	// unavailable 记录「源本身出故障」的次数。★它与「凭据错」必须分开统计：

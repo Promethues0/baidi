@@ -924,6 +924,10 @@ export interface ObjectRef { kind: 'resource' | 'ipsec'; id: string; name: strin
 export interface ObjectUsageResp { usage: Record<string, ObjectRef[]> }
 
 /* ── 终端用户门户 ── */
+/** AuthDomainOption 登录页的认证域下拉项（GET /api/v1/auth/domains，免认证）。
+ *  只有 id/name/kind 三样——那个端点是匿名可访问的，多一个字段就是多一分暴露。 */
+export interface AuthDomainOption { id: string; name: string; kind: string }
+
 export interface PortalLoginResp {
   ok: boolean;
   needMfa?: boolean;        // legacy 演示验证码路径（未配置 WebAuthn RP 且未注册 TOTP 时回落）
@@ -935,6 +939,11 @@ export interface PortalLoginResp {
   reason?: string;
   token?: string;
   displayName?: string;
+  /** needDirectory 配了多个认证域又没指定：前端据此渲染下拉并重试（wave8 行动 12）。
+   *  ★不指定时后端**拒绝**而不是挨个去问——挨个问等于把明文口令逐台投递给
+   *  每一个排在前面的目录服务器。 */
+  needDirectory?: boolean;
+  domains?: AuthDomainOption[];
   role?: string;
 }
 

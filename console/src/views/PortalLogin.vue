@@ -63,6 +63,17 @@
           </div>
 
           <a-form :model="form" layout="vertical" @submit.prevent>
+            <!-- 认证域（wave8 行动 12）：只有配了 ≥2 个外部认证源时才出现。
+                 ★它不是"多一个可选项"——不选的话后端会拒绝登录，因为挨个去问
+                 等于把你的明文口令投递给每一个排在前面的目录服务器。 -->
+            <a-form-item v-if="authDomains.length" field="directory" hide-label>
+              <a-select v-model="form.directory" size="large" placeholder="选择你所属的认证域">
+                <template #prefix><icon-apps /></template>
+                <a-option v-for="d in authDomains" :key="d.id" :value="d.id">
+                  {{ d.name }}<span class="bd-dirkind">{{ d.kind.toUpperCase() }}</span>
+                </a-option>
+              </a-select>
+            </a-form-item>
             <a-form-item field="username" hide-label>
               <a-input
                 v-model="form.username"
@@ -298,7 +309,7 @@
 import { onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, setToken, type PortalLoginResp } from '@/lib/api';
+import { api, setToken, type PortalLoginResp, type AuthDomainOption } from '@/lib/api';
 import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
@@ -311,7 +322,22 @@ const ticket = ref(''); // 「口令已验」一次性票据，断言两回合�
 const pwToken = ref(''); // 首登强制改密的 15min 受限令牌（只够调 /auth/password，不入 localStorage）
 const pwMsg = ref('');
 
-const form = reactive({ username: '', password: '', mfaCode: '' });
+const form = reactive({ username: '', password: '', mfaCode: '', directory: '' });
+
+/* ── 认证域（wave8 行动 12）──
+   只有配了 ≥2 个外部认证源时后端才回非空列表；单目录部署下这个下拉不出现，
+   登录体验与改造前逐字一致。 */
+const authDomains = ref<AuthDomainOption[]>([]);
+async function loadAuthDomains() {
+  try {
+    const r = await api<{ domains: AuthDomainOption[] }>('/auth/domains');
+    authDomains.value = r.domains ?? [];
+    // 只有一个候选时直接选中（虽然后端此时本就回空，这里是防御性的）。
+    if (authDomains.value.length === 1) form.directory = authDomains.value[0].id;
+  } catch {
+    authDomains.value = [];
+  }
+}
 const pwForm = reactive({ pw: '', pw2: '' });
 
 /* ── OIDC 登录（wave7 行动 1）── */
@@ -374,6 +400,7 @@ async function handleOidcReturn() {
 }
 
 onMounted(() => {
+  void loadAuthDomains();
   void handleOidcReturn();
   // 公开清单（无需登录）；拉不到就不渲染入口——没有源时本地口令登录不受影响。
   api<{ providers: OidcProvider[] }>('/auth/oidc/providers')
@@ -403,6 +430,9 @@ function onSuccess(resp: PortalLoginResp) {
 async function post(withMfa: boolean): Promise<PortalLoginResp | null> {
   const body: Record<string, string> = { username: form.username, password: form.password };
   if (withMfa) body.mfaCode = form.mfaCode;
+  // 认证域：配了多个外部源时必带。不带的话后端会拒绝并回 needDirectory，
+  // 而不是挨个去问——挨个问等于把明文口令投递给每一个排在前面的目录服务器。
+  if (form.directory) body.directory = form.directory;
   try {
     return await api<PortalLoginResp>('/portal/login', {
       method: 'POST',
@@ -425,6 +455,14 @@ async function submitLogin() {
   const resp = await post(false);
   loading.value = false;
   if (!resp) return;
+
+  // 认证域未指定（配了多个外部源）：把候选灌进下拉让用户选，而不是让他去猜口令。
+  // ★后端此时**没有**去问任何一台目录服务器，口令一台都没发出去。
+  if (resp.needDirectory) {
+    authDomains.value = resp.domains ?? [];
+    errMsg.value = resp.reason ?? '请选择你所属的认证域后重试。';
+    return;
+  }
 
   // passkey 二次认证（口令已通过，服务端下发一次性票据）
   if (resp.needWebauthn && resp.ticket) {
@@ -779,4 +817,6 @@ function backToLogin() {
 .bd-oidc__sep { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; color: var(--bd-t3); font-size: 12px; }
 .bd-oidc__sep::before, .bd-oidc__sep::after { content: ''; flex: 1; height: 1px; background: var(--bd-line, rgba(0,0,0,.08)); }
 .bd-oidc__btn { margin-bottom: 8px; }
+
+.bd-dirkind { margin-left: 8px; font-size: 11px; color: var(--bd-t3); }
 </style>

@@ -100,35 +100,11 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: shell 脚本：变量名后紧跟全角字符必须用 ${} 包起来
-        run: |
-          # macOS 自带 bash 3.2，在 UTF-8 locale 下会把紧跟 `$VAR` 的全角字符（`）`、`，`…）
-          # 的**首字节吞进变量名**，于是查的是 `GOARCH\xef` 这个不存在的变量。
-          # 精确复现：
-          #   LC_ALL=en_US.UTF-8 bash -c 'set -u; A=1; echo "（$A）"'  → A�: unbound variable
-          #   LC_ALL=C           bash -c 'set -u; A=1; echo "（$A）"'  → （1）
-          # 本项目所有提示语都是中文，这个写法遍地都是（当时全仓 52 处）。
-          # ★`set -u` 让它当场炸是运气好：没开 `set -u` 的脚本里，它**静默展开成空串**——
-          #   `rm -rf "$PREFIX/x"` 这类地方错成什么样不用多说。
-          # 扫全仓而不只是 clients/：gateway/*.sh 与 deploy/*.sh 同样有人在 mac 上跑。
-          python3 - <<'PY'
-          import re, subprocess, pathlib, sys
-          VENDORED = {"clients/mobile/native/android/gradlew"}  # 第三方文件，不归我们管
-          pat = re.compile(rb'\$([A-Za-z_][A-Za-z0-9_]*)(?=[\x80-\xff])')
-          hits = []
-          for f in subprocess.run(["git", "ls-files", "*.sh", "*.bash"],
-                                  capture_output=True, text=True).stdout.split():
-              if f in VENDORED:
-                  continue
-              for i, line in enumerate(pathlib.Path(f).read_bytes().split(b"\n"), 1):
-                  for m in pat.finditer(line):
-                      hits.append(f"{f}:{i}\t${m.group(1).decode()}"
-                                  f"  →  {line.decode('utf-8','replace').strip()[:100]}")
-          if hits:
-              print("✗ 下列位置的 $变量 后面紧跟非 ASCII 字符，请改成 ${变量}：")
-              print("\n".join("  " + h for h in hits))
-              sys.exit(1)
-          print("✓ 无裸 $变量 紧邻全角字符")
-          PY
+        # 实现抽在 scripts/check-shell-fullwidth-vars.sh（server.yml 也调同一份）。
+        # ★抽出去的理由记在脚本头部：这条检查是**全仓**的，而它此前只挂在本流水线上，
+        #   本流水线的 paths 又只盯 clients/**——于是 deploy/*.sh 里引入的同类 bug
+        #   潜伏了三次提交才被撞见。一条全仓的检查不该只有一个子树的触发面。
+        run: bash scripts/check-shell-fullwidth-vars.sh
 
       - name: shell 脚本：语法自检
         run: |

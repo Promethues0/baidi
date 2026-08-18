@@ -70,7 +70,9 @@ fi
 # 而改造前 `grep limit_ deploy/` 零命中。删掉哪一条都必须在构建期当场红。
 for d in limit_req_zone limit_conn_zone 'zone=baidi_login' 'zone=baidi_api' 'limit_conn baidi_dl'; do
   if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q -- "$d"; then
-    echo "✗ 交付 nginx/baidi.conf 缺少限流指令「$d」，构建中止（见 docs/charter/wave8.md 行动 16）"; exit 1
+    # ${d} 必须带花括号：macOS 自带 bash 3.2 在 UTF-8 locale 下会把紧跟 $d 的全角
+    # 「」」的首字节吞进变量名，于是这句话恰好丢掉它唯一要传达的信息（是哪一条没了）。
+    echo "✗ 交付 nginx/baidi.conf 缺少限流指令「${d}」，构建中止（见 docs/charter/wave8.md 行动 16）"; exit 1
   fi
 done
 # 片段文件必须随包发，且**不能**叫 .conf（conf.d/*.conf 会被 include 进 http{}，

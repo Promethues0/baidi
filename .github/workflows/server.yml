@@ -29,12 +29,20 @@ on:
       - 'control/**'
       - 'gateway/**'
       - 'console/**'
+      # deploy/** 与 scripts/**：运维脚本此前**两条流水线都不看**——deploy/ 下那几个
+      # （deploy.sh / install-remote.sh / promote-standby.sh / wipe-remote.sh）好几个要
+      # 以 root 跑、也有人在 mac 上跑，却没有任何 CI 碰过它们。实际后果已经发生过一次：
+      # build.sh 里一处 `「$d」` 潜伏三次提交才被另一条流水线偶然撞见。
+      - 'deploy/**'
+      - 'scripts/**'
       - '.github/workflows/**'
   pull_request:
     paths:
       - 'control/**'
       - 'gateway/**'
       - 'console/**'
+      - 'deploy/**'
+      - 'scripts/**'
       - '.github/workflows/**'
 
 permissions:
@@ -73,6 +81,11 @@ jobs:
           # 一条 shell 风格建议会挡住真正致命的上下文错误。
           "$(go env GOPATH)/bin/actionlint" -shellcheck= -pyflakes= .github/workflows/*.yml
           echo "✓ 全部工作流文件通过 actionlint"
+
+      - name: shell 脚本：变量名后紧跟全角字符必须用 ${} 包起来
+        # 与 clients.yml 调**同一份**实现。挂在这条流水线上是因为它的 paths 覆盖
+        # deploy/** 与 gateway/**，而那两处的脚本才是 root/mac 上真正会被执行的。
+        run: bash scripts/check-shell-fullwidth-vars.sh
 
   go:
     name: Go · ${{ matrix.mod }}（vet + test）

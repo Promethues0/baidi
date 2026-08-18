@@ -208,12 +208,18 @@ func (s *Server) handleJitGrants(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	grants, err := s.store.JitGrants(r.Context())
+	grants, total, err := s.jitGrantsPage(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load grants")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"grants": grants})
+	// ★截断必须可见（wave8 行动 17）：清单只读前 ListLimit 条，不回总数的话，
+	// 第 501 条之后的授予在管理台上**根本不存在**——而访问审查恰恰是要看
+	// 「有没有我不知道的授予」。判定面不受影响（告警走 ActiveGrants/StaleGrants），
+	// 所以这是展示面问题，但一份被截断的审查清单被当成全量，后果不轻。
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"grants": grants, "total": total, "limit": store.ListLimit,
+		"truncated": total > len(grants)})
 }
 
 // handleRevokeGrant 管理员提前撤销一条授予（admin）。撤销后网关下轮轮询即失去 allow。
@@ -237,4 +243,16 @@ func (s *Server) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "security", "撤销 JIT 授予 "+g.ID+"（"+g.User+"@"+g.ResourceName+"）："+orElse(body.Reason, "管理员主动撤销"), "deny")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "grant": g})
+}
+
+// jitGrantsPage 取清单 + 库里总行数；后端不支持分页时回退成「总数=已读条数」
+// （纯 Memory 后端本来就没有 500 行以上的数据，不会因此谎报未截断）。
+func (s *Server) jitGrantsPage(ctx context.Context) ([]store.JitGrant, int, error) {
+	if p, ok := s.store.(interface {
+		JitGrantsPage(ctx context.Context) ([]store.JitGrant, int, error)
+	}); ok {
+		return p.JitGrantsPage(ctx)
+	}
+	l, err := s.store.JitGrants(ctx)
+	return l, len(l), err
 }

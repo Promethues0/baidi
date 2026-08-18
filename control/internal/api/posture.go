@@ -197,12 +197,17 @@ func (s *Server) handlePostureList(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
 	}
-	reports, err := s.store.PostureReports(r.Context())
+	reports, total, err := s.postureReportsPage(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load posture reports")
 		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"reports": reports})
+	// 截断必须可见（同 handleJitGrants）。判定面不受这道上限影响——
+	// 准入闸走 PostureUsersByDisposal 的独立 DISTINCT 查询——但一份被截断的
+	// 合规清单被当成全量，管理员会据此判断「没有不合规终端」。
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"reports": reports, "total": total, "limit": store.ListLimit,
+		"truncated": total > len(reports)})
 }
 
 // handleDeletePostureReport 删除某设备的终端报告（admin，设备退役 / 清理陈旧记录）。
@@ -281,4 +286,15 @@ func (s *Server) minClientVersion(ctx context.Context, platform string) string {
 		}
 	}
 	return ""
+}
+
+// postureReportsPage 取清单 + 库里总行数；后端不支持分页时回退成「总数=已读条数」。
+func (s *Server) postureReportsPage(ctx context.Context) ([]store.PostureReport, int, error) {
+	if p, ok := s.store.(interface {
+		PostureReportsPage(ctx context.Context) ([]store.PostureReport, int, error)
+	}); ok {
+		return p.PostureReportsPage(ctx)
+	}
+	l, err := s.store.PostureReports(ctx)
+	return l, len(l), err
 }

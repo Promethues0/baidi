@@ -90,7 +90,13 @@
     <!-- ============ 授予台账 ============ -->
     <div v-show="tab === 'grants'" class="bd-tablecard">
       <div class="bd-toolbar">
-        <span class="bd-toolbar__c">共 {{ grants.length }} 条授予 · 有效 {{ activeCount }}</span>
+        <!-- ★截断必须可见：清单只读前 limit 条，不说的话第 limit+1 条之后的授予
+             在这一页上根本不存在，而访问审查恰恰是要看「有没有我不知道的授予」。 -->
+        <span class="bd-toolbar__c">
+          共 {{ grantTotal }} 条授予 · 有效 {{ activeCount }}
+          <b v-if="grantTruncated" class="bd-trunc">（本页只显示最近 {{ grants.length }} 条，
+            其余 {{ grantTotal - grants.length }} 条未加载——请用 API 或收窄时间范围查看）</b>
+        </span>
       </div>
       <table class="bd-table">
         <thead>
@@ -255,6 +261,10 @@ async function revoke(g: JitGrant) {
   }
 }
 
+/** 库里的授予总数与「本页是否被截断」（后端 /jit/grants 下发）。 */
+const grantTotal = ref(0);
+const grantTruncated = ref(false);
+
 async function load() {
   try {
     const [rq, gr] = await Promise.all([
@@ -263,12 +273,16 @@ async function load() {
     ]);
     requests.value = rq.requests ?? [];
     grants.value = gr.grants ?? [];
+    grantTotal.value = gr.total ?? (gr.grants?.length ?? 0);
+    grantTruncated.value = !!gr.truncated;
     selId.value = pending.value[0]?.id ?? '';
     syncGrantTtl();
     live.value = true;
   } catch {
     requests.value = MOCK_REQUESTS;
     grants.value = MOCK_GRANTS;
+    grantTotal.value = MOCK_GRANTS.length;
+    grantTruncated.value = false;
     selId.value = MOCK_REQUESTS[0]?.id ?? '';
     syncGrantTtl();
     live.value = false;
@@ -283,6 +297,7 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
 </script>
 
 <style scoped>
+.bd-trunc { color: var(--bd-warning); font-weight: 500; }
 .bd-head__right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
 
 /* tabs */

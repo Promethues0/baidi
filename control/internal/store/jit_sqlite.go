@@ -75,13 +75,35 @@ func scanGrants(rows *sql.Rows, now int64, displayExpire bool) ([]JitGrant, erro
 	return out, rows.Err()
 }
 
+// ListLimit 列表面的读取上限。展示用，**不是**判定用——判定各走各的查询
+// （告警读 ActiveGrants/StaleGrants、准入读 PostureUsersByDisposal 的 DISTINCT），
+// 所以这道上限截断的只是"看得到多少行"。
+const ListLimit = 500
+
 // JitGrants 全部授予（active/revoked/expired，新→旧），供管理台访问审查/倒计时。展示层纠正到期状态。
 func (s *SQLiteStore) JitGrants(ctx context.Context) ([]JitGrant, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+grantCols+` FROM jit_grants ORDER BY granted_at DESC LIMIT 500`)
-	if err != nil {
-		return nil, err
+	l, _, err := s.JitGrantsPage(ctx)
+	return l, err
+}
+
+// JitGrantsPage 同上，另回**库里的总行数**。
+//
+// ★为什么要多这一趟 COUNT：`LIMIT 500` 不带总数、页面也不提示，与本项目反复强调的
+// 「截断必须可见」相反——第 501 条之后的授予在管理台上**根本不存在**，
+// 而访问审查恰恰是要看"有没有我不知道的授予"。多一次 COUNT 的代价远小于
+// 让一份审查清单在使用者不知情的情况下少掉一截。
+func (s *SQLiteStore) JitGrantsPage(ctx context.Context) ([]JitGrant, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM jit_grants`).Scan(&total); err != nil {
+		return nil, 0, err
 	}
-	return scanGrants(rows, time.Now().Unix(), true)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+grantCols+` FROM jit_grants ORDER BY granted_at DESC LIMIT ?`, ListLimit)
+	if err != nil {
+		return nil, 0, err
+	}
+	out, err := scanGrants(rows, time.Now().Unix(), true)
+	return out, total, err
 }
 
 // ActiveGrants 当前有效授予（status=active 且未到期）——数据面 handleGatewayPolicy 出口 merge 的来源。

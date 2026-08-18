@@ -14,8 +14,16 @@ source "$HERE/config.env"
 # config.env 里的值不会自动过去——漏转的症状是「config.env 里写了 WITH_IPSEC=1，
 # 部署成功，机器上却根本没有 baidi-ipsec」，且全程无报错。
 : "${WITH_IPSEC:=0}"; : "${IPSEC_GW_ID:=}"; : "${IKE_PORT:=}"; : "${NATT_PORT:=}"
-# 首登强制改密（生产建议 1）：同样必须显式转发，否则 config.env 里写了也悄悄不生效。
-: "${BAIDI_SEED_MUST_CHANGE:=0}"
+# 首登强制改密：**默认 1**（wave8 行动 16）。同样必须显式转发，否则 config.env 里写了也悄悄不生效。
+#
+# ★为什么默认翻成 1：NFR-SEC-05 是 P0，验收词就是「默认安全开局：首登强制改密、
+# 无默认弱口令」。默认 0 的实际后果是——按参考流程装出来的**生产机开局就带着一个
+# 写在 README / CLAUDE.md / 演示站说明里的公开口令**（baidi@123），而系统不催任何人改。
+# 本项目在「收口默认值与逃生舱」一节确立过判据：三个 HS256 逃生舱都被翻成默认 false，
+# 理由是「默认值就是绝大多数部署的真实姿态」——这一项此前恰恰反着来。
+# 演示便利由演示机在 config.env 里**显式**置 0 承担（那是一次有意识的选择，
+# 而不是一个谁也没看见的默认值）。
+: "${BAIDI_SEED_MUST_CHANGE:=1}"
 
 # 若指定私钥则用之（如 ubuntu 用户需 -i ~/.ssh/xxx）
 SSH=(ssh); RSYNC_E=(ssh)

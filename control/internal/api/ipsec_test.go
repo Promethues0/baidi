@@ -262,12 +262,34 @@ func TestSaveIpsecValidatesWithActualValues(t *testing.T) {
 	if code != http.StatusBadRequest || !strings.Contains(errMsg(resp), "不是地址") {
 		t.Fatalf("应拒绝非法 peer 并回显实际值：%d %v", code, resp)
 	}
-	// 合法形态都要过：裸 IP / IP:port / FQDN
-	for _, peer := range []string{"203.0.113.7", "203.0.113.7:500", "sh.example.com"} {
+	// 合法形态：裸 IP / IP:port（含 IPv6）
+	for _, peer := range []string{"203.0.113.7", "203.0.113.7:500", "[2001:db8::1]:500"} {
 		body = `{"name":"X","peer":"` + peer + `","localSubnet":"10.20.0.0/16","remoteSubnet":"10.80.0.0/16"}`
 		if code, resp := f.callAdmin(t, http.MethodPost, "/api/v1/ipsec", body, tok); code != http.StatusOK {
 			t.Fatalf("peer=%q 应被接受：%d %v", peer, code, resp)
 		}
+	}
+	// ★FQDN 必须**拒收**（wave8 行动 17）。这条断言此前是反的——它把
+	// 「sh.example.com 应被接受」钉成了正确行为，而组网网关的 parsePeer 是**刻意**
+	// 不解析域名的（sync_test.go 正把「拒收 FQDN」钉住）。于是入口放行、
+	// 400 文案还主动推荐这种写法，管理员照着填拿到 200 OK，站点安静地永远 down：
+	// 要等到「已指派网关 + 网关在线 + 下一轮同步」之后才能从 LastError 里看到那句拒绝。
+	// 又一个「绿着的测试在替坏行为背书」（同 wave8 行动 2 的 Rust 用例、行动 7 的 diag 用例）。
+	for _, peer := range []string{"sh.example.com", "sh.example.com:500"} {
+		body = `{"name":"X","peer":"` + peer + `","localSubnet":"10.20.0.0/16","remoteSubnet":"10.80.0.0/16"}`
+		code, resp := f.callAdmin(t, http.MethodPost, "/api/v1/ipsec", body, tok)
+		if code != http.StatusBadRequest {
+			t.Fatalf("peer=%q 是域名，数据面不解析 DNS，入口必须当场拒收：%d %v", peer, code, resp)
+		}
+		m := errMsg(resp)
+		if !strings.Contains(m, "DNS") || !strings.Contains(m, peer) {
+			t.Fatalf("拒绝要说得出原因并回显实际值（否则管理员会反复换写法去试）：%q", m)
+		}
+	}
+	// 400 文案不得再把域名列为推荐写法。
+	body = `{"name":"X","peer":"???","localSubnet":"10.20.0.0/16","remoteSubnet":"10.80.0.0/16"}`
+	if _, resp := f.callAdmin(t, http.MethodPost, "/api/v1/ipsec", body, tok); strings.Contains(errMsg(resp), "example.com") {
+		t.Fatalf("错误文案不该把 FQDN 列为可用写法：%q", errMsg(resp))
 	}
 }
 

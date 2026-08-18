@@ -200,7 +200,14 @@
         <a-button size="small" @click="loadPosture"><icon-refresh /> 刷新</a-button>
       </div>
       <div v-if="postureErr" class="bd-empty" style="display: block">{{ postureErr }}</div>
-      <table v-else class="bd-table">
+      <!-- ★截断必须可见：清单只读前 N 条。不说的话，一份被截断的合规清单会被当成全量，
+           管理员据此判断「没有不合规终端」——而看不见的那截里可能全是 block。 -->
+      <div v-else-if="postureTruncated" class="bd-trunc">
+        共 {{ postureTotal }} 台终端上报，本页只显示最近 {{ postureRows.length }} 条，
+        其余 {{ postureTotal - postureRows.length }} 条未加载——请用 API 查询完整清单。
+        （准入判定不受此上限影响：闸门读的是独立的全量查询。）
+      </div>
+      <table v-if="!postureErr" class="bd-table">
         <thead>
           <tr><th>账号</th><th>设备指纹</th><th>平台 / 系统</th><th>客户端</th><th>检查</th><th>判定</th><th>评分</th><th>最后上报</th><th class="r">操作</th></tr>
         </thead>
@@ -411,10 +418,17 @@ function removeCheck(key: string) {
 
 /* ── 终端合规（GET /posture，admin）── */
 const postureRows = ref<PostureRow[]>([]);
+/** 库里的报告总数与「本页是否被截断」（后端 /posture 下发）。
+ *  ★不显示的话，一份被截断的合规清单会被当成全量——管理员据此判断「没有不合规终端」。 */
+const postureTotal = ref(0);
+const postureTruncated = ref(false);
 const postureErr = ref('');
 async function loadPosture() {
   try {
-    postureRows.value = (await api<PostureResp>('/posture')).reports;
+    const pr = await api<PostureResp>('/posture');
+    postureRows.value = pr.reports;
+    postureTotal.value = pr.total ?? pr.reports.length;
+    postureTruncated.value = !!pr.truncated;
     postureErr.value = '';
   } catch { postureErr.value = '暂无法读取（需管理员登录 / 后端在线）'; }
 }
@@ -450,6 +464,7 @@ onMounted(async () => {
 </script>
 
 <style scoped>
+.bd-trunc { margin: 8px 0 4px; padding: 8px 11px; background: rgba(255,125,0,.08); border-radius: 6px; font-size: 12px; line-height: 1.7; color: var(--bd-warning); }
 /* tabs */
 .bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
 .bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }

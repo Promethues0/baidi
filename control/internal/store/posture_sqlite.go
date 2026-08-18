@@ -73,11 +73,27 @@ func scanPostureRows(rows *sql.Rows) ([]PostureReport, error) {
 // PostureReports 最新报告清单（ts 新者在前，供安全中心「终端合规」与态势聚合）。
 // 行数已由"每账号 ≤20 台"钳制，这里再加读取上限兜底（防未来放宽上限后列表面被拖垮）。
 func (s *SQLiteStore) PostureReports(ctx context.Context) ([]PostureReport, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT `+postureCols+` FROM posture_reports ORDER BY ts DESC LIMIT 500`)
-	if err != nil {
-		return nil, err
+	l, _, err := s.PostureReportsPage(ctx)
+	return l, err
+}
+
+// PostureReportsPage 同上，另回**库里的总行数**（截断必须可见，见 store.ListLimit）。
+//
+// ★判定面不受这道上限影响：准入闸走 PostureUsersByDisposal 的独立 DISTINCT 查询，
+// 单账号最差判定走 PostureVerdict。这里截断的只是「终端合规」页看得到多少行——
+// 但看不见的那截同样要说出来，否则管理员会把一份被截断的清单当成全量。
+func (s *SQLiteStore) PostureReportsPage(ctx context.Context) ([]PostureReport, int, error) {
+	var total int
+	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM posture_reports`).Scan(&total); err != nil {
+		return nil, 0, err
 	}
-	return scanPostureRows(rows)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT `+postureCols+` FROM posture_reports ORDER BY ts DESC LIMIT ?`, ListLimit)
+	if err != nil {
+		return nil, 0, err
+	}
+	out, err := scanPostureRows(rows)
+	return out, total, err
 }
 
 // PostureVerdict 某账号（规范化匹配）跨设备的最差判定：处置严厉度高者优先，同级取最新。

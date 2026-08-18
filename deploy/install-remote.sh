@@ -299,10 +299,13 @@ if ! grep -q '^BAIDI_IPSEC_PSK_KEY=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; the
   echo "==> 已登记 IPSec PSK 主密钥路径 → $BD_PREFIX/etc/keys/ipsec-psk.key（首次用到时由 control 自动生成 0600）"
 fi
 
-# 首登强制改密（config.env 置 BAIDI_SEED_MUST_CHANGE=1 时写入）：control 首次建库
-# 会把种子账号（含 admin）全部置「首登须改密」。仅首启建库生效——库已存在时写入
-# 无副作用；幂等追加，已有该项不重复写。
-if [ "${BAIDI_SEED_MUST_CHANGE:-0}" = "1" ] && ! grep -q '^BAIDI_SEED_MUST_CHANGE=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; then
+# 首登强制改密：**默认开**（wave8 行动 16）。control 首次建库会把种子账号（含 admin）
+# 全部置「首登须改密」。仅首启建库生效——库已存在时写入无副作用；幂等追加。
+#
+# ★缺省值与 deploy.sh 一致（1）。直接 ssh 跑本脚本、没经 deploy.sh 转发时也是开的：
+# 两处缺省不一致的话，「按 README 手工装」与「按 deploy.sh 装」会得到两种安全姿态，
+# 而两者在机器上完全同形。
+if [ "${BAIDI_SEED_MUST_CHANGE:-1}" = "1" ] && ! grep -q '^BAIDI_SEED_MUST_CHANGE=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; then
   echo "BAIDI_SEED_MUST_CHANGE=1" >> "$BD_PREFIX/etc/baidi.env"
   chmod 0600 "$BD_PREFIX/etc/baidi.env"
   echo "==> 已开启首登强制改密（仅首次建库时对种子账号生效）"
@@ -362,10 +365,17 @@ fi
 
 # 渲染并校验 nginx 站点（备份→防御→端口预检→nginx -t→reload-or-restart，任一失败即还原）
 [ -f /etc/nginx/conf.d/baidi.conf ] && cp -a /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi.conf.bak
+[ -f /etc/nginx/conf.d/baidi-proxy-api.inc ] && cp -a /etc/nginx/conf.d/baidi-proxy-api.inc /etc/nginx/conf.d/baidi-proxy-api.inc.bak
 restore_nginx() { # 有旧备份则还原可用配置，仅首装无备份才删（绝不留半残文件毒化烛龙后续 reload）
   if [ -f /etc/nginx/conf.d/baidi.conf.bak ]; then mv -f /etc/nginx/conf.d/baidi.conf.bak /etc/nginx/conf.d/baidi.conf
   else rm -f /etc/nginx/conf.d/baidi.conf; fi
+  if [ -f /etc/nginx/conf.d/baidi-proxy-api.inc.bak ]; then mv -f /etc/nginx/conf.d/baidi-proxy-api.inc.bak /etc/nginx/conf.d/baidi-proxy-api.inc
+  else rm -f /etc/nginx/conf.d/baidi-proxy-api.inc; fi
 }
+# ★片段文件必须是 .inc 而不是 .conf：conf.d/*.conf 会被 nginx 直接 include 进 http{}，
+# 而这份里全是 proxy_* 这类只能出现在 location 里的指令——落成 .conf 会让
+# **整台机器的 nginx** 起不来（包括与我们共存的烛龙站点）。
+render "$HERE/nginx/baidi-proxy-api.inc" > /etc/nginx/conf.d/baidi-proxy-api.inc
 render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
 # 独占标准端口(443)时补一个 80→443 跳转：具名 server（server_name=本机），非 default_server，
 # 与烛龙共存契约不冲突（名匹配，不抢兜底）；裸 IP / http:// 访问自动跳 https。非 443 端口(共存模式)不加。
@@ -582,6 +592,21 @@ if [ "${WITH_GATEWAY:-0}" = "1" ]; then
   echo "             然后给 baidi-gateway.service 的启动参数加 -pf 并以 root 运行（重启后规则集需重新装）。"
   echo "    生效与否可在「网关与隐身」页逐台核对（回执来自网关实测，不是配置回显）。"
 fi
+# 首登口令姿态：**关掉时必须醒目告警**（wave8 行动 16）。
+# ★这条告警的意义在于「关掉」是一次有意识的取舍——种子口令 baidi@123 是公开的
+# （README / CLAUDE.md / 演示站说明里都有）。不喊出来的话，一台按 config.env 装出来的
+# 生产机开局就带着一个人人都知道的口令，而部署输出里一个字都没提。
+if [ "${BAIDI_SEED_MUST_CHANGE:-1}" = "1" ]; then
+  echo "  ✓ 首登强制改密：已开启（种子账号首次登录必须改掉公开口令 baidi@123 才能拿到会话）"
+else
+  echo ""
+  echo "  ⚠ 首登强制改密**已被显式关闭**（config.env 里 BAIDI_SEED_MUST_CHANGE=0）"
+  echo "    本机的种子账号（含 admin）现在可以用公开口令 baidi@123 直接登录，"
+  echo "    而那个口令写在本项目的 README、CLAUDE.md 与在线演示站说明里。"
+  echo "    这只适合演示机。生产请删掉 config.env 里那一行（默认即为开启）后**重建数据库**，"
+  echo "    或立刻用管理员改掉全部种子账号的口令——该开关只在首次建库时生效。"
+  echo ""
+fi
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
-echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
+echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi-proxy-api.inc /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
 systemctl --no-pager status baidi-control | head -5 || true

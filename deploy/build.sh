@@ -63,5 +63,22 @@ if sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'default_server'; then
   echo "✗ 交付 nginx/baidi.conf 含 default_server 指令，构建中止"; exit 1
 fi
 
+# 自检：限流指令必须在交付件里（wave8 行动 16）。
+#
+# ★这道检查就是限流配置的**执行方**。没有它，「登录端点限速」是一句只存在于
+# 文档与代码注释里的话——`lockout.go` 的运行期告警字面把运维指向 nginx limit_req，
+# 而改造前 `grep limit_ deploy/` 零命中。删掉哪一条都必须在构建期当场红。
+for d in limit_req_zone limit_conn_zone 'zone=baidi_login' 'zone=baidi_api' 'limit_conn baidi_dl'; do
+  if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q -- "$d"; then
+    echo "✗ 交付 nginx/baidi.conf 缺少限流指令「$d」，构建中止（见 docs/charter/wave8.md 行动 16）"; exit 1
+  fi
+done
+# 片段文件必须随包发，且**不能**叫 .conf（conf.d/*.conf 会被 include 进 http{}，
+# 而它全是只能出现在 location 里的 proxy_* 指令 → 整台机器的 nginx 起不来）。
+[ -f "$OUT/nginx/baidi-proxy-api.inc" ] || { echo "✗ 交付件缺少 nginx/baidi-proxy-api.inc，构建中止"; exit 1; }
+if ls "$OUT/nginx/"*.inc.conf >/dev/null 2>&1; then
+  echo "✗ nginx 片段不得以 .conf 结尾（会被 include 进 http{} 而炸掉整台机器的 nginx）"; exit 1
+fi
+
 echo "✓ 构建完成 → $OUT"
 ls -la "$OUT" "$OUT/bin"

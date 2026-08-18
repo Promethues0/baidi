@@ -204,13 +204,22 @@
 
 ### 第五梯队：默认部署姿态与入口/实现矛盾
 
-**16. 默认安全开局：种子口令 + 限流（NFR-SEC-05、FR-ADMIN-01、FR-SYSCFG-09、FR-INT-16）— S**
+**16. 默认安全开局：种子口令 + 限流（NFR-SEC-05、FR-ADMIN-01、FR-SYSCFG-09、FR-INT-16）— S ✅ 已落地**
+- 落地记（2026-08-18）：①`BAIDI_SEED_MUST_CHANGE` 默认翻成 1（`deploy.sh` 与 `install-remote.sh` **两处缺省都要改**——不一致的话「按 README 手工装」与「按脚本装」会得到两种安全姿态而机器上完全同形），演示机在 `config.env` 里显式置 0，`install-remote.sh` 收尾对开/关各打一段话、关闭时明写「本机种子账号现在可以用公开口令直接登录，而那个口令写在 README / CLAUDE.md / 演示站说明里」。②`deploy/nginx/baidi.conf` 加 `limit_req_zone`/`limit_conn_zone`：三条登录端点各 20r/m（burst 10 nodelay）、`/api/` 30r/s、`/downloads/` `limit_conn 4`；proxy 公共片段抽成 `baidi-proxy-api.inc`。
+- **一个只在部署时才会炸的坑，提前挡住了**：片段文件**不能**叫 `.conf`——`conf.d/*.conf` 会被 nginx include 进 `http{}`，而那份里全是 `proxy_*` 这类只能出现在 location 里的指令，落成 `.conf` 会让**整台机器的 nginx** 起不来（包括与我们共存的烛龙）。`build.sh` 里加了命名自检。
+- **限流指令有构建期执行方**：`build.sh` 逐条检查 5 个关键指令，删掉任何一条当场红（实测抽掉 `limit_conn baidi_dl` 即中止）。没有它的话，「登录端点限速」是一句只存在于文档与 `lockout.go` 注释里的话。
+- 文案按宪章「注意」写：**默认部署下登录爆破是防住的**，这份配置真正覆盖的是免认证大文件下载 / 已认证 API 零配额 / 管理员手动关掉 IP 维度这三块，`ARCHITECTURE.md` 那段从「应当」改成了指向已生效的配置并逐条列出这三块。
 - 做什么：①`BAIDI_SEED_MUST_CHANGE` 默认翻成 `1`，演示机在 `config.env` 里显式置 0；`install-remote.sh` 输出里把「本机初始口令未强制修改」列成醒目告警。②`limit_req_zone` + 对 `/api/v1/auth/`、`/api/v1/portal/login` 加 `limit_req`（burst+nodelay），并给 `/downloads/` 加 `limit_conn`；同时把 `ARCHITECTURE.md:978-980` 那句从「应当」改成指向已生效的配置。
 - 改哪里：`deploy/deploy.sh:17-18`、`deploy/config.env.example:23-28`、`control/internal/store/sqlite.go:1113`；`deploy/nginx/baidi.conf`（全文 44 行、`grep limit_ deploy/` 零命中；installer 装的就是这一份，`conf.d` include 在 `http{}` 里，`limit_req_zone` 放得进去）。
 - 为什么值得：①NFR-SEC-05 是 P0，验收词就是「默认安全开局：首登强制改密、无默认弱口令」，现在默认姿态恰好相反——按参考流程装出来的生产机开局就带着一个写在 README/CLAUDE.md/演示站说明里的公开口令，且系统不催任何人改。项目自己在「收口默认值与逃生舱」一节确立过判据：三个 HS256 逃生舱都被翻成默认 false，理由是「默认值就是绝大多数部署的真实姿态」——这一项恰恰反着来，而演示便利完全可以由演示机显式置 0 承担。②是**文档已经指名道姓地说了执行方在哪，而那个执行方在产品自己的部署产物里不存在**——`lockout.go:365` 的运行期 warn 日志字面写着「建议：在前置 nginx 对 /api/v1/*/login 按源限速（limit_req）」，代码在运行时把运维指向一份产品自己不发的配置。
 - 注意（严重度已被对抗验证下修，别写错）：**登录爆破在默认部署下是防住的**——`lockout` 账号 + 源 IP 两维度默认全开，`loginGateLocked` 在锁命中时直接 403 **且不调用 Fail**，实测单源灌 4096 次只插进 5 个账号键。`limit_req` 对唯一还活着的分布式变种（约 820 个不同 /64、每源 5 个请求）也基本无用。真正剩下的无控制面是三块：**免认证大文件下载**（`/downloads/{file}` 走 `http.ServeFile` 直发几十 MB，nginx 侧 `proxy_buffering off` 且无 `limit_conn`）、**已认证 API 零配额**（FR-INT-16 在白帝形态下的唯一真实读法）、以及**管理员手动关掉 IP 维度**（NAT 后办公网的常见运维动作）的部署。文案要按这三块写，不要写成「登录可被随便爆破」。
 
-**17. 两处入口/实现矛盾 + 静默截断（FR-IPSEC-18/19、NFR-PERF-06）— S**
+**17. 两处入口/实现矛盾 + 静默截断（FR-IPSEC-18/19、NFR-PERF-06）— S ✅ 已落地**
+- 落地记（2026-08-18）：①`validIpsecPeer` 换成 `ipsecPeerError`，**FQDN 一律拒收**并给出说得出原因的文案（笼统的"格式不对"会让管理员反复换写法去试），400 里那句把 `sh.example.com` 列为推荐写法的文案同批改掉。②`/jit/grants` 与 `/posture` 回 `total`/`limit`/`truncated`（`store.ListLimit`），两页各显示「共 N 条、本页只显示最近 M 条」。
+- **又一个「绿着的测试在替坏行为背书」**：`TestSaveIpsecValidatesWithActualValues` 原本断言「`sh.example.com` 应被接受」——改对实现反而是它转红。这是本项目第三次遇到同一形态（行动 2 的 Rust `assert!(cv.ok)`、行动 7 的 diag stealth 用例）。已改成断言拒收 + 文案要点名原因 + 400 文案不得再出现 `example.com`。
+- **`total` 必须是库里的行数而不是 `len(已读)`**：后者恒等于 500，`truncated` 永远算成 false，这道提示等于白加。用例直接落库造 507 条 posture 钉住。
+- 按「注意」写清这是展示面问题不是判定面问题（告警走 `ActiveGrants`/`StaleGrants`、准入走 `PostureUsersByDisposal` 的 DISTINCT），但一份被截断的访问审查/合规清单被当成全量后果不轻。
+- 变异 2 条全红：`total` 改回已读条数 / FQDN 又被放行。
 - 做什么：①`validIpsecPeer` 去掉 FQDN 分支并改掉那句误导文案（或保留放行但在 `ipsecConfigWarning` 里补一条「peer 是域名，本版本网关不做 DNS 解析，该站点会被装载期拒绝」）；②`JitGrants` 与 `PostureReports` 两处 `LIMIT 500` 改为带 total 的分页，或至少回一个「已截断」标记并在页面上显示。
 - 改哪里：`control/internal/api/ipsec.go:241-255`（FQDN 分支 + 注释「权威解析在网关侧」，与事实相反）、`:227` 的 400 文案（**主动把 FQDN 列为推荐写法**）、`:137-161` `ipsecConfigWarning`；`control/internal/store/jit_sqlite.go:80`、`store/posture_sqlite.go:76`。
 - 为什么值得：①`gateway/cmd/baidi-ipsec/sync.go:459-473` `parsePeer` 是**刻意**不解析的（错误文案自陈理由：DNS 抖动会造成谁也解释不清的间歇性故障），`sync_test.go:388` 正把「拒收 FQDN」当正确行为钉住——入口不但放行，还手把手教管理员填一个必然跑不通的值，而管理员点完保存拿到的是 200 OK，要等到「已指派网关 + 网关在线 + 下一轮同步」之后才从 `SiteState.LastError` 看到。②两处 `LIMIT 500` 返回值不带总数、页面也不提示，与本项目反复强调的「截断必须可见」相反。

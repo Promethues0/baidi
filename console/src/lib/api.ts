@@ -771,7 +771,10 @@ export interface PostureRow {
   checks: PostureCheckRow[]; verdict: 'allow' | 'degrade' | 'gray' | 'block';
   score: number; level: 'low' | 'medium' | 'high'; reasons: string[]; ts: number;
 }
-export interface PostureResp { reports: PostureRow[] }
+/** ★带截断标记：清单只读前 limit 条。truncated 时页面**必须**显示「共 N 条，
+ *  这里只显示前 M 条」——一份被截断的合规清单被当成全量，管理员会据此判断
+ *  「没有不合规终端」。判定面不受这道上限影响（准入闸走独立的 DISTINCT 查询）。 */
+export interface PostureResp { reports: PostureRow[]; total?: number; limit?: number; truncated?: boolean }
 
 /* ── 资源策略 + 在线网关（数据面，control 托管、网关动态拉取） ── */
 export interface Resource {
@@ -1051,7 +1054,9 @@ export interface JitGrant {
 }
 export interface AccessRequestsResp { requests: AccessRequest[] }
 export interface MyRequestsResp { requests: AccessRequest[]; grants: JitGrant[] }
-export interface JitGrantsResp { grants: JitGrant[] }
+/** ★同 PostureResp：第 limit+1 条之后的授予在管理台上根本不存在，
+ *  而访问审查恰恰是要看「有没有我不知道的授予」。 */
+export interface JitGrantsResp { grants: JitGrant[]; total?: number; limit?: number; truncated?: boolean }
 
 /** 客户端下载中心（公开端点 GET /portal/downloads；文件走 /downloads/<file>） */
 export interface ClientDownload {

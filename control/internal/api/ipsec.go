@@ -223,8 +223,8 @@ func validateIpsecSite(it store.IpsecSite) string {
 			return f.name + " 的主机位不为零：" + f.val + "，应写作 " + p.Masked().String()
 		}
 	}
-	if !validIpsecPeer(it.Peer) {
-		return "peer 不是合法的对端地址：" + it.Peer + "（可写 203.0.113.21、203.0.113.21:500 或 sh.example.com）"
+	if msg := ipsecPeerError(it.Peer); msg != "" {
+		return msg
 	}
 	// gatewayId 必须与组网网关的证书 CN 同形。留空是合法的（尚未指派，由 ConfigWarning 提示），
 	// 但填了个取不到站点的值就是**静默失效**：控制面按 gateway_id == CN 精确过滤下发，
@@ -236,22 +236,42 @@ func validateIpsecSite(it store.IpsecSite) string {
 	return ""
 }
 
-// validIpsecPeer 校验对端 IKE 落点。端口可省略（网关按 IKE 默认 500 处理），
-// 三种形态都要过：裸地址（含 IPv6）、地址:端口、FQDN[:端口]。
-func validIpsecPeer(s string) bool {
-	if _, err := netip.ParseAddrPort(s); err == nil {
-		return true
+// ipsecPeerError 校验对端 IKE 落点；返回空串表示合法。
+//
+// 只接受**裸 IP** 与 **IP:端口**（含 IPv6），端口可省（网关按 IKE 默认 500 补）。
+//
+// ★**FQDN 一律拒收**（wave8 行动 17）。此前这里放行域名、注释还写着「权威解析在网关侧」，
+// 而事实完全相反：`gateway/cmd/baidi-ipsec/sync.go` 的 `parsePeer` 是**刻意**不解析域名的，
+// 它的错误文案自陈理由——「隧道对端在 DNS 抖动时切换落点，会得到一条谁也解释不清的
+// 间歇性故障」，`sync_test.go` 还把「拒收 FQDN」当正确行为钉住。
+//
+// 于是改造前的形态是：入口不但放行，400 文案还**主动把 `sh.example.com` 列为推荐写法**，
+// 管理员照着填、点保存拿到 200 OK，站点安静地永远 down——要等到「已指派网关 + 网关在线
+// + 下一轮同步」之后，才能从站点详情的 LastError 里看到那句拒绝。
+// 入口与实现必须同口径：数据面不解析，控制面就不能收。
+func ipsecPeerError(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "peer 不能为空（对端 IKE 落点，写 IP 或 IP:端口，如 203.0.113.21 或 203.0.113.21:500）"
 	}
-	if _, err := netip.ParseAddr(s); err == nil {
-		return true
+	if _, err := netip.ParseAddrPort(v); err == nil {
+		return ""
 	}
-	host := s
-	if h, _, err := net.SplitHostPort(s); err == nil {
+	if _, err := netip.ParseAddr(v); err == nil {
+		return ""
+	}
+	// 到这里说明它不是 IP。若长得像域名，给一条**说得出原因**的拒绝，
+	// 而不是笼统的"格式不对"——后者会让管理员反复换写法去试。
+	host := v
+	if h, _, err := net.SplitHostPort(v); err == nil {
 		host = h
 	}
-	// FQDN：至少一个点，且不含明显非法字符。刻意不做严格 RFC 1123 校验——
-	// 权威解析在网关侧，这里只挡住空串/带空格/带路径这类一眼可见的手误。
-	return host != "" && strings.Contains(host, ".") && !strings.ContainsAny(host, " /\\")
+	if host != "" && strings.Contains(host, ".") && !strings.ContainsAny(host, " /\\") {
+		return "peer 不能填域名（" + v + "）：本版本的组网网关**不做 DNS 解析**——" +
+			"隧道对端在 DNS 抖动时切换落点，会造成一条谁也解释不清的间歇性故障。" +
+			"请填对端的固定 IP（可带端口），如 203.0.113.21 或 203.0.113.21:500。"
+	}
+	return "peer 不是合法的对端地址：" + v + "（只接受 IP 或 IP:端口，如 203.0.113.21、203.0.113.21:500）"
 }
 
 // handleDeleteIpsec 删除一条站点（admin）。密钥行与运行态行同事务连带清除。

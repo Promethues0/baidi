@@ -604,6 +604,36 @@ B1 刻意用一个必然连不通的网关地址（`127.0.0.1:1`），只让它�
 - **UNKNOWN** → 脚本读不出（如 PE 头损坏、System32 里有别的软件装的 wintun）。
   按不可判定处理，**不当成通过**。
 
+### 10.3b 已经跑过的：阶段 A（2026-08-18，第一次有真机证据）
+
+Windows 这条链路在此之前**从未被真实硬件碰过**。第一次实测结果：
+
+```
+主机：Windows 11 专业版 · ARM64（原生，无模拟层）
+阶段 A：通过 7 · 失败 0 · 不可判定 0 · 跳过 0
+
+A0 定位安装目录      C:\Program Files\白帝安全接入客户端\
+A1 perMachine 落位   同上（不在 %LOCALAPPDATA%，提权路径无写入面）
+A2 DLL 同目录        wintun.dll（222,488 字节）与 baidi-tun.exe 同目录
+A3 架构一致          DLL 与 exe 均为 arm64
+A3b 包 vs 本机       均 ARM64，无模拟层
+A4 许可随包          wintun-LICENSE.txt 首行 "Prebuilt Binaries License"
+A5 sidecar 命名      baidi-tun.exe、baidi-knock.exe
+```
+
+**这证明了什么**：wintun 取件 + 哈希钉扎 + 暂存区架构复核 + `installMode=perMachine`
++ `bundle.resources` 映射形写法这一整串打包纪律，在真机上**确实落成了它们声称的样子**。
+其中 `bundle.resources` 那条尤其值得记：它写错时「包照样打得出、装得上、文件也在」，
+只在用户点接入那一刻炸——A2 是它第一次被真实安装结果验证。
+
+**顺带确认的一件事**：安装目录含非 ASCII（`白帝安全接入客户端`），真机上一切正常。
+这条路径此前只有 CI 里那道「productName 含非 ASCII 必须配
+`bundle.windows.wix.language`」的静态检查守着，没有实证。
+
+**这没有证明什么**（别让 7 个 PASS 溢出到它没覆盖的地方）：UAC 提权、建虚拟网卡、
+路由接管、NRPT 分离式 DNS、隧道连通——阶段 A 一条都不碰。它们是 B 与 C 的事。
+**所以 UNVERIFIED 标记与"不进下载中心"的决定此刻仍然成立。**
+
 ### 10.4 脚本随包走（不用去仓库里找）
 
 `verify-windows.ps1` 现在**装在 CI 产物里**，与 msi/nsis 同目录，

@@ -88,7 +88,7 @@
                 :disabled="opening === app.id || (browserOpenable(app) && !webProxy.ready)"
                 :title="browserOpenable(app) && !webProxy.ready ? webProxy.note : ''"
                 @click="openApp(app)"
-              ><icon-link />{{ opening === app.id ? '正在打开…' : (browserOpenable(app) ? '访问' : '接入地址') }}</button>
+              ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
               <button
                 v-else-if="app.degraded"
                 class="bd-tile__btn bd-tile__btn--ghost"
@@ -181,7 +181,10 @@ const submitting = ref(false);
 const modeMeta: Record<PortalTile['mode'], { label: string; icon: string }> = {
   tunnel: { label: '隧道代理', icon: 'icon-swap' },
   web:    { label: 'Web 应用', icon: 'icon-common' },
-  global: { label: '全局加速', icon: 'icon-public' }
+  // ★原名「全局加速」——它既不加速也不受控。这类应用不经网关、不进隧道路由、
+  // 不做鉴权，剖面与门户都直接给 accessible: true，凡是能登录的人都看得到。
+  // 三处名字（向导 / 门户 / 移动端）统一成同一个词（wave8 行动 14）。
+  global: { label: '直连书签', icon: 'icon-public' }
 };
 
 const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
@@ -205,9 +208,24 @@ function logout() {
   router.push('/portal/login');
 }
 
-/** 该磁贴能不能在浏览器里直接打开：只有 Web 发布模式经七层代理，
- *  隧道 / 全网资源两种模式浏览器没有载体（前者要桌面客户端隧道）。 */
+/** 该磁贴能不能在浏览器里直接打开。
+ *
+ *  - web：经七层代理（换票 → 跳网关入口）；
+ *  - global：**直连书签**，地址是完整 URL 时直接开新标签（它本来就不经白帝任何通道）；
+ *  - tunnel：浏览器没有载体，要桌面客户端。 */
 function browserOpenable(app: PortalTile) { return app.mode === 'web'; }
+/** 按钮文案要与点下去真正会发生的事一致：
+ *  web=经七层代理访问 / global=直接开新标签（或只显示地址）/ tunnel=要客户端。 */
+function openLabel(app: PortalTile) {
+  if (app.mode === 'global') return bookmarkURL(app) ? '打开链接' : '查看地址';
+  return browserOpenable(app) ? '访问' : '接入地址';
+}
+/** 直连书签的地址是不是一个能直接打开的 URL（泛域名 *.x.com 不是）。 */
+function bookmarkURL(app: PortalTile): string {
+  const a = (app.addr || '').trim();
+  if (app.mode !== 'global' || !a || a.includes('*')) return '';
+  return /^https?:\/\//i.test(a) ? a : 'https://' + a;
+}
 
 /**
  * 真正打开一个受保护业务。
@@ -221,6 +239,15 @@ function browserOpenable(app: PortalTile) { return app.mode === 'web'; }
  * 被业务系统顶掉之后用户再打开第二个应用就得重新登录门户。
  */
 async function openApp(app: PortalTile) {
+  // 直连书签：不经白帝任何通道，能拼出 URL 就直接开。
+  // ★改造前这里统一提示「请用桌面客户端接入后访问 X」——对 global 是**错的**：
+  // 它压根不走隧道，客户端接入了也帮不上忙，等于把用户指去一条不存在的路。
+  if (app.mode === 'global') {
+    const u = bookmarkURL(app);
+    if (u) { window.open(u, '_blank', 'noopener'); return; }
+    Message.info(`「${app.name}」是直连书签（不经白帝通道，也不受访问控制），请直接访问：${app.addr}`);
+    return;
+  }
   if (!browserOpenable(app)) {
     Message.info(`「${app.name}」是 ${modeMeta[app.mode].label}，浏览器无法直达，请用桌面客户端接入后访问 ${app.addr}`);
     return;

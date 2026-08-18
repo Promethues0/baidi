@@ -37,7 +37,7 @@
         <table class="bd-table">
           <thead>
             <tr>
-              <th>应用名称</th><th>发布模式</th><th>所属区域</th><th>已授权</th><th>状态</th><th class="r">操作</th>
+              <th>应用名称</th><th>发布模式</th><th>关联资源</th><th>已授权</th><th>状态</th><th class="r">操作</th>
             </tr>
           </thead>
           <tbody>
@@ -51,12 +51,25 @@
                 </div>
               </td>
               <td><span class="bd-tg" :style="tagStyle(modeMeta(a.mode).color)">{{ modeMeta(a.mode).label }}</span></td>
-              <td>{{ a.node }}</td>
+              <!-- 这里原来是「所属区域」，恒定显示「华东出口」：管理员根本没有这个输入项，
+                   CreateApp 一律写死它，唯一消费方就是这一列。已随 apps.node 一并摘除
+                   （wave8 行动 14）。换成真有内容的一列：这个应用挂在哪条受控资源上——
+                   它决定了访问授权与网关能不能拨出去。 -->
+              <td>
+                <span v-if="a.resourceId" class="bd-mono">{{ a.resourceId }}</span>
+                <span v-else class="bd-auth--none" title="未关联受控资源：隧道与七层两条路都不通">未关联</span>
+              </td>
               <td><span :class="{ 'bd-auth--none': a.authScope === 'unlinked' }" :title="authTitle(a)">{{ authText(a) }}</span></td>
               <td>
                 <span class="bd-st"><span class="d" :style="{ background: a.status === 'running' ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ a.status === 'running' ? '运行中' : '已停用' }}</span>
               </td>
-              <td class="r"><span class="bd-link" @click="openWizard">编辑</span> <span class="bd-link bd-link--grey" style="margin-left: 12px">详情</span></td>
+              <!-- ★「编辑」此前走的是 openWizard → POST /apps，点一次多出一条同名应用。
+                   现在进真编辑抽屉（PUT /apps/{id}）。旁边那个没有 @click 的「详情」
+                   已删除——一个点不动的链接与死按钮同族。 -->
+              <td class="r">
+                <span class="bd-link" @click="openEdit(a)">编辑</span>
+                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="confirmDelete(a)">下架</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -145,7 +158,23 @@
           </div>
           <div v-if="wz.mode === 'tunnel'" class="bd-fld"><label>内网地址</label><a-input v-model="wz.f.addr" placeholder="10.30.5.8:22" class="bd-mono" /></div>
           <div v-else-if="wz.mode === 'web'" class="bd-fld"><label>内网 URL</label><a-input v-model="wz.f.addr" placeholder="http://10.20.1.10:8080" class="bd-mono" /></div>
-          <div v-else class="bd-fld"><label>泛域名</label><a-input v-model="wz.f.addr" placeholder="*.cnki.net" class="bd-mono" /></div>
+          <div v-else class="bd-fld">
+            <label>链接地址</label>
+            <a-input v-model="wz.f.addr" placeholder="https://www.cnki.net" class="bd-mono" />
+            <span class="bd-fld__d">填完整 URL 门户里可以直接点开；填泛域名（<code>*.cnki.net</code>）则只作为说明文字展示。</span>
+          </div>
+          <!-- ★这条告警是这张模式卡保留下来的前提：不说的话，它在向导里与两条真链路
+               平级摆着，管理员会合理推断「已发布并受控」。 -->
+          <div class="bd-wz__warn">
+            <icon-exclamation-circle-fill />
+            <div>
+              <b>直连书签不受访问控制。</b>
+              它不经网关、不进隧道路由、不做鉴权——门户与客户端对它一律标为可访问，
+              <b>凡是能登录的人都看得到、点得开</b>。资源策略页的 ACL、JIT 审批、降权、
+              强制下线对它都不生效。要做真正的受控发布，请选上面两条模式之一。
+              （泛域名代理需要证书签发与正文改写，本版本不做，见 docs/ARCHITECTURE.md 第七节。）
+            </div>
+          </div>
           <div class="bd-fld"><label>关联受控资源</label>
             <a-select v-model="wz.f.resourceId" placeholder="选择资源（决定客户端路由与 JIT 申请）" allow-clear>
               <a-option v-for="r in resources" :key="r.id" :value="r.id">{{ r.name }}（{{ r.backend }}）</a-option>
@@ -209,6 +238,53 @@
         </div>
       </div>
     </a-drawer>
+
+    <!-- ============ 编辑已发布应用（PUT /apps/{id}）============
+         ★与发布向导分开：向导是三步引导 + POST，编辑是一屏改完 + PUT。
+         复用向导的话，「取消」之后再点「新增」会带着上一条应用的值，
+         而两者的提交动词不同——这正是改造前那个 bug 的成因。 -->
+    <a-drawer v-model:visible="ed.open" :width="520" title="编辑应用" unmount-on-close :footer="false">
+      <div class="bd-wz__body">
+        <div class="bd-fld"><label>应用名称</label><a-input v-model="ed.f.name" /></div>
+        <div class="bd-fld"><label>发布模式</label>
+          <a-select v-model="ed.f.mode">
+            <a-option v-for="m in MODES" :key="m.key" :value="m.key">{{ m.label }}</a-option>
+          </a-select>
+          <span class="bd-fld__d">{{ modeMeta(ed.f.mode).desc }}</span>
+        </div>
+        <div v-if="ed.f.mode === 'global'" class="bd-wz__warn">
+          <icon-exclamation-circle-fill />
+          <div><b>直连书签不受访问控制。</b>不经网关、不进隧道路由、不做鉴权，凡是能登录的人都看得到、点得开。</div>
+        </div>
+        <div class="bd-fld"><label>{{ ed.f.mode === 'global' ? '链接地址' : '内网地址' }}</label>
+          <a-input v-model="ed.f.addr" class="bd-mono" />
+        </div>
+        <div class="bd-fld"><label>所属分类</label>
+          <a-select v-model="ed.f.category">
+            <a-option v-for="c in pickableCats" :key="c.key" :value="c.key">{{ c.label }}</a-option>
+          </a-select>
+        </div>
+        <div class="bd-fld"><label>关联受控资源</label>
+          <a-select v-model="ed.f.resourceId" placeholder="未关联" allow-clear>
+            <a-option v-for="r in resources" :key="r.id" :value="r.id">{{ r.name }}（{{ r.backend }}）</a-option>
+          </a-select>
+          <span v-if="!ed.f.resourceId && ed.f.mode !== 'global'" class="bd-fld__d">
+            不关联资源的应用无法经隧道访问、也无法被 JIT 申请——客户端剖面会对此显式告警。
+          </span>
+        </div>
+        <div class="bd-fld"><label>状态</label>
+          <a-select v-model="ed.f.status">
+            <a-option value="running">运行中（进门户与客户端剖面）</a-option>
+            <a-option value="stopped">已停用（不下发给任何终端）</a-option>
+          </a-select>
+        </div>
+        <div class="bd-wz__foot">
+          <div style="flex: 1" />
+          <button class="bd-btn bd-btn--ghost" @click="ed.open = false">取消</button>
+          <button class="bd-btn" :disabled="!canSaveEdit || ed.busy" :style="{ opacity: canSaveEdit && !ed.busy ? 1 : 0.5 }" @click="saveEdit">保存</button>
+        </div>
+      </div>
+    </a-drawer>
   </div>
 </template>
 
@@ -226,7 +302,11 @@ const filtered = computed(() => (cat.value === 'all' ? apps.value : apps.value.f
 const MODES = [
   { key: 'tunnel', label: '隧道应用（C/S）', desc: 'SSH / RDP / 数据库等 C/S 业务，走 SSL 访问隧道', icon: 'IconCode', bg: '#F5E8FF', color: '#722ED1' },
   { key: 'web', label: 'WEB 应用（B/S）', desc: '浏览器直达的 B/S 业务，免客户端，走 HTTPS 代理', icon: 'IconCommon', bg: '#F2F7FF', color: '#165DFF' },
-  { key: 'global', label: 'WEB 全网资源', desc: '知网 / 图书馆等泛域名公网资源，门户内访问', icon: 'IconPublic', bg: '#E8FFEA', color: '#00B42A' }
+  // ★这一项原名「WEB 全网资源」，与上面两条真链路平级摆着，管理员合理推断它是
+  // 「已发布并受控」。实际上它**不经网关、不受任何访问控制**，对全体登录用户可见——
+  // 剖面与门户都直接给 Accessible: true。泛域名代理（证书签发 + 正文改写）是 L 级工程，
+  // 本版本不做，所以按它真实的样子命名（wave8 行动 14）。
+  { key: 'global', label: '直连书签（不经隧道）', desc: '门户里的一个链接：不经网关、不受访问控制、对全体登录用户可见', icon: 'IconPublic', bg: '#E8FFEA', color: '#00B42A' }
 ] as const;
 function modeMeta(m: string) { return MODES.find((x) => x.key === m) ?? MODES[1]; }
 
@@ -320,6 +400,60 @@ async function next() {
   } finally {
     publishing.value = false;
   }
+}
+
+/* ── 编辑 / 下架已发布应用（FR-APP-01 的另外两件，wave8 行动 14）──
+   改造前「编辑」走的是 openWizard → POST /apps：点一次多出一条同名应用，
+   比一个点了没反应的死按钮更坏（后者只是缺功能，前者会静默把数据搞乱）。 */
+const ed = reactive({
+  open: false, busy: false,
+  f: { id: '', name: '', addr: '', mode: 'web' as App['mode'], category: '', resourceId: '', status: 'running' as App['status'] }
+});
+const canSaveEdit = computed(() => !!ed.f.name.trim() && !!ed.f.addr.trim() && !!ed.f.category);
+function openEdit(a: App) {
+  ed.f = {
+    id: a.id, name: a.name, addr: a.addr, mode: a.mode,
+    category: a.category, resourceId: a.resourceId ?? '', status: a.status
+  };
+  ed.open = true;
+}
+async function saveEdit() {
+  if (!canSaveEdit.value) return;
+  ed.busy = true;
+  try {
+    await api(`/apps/${encodeURIComponent(ed.f.id)}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        name: ed.f.name.trim(), addr: ed.f.addr.trim(), mode: ed.f.mode,
+        category: ed.f.category, resourceId: ed.f.resourceId, status: ed.f.status
+      })
+    });
+    ed.open = false;
+    Message.success(`应用「${ed.f.name}」已更新`);
+    await load();
+  } catch (e) {
+    Message.error(reason(e, '保存失败（需管理员登录 / 后端在线）'));
+  } finally { ed.busy = false; }
+}
+function confirmDelete(a: App) {
+  Modal.warning({
+    title: `下架应用「${a.name}」？`,
+    // ★必须说清"资源不删"：不说的话，管理员会以为下架顺手收回了访问权，
+    // 而资源侧的 ACL 与 JIT 授予原样有效（隧道照样能连）。
+    content: a.resourceId
+      ? `磁贴会从门户与客户端剖面里移除。关联的受控资源 ${a.resourceId} 不会被删除——它的访问控制仍按资源策略生效，如需一并收回请去「安全防护 → 资源策略」。`
+      : '磁贴会从门户与客户端剖面里移除。该应用未关联受控资源。',
+    okText: '确认下架', cancelText: '取消', hideCancel: false,
+    onOk: async () => {
+      try {
+        await api(`/apps/${encodeURIComponent(a.id)}`, { method: 'DELETE' });
+        Message.success(`应用「${a.name}」已下架`);
+        await load();
+      } catch (e) {
+        Message.error(reason(e, '下架失败（需管理员登录 / 后端在线）'));
+      }
+    }
+  });
 }
 
 /* ── 分类维护（增删改 + 排序）──
@@ -435,6 +569,7 @@ onMounted(load);
 </script>
 
 <style scoped>
+.bd-link--danger { color: var(--bd-danger); }
 .bd-two { display: flex; gap: 16px; align-items: flex-start; }
 .bd-cats { width: 210px; flex: none; padding: 12px; }
 .bd-cats__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }

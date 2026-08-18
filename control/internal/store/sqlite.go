@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -1145,8 +1146,8 @@ func (s *SQLiteStore) seed() error {
 	if n == 0 {
 		b, _ := s.Memory.Apps(ctx)
 		for _, a := range b.Apps {
-			if _, err := s.db.Exec(`INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-				a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr(), a.ResourceID); err != nil {
+			if _, err := s.db.Exec(`INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,'','',?,?,?)`,
+				a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Status, nowStr(), a.ResourceID); err != nil {
 				return err
 			}
 		}
@@ -1573,7 +1574,7 @@ func nowStr() string { return time.Now().Format("2006-01-02 15:04:05") }
 func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 	// ★不选 authed_users：那一列已废弃（种子写死的 860/64/210/1284，全库无 UPDATE）。
 	// 授权面在下面按关联资源的真实 ACL 现算，见 App.AuthedUsers 的注释。
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,node,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,addr,mode,category,status,COALESCE(resource_id,'') FROM apps ORDER BY created_at`)
 	if err != nil {
 		return AppBundle{}, err
 	}
@@ -1582,7 +1583,7 @@ func (s *SQLiteStore) Apps(ctx context.Context) (AppBundle, error) {
 	counts := map[string]int{}
 	for rows.Next() {
 		var a App
-		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Node, &a.Status, &a.ResourceID); err != nil {
+		if err := rows.Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Status, &a.ResourceID); err != nil {
 			return AppBundle{}, err
 		}
 		apps = append(apps, a)
@@ -1638,14 +1639,78 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 	if a.Status == "" {
 		a.Status = "running"
 	}
-	if a.Node == "" {
-		a.Node = "华东出口"
-	}
-	if _, err := tx.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,?,?,?,?,?)`,
-		a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Node, a.AuthedUsers, a.Status, nowStr(), a.ResourceID); err != nil {
+	// node / authed_users 两列写空串：列保留（删列要重建表），但它们已无任何消费方。
+	if _, err := tx.ExecContext(ctx, `INSERT INTO apps(id,name,addr,mode,category,node,authed_users,status,created_at,resource_id) VALUES(?,?,?,?,?,'','',?,?,?)`,
+		a.ID, a.Name, a.Addr, a.Mode, a.Category, a.Status, nowStr(), a.ResourceID); err != nil {
 		return App{}, err
 	}
 	return a, tx.Commit()
+}
+
+// ErrAppNotFound 改/删一个不存在的应用。
+var ErrAppNotFound = errors.New("应用不存在")
+
+// UpdateApp 修改一条已发布的应用（FR-APP-01「新增/编辑/删除」的编辑那一半）。
+//
+// ★与 CreateApp 同款事务 + 分类校验：改分类同样能把应用改进一个已被删掉的 key 里，
+// 后果一模一样（筛选条任何一栏都不出现，只有「全部应用」看得到）。
+//
+// ★**id 不可改**（它是主键，且被 portal 磁贴、剖面 resmap 按值引用）；
+// created_at 与 authed_users 不动（后者是废弃列，真实授权面每次读现算）。
+// 改造前这个接口根本不存在：控制台「编辑」按钮点下去走的是 openWizard → POST /apps，
+// 净效果是**新增一条同名应用**——比一个点了没反应的死按钮更坏。
+func (s *SQLiteStore) UpdateApp(ctx context.Context, a App) (App, error) {
+	a.Category = strings.TrimSpace(a.Category)
+	tx, err := s.db.BeginTx(ctx, nil)
+	if err != nil {
+		return App{}, err
+	}
+	defer tx.Rollback() //nolint:errcheck
+	var n int
+	if err := tx.QueryRowContext(ctx,
+		`SELECT COUNT(*) FROM app_categories WHERE "key"=?`, a.Category).Scan(&n); err != nil {
+		return App{}, err
+	}
+	if n == 0 {
+		return App{}, ErrUnknownAppCategory
+	}
+	res, err := tx.ExecContext(ctx,
+		`UPDATE apps SET name=?, addr=?, mode=?, category=?, status=?, resource_id=? WHERE id=?`,
+		a.Name, a.Addr, a.Mode, a.Category, a.Status, a.ResourceID, a.ID)
+	if err != nil {
+		return App{}, err
+	}
+	// ★必须查影响行数：SQLite 对「WHERE id=不存在」的 UPDATE 不报错。
+	// 不查的话，改一个已被别人删掉的应用会静默成功，页面刷新后改动凭空消失。
+	if k, _ := res.RowsAffected(); k == 0 {
+		return App{}, ErrAppNotFound
+	}
+	return a, tx.Commit()
+}
+
+// DeleteApp 下架一条应用。
+//
+// ★**不级联删关联的受控资源**：资源可被多个应用引用，也可能有 JIT 授予与审批单挂在它上面。
+// 下架应用只是把这块磁贴从门户与客户端剖面里摘掉，资源本体与它的 ACL 原样留在资源策略页。
+// 反过来做（顺手删资源）会让另一个应用突然变成「未关联受控资源」，而管理员完全不知道
+// 是自己刚才那次下架造成的。
+func (s *SQLiteStore) DeleteApp(ctx context.Context, id string) (App, error) {
+	var a App
+	var resID sql.NullString
+	err := s.db.QueryRowContext(ctx,
+		`SELECT id,name,addr,mode,category,status,COALESCE(resource_id,'') FROM apps WHERE id=?`, id).
+		Scan(&a.ID, &a.Name, &a.Addr, &a.Mode, &a.Category, &a.Status, &resID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return App{}, ErrAppNotFound
+	}
+	if err != nil {
+		return App{}, err
+	}
+	a.ResourceID = resID.String
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM apps WHERE id=?`, id); err != nil {
+		return App{}, err
+	}
+	return a, nil
 }
 
 func pick(a, b string) string {

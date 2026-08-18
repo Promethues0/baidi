@@ -592,7 +592,12 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
 
 	// ── 写操作（落 SQLite）──
-	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                       // 发布应用
+	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp) // 发布应用
+	// FR-APP-01 是 P0「新增/编辑/删除」三件套。改造前只有 GET + POST，而控制台的
+	// 「编辑」按钮走的是发布向导 → POST，净效果是**新增一条同名应用**——比一个
+	// 点了没反应的死按钮更坏（后者只是缺功能，前者会静默把数据搞乱）。
+	mux.HandleFunc("PUT /api/v1/apps/{id}", s.handleUpdateApp)
+	mux.HandleFunc("DELETE /api/v1/apps/{id}", s.handleDeleteApp)
 	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval) // 设备绑定审批
 	// 接入策略（FR-POLICY-29 同时在线设备上限 / FR-POLICY-30 接入超时注销）。
 	// 读=任意管理员（角色现算），写=PermSecurity——它决定谁能接入，与资源授权同权。

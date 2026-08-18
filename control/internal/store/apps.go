@@ -33,7 +33,10 @@ type App struct {
 	// ★注意它与 Mode 的 "global" 毫无关系：Mode 是发布形态（决定走不走隧道），
 	// Category 只是管理台上的归类维度，两者恰好都有一个叫 global 的取值。
 	Category string `json:"category"`
-	Node     string `json:"node"` // 所属网关区域
+	// ★这里曾经有 Node（"所属网关区域"）。已摘除（wave8 行动 14）：管理员在发布向导里
+	// **根本没有这个输入项**，CreateApp 一律写死「华东出口」，而唯一的消费方是应用表里
+	// 一列恒定显示同一个值的表头。真实的「这个应用经哪台网关接入」由网关落点清单决定
+	// （剖面下发有序落点 + 客户端故障转移），与应用无关，也不该由应用来声明。
 	// AuthedUsers / AuthScope 是**现算**的授权面，不是存储值：以本应用关联资源的
 	// 静态 ACL（allow_users ∪ allow_roles 展开 ∪ 组织/用户组展开）为准，每次读现算。
 	//
@@ -64,12 +67,12 @@ const (
 // seedApps 内存种子应用清单（未连库时的降级演示数据，也是首启播种的来源）。
 func seedApps() []App {
 	return []App{
-		{ID: "a1", Name: "OA 协同办公", Addr: "10.20.1.10:8080", Mode: "web", Category: "office", Node: "华东出口", Status: "running", ResourceID: "oa"},
-		{ID: "a2", Name: "财务核算系统", Addr: "10.20.3.21:443", Mode: "web", Category: "finance", Node: "华东出口", Status: "running", ResourceID: "finance"},
-		{ID: "a3", Name: "研发 Git 仓库", Addr: "10.30.5.8:22", Mode: "tunnel", Category: "dev", Node: "华东出口", Status: "running", ResourceID: "git"},
-		{ID: "a4", Name: "数据库运维 (SSH)", Addr: "10.30.9.4:22", Mode: "tunnel", Category: "dev", Node: "华南出口", Status: "running"},
-		{ID: "a5", Name: "客服工单系统", Addr: "10.40.2.7:8000", Mode: "web", Category: "office", Node: "华南出口", Status: "stopped"},
-		{ID: "a6", Name: "知网文献 (全网资源)", Addr: "*.cnki.net", Mode: "global", Category: "global", Node: "华东出口", Status: "running"},
+		{ID: "a1", Name: "OA 协同办公", Addr: "10.20.1.10:8080", Mode: "web", Category: "office", Status: "running", ResourceID: "oa"},
+		{ID: "a2", Name: "财务核算系统", Addr: "10.20.3.21:443", Mode: "web", Category: "finance", Status: "running", ResourceID: "finance"},
+		{ID: "a3", Name: "研发 Git 仓库", Addr: "10.30.5.8:22", Mode: "tunnel", Category: "dev", Status: "running", ResourceID: "git"},
+		{ID: "a4", Name: "数据库运维 (SSH)", Addr: "10.30.9.4:22", Mode: "tunnel", Category: "dev", Status: "running"},
+		{ID: "a5", Name: "客服工单系统", Addr: "10.40.2.7:8000", Mode: "web", Category: "office", Status: "stopped"},
+		{ID: "a6", Name: "知网文献 (直连书签)", Addr: "https://www.cnki.net", Mode: "global", Category: "global", Status: "running"},
 	}
 }
 

@@ -47,7 +47,9 @@ function open(a: PortalTile) {
   if (a.unavailable) { Message.warning(`「${a.name}」无法访问，请联系管理员：${a.unavailableReason || '配置缺口'}`); return; }
   if (!a.accessible) { Message.warning(`「${a.name}」你当前未获授权，请到浏览器门户提交访问申请`); return; }
   if (a.mode === 'tunnel' && !session.connected) { Message.warning('请先在「接入」开启企业内网隧道'); return; }
-  Message.success(`正在打开「${a.name}」（${a.mode === 'web' ? 'Web 代理' : a.mode === 'global' ? '全网资源' : '隧道访问'}）`);
+  // ★三处名字统一成「直连书签」（向导 / 门户 / 这里）：它不经网关、不受访问控制，
+  // 叫「全网资源」会让人以为是一种受控发布形态（wave8 行动 14）。
+  Message.success(`正在打开「${a.name}」（${a.mode === 'web' ? 'Web 代理' : a.mode === 'global' ? '直连书签 · 不经隧道' : '隧道访问'}）`);
 }
 
 async function load() {

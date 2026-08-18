@@ -176,10 +176,14 @@ type appState struct {
 // a.Mode 与 appState.Unavailable 判断，不要直接用零值）。
 func appAccessState(user, role string, a store.App, byRes map[string]store.Resource,
 	ix store.SubjectIndex, granted map[string]bool, degraded bool) (store.Resource, appState) {
-	// global 模式（*.cnki.net 这类全网资源）没有受控资源可判，也不经网关代理。
-	// 两个出口都如实标 normal + 可见——它**绕过授权判定**这件事本身是一处未表态的缺口
-	// （见 docs/charter/wave8.md 行动 14），但在处置它之前两处必须先同口径：
-	// 一处放行一处拦，会让门户与客户端对同一个应用给出相反答案，比现状更难查。
+	// global = **直连书签**（wave8 行动 14 已表态）：它不经网关、不进隧道路由、不做鉴权，
+	// 两个出口都如实标 normal + 可见。这不再是一处"未表态的缺口"——发布向导、门户磁贴、
+	// 移动端三处都当面写明「不受访问控制，凡是能登录的人都看得到」，
+	// 名字也从「WEB 全网资源 / 全局加速 / 全网资源」统一成了「直连书签」。
+	//
+	// ★真正的泛域名代理（证书签发 + 正文改写）是 L 级工程，本版本不做；
+	// 要受控发布只有 tunnel / web 两条真链路。两处判定必须同口径：
+	// 一处放行一处拦，会让门户与客户端对同一个应用给出相反答案。
 	if a.Mode == "global" {
 		return store.Resource{}, appState{Sensitivity: store.SensitivityNormal, Accessible: true}
 	}

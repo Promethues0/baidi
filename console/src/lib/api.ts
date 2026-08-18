@@ -137,8 +137,12 @@ export interface AppCategoryDef { key: string; label: string; sort: number; buil
 export interface AppCategoriesResp { categories: AppCategoryDef[] }
 export interface App {
   id: string; name: string; addr: string;
+  /** tunnel/web 是受控发布；**global 是直连书签**——不经网关、不受访问控制，
+   *  对全体登录用户可见（剖面与门户都直接给 accessible: true）。 */
   mode: 'tunnel' | 'web' | 'global';
-  category: string; node: string; authedUsers: number;
+  /** 关联的受控资源 id。空 = 未关联，隧道与七层两条路都不通。 */
+  resourceId?: string;
+  category: string; authedUsers: number;
   /** 授权面性质：unlinked 未关联资源 / unlimited 未设 ACL 对全员开放 / limited 按 ACL 限定 */
   authScope?: 'unlinked' | 'unlimited' | 'limited';
   status: 'running' | 'stopped';

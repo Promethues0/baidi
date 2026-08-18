@@ -95,6 +95,9 @@ func builtinAppCategories() []AppCategoryDef {
 		{Key: "office", Label: "办公协同", Sort: 10, Builtin: true},
 		{Key: "finance", Label: "财务高敏", Sort: 20, Builtin: true},
 		{Key: "dev", Label: "研发运维", Sort: 30, Builtin: true},
+		// ★这一项是**分类**（管理台归类维度），与 App.Mode 的 "global"（发布形态）
+		// 毫无关系，只是恰好同名。别顺手把它改成「直连书签」——那是发布形态的名字，
+		// 改了就等于把两个维度重新混成一谈（wave8 行动 14 差点踩进去）。
 		{Key: "global", Label: "全网资源", Sort: 40, Builtin: true},
 	}
 }

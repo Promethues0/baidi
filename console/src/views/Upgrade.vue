@@ -98,14 +98,18 @@
             扩大比例只会新增命中，不会把已升级的用户退回旧版。
           </div>
           <table class="bd-table" style="margin-top: 10px">
-            <thead><tr><th>平台</th><th>稳定版</th><th>灰度版</th><th>比例</th><th>定向</th><th class="r">操作</th></tr></thead>
+            <thead><tr><th>平台</th><th>稳定版</th><th>灰度版</th><th>比例</th><th>定向</th><th>预计影响</th><th class="r">操作</th></tr></thead>
             <tbody>
               <tr v-for="p in bundle.gray" :key="p.platform">
                 <td><b>{{ platformLabel(p.platform) }}</b></td>
                 <td class="bd-mono">{{ p.stable || '—' }}</td>
                 <td class="bd-mono">{{ p.version }}</td>
                 <td>{{ p.percent }}%</td>
-                <td class="bd-dim">{{ (p.accounts?.length ?? 0) + (p.groups?.length ?? 0) || '—' }}</td>
+                <td class="bd-dim" :title="targetTitle(p)">{{ targetText(p) }}</td>
+                <!-- ★「预计影响」是 upgrade.Coverage 精确数出来的（分桶确定性），不是
+                     accounts×percent/100 的估算。缺席时显示「—」而不是 0：
+                     把读取失败画成「0 人」会让管理员以为这条灰度谁也没命中，进而调高比例。 -->
+                <td>{{ coverText(p) }}</td>
                 <td class="r">
                   <button type="button" class="bd-link" @click="openGray(p)">编辑</button>
                   <button type="button" class="bd-link bd-link--danger" style="margin-left: 12px"
@@ -118,6 +122,30 @@
             </tbody>
           </table>
           <button type="button" class="bd-link" style="margin-top: 8px" @click="openGray()"><icon-plus />新增灰度计划</button>
+
+          <!-- ★现场实际版本分布（FR-UPG-19 AC-12 的验收依据）。
+               灰度只决定「告诉谁有新版」，不决定任何人**实际**装了什么——
+               客户端不自动下载、不自动安装。放开比例前要看的是这一份，
+               改造前它根本不存在，AC-12「先小范围验证再放开」在真机上无从验证。 -->
+          <div class="bd-vers__sub">现场终端版本分布</div>
+          <div class="bd-hint">
+            来自终端 posture 上报（每台设备最新一份），是「谁在跑哪个版本」的唯一权威事实。
+            <b>未上报</b>单列一桶——把它并进稳定版会让「有一批机器根本没报过版本」这件事消失，
+            而那批机器恰恰是升级里最需要盯的。
+          </div>
+          <table v-if="versionRows.length" class="bd-table" style="margin-top: 8px">
+            <thead><tr><th>平台</th><th>客户端版本</th><th>终端数</th></tr></thead>
+            <tbody>
+              <tr v-for="(v, i) in versionRows" :key="i">
+                <td>{{ v.platform || '未上报' }}</td>
+                <td :class="v.version ? 'bd-mono' : 'bd-dim'">{{ v.version || '未上报' }}</td>
+                <td>{{ v.count }}</td>
+              </tr>
+            </tbody>
+          </table>
+          <div v-else class="bd-vers__empty" style="padding: 14px 0">
+            尚无终端上报过环境（posture）——装上客户端并登录一次后这里就会有数据。
+          </div>
         </div>
 
         <!-- 配置备份 -->
@@ -164,6 +192,25 @@
         <div class="bd-fld"><label>定向账号（无视比例，逗号分隔）</label>
           <a-input v-model="gr.accounts" placeholder="qa.liu, dev.wang" class="bd-mono" />
         </div>
+        <!-- ★用户组定向：改造前这个多选**根本不存在**，而保存请求体里写死 groups: []。
+             于是管理员只要在页面上改一下比例，经 API 配好的用户组定向就被整体清空——
+             接口回 200、页面看不出差别，灰度对象从「测试组」变成「全体 N% 随机分桶」。
+             SaveGrayPlan 是整条覆盖式保存，前端漏一个字段就是一次静默的配置丢失。 -->
+        <div class="bd-fld"><label>定向用户组（无视比例）</label>
+          <a-select v-model="gr.groups" multiple allow-clear placeholder="不按用户组定向">
+            <a-option v-for="g in groupOpts" :key="g.id" :value="g.id">{{ g.name }}（{{ g.accounts.length }} 人）</a-option>
+          </a-select>
+        </div>
+        <!-- ★措辞必须与算法一致：定向部分是精确的（就是这些人），比例部分是估算的
+             （前端算不出服务端的 SHA-256 分桶）。写成「精确算出来的」就是在替一个
+             估算值背书——保存后表格「预计影响」那一列才是后端精确数出来的权威值。 -->
+        <div class="bd-fld__hint">
+          预览：定向命中 <b>{{ previewDirect }}</b> 人（精确）
+          <template v-if="gr.percent > 0">
+            ＋ 按 {{ gr.percent }}% 分桶<b>约</b> {{ previewCoverage - previewDirect }} 人（估算，前端算不出服务端分桶）
+          </template>
+          ，共 {{ bundle.total ?? '—' }} 个账号。保存后表格「预计影响」列是后端精确数出来的。
+        </div>
         <div class="bd-fld__foot">
           <button class="bd-btn bd-btn--ghost" @click="gr.open = false">取消</button>
           <button class="bd-btn" :disabled="gr.busy" @click="saveGray">保存</button>
@@ -195,7 +242,7 @@ const gwList = computed(() => Object.entries(bundle.value.gateways ?? {})
 
 const chk = reactive({ manifest: '', sig: '', busy: false, result: null as UpgradeCheckResult | null });
 const bk = reactive({ pass: '', note: '', busy: false });
-const gr = reactive({ open: false, editing: false, busy: false, platform: 'macos', stable: '', version: '', percent: 10, accounts: '' });
+const gr = reactive({ open: false, editing: false, busy: false, platform: 'macos', stable: '', version: '', percent: 10, accounts: '', groups: [] as string[] });
 
 async function load() {
   try {
@@ -235,12 +282,57 @@ async function doCheck() {
   finally { chk.busy = false; }
 }
 
+/** 灰度定向的用户组候选（后端随 /upgrade 下发，与资源授权、认证策略共用同一处展开）。 */
+const groupOpts = computed(() => bundle.value.groups ?? []);
+/** 版本分布按「终端数降序」排：升级要先看的是量最大的那一桶。 */
+const versionRows = computed(() => [...(bundle.value.versions ?? [])].sort((a, b) => b.count - a.count));
+
+function targetText(p: GrayPlan) {
+  const a = p.accounts?.length ?? 0, g = p.groups?.length ?? 0;
+  if (!a && !g) return '—';
+  return [a ? `${a} 账号` : '', g ? `${g} 用户组` : ''].filter(Boolean).join(' + ');
+}
+function targetTitle(p: GrayPlan) {
+  const names = (p.groups ?? []).map((id) => groupOpts.value.find((x) => x.id === id)?.name || id);
+  return [ (p.accounts ?? []).join('、'), names.join('、') ].filter(Boolean).join(' | ') || '未做定向';
+}
+/** ★缺席（后端读取失败）显示「—」，不是 0。两者在决策上正好相反。 */
+function coverText(p: GrayPlan) {
+  const c = bundle.value.coverage?.[p.platform];
+  if (c === undefined) return '—';
+  const total = bundle.value.total;
+  return total ? `${c} / ${total} 人` : `${c} 人`;
+}
+/** 弹窗里的实时预览：与后端 upgrade.Decide 同构（定向命中 → 必中；否则按稳定分桶）。
+ *  ★只是预览，权威值是保存后后端算的那份（表格「预计影响」列）。 */
+/** 定向命中（账号 ∪ 用户组展开）——这一半是精确的。 */
+const previewDirect = computed(() => {
+  const direct = new Set(gr.accounts.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+  for (const id of gr.groups) {
+    groupOpts.value.find((g) => g.id === id)?.accounts.forEach((a) => direct.add(a.toLowerCase()));
+  }
+  return direct.size;
+});
+const previewCoverage = computed(() => {
+  const direct = new Set(gr.accounts.split(',').map((x) => x.trim().toLowerCase()).filter(Boolean));
+  for (const id of gr.groups) {
+    groupOpts.value.find((g) => g.id === id)?.accounts.forEach((a) => direct.add(a.toLowerCase()));
+  }
+  const total = bundle.value.total ?? 0;
+  if (!gr.version.trim()) return 0; // 版本为空 = 撤销该平台的灰度（后端语义）
+  // 比例部分按 percent 估：前端算不出 SHA-256 分桶，故只对定向部分精确、比例部分取整估。
+  const byPercent = Math.round(((total - direct.size) * gr.percent) / 100);
+  return direct.size + Math.max(0, byPercent);
+});
+
 function openGray(p?: GrayPlan) {
   err.value = '';
   Object.assign(gr, {
     open: true, editing: !!p, busy: false,
     platform: p?.platform ?? 'macos', stable: p?.stable ?? '', version: p?.version ?? '',
-    percent: p?.percent ?? 10, accounts: (p?.accounts ?? []).join(', ')
+    percent: p?.percent ?? 10, accounts: (p?.accounts ?? []).join(', '),
+    // ★必须回填：不回填 + 保存时整条覆盖 = 编辑一次就把用户组定向清空。
+    groups: [...(p?.groups ?? [])]
   });
 }
 
@@ -253,7 +345,7 @@ async function saveGray() {
         platform: gr.platform, stable: gr.stable.trim(), version: gr.version.trim(),
         percent: gr.percent,
         accounts: gr.accounts.split(',').map((s) => s.trim()).filter(Boolean),
-        groups: []
+        groups: [...gr.groups]
       })
     });
     gr.open = false;

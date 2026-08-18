@@ -1274,6 +1274,16 @@ export interface UpgradeBundle {
   gateways: Record<string, string>;
   rules: UpgradeRules;
   gray: GrayPlan[];
+  /** 每条灰度计划**精确**命中的账号数（key = platform）。缺席 = 读取失败，
+   *  与 0 是两回事：把读失败画成「0 人」会让管理员以为这条灰度谁也没命中，进而调高比例。 */
+  coverage?: Record<string, number>;
+  /** 参与分桶的账号总数（覆盖数的分母）。 */
+  total?: number;
+  /** 现场终端的**实际**版本分布（posture 上报）。灰度只决定"告诉谁有新版"，
+   *  不决定任何人实际装了什么——放开比例前要看的是这一份。 */
+  versions?: { platform: string; version: string; count: number }[];
+  /** 用户组候选（灰度定向用，与资源授权/认证策略共用同一处展开）。 */
+  groups?: SubjectOption[];
   /** 后端下发的边界声明：哪些做了、哪些刻意不做。前端不得自行编写或省略。 */
   boundaries: string[];
 }

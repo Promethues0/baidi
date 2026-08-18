@@ -150,3 +150,20 @@ func userStateBuckets(count func(states ...string) int) []UserStateBucket {
 		{Key: "disabled", Label: "禁用账号", Count: count("disabled"), Tone: "normal"},
 	}
 }
+
+// ── 终端版本分布（FR-UPG-19 AC-12：灰度放开的决策依据）──
+
+// ClientVersionStat 一个 (平台, 客户端版本) 桶的终端数。
+//
+// ★这是全系统唯一权威的「谁在跑哪个版本」：灰度计划只决定「告诉谁有新版」，
+// 不决定任何人**实际**装了什么（客户端不自动下载、不自动安装）。
+// 管理员把比例从 10% 调到 50% 之前要看的正是这份分布——改造前它根本不存在，
+// AC-12「先小范围验证再放开」在真机上无从验证。
+type ClientVersionStat struct {
+	Platform string `json:"platform"`
+	// Version 客户端自报版本。**空串保留为一个独立的桶**（渲染成「未上报」），
+	// 绝不并进任何一个具体版本里——把它算进稳定版会让「有一批终端根本没报过版本」
+	// 这件事消失，而那批机器恰恰是升级里最需要盯的。
+	Version string `json:"version"`
+	Count   int    `json:"count"`
+}

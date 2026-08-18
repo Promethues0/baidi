@@ -41,6 +41,20 @@ type upgradeBundle struct {
 	Gateways map[string]string  `json:"gateways"` // 网关 id → 上报版本（空串=旧网关不上报）
 	Rules    upgrade.Rules      `json:"rules"`
 	Gray     []upgrade.GrayPlan `json:"gray"`
+	// Coverage 每条灰度计划**精确**命中的账号数（key = platform）。
+	//
+	// ★不是 accounts×percent/100 的估算：分桶是确定性的，真实命中数能直接数出来
+	// （upgrade.Coverage）。显示近似值会让管理员在「说好 10% 结果 13 个人」时
+	// 怀疑灰度本身有问题。改造前这个函数**全仓只有三条单测在调**，
+	// 而它的注释白纸黑字写着「供控制台显示『预计影响 N 人』」。
+	Coverage map[string]int `json:"coverage"`
+	// Total 参与分桶的账号总数（覆盖数的分母）。
+	Total int `json:"total"`
+	// Versions 现场终端的**实际**版本分布（posture 上报）。灰度只决定"告诉谁有新版"，
+	// 不决定任何人实际装了什么——放开比例前要看的是这一份。
+	Versions []store.ClientVersionStat `json:"versions"`
+	// Groups 用户组候选（灰度定向用，与资源授权/认证策略共用 subjectOptions）。
+	Groups []subjectOption `json:"groups"`
 	// Boundaries 如实告知本功能做到哪、没做哪——PRD 第 4 章有大量源产品专有内容，
 	// 不说清楚的话，管理员会以为界面上没有的就是「还没做完」而不是「刻意不做」。
 	Boundaries []string `json:"boundaries"`
@@ -88,7 +102,54 @@ func (s *Server) upgradeBundle(r *http.Request) (upgradeBundle, error) {
 	if b.Gray, err = s.upg.GrayPlans(r.Context()); err != nil {
 		return b, err
 	}
+	s.fillGrayCoverage(r, &b)
 	return b, nil
+}
+
+// fillGrayCoverage 补上「预计影响 N 人」「实际版本分布」「用户组候选」三样。
+//
+// best-effort：任何一处读失败都只让对应字段缺席，不影响升级页主体
+// （规则与灰度计划已经取到了）。★缺席与 0 在前端是两种渲染：
+// 前者显示「—（读取失败）」，后者显示「0 人」——把读失败画成 0 人，
+// 管理员会以为这条灰度谁也没命中，进而把比例调高。
+func (s *Server) fillGrayCoverage(r *http.Request, b *upgradeBundle) {
+	if vs, ok := s.store.(interface {
+		ClientVersionStats(ctx context.Context) ([]store.ClientVersionStat, error)
+	}); ok {
+		if list, err := vs.ClientVersionStats(r.Context()); err == nil {
+			b.Versions = list
+		}
+	}
+	_, groups, err := s.subjectOptions(r.Context())
+	if err == nil {
+		b.Groups = groups
+	}
+	ub, err := s.store.Users(r.Context())
+	if err != nil {
+		return
+	}
+	// ★分母是**目录里的全部账号**，与 Decide 的入参口径一致。
+	// 只数"在线的"或"报过 posture 的"会让同一条计划在不同时刻显示不同的覆盖数，
+	// 而分桶本身是确定性的——那种跳动会被读成"灰度不稳定"。
+	accounts := make([]string, 0, len(ub.Users))
+	for _, u := range ub.Users {
+		accounts = append(accounts, u.Account)
+	}
+	b.Total = len(accounts)
+	groupsOf := func(string) []string { return nil }
+	if ix, err := s.store.SubjectIndex(r.Context()); err == nil {
+		byAcct := map[string][]string{}
+		for gid, accts := range ix.GroupAccounts {
+			for _, a := range accts {
+				byAcct[a] = append(byAcct[a], gid)
+			}
+		}
+		groupsOf = func(a string) []string { return byAcct[normUser(a)] }
+	}
+	b.Coverage = map[string]int{}
+	for _, p := range b.Gray {
+		b.Coverage[p.Platform] = upgrade.Coverage(p, accounts, groupsOf)
+	}
 }
 
 // gatewayVersions 取各网关**上报**的版本。旧网关不上报时是空串——

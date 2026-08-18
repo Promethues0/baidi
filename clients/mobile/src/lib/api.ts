@@ -60,3 +60,38 @@ export interface PortalTile {
   unavailableReason?: string;
 }
 export interface PortalAppsResp { apps: PortalTile[] }
+
+/* ── 客户端灰度更新检查（GET /api/v1/client/update，登录用户）──
+ *
+ * ★判定完全在服务端：控制面按 (平台, 账号) 稳定分桶、叠加定向名单/用户组，
+ * 算出「这台机器此刻该被告知哪个版本」，并且只有目标版本**高于**上报版本时才回 update=true。
+ * 移动端刻意不自己算比例、也不自己比版本号——两边各写一份版本比较，迟早出现
+ * 「服务端说不用升、客户端横幅还挂着」这种谁也说不清对错的分歧（与桌面端同一条纪律）。
+ *
+ * 后端按 platform 分桶**早已支持** android/ios/harmony；改造前只是移动端从没调过这一跳
+ * （grep client/update 在 clients/mobile 里零命中）。
+ */
+export interface ClientUpdateResp {
+  platform: string;
+  current: string;
+  latest?: string;
+  inGray?: boolean;
+  reason: string;
+  /** ★横幅的唯一判据：服务端已排除「版本相同」与「目标更旧（那是降级）」两种情况。 */
+  update: boolean;
+}
+
+/** 本端版本（构建期由 vite define 从 package.json 注入）。 */
+export const appVersion: string = typeof __APP_VERSION__ === 'string' ? __APP_VERSION__ : '';
+
+/**
+ * 检查客户端更新。
+ *
+ * ★version 必须是本机真实版本，不能留空：服务端对空版本的语义是
+ * 「客户端没报版本 → 把最新版告诉它」，会无条件回 update=true，
+ * 于是横幅在早已是最新版的机器上常亮。取不到版本就别调。
+ */
+export function checkClientUpdate(platform: string, version: string): Promise<ClientUpdateResp> {
+  const q = new URLSearchParams({ platform, version });
+  return api<ClientUpdateResp>('/client/update?' + q.toString());
+}

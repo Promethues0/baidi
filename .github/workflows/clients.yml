@@ -900,6 +900,24 @@ jobs:
           正因为「能装 ≠ 验证过」，这个包**不进下载中心**（deploy/artifacts/downloads 的
           manifest 里 Windows 那一行照实说明未实机验证、产物标 UNVERIFIED、请联系管理员，
           **不写「构建中，敬请期待」**——那等于让人一直等一个按现有决策不会下发的包）。
+
+          ── 怎么把「未验证」变成「已验证」──────────────────────────────
+          本包**同目录**附了 verify-windows.ps1：上面那三项未验证的东西，它逐条测。
+          这是「先验后发」唯一认可的证据来源——跑通它、把报告回传，Windows 客户端
+          才会进下载中心。
+
+            阶段 A｜打包落位（普通权限，不改动系统任何状态；装完先跑这个）
+              powershell -ExecutionPolicy Bypass -File .\verify-windows.ps1
+
+            阶段 B｜UAC 提权 + 建虚拟网卡（右键「以管理员身份运行 PowerShell」）
+              powershell -ExecutionPolicy Bypass -File .\verify-windows.ps1 -Stage B
+
+            阶段 C｜完整链路 + 分离式 DNS（需要能连到 baidi-control 与 baidi-gateway）
+              powershell -ExecutionPolicy Bypass -File .\verify-windows.ps1 -Stage C -Control https://<控制中心地址>
+
+          前一阶段不过就别跑后一阶段：在 DLL 都没落对位置的机器上测隧道，
+          只会得到一个无从归因的失败。脚本**不修任何东西**，只观察并如实报告；
+          报告会同时写进文件并整段打在屏幕上（文件写不出时直接复制屏幕那段回传）。
           TXT
           # 溯源与包同行，理由同 Linux 那一步
           {
@@ -907,6 +925,10 @@ jobs:
             echo "构建溯源（机器可读的一份见同目录 build-provenance.env）："
             sed 's/^/  /' "$BD_BUNDLE_ROOT/bundle/build-provenance.env"
           } >> "$BD_BUNDLE_ROOT/bundle/README-windows.txt"
+          # ★验证脚本必须**随包走**。它此前只躺在仓库里：拿到包的人被告知
+          #   「这三项没在真机上验过」，却没人告诉他一套专测这三项的脚本是存在的，
+          #   于是「先验后发」这条路在收件人那一侧是断的。包与它的验收工具必须同行。
+          cp clients/verify-windows.ps1 "$BD_BUNDLE_ROOT/bundle/verify-windows.ps1"
 
       - name: 上传前断言真有Windows 安装包（不是只有 README）
         if: runner.os == 'Windows'
@@ -921,6 +943,17 @@ jobs:
             ls -R "$BD_BUNDLE_ROOT/bundle" 2>/dev/null || true
             exit 1; }
           echo "✓ 安装包 $n 个"
+          # ★验证脚本与它在 README 里的指路，两者必须同时在场——与 wintun LICENSE
+          #   那道检查同一条纪律：**说过的话要有执行方**。
+          #   少了脚本：README 教人跑一个包里没有的文件；
+          #   少了指路：脚本躺在包里没人知道它是干什么的。
+          [ -f "$BD_BUNDLE_ROOT/bundle/verify-windows.ps1" ] || {
+            echo "✗ bundle 下缺 verify-windows.ps1（拷贝那步没跑？）"; exit 1; }
+          grep -q 'verify-windows.ps1' "$BD_BUNDLE_ROOT/bundle/README-windows.txt" || {
+            echo "✗ README-windows.txt 没有指向 verify-windows.ps1——"
+            echo "  拿到包的人不会知道有这么一套验收工具，「先验后发」在收件人那一侧就是断的"
+            exit 1; }
+          echo "✓ 验证脚本随包 + README 已指路"
 
       - name: 上传产物（Windows）
         if: runner.os == 'Windows'
@@ -932,4 +965,5 @@ jobs:
             ${{ env.BD_BUNDLE_ROOT }}/bundle/nsis/*.exe
             ${{ env.BD_BUNDLE_ROOT }}/bundle/README-windows.txt
             ${{ env.BD_BUNDLE_ROOT }}/bundle/build-provenance.env
+            ${{ env.BD_BUNDLE_ROOT }}/bundle/verify-windows.ps1
           if-no-files-found: error

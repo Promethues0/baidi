@@ -4,6 +4,7 @@
  *  - 浏览器 dev：经本地 baidi-knock-agent（/knock 代理）发起真实敲门 + 隧道可达性验证。
  * 两条路径都执行"真链路"敲门，区别只是谁来发 UDP 包。
  */
+import { Command } from '@tauri-apps/plugin-shell';
 import { config, profile, device } from './store';
 
 /**
@@ -34,10 +35,15 @@ export async function knock(token: string): Promise<KnockResult> {
 
   if (inTauri()) {
     // 生产：Tauri sidecar 执行 baidi-knock（真实 UDP 敲门，源 IP = 本机）。
-    // 变量化模块名 + @vite-ignore，让浏览器 dev 构建不去解析该 Tauri-only 依赖。
-    const shellMod = '@tauri-apps/plugin-shell';
-    const shell = (await import(/* @vite-ignore */ shellMod)) as { Command: { sidecar: (b: string, a: string[]) => { execute: () => Promise<{ code: number | null; stdout: string; stderr: string }> } } };
-    const out = await shell.Command.sidecar('binaries/baidi-knock',
+    //
+    // ★静态 import，别改回「变量化模块名 + @vite-ignore」。原注释说那样写是
+    // 「让浏览器 dev 构建不去解析该 Tauri-only 依赖」，代价却是**裸模块名原样留进
+    // 打包产物**：`import("@tauri-apps/plugin-shell")`，WebView 解析不了裸说明符，
+    // 运行期抛 `Failed to resolve module specifier`——真实敲门在打包后的客户端里
+    // 整条是死的。dev 分支根本走不到这里（下面 inTauri() 为 false 那一支），
+    // 所以静态引入对 dev 无副作用；Vite 会把它打进 bundle。
+    // 同一形态在 tunnel.ts 里也有一处（tunnel_start 等全部失效），2026-08-18 一并修。
+    const out = await Command.sidecar('binaries/baidi-knock',
       ['-spa', spaTarget(), '-token', token, '-control', control,
         // 终端指纹：控制面「授信终端」准入闸的判据，与 posture 上报同一个值。
         // 还没采过一轮时是空串，baidi-knock 照常发（观察模式放行并留痕，严格模式明确拒）。

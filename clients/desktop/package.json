@@ -6,7 +6,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "vite build",
+    "build": "vite build && node scripts/check-bundle-specifiers.mjs",
     "preview": "vite preview --port 4294",
     "type-check": "vue-tsc --noEmit",
     "tauri": "tauri",

@@ -5,6 +5,7 @@
  *  - 浏览器 dev：无 utun（需 root + Tauri），退化为经 baidi-knock-agent 的真实敲门探测，
  *    供 UI 联调；不接管系统流量。
  */
+import { invoke as tauriInvoke } from '@tauri-apps/api/core';
 import { config, session, profile, device } from './store';
 import type { ProfileGateway } from './api';
 
@@ -12,10 +13,26 @@ export function tauriRuntime(): boolean {
   return typeof (window as unknown as { __TAURI_INTERNALS__?: unknown }).__TAURI_INTERNALS__ !== 'undefined';
 }
 
+/**
+ * 调一条 Tauri 命令。
+ *
+ * ★这里**必须是静态 import**，别再改回 `await import(/* @vite-ignore *\/ mod)`。
+ * 那种写法（变量做说明符 + @vite-ignore）等于明确告诉 Vite「别管这个 import」，
+ * 于是**裸模块名原样留在了打包产物里**：`import("@tauri-apps/api/core")`。
+ * 浏览器/WebView2 解析不了裸说明符（没有 import map），运行期直接抛
+ * `Failed to resolve module specifier '@tauri-apps/api/core'`。
+ *
+ * 后果是整条隧道控制链在**打包后的客户端里全是死的**——tunnel_start / status / stop /
+ * open_app_url / force_quit 一个都调不动。点「接入」什么都不会发生：不弹 UAC、
+ * 不建网卡、也没有任何服务端痕迹，看起来就像"客户端没反应"。
+ *
+ * 为什么一直没暴露：dev 走浏览器时 `tauriRuntime()` 为 false，这条路径根本不进；
+ * 而打包后的客户端在 2026-08-18 之前从没在真机上被点过「接入」。
+ * 同仓库的 Diagnostics.vue 一直是静态 import，能正常工作——两种引法并存，
+ * 坏的那种恰好在主链路上。
+ */
 async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T> {
-  const mod = '@tauri-apps/api/core';
-  const core = (await import(/* @vite-ignore */ mod)) as { invoke: (c: string, a?: Record<string, unknown>) => Promise<T> };
-  return core.invoke(cmd, args);
+  return tauriInvoke<T>(cmd, args as Record<string, unknown>);
 }
 
 interface TunStatusRaw {

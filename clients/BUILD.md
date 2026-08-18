@@ -734,6 +734,46 @@ macOS 上同样会撞（WKWebView 也校验系统钥匙串），只是此前所�
 **验证阶段 C 的前提因此要写清楚**：要么把控制面证书导入本机信任库，
 要么给控制面换一张受信任的证书。演示站是自签，所以跑阶段 C 之前必须先导。
 
+### 10.3f C1 的**真正**死因：打包产物里的裸说明符动态 import（整条隧道控制链是死的）
+
+导入证书解决了登录之后，客户端在接入页抛：
+
+```
+Failed to resolve module specifier '@tauri-apps/api/core'
+```
+
+这才是 C1 的根因，而且比前面几条严重得多。`src/lib/tunnel.ts` 与 `src/lib/knock.ts`
+用的是「变量做模块说明符 + `@vite-ignore`」：
+
+```ts
+const mod = '@tauri-apps/api/core';
+const core = await import(/* @vite-ignore */ mod);   // ← Vite 被明确告知「别管它」
+```
+
+于是**裸模块名原样进了打包产物**（实测 `dist/assets/*.js` 里有
+`import("@tauri-apps/api/core")` 与 `import("@tauri-apps/plugin-shell")`）。
+浏览器/WebView2 没有 import map，解析不了裸说明符，运行期直接抛。
+
+**影响面**：`tunnel_start` / `tunnel_status` / `tunnel_stop` / `open_app_url` /
+`force_quit`，以及 sidecar 敲门——**在打包后的客户端里全部调不动**。点「接入」什么都不会
+发生：不弹 UAC、不建网卡、服务端一条记录都没有，看起来就像"客户端没反应"。
+**这不是 Windows 独有的，所有平台的打包产物都一样。** 自 `82f26b6`（2026-07-01
+「桌面客户端：真 utun 数据面接管流量」）起就是坏的。
+
+**为什么单测、dev、CI 全都没发现**：
+- dev 走浏览器时 `tauriRuntime()` 为 false，这些路径根本不进；
+- Rust 单测测的是提权命令的**构造**（纯函数），不涉及前端能不能把命令发出去；
+- CI 只验"包打得出来"，不启动 GUI 点按钮；
+- 而打包后的客户端在 2026-08-18 之前**从没在真机上被点过「接入」**。
+
+同一个仓库里 `Diagnostics.vue` 一直是静态 `import { invoke } from '@tauri-apps/api/core'`，
+工作正常——两种引法并存，坏的那种恰好在主链路上。
+
+已修：两处都改静态 import。并加 `scripts/check-bundle-specifiers.mjs`，
+扫描 `dist/assets/*.js` 里是否残留 `import("<非相对路径>")`，串进 `npm run build`
+（`tauri.conf.json` 的 `beforeBuildCommand` 调的就是它，所以打包链同样受保护）。
+变异验证：把坏写法塞回 tunnel.ts，构建当场退出码 1 并指名文件与模块。
+
 ### 10.4 脚本随包走（不用去仓库里找）
 
 `verify-windows.ps1` 现在**装在 CI 产物里**，与 msi/nsis 同目录，

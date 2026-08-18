@@ -261,3 +261,40 @@ func TestClientsWorkflowShipsProvenance(t *testing.T) {
 		}
 	}
 }
+
+// TestShippedManifestMatchesPlaceholderNotes 仓库里**已交付的那份** manifest.json，
+// 其未上架平台的文案必须与 placeholderManifest() 逐字一致。
+//
+// ★上面那条用例守的是「脚本生成的」manifest，这条守的是「仓库里躺着的、会被 build.sh
+// 拷进交付件、最终装到演示机上的」那一份——两者不是同一个东西。
+// 实际踩到过：`wintun.dll` 从「需自备（本仓库不分发）」改成「构建期官方取件 + 哈希校验、
+// 随包分发」之后，脚本与 placeholderManifest() 都跟着改了，**而这份产物 manifest 没有**。
+// 于是演示站的下载中心对着用户说了三个月「需自备 wintun.dll」——一句已经不成立的话，
+// 且它恰好会劝退唯一有可能去做实机验证的那批人。
+//
+// 只比未上架平台的 note：已上架条目带 file/size/sha256，本来就该与占位不同。
+func TestShippedManifestMatchesPlaceholderNotes(t *testing.T) {
+	path := filepath.Join(repoRoot(t), "deploy", "artifacts", "downloads", "manifest.json")
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Skipf("仓库里没有已交付的 manifest（%v）", err)
+	}
+	var shipped downloadsManifest
+	if err := json.Unmarshal(b, &shipped); err != nil {
+		t.Fatalf("已交付的 manifest.json 解析失败: %v", err)
+	}
+	want := map[string]string{}
+	for _, c := range placeholderManifest().Clients {
+		want[c.Platform] = c.Note
+	}
+	for _, c := range shipped.Clients {
+		if c.Available {
+			continue // 已上架条目的 note 是它自己的（如「调试签名版…」），不参与比对
+		}
+		if w, ok := want[c.Platform]; ok && c.Note != w {
+			t.Errorf("平台 %s 的占位文案与 placeholderManifest() 不一致——"+
+				"这份 manifest 会被装到演示机上，它说的话必须与代码里那份相同：\n"+
+				"  已交付：%s\n  代码里：%s", c.Platform, c.Note, w)
+		}
+	}
+}

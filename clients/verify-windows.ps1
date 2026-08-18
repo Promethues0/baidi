@@ -56,6 +56,9 @@ param(
     [ValidateSet('A', 'B', 'C', 'All')][string]$Stage = 'A',
     [string]$InstallDir = '',
     [string]$Control = '',
+    # 阶段 C 用：一个业务地址（客户端「应用」页里的接入地址），用来做端到端连通判定。
+    # 不给则 C3 如实 SKIP——**不给就跳过，绝不假装验过**。
+    [string]$Probe = '',
     # 留空表示"自动挑一个写得进去的位置"（见 Write-Report）。
     # ★刻意不再写死 "$env:USERPROFILE\Desktop"：OneDrive 接管桌面之后那个目录**可能根本不存在**，
     #   而原先的写法在写失败之后照样打印"报告已写入"——脚本声称成功、实际什么都没留下。
@@ -64,6 +67,7 @@ param(
 
 $ErrorActionPreference = 'Continue'   # 单条检查失败不中止整轮：一次跑完拿到全貌比早退更有用
 $script:Results = @()
+$script:NrptSeen = $false   # 阶段 C：接入时到底有没有 NRPT 规则，决定 C6 是判定还是跳过
 
 function Add-Result {
     param(
@@ -329,16 +333,92 @@ function Invoke-StageB {
 }
 
 function Invoke-StageC {
-    Write-Host "`n═══ 阶段 C：完整链路 ═══" -ForegroundColor Cyan
+    Write-Host "`n═══ 阶段 C：完整链路（客户端自己走一遍）═══" -ForegroundColor Cyan
     if (-not $Control) {
-        Add-Result 'C0' '完整链路' 'SKIP' '未给 -Control；阶段 C 需要一个可达的 baidi-control（如 -Control https://10.0.0.5:8090）'
+        Add-Result 'C0' '完整链路' 'SKIP' '未给 -Control；阶段 C 需要一个可达的 baidi-control（如 -Control https://101.43.125.131）'
         return
     }
-    Add-Result 'C0' '完整链路' 'UNKNOWN' `
-        ("阶段 C 目前只能人工走：请用桌面客户端登录 {0} 并点「接入」，然后观察——" -f $Control)
-    Add-Result 'C1' 'SPA 敲门 → 隧道建立' 'UNKNOWN' '客户端「接入」页是否显示已接入、网关落点与钉扎指纹是否正确'
-    Add-Result 'C2' '分离式 DNS（NRPT）' 'UNKNOWN' "接入后跑 Get-DnsClientNrptRule，看是否出现指向隧道内解析器的规则"
-    Add-Result 'C3' '断开后 NRPT 回收' 'UNKNOWN' '断开后再跑一次 Get-DnsClientNrptRule，规则应已消失'
+
+    # ★阶段 C 刻意**由人操作产品、由脚本判定系统状态**，脚本自己不去拉 baidi-tun。
+    #   理由：阶段 B 是从一个已提权的 PowerShell 里直接拉进程的，**绕过了客户端自己的
+    #   UAC 提权路径**（elevate.rs 的 Start-Process -Verb RunAs）——那正是 README 里
+    #   列的第 1 项未验证。脚本替用户提权就永远验不到它。
+    #   所以这里让客户端自己去弹 UAC、自己建卡，脚本只看它留下的系统状态。
+    Write-Host ''
+    Write-Host '  请现在用桌面客户端完成以下操作：' -ForegroundColor Yellow
+    Write-Host ("    1) 登录 {0}（演示账号 li.fang / baidi@123）" -f $Control)
+    Write-Host  '    2) 点「接入」，**留意是否弹出 UAC 提权框**并同意'
+    Write-Host  '    3) 等接入页显示已接入'
+    Read-Host  '  完成后按回车继续（脚本开始判定）' | Out-Null
+
+    # C1 隧道网卡
+    $ad = Get-NetAdapter -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -eq 'baidi0' -or $_.InterfaceDescription -like '*Wintun*' }
+    if (-not $ad) {
+        Add-Result 'C1' '客户端自行提权并建卡' 'FAIL' `
+            '没找到 baidi0：客户端没能建起隧道网卡（若 UAC 框根本没弹，问题在提权路径 elevate.rs）'
+        Add-Result 'C2' '受保护网段已接管' 'SKIP' '网卡不在'
+        Add-Result 'C3' '业务地址可达' 'SKIP' '网卡不在'
+        Add-Result 'C4' '分离式 DNS（NRPT）' 'SKIP' '网卡不在'
+        return
+    }
+    Add-Result 'C1' '客户端自行提权并建卡' 'PASS' `
+        ("{0}（{1}）状态={2}——这条同时证明了客户端自己的 UAC 提权路径可用" -f $ad[0].Name, $ad[0].InterfaceDescription, $ad[0].Status)
+
+    # C2 路由接管：必须是**真实业务网段**，不能是阶段 B 那个假网段
+    $idx = $ad[0].ifIndex
+    $rt = @(Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.ifIndex -eq $idx })
+    $real = @($rt | Where-Object { $_.DestinationPrefix -ne '10.99.99.0/24' -and $_.DestinationPrefix -notmatch '^(224\.|255\.|ff00:|::1/128|fe80:)' })
+    if ($real.Count -gt 0) {
+        Add-Result 'C2' '受保护网段已接管' 'PASS' (($real | ForEach-Object { $_.DestinationPrefix }) -join ', ')
+    } else {
+        # ★网卡在、路由不在，是本项目点名过的最迷惑失败形态：显示已接入、什么都访问不了。
+        Add-Result 'C2' '受保护网段已接管' 'FAIL' `
+            'baidi0 在，但没有任何真实业务网段指向它——隧道建起来了却没有流量会进去（剖面 routes 为空？）'
+    }
+
+    # C3 业务地址真的连得通（唯一的端到端证据）
+    if ($Probe) {
+        $hp = $Probe -split ':'
+        $ok = $false
+        try {
+            $c = New-Object Net.Sockets.TcpClient
+            $ok = $c.ConnectAsync($hp[0], [int]$hp[1]).Wait(6000)
+            $c.Close()
+        } catch { $ok = $false }
+        if ($ok) { Add-Result 'C3' '业务地址可达' 'PASS' ("经隧道连通 " + $Probe) }
+        else     { Add-Result 'C3' '业务地址可达' 'FAIL' ("连不上 " + $Probe + "（网卡与路由都在，说明卡在敲门/隧道/授权某一环）") }
+    } else {
+        Add-Result 'C3' '业务地址可达' 'SKIP' `
+            '未给 -Probe。想验端到端，从客户端「应用」页取一个应用的接入地址传进来，如 -Probe 10.99.0.218:22'
+    }
+
+    # C4 NRPT：控制面没下发 dns 段时**如实标 SKIP**，不是 FAIL 也不是 UNKNOWN
+    $nrpt = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue |
+              Where-Object { $_.Namespace -and $_.NameServers })
+    if ($nrpt.Count -gt 0) {
+        Add-Result 'C4' '分离式 DNS（NRPT）' 'PASS' `
+            (($nrpt | ForEach-Object { ($_.Namespace -join ',') + '→' + ($_.NameServers -join ',') }) -join ' | ')
+        $script:NrptSeen = $true
+    } else {
+        Add-Result 'C4' '分离式 DNS（NRPT）' 'SKIP' `
+            '没有 NRPT 规则。若该控制面的剖面里 dns 段为空（演示站就是），这是预期——分离式 DNS 在此次验证里不适用，不能算通过也不算失败'
+    }
+
+    Write-Host ''
+    Read-Host '  现在请在客户端点「断开」，完成后按回车（脚本检查回收）' | Out-Null
+    Start-Sleep -Seconds 3
+    $left = @(Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'baidi0' })
+    if ($left.Count -eq 0) { Add-Result 'C5' '断开后网卡已回收' 'PASS' 'baidi0 已消失' }
+    else                   { Add-Result 'C5' '断开后网卡已回收' 'FAIL' 'baidi0 仍在' }
+
+    if ($script:NrptSeen) {
+        $after = @(Get-DnsClientNrptRule -ErrorAction SilentlyContinue | Where-Object { $_.Namespace -and $_.NameServers })
+        if ($after.Count -eq 0) { Add-Result 'C6' '断开后 NRPT 已回收' 'PASS' '规则已清空' }
+        else                    { Add-Result 'C6' '断开后 NRPT 已回收' 'FAIL' '断开后仍残留 NRPT 规则（域名解析会继续指向已经不存在的隧道内解析器）' }
+    } else {
+        Add-Result 'C6' '断开后 NRPT 已回收' 'SKIP' '接入时就没有 NRPT 规则'
+    }
 }
 
 # ── 主流程 ──

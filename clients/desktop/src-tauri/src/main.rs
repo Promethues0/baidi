@@ -464,7 +464,30 @@ fn tunnel_status() -> TunStatus {
     };
     let pid = read_pid(p).unwrap_or_default();
     let running = tun_running();
-    let full = fs::read_to_string(&p.log).unwrap_or_default();
+    // ★两路日志都要读。Windows 上 `Start-Process` 拒绝把 stdout 与 stderr 重定向到
+    // 同一路径，elevate.rs 因此把它们分成 p.log(stderr) 与 p.out(stdout) 两个文件；
+    // 而 baidi-tun 的 slog **写的是 stdout**（cmd/baidi-tun/main.go 首行 SetDefault）。
+    // 只读 p.log 的后果：接入页的日志尾部在 Windows 上恒空，`last_endpoint_line` 要找的
+    // `endpoint=i/n id= addr= reason=` 那行也**永远匹配不到**——多网关故障转移在
+    // Windows 上完全不可见，排障时更是一条数据面日志都看不到。
+    //
+    // 为什么一直没暴露：unix 的 launcher 用 `>{log} 2>&1` 把两路合流进了 p.log，
+    // 所以 macOS 上一切正常。这条 2026-06-23（slog 改写 stdout）与 2026-08-11
+    // （elevate.rs 落地，注释里仍写着"slog 默认写 stderr"）之间的偏差，
+    // 直到 2026-08-18 第一次在真 Windows 上跑验证才被发现。
+    //
+    // 顺序：stderr 在前、stdout 在后。log_tail 取的是**末尾**若干字节，
+    // 把信息量大的那一路（slog）放后面，尾部才有东西可看。
+    // unix 上 p.out 根本不存在，read_to_string 失败即空串，对既有行为零影响。
+    let mut full = fs::read_to_string(&p.log).unwrap_or_default();
+    if let Ok(out) = fs::read_to_string(&p.out) {
+        if !out.is_empty() {
+            if !full.is_empty() && !full.ends_with('\n') {
+                full.push('\n');
+            }
+            full.push_str(&out);
+        }
+    }
     TunStatus {
         running,
         pid,

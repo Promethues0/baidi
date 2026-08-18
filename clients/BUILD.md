@@ -660,6 +660,37 @@ A5 sidecar 命名      baidi-tun.exe、baidi-knock.exe
 第 2、3 条则要等到"日志恰好为空"这个组合才现形。CI 里那条「冒烟跑一次
 verify-windows.ps1」只断言它写得出报告，不断言报告里的结论对不对。
 
+### 10.3d 阶段 C 首跑：抓到一个 **Windows 独有的产品缺陷**（接入页读错了日志文件）
+
+C1 报 FAIL（客户端点了接入却没建出 baidi0），排查过程中先撞到的是另一件事：
+
+| 位置 | 事实 |
+|---|---|
+| `gateway/cmd/baidi-tun/main.go:65` | slog 显式写 **os.Stdout**（2026-06-23 `20aaecd` 那次 utun 引流改的） |
+| `elevate.rs` unix launcher | `{tun} {args} >{log} 2>&1` —— **两路合流**进同一个文件 |
+| `elevate.rs` Windows launcher | `-RedirectStandardOutput {out} -RedirectStandardError {log}` —— **分两个文件** |
+| `main.rs` `tun_status` | `fs::read_to_string(&p.log)` —— **只读 stderr** |
+
+结论：**在 Windows 上，接入页拿到的日志里不可能有任何 slog 输出**。后果有两条，
+都不报错：
+
+1. 接入页的「日志尾部」恒空（除非 baidi-tun 以 `log.Fatal` 死掉，那是 Go 标准 log，走 stderr）；
+2. `last_endpoint_line` 要解析的 `endpoint=i/n id= addr= reason=` 那一行**永远匹配不到**——
+   多网关故障转移在 Windows 上**完全不可见**，而 CLAUDE.md 明写接入页靠它展示落点切换。
+
+**为什么潜伏了三个月**：unix 的 launcher 把两路合流了，macOS 上一切正常。
+这是「只有部分平台会告诉你」的又一例（同 `bundle.resources` 只有 NSIS 遵守那次）。
+时间线也是「产出端改了、消费端的注释停在旧事实上」的标准形态：
+slog 改写 stdout 在 2026-06-23，而 elevate.rs 在 2026-08-11 落地时注释仍写着
+「slog 默认写 stderr，接入页解析的就是这一份」。
+
+已修：`tun_status` 两路都读（stderr 在前、stdout 在后——`log_tail` 取末尾若干字节，
+信息量大的那一路放后面尾部才有东西）；unix 上 `p.out` 不存在，读失败即空串，零影响。
+`elevate.rs` 那句错注释同批改对，并写明两侧改动前要看对面。
+
+**这条与 C1 的失败没有因果关系**（建卡与写日志互不相干），但它正是 C1 排不动的原因：
+用户在接入页看不到任何数据面日志。修完之后再排 C1 才有材料。
+
 ### 10.4 脚本随包走（不用去仓库里找）
 
 `verify-windows.ps1` 现在**装在 CI 产物里**，与 msi/nsis 同目录，

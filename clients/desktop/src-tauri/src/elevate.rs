@@ -75,10 +75,18 @@ impl Platform {
 /// 且该目录的属主与权限每次都要复核（见 [`check_runtime_dir`]）。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Paths {
-    /// baidi-tun 日志（进程 stderr：slog 默认写 stderr，接入页解析的就是这一份）。
+    /// baidi-tun 的 **stderr**。
+    ///
+    /// ★这句注释原本写着「slog 默认写 stderr，接入页解析的就是这一份」——**是错的**，
+    /// 而且错了三个月：`cmd/baidi-tun/main.go` 首行就把 slog 定向到了 `os.Stdout`
+    /// （2026-06-23 那次 utun 引流改的），比本文件早两个月。unix 的 launcher 用
+    /// `>{log} 2>&1` 把两路合流进这个文件，所以 macOS 上看不出差别；Windows 分两个文件，
+    /// 于是接入页只读这一份时**拿不到任何 slog 输出**。2026-08-18 首次真机验证暴露。
+    /// 现在 `tun_status` 两个都读（见 main.rs），改动任一侧前先看那边的注释。
     pub log: String,
-    /// baidi-tun 的 stdout。**只有 Windows 用得到**：PowerShell 的 `Start-Process` 拒绝把
-    /// stdout 与 stderr 重定向到同一个文件，unix 那边一句 `>log 2>&1` 就合流了。
+    /// baidi-tun 的 **stdout**，也就是 slog 真正写入的那一路。
+    /// **只有 Windows 会用到这个文件**：PowerShell 的 `Start-Process` 拒绝把
+    /// stdout 与 stderr 重定向到同一个路径，unix 那边一句 `>log 2>&1` 就合流了。
     pub out: String,
     pub pid: String,
     /// 提权 launcher 脚本（unix 是 bash，Windows 是 ps1）。含会话令牌，用后即删。

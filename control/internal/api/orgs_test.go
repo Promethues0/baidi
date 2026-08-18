@@ -247,47 +247,10 @@ func TestUsersCarryOrgAndGroups(t *testing.T) {
 	}
 }
 
-// 策略中心的组织树来自库：新建部门后 GET /policies 立刻能看到。
-func TestPoliciesTreeFollowsOrgUnits(t *testing.T) {
-	h := newTestServer(t)
-	adm := adminToken()
-	code, out := doJSON(t, h, "POST", "/api/v1/orgs", adm, map[string]any{"name": "风控组", "parentId": "root"})
-	if code != http.StatusOK {
-		t.Fatalf("建组织 http %d", code)
-	}
-	id, _ := mapOf(t, out["org"])["id"].(string)
-
-	code, out = doJSON(t, h, "GET", "/api/v1/policies", adm, nil)
-	if code != http.StatusOK {
-		t.Fatalf("GET /policies http %d", code)
-	}
-	var seen []string
-	var walk func(ns []any)
-	walk = func(ns []any) {
-		for _, raw := range ns {
-			n := mapOf(t, raw)
-			seen = append(seen, n["key"].(string))
-			if kids, ok := n["children"].([]any); ok {
-				walk(kids)
-			}
-		}
-	}
-	walk(out["tree"].([]any))
-	has := func(k string) bool {
-		for _, s := range seen {
-			if s == k {
-				return true
-			}
-		}
-		return false
-	}
-	if !has(id) {
-		t.Errorf("新建部门应出现在策略树上: %v", seen)
-	}
-	if has("east") || has("contractor") {
-		t.Errorf("策略树仍含硬编码种子节点: %v", seen)
-	}
-}
+// ★这里原有 TestPoliciesTreeFollowsOrgUnits（断言 GET /api/v1/policies 的组织树
+// 跟随 org_units）。那个端点随「用户策略 · 继承编辑器」一并摘除（wave8 行动 13-①）——
+// 树本身仍由 store.PolicyBundle 真实构建，覆盖它的用例是
+// store.TestPolicyBundleTreeFromDB，这里不再重复一份对着已删端点的断言。
 
 // ── 解码 helper ──
 

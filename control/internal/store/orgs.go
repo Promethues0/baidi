@@ -171,14 +171,13 @@ func buildOrgTree(orgs []Org) []OrgUnit {
 	return out
 }
 
-// toPolicyTree 把组织树映射成策略继承树节点，标注哪些节点定义了自定义策略覆盖。
-// 策略中心的继承可视化就靠 HasCustom 区分「自己定了」与「继承父级」。
-func toPolicyTree(units []OrgUnit, custom map[string]bool) []OrgNode {
+// toPolicyTree 把组织树映射成带子树人数的节点树。
+func toPolicyTree(units []OrgUnit) []OrgNode {
 	out := []OrgNode{}
 	for _, u := range units {
-		n := OrgNode{Key: u.Key, Title: u.Title, Members: u.Members, HasCustom: custom[u.Key]}
+		n := OrgNode{Key: u.Key, Title: u.Title, Members: u.Members}
 		if len(u.Children) > 0 {
-			n.Children = toPolicyTree(u.Children, custom)
+			n.Children = toPolicyTree(u.Children)
 		}
 		out = append(out, n)
 	}

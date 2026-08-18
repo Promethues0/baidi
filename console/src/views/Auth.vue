@@ -123,7 +123,7 @@
     <div v-show="tab === 'policy'">
       <div class="bd-srctoolbar">
         <div class="bd-srctoolbar__sub">
-          按<b>用户目录</b>分组编排 · 共 <b>{{ policies.length }}</b> 条策略 · PC/WEB 端与移动端 APP 分别配置主认证 / 二次认证
+          按<b>用户目录</b>分组编排 · 共 <b>{{ policies.length }}</b> 条策略 · 每条声明<b>可接受的二次认证方式</b>与自适应规则（主认证方式由认证源与认证域路由决定，不在这里配）
           <span class="bd-srchint">自适应规则由登录链路实时求值：命中增强条件且未被豁免即要求二次认证</span>
         </div>
         <button class="bd-btn" @click="openCreate"><icon-plus />新增策略</button>
@@ -187,35 +187,15 @@
             <span v-else class="bd-tg bd-tg--warnbox">未绑定适用范围，不会命中任何账号</span>
           </div>
 
-          <!-- 两端分栏 -->
-          <div class="bd-platgrid">
-            <div class="bd-plat">
-              <div class="bd-plat__h"><icon-desktop /> PC / WEB 端</div>
-              <div class="bd-plat__row">
-                <span class="bd-plat__k">主认证</span>
-                <span class="bd-tg" :style="tagStyle(primaryColor(p.pc.primary))">{{ primaryLabel(p.pc.primary) }}</span>
-              </div>
-              <div class="bd-plat__row">
-                <span class="bd-plat__k">二次认证</span>
-                <template v-if="p.pc.secondary.length">
-                  <span v-for="s in p.pc.secondary" :key="s" class="bd-tg bd-tg--sec">{{ secondaryLabel(s) }}</span>
-                </template>
-                <span v-else class="bd-plat__none">无（单因素）</span>
-              </div>
-            </div>
-            <div class="bd-plat">
-              <div class="bd-plat__h"><icon-mobile /> 移动端 APP</div>
-              <div class="bd-plat__row">
-                <span class="bd-plat__k">主认证</span>
-                <span class="bd-tg" :style="tagStyle(primaryColor(p.mobile.primary))">{{ primaryLabel(p.mobile.primary) }}</span>
-              </div>
-              <div class="bd-plat__row">
-                <span class="bd-plat__k">二次认证</span>
-                <template v-if="p.mobile.secondary.length">
-                  <span v-for="s in p.mobile.secondary" :key="s" class="bd-tg bd-tg--sec">{{ secondaryLabel(s) }}</span>
-                </template>
-                <span v-else class="bd-plat__none">无（单因素）</span>
-              </div>
+          <!-- 二次认证方式（PC/移动端两栏已合并：两端走同一个 /portal/login，请求里没有端标识） -->
+          <div class="bd-plat">
+            <div class="bd-plat__row">
+              <span class="bd-plat__k">可接受的二次认证方式</span>
+              <template v-if="(p.secondary || []).length">
+                <span v-for="s in p.secondary" :key="s" class="bd-tg bd-tg--sec">{{ secondaryLabel(s) }}</span>
+                <span class="bd-plat__none">· 演示验证码对本策略覆盖的账号不成立</span>
+              </template>
+              <span v-else class="bd-plat__none">未声明（要求二次认证时，未绑认证器的账号可走演示验证码回落）</span>
             </div>
           </div>
 
@@ -225,7 +205,6 @@
             <span v-for="e in exemptChips(p)" :key="'ex-' + e" class="bd-mtg bd-mtg--ok"><icon-check-circle />{{ e }}</span>
             <span v-for="e in enhanceChips(p)" :key="'en-' + e" class="bd-mtg bd-mtg--warn"><icon-exclamation-circle />{{ e }}</span>
             <span v-if="!hasAdaptive(p)" class="bd-plat__none">未启用自适应</span>
-            <span class="bd-foot__authz"><icon-apps />{{ p.authzApps || '不授权' }}</span>
           </div>
         </div>
       </div>
@@ -292,34 +271,34 @@
         </template>
         <div v-else class="bd-form__hint">默认策略覆盖该用户目录的全体账号，无需绑定组织/用户组。</div>
 
-        <!-- 两端认证方式 -->
-        <div class="bd-form__platgrid">
-          <div class="bd-form__plat">
-            <div class="bd-form__plath"><icon-desktop /> PC / WEB 端</div>
-            <label class="bd-form__lab">主认证 <em>*</em></label>
-            <a-select v-model="editing.pc.primary" placeholder="选择主认证方式">
-              <a-option v-for="m in PRIMARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
-            </a-select>
-            <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
-            <a-select v-model="editing.pc.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
-              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value" :disabled="!methodAvailable(m.value)">
-                {{ m.label }}{{ methodAvailable(m.value) ? '' : '（未实现）' }}
-              </a-option>
-            </a-select>
-          </div>
-          <div class="bd-form__plat">
-            <div class="bd-form__plath"><icon-mobile /> 移动端 APP</div>
-            <label class="bd-form__lab">主认证 <em>*</em></label>
-            <a-select v-model="editing.mobile.primary" placeholder="选择主认证方式">
-              <a-option v-for="m in PRIMARY_OPTS" :key="m.value" :value="m.value">{{ m.label }}</a-option>
-            </a-select>
-            <label class="bd-form__lab" style="margin-top: 10px">二次认证（可多选）</label>
-            <a-select v-model="editing.mobile.secondary" multiple placeholder="无则单因素登录" :max-tag-count="3">
-              <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value" :disabled="!methodAvailable(m.value)">
-                {{ m.label }}{{ methodAvailable(m.value) ? '' : '（未实现）' }}
-              </a-option>
-            </a-select>
-          </div>
+        <!-- 两端认证方式。
+             ★这里曾经有「主认证」下拉（local/ad/ldap/radius/oauth/sms/cert 七项）。
+             已整体摘除（wave8 行动 13-②）——它在本策略模型里是**同义反复**而不是
+             "还没接线"：策略匹配的第一步就是按目录筛，一条策略只作用于已经被该目录
+             认出来的人；对它说"主认证用证书"不可能生效，那个人已经拿口令进来了。
+             而摘除前保存回 200、卡片明晃晃写着证书认证，口令登录一次不落照常成功。
+             同批合并了 PC / 移动端两栏：三端走的是**同一个** /portal/login，请求里没有
+             任何端标识，两栏并排会让人以为"移动端可以配得更严"。 -->
+        <div class="bd-form__hint" style="margin-bottom: 10px">
+          主认证方式由<b>认证源配置</b>与登录时的<b>认证域路由</b>决定（命中即只问该源），
+          不在这里配。<b>PC 与移动端也不分栏</b>——三端走同一个 /portal/login，请求里没有端标识。
+          本抽屉只配<b>二次认证</b>——它是真执行的：已注册 passkey/TOTP 的账号无条件强制，
+          策略只能加强不能削弱。
+        </div>
+        <div class="bd-form__row">
+          <label class="bd-form__lab">可接受的二次认证方式（可多选）</label>
+          <a-select v-model="editing.secondary" multiple placeholder="留空 = 不额外约束" :max-tag-count="3">
+            <a-option v-for="m in SECONDARY_OPTS" :key="m.value" :value="m.value" :disabled="!methodAvailable(m.value)">
+              {{ m.label }}{{ methodAvailable(m.value) ? '' : '（未实现）' }}
+            </a-option>
+          </a-select>
+        </div>
+        <!-- ★这一栏的**唯一执行语义**要说清楚，否则它就是又一个装饰。
+             它不决定"用哪个因子"（那由账号已注册的认证器决定：passkey > TOTP）。 -->
+        <div class="bd-form__hint">
+          选中后：本策略要求二次认证、而该账号<b>既没绑 passkey 也没绑 TOTP</b> 时，
+          一律回「请先注册」，<b>不接受演示验证码回落</b>。留空则保持回落（行为不变）。
+          这一栏不决定用哪个因子——那由账号已注册的认证器决定（passkey 优先于 TOTP）。
         </div>
         <!-- 方式能力说明：置灰的是未实现的（后端能力声明同源，保存也会被拒）。 -->
         <div v-if="totpMethod" class="bd-form__hint" style="margin-top: 8px">
@@ -397,10 +376,6 @@
         </div>
 
         <div class="bd-form__2col">
-          <div class="bd-form__row">
-            <label class="bd-form__lab">默认授权应用</label>
-            <a-input v-model="editing.authzApps" placeholder="如：默认授权全部应用 / 仅 OA / 不授权" allow-clear />
-          </div>
           <div class="bd-form__row">
             <label class="bd-form__lab">启用策略</label>
             <a-switch v-model="editing.enabled" />
@@ -684,7 +659,7 @@ import { Message, Modal } from '@arco-design/web-vue';
 import {
   api, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
   type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthMethodCapability, type AuthDirectory, type EnhanceRule,
-  type PrimaryMethod, type SecondaryMethod, type SubjectOption,
+  type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
   type LdapConfig, type OidcConfig, type AdmitConfig, type ExtAdmission
 } from '@/lib/api';
@@ -1068,15 +1043,6 @@ function addSource() { Message.info('接入认证源向导（演示）'); }
 /* ── 认证策略（FR-AUTH-12）── */
 const policies = ref<AuthPolicy[]>([]);
 
-const PRIMARY_OPTS: { value: PrimaryMethod; label: string }[] = [
-  { value: 'local', label: '本地账号密码' },
-  { value: 'ad', label: 'AD 域' },
-  { value: 'ldap', label: 'LDAP 目录' },
-  { value: 'radius', label: 'RADIUS 账号' },
-  { value: 'oauth', label: '企微/钉钉/飞书' },
-  { value: 'sms', label: '短信验证码' },
-  { value: 'cert', label: '证书 / USB-Key' }
-];
 const SECONDARY_OPTS: { value: SecondaryMethod; label: string }[] = [
   { value: 'sms', label: '短信' },
   { value: 'totp', label: 'TOTP 令牌' },
@@ -1084,13 +1050,7 @@ const SECONDARY_OPTS: { value: SecondaryMethod; label: string }[] = [
   { value: 'cert', label: '证书 / USB-Key' },
   { value: 'http', label: 'HTTP(S) 令牌' }
 ];
-const PRIMARY_LABEL: Record<string, string> = Object.fromEntries(PRIMARY_OPTS.map((o) => [o.value, o.label]));
 const SECONDARY_LABEL: Record<string, string> = Object.fromEntries(SECONDARY_OPTS.map((o) => [o.value, o.label]));
-const PRIMARY_COLOR: Record<string, string> = {
-  local: '#165DFF', ad: '#165DFF', ldap: '#722ED1', radius: '#FF7D00', oauth: '#00B42A', sms: '#FF7D00', cert: '#722ED1'
-};
-function primaryLabel(m: string) { return PRIMARY_LABEL[m] ?? m ?? '—'; }
-function primaryColor(m: string) { return PRIMARY_COLOR[m] ?? '#86909C'; }
 function secondaryLabel(m: string) { return SECONDARY_LABEL[m] ?? m; }
 
 /* 可作为「用户目录」被策略绑定的取值：**由后端下发**（GET /authpolicy 的 directories）。
@@ -1210,14 +1170,13 @@ function blankPolicy(): AuthPolicy {
   return {
     id: '', name: '', directory: directorySources.value[0]?.key ?? 'local', isDefault: false,
     scope: '', priority: 50, enabled: true,
-    pc: { primary: 'ad', secondary: [] }, mobile: { primary: 'ad', secondary: [] },
+    secondary: [],
     scopeOrgs: [], scopeGroups: [],
     exempt: { trustedDevice: false, trustedNetwork: false, networks: [], winDomain: false },
     enhance: {
       always: false, weakPwd: false, offHours: false,
       workStart: '09:00', workEnd: '18:00', workDays: [1, 2, 3, 4, 5], geoAnomaly: false
     },
-    authzApps: ''
   };
 }
 /** 老库读回来的策略可能缺新字段（后端已回填，这里是渲染侧兜底）：补齐再进表单，避免 v-model 挂在 undefined 上。 */
@@ -1226,6 +1185,7 @@ function normalizePolicy(p: AuthPolicy): AuthPolicy {
   return {
     ...p,
     scopeOrgs: p.scopeOrgs ?? [], scopeGroups: p.scopeGroups ?? [],
+    secondary: p.secondary ?? [],
     exempt: { ...b.exempt, ...(p.exempt ?? {}), networks: p.exempt?.networks ?? [] },
     enhance: { ...b.enhance, ...(p.enhance ?? {}), workDays: p.enhance?.workDays ?? [] }
   };
@@ -1242,7 +1202,6 @@ async function savePolicy(): Promise<boolean> {
   const p = editing.value;
   if (!p.name.trim()) { Message.warning('请填写策略名称'); return false; }
   if (!p.directory) { Message.warning('请选择所属用户目录'); return false; }
-  if (!p.pc.primary || !p.mobile.primary) { Message.warning('PC 端与移动端均须配置主认证方式'); return false; }
   // 与后端 authpolicy.Validate 同口径的前置提醒（真正的闸在后端，这里只是少跑一趟）
   if (!p.isDefault && !p.scopeOrgs.length && !p.scopeGroups.length) {
     Message.warning('非默认策略必须绑定适用范围（组织或用户组），否则它匹配不到任何账号');
@@ -1504,9 +1463,7 @@ onMounted(async () => {
 .bd-link--disabled { color: var(--bd-t4); cursor: default; }
 .bd-pcard__scope { font-size: 12.5px; color: var(--bd-t3); margin: 4px 0 14px; }
 
-.bd-platgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
 .bd-plat { border: 1px solid var(--bd-fill-2); border-radius: 9px; padding: 12px 14px; background: var(--bd-fill-1); }
-.bd-plat__h { display: flex; align-items: center; gap: 6px; font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 10px; }
 .bd-plat__row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 7px; }
 .bd-plat__k { font-size: 12px; color: var(--bd-t3); width: 56px; flex: none; }
 .bd-plat__none { font-size: 12px; color: var(--bd-t4); }
@@ -1524,9 +1481,6 @@ onMounted(async () => {
 .bd-form__lab { font-size: 12.5px; color: var(--bd-t2); font-weight: 500; }
 .bd-form__lab em { color: var(--bd-danger); font-style: normal; }
 .bd-form__2col { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.bd-form__platgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.bd-form__plat { border: 1px solid var(--bd-border); border-radius: 9px; padding: 14px; display: flex; flex-direction: column; gap: 6px; }
-.bd-form__plath { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 6px; padding-bottom: 8px; border-bottom: 1px solid var(--bd-fill-2); }
 .bd-form__sec { border: 1px solid var(--bd-fill-2); border-radius: 9px; padding: 12px 14px; background: var(--bd-fill-1); }
 .bd-form__sech { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 10px; }
 .bd-form__checks { display: flex; flex-wrap: wrap; gap: 10px 18px; }

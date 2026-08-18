@@ -10,7 +10,6 @@ type Store interface {
 	// ★窗口只对审计派生的那几项生效；账号/终端两条防线是当前状态快照，
 	// 由 DefenseLine.Scope 逐条标出（见那里的注释）。
 	Overview(ctx context.Context, windowHours int) (Overview, error)
-	PolicyBundle(ctx context.Context) (PolicyBundle, error)
 	Apps(ctx context.Context) (AppBundle, error)
 	// AppCategories 应用分类字典（app_categories 表，含各分类下的应用数）。
 	// Apps() 的分类筛选条由它构建；管理台的分类维护弹窗也读它。

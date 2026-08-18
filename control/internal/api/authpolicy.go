@@ -140,11 +140,8 @@ func (s *Server) handleSaveAuthPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "name/directory 必填")
 		return
 	}
-	// 主认证是上线的必经闸门：PC 与移动端至少各有一种主认证方式，否则该端无法登录。
-	if p.PC.Primary == "" || p.Mobile.Primary == "" {
-		httpx.Error(w, http.StatusBadRequest, "PC 端与移动端均须配置主认证方式")
-		return
-	}
+	// ★这里曾经校验「PC 与移动端均须配置主认证方式」，注释还写着"否则该端无法登录"。
+	// 那句话是假的——没有任何东西读 Primary。字段与校验一起摘掉了，见 store.AuthMethodSet。
 	// ★保存即校验：拦下所有"存进去也不会生效"的配置（冻结开关、空网段的可信网络、
 	// 没绑定适用范围的非默认策略）。历史上这些形态能静默入库，于是页面配得好好的、
 	// 登录行为一点没变。

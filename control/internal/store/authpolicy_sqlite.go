@@ -26,18 +26,23 @@ func (s *SQLiteStore) AuthPolicies(ctx context.Context) ([]AuthPolicy, error) {
 		var isDef, enabled int
 		var pc, mobile, exempt, enhance, scopeOrgs, scopeGroups string
 		if err := rows.Scan(&p.ID, &p.Name, &p.Directory, &isDef, &p.Scope, &p.Priority, &enabled,
-			&pc, &mobile, &exempt, &enhance, &scopeOrgs, &scopeGroups, &p.AuthzApps); err != nil {
+			&pc, &mobile, &exempt, &enhance, &scopeOrgs, &scopeGroups, new(string)); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal([]byte(pc), &p.PC)
-		_ = json.Unmarshal([]byte(mobile), &p.Mobile)
+		// pc / mobile 两列并成一份 Secondary（wave8 行动 13-②）。
+		// ★读时合并而不是加一列 + 一次性回填：这两列的内容一直是同一份方式清单
+		// （两端在登录链路上根本区分不了），合并是**无损**的，且省掉一次会漏跑的迁移。
+		// 写回时 pc 列存合并后的清单、mobile 列存 `{}`，旧版本控制面读到的仍是可用配置。
+		var pcSet, mobileSet AuthMethodSetLegacy
+		_ = json.Unmarshal([]byte(pc), &pcSet)
+		_ = json.Unmarshal([]byte(mobile), &mobileSet)
+		p.Secondary = mergeMethods(pcSet.Secondary, mobileSet.Secondary)
 		_ = json.Unmarshal([]byte(exempt), &p.Exempt)
 		_ = json.Unmarshal([]byte(enhance), &p.Enhance)
 		_ = json.Unmarshal([]byte(scopeOrgs), &p.ScopeOrgs)
 		_ = json.Unmarshal([]byte(scopeGroups), &p.ScopeGroups)
 		// 切片列一律回退成空数组，避免前端拿到 null 渲染报错、以及判定侧再多一种形态要特判。
-		p.PC.Secondary = nonNil(p.PC.Secondary)
-		p.Mobile.Secondary = nonNil(p.Mobile.Secondary)
+		p.Secondary = nonNil(p.Secondary)
 		p.Exempt.Networks = nonNil(p.Exempt.Networks)
 		p.ScopeOrgs = nonNil(p.ScopeOrgs)
 		p.ScopeGroups = nonNil(p.ScopeGroups)
@@ -52,8 +57,8 @@ func (s *SQLiteStore) AuthPolicies(ctx context.Context) ([]AuthPolicy, error) {
 }
 
 func (s *SQLiteStore) upsertAuthPolicy(ctx context.Context, p AuthPolicy) error {
-	pc, _ := json.Marshal(p.PC)
-	mobile, _ := json.Marshal(p.Mobile)
+	pc, _ := json.Marshal(AuthMethodSetLegacy{Secondary: nonNil(p.Secondary)})
+	mobile, _ := json.Marshal(AuthMethodSetLegacy{Secondary: []string{}})
 	exempt, _ := json.Marshal(p.Exempt)
 	enhance, _ := json.Marshal(p.Enhance)
 	scopeOrgs, _ := json.Marshal(nonNil(p.ScopeOrgs))
@@ -66,7 +71,7 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, directory=excluded.directory, 
   authz_apps=excluded.authz_apps, updated_at=excluded.updated_at`,
 		p.ID, p.Name, p.Directory, b2i(p.IsDefault), p.Scope, p.Priority, b2i(p.Enabled),
 		string(pc), string(mobile), string(exempt), string(enhance),
-		string(scopeOrgs), string(scopeGroups), p.AuthzApps, nowStr())
+		string(scopeOrgs), string(scopeGroups), "", nowStr())
 	return err
 }
 
@@ -80,8 +85,7 @@ func (s *SQLiteStore) SaveAuthPolicy(ctx context.Context, p AuthPolicy) (AuthPol
 	if p.Priority == 0 {
 		p.Priority = 50
 	}
-	p.PC.Secondary = nonNil(p.PC.Secondary)
-	p.Mobile.Secondary = nonNil(p.Mobile.Secondary)
+	p.Secondary = nonNil(p.Secondary)
 	p.Exempt.Networks = nonNil(p.Exempt.Networks)
 	p.ScopeOrgs = nonNil(p.ScopeOrgs)
 	p.ScopeGroups = nonNil(p.ScopeGroups)

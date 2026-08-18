@@ -122,3 +122,49 @@ func TestCheckKnockRejectsWebTicket(t *testing.T) {
 		t.Fatalf("对照组敲门令牌应通过: %v", err)
 	}
 }
+
+// ── wave8 行动 13-①：业务活跃时刻（FR-POLICY-30 的信号源）──
+
+// TestKeepaliveDoesNotCountAsActivity 敲门保活**不是**业务流量。
+//
+// ★这是整条规则的命门：客户端只要不退出就每 15s 敲一次门。若 Allow（续窗）
+// 顺手刷新 lastActive，「无业务流量超时注销」就永远不会触发——
+// 一条管理员开了、页面显示"已启用"、而从不生效的安全规则。
+func TestKeepaliveDoesNotCountAsActivity(t *testing.T) {
+	al := NewAllowlist()
+	al.Allow("10.0.0.9", "li.fang", "user", time.Minute)
+	if s := sessionOf(t, al, "10.0.0.9"); !s.LastActive.IsZero() {
+		t.Fatalf("刚放行、还没有任何业务连接时，活跃时刻必须是零值（不可判定），得到 %v", s.LastActive)
+	}
+	// 一次业务连接。
+	al.Touch("10.0.0.9")
+	first := sessionOf(t, al, "10.0.0.9").LastActive
+	if first.IsZero() {
+		t.Fatal("Touch 之后应记下活跃时刻")
+	}
+	// 再敲一次门（保活续窗）——活跃时刻不得被刷新。
+	time.Sleep(2 * time.Millisecond)
+	al.Allow("10.0.0.9", "li.fang", "user", time.Minute)
+	if got := sessionOf(t, al, "10.0.0.9").LastActive; !got.Equal(first) {
+		t.Fatalf("保活续窗不该刷新业务活跃时刻（否则超时规则永不触发），%v → %v", first, got)
+	}
+	// 窗口外的 Touch 是空操作。这条守卫主要防的是**条目泄漏**（给任意 IP 建一行），
+	// 行为上看不出差别——因为 Sessions()/Allowed() 都按 until 过滤。
+	// 保留断言是为了钉住"过滤"这件事本身。
+	al2 := NewAllowlist()
+	al2.Touch("10.0.0.9")
+	if len(al2.Sessions()) != 0 {
+		t.Fatal("没有放行窗口时 Touch 不该凭空造出会话")
+	}
+}
+
+func sessionOf(t *testing.T, al *Allowlist, ip string) Session {
+	t.Helper()
+	for _, s := range al.Sessions() {
+		if s.IP == ip {
+			return s
+		}
+	}
+	t.Fatalf("找不到 %s 的会话", ip)
+	return Session{}
+}

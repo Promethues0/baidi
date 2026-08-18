@@ -16,8 +16,7 @@ func TestSaveAuthPolicyRoundTrip(t *testing.T) {
 
 	in := AuthPolicy{
 		Name: "研发 · 加严", Directory: "local", Priority: 7, Enabled: true,
-		PC:        AuthMethodSet{Primary: "local", Secondary: []string{"totp"}},
-		Mobile:    AuthMethodSet{Primary: "local"},
+		Secondary: []string{"totp"},
 		ScopeOrgs: []string{"dev"}, ScopeGroups: []string{"g-oncall"},
 		Exempt: ExemptRule{TrustedNetwork: true, Networks: []string{"10.8.0.0/16"}, TrustedDevice: true},
 		Enhance: EnhanceRule{
@@ -92,9 +91,11 @@ func TestBackfillAuthPolicyScopeOnLegacyDB(t *testing.T) {
 		if p.Enhance.GeoAnomaly || p.Exempt.WinDomain {
 			t.Errorf("%s 的冻结开关没被清掉：判不了的规则不该留在库里显示为已启用", p.ID)
 		}
-		// 回填不该顺手动掉别的字段
-		if p.PC.Primary == "" {
-			t.Errorf("%s 的主认证被回填弄丢了", p.ID)
+		// 回填不该顺手动掉别的字段。哨兵换成 PC.Secondary——原来用的是 PC.Primary，
+		// 而那个字段已随 wave8 行动 13-② 摘除（它在本策略模型里是同义反复，
+		// 且零消费方，见 store/authpolicy.go 顶部注释）。
+		if len(p.Secondary) == 0 {
+			t.Errorf("%s 的二次认证方式被回填弄丢了", p.ID)
 		}
 	}
 }
@@ -181,4 +182,35 @@ func TestOneClickColumnFrozen(t *testing.T) {
 	if err := s.db.QueryRow(`SELECT one_click FROM auth_policies LIMIT 1`).Scan(&v); err != nil {
 		t.Fatalf("列应仍在（旧库可直接启动）: %v", err)
 	}
+}
+
+// TestLegacyPcMobileColumnsMerge 旧库里分别配在 pc / mobile 两列上的方式必须合并读出。
+//
+// ★这条钉的是"合并"本身。只读 pc 列的话，一条历史策略里**只配在移动端**的
+// 二次认证方式会在升级那一刻静默消失——策略还在、开关不见了，而它正是
+// AuthPolicy.Secondary 的唯一执行语义（不接受 legacy 演示验证码回落）的开关。
+func TestLegacyPcMobileColumnsMerge(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `INSERT INTO auth_policies
+(id,name,directory,is_default,scope,priority,enabled,pc,mobile,exempt,enhance,scope_orgs,scope_groups,authz_apps,updated_at)
+VALUES('ap-legacy','历史策略','local',0,'',50,1,?,?,'{}','{}','[]','[]','','')`,
+		`{"primary":"local","secondary":[]}`,
+		`{"primary":"local","secondary":["totp"]}`); err != nil {
+		t.Fatalf("插历史行: %v", err)
+	}
+	pols, err := s.AuthPolicies(ctx)
+	if err != nil {
+		t.Fatalf("读策略: %v", err)
+	}
+	for _, p := range pols {
+		if p.ID != "ap-legacy" {
+			continue
+		}
+		if len(p.Secondary) != 1 || p.Secondary[0] != "totp" {
+			t.Fatalf("只配在 mobile 列上的方式必须合并读出，得到 %v", p.Secondary)
+		}
+		return
+	}
+	t.Fatal("找不到历史策略行")
 }

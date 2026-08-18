@@ -668,24 +668,6 @@ func (s *SQLiteStore) backfillOrgUnits(ctx context.Context) error {
 
 // ── PolicyBundle 脱种子 ──
 
-// policyOverrideNodes 读已定义自定义策略覆盖的节点集合。
-func (s *SQLiteStore) policyOverrideNodes(ctx context.Context) (map[string]bool, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT node FROM policy_overrides`)
-	if err != nil {
-		return nil, err
-	}
-	defer rows.Close()
-	out := map[string]bool{}
-	for rows.Next() {
-		var n string
-		if err := rows.Scan(&n); err != nil {
-			return nil, err
-		}
-		out[n] = true
-	}
-	return out, rows.Err()
-}
-
 // PolicyBundle 策略继承树：**整棵树由 org_units 真实数据构建**（此前整棵树是
 // Memory 里硬编码的四个部门，节点 key 与库里任何东西都对不上——按节点保存的
 // 策略覆盖因此永远落在一批虚构 key 上）。
@@ -697,9 +679,5 @@ func (s *SQLiteStore) PolicyBundle(ctx context.Context) (PolicyBundle, error) {
 	if err != nil {
 		return PolicyBundle{}, err
 	}
-	custom, err := s.policyOverrideNodes(ctx)
-	if err != nil {
-		return PolicyBundle{}, err
-	}
-	return PolicyBundle{Tree: toPolicyTree(buildOrgTree(orgs), custom)}, nil
+	return PolicyBundle{Tree: toPolicyTree(buildOrgTree(orgs))}, nil
 }

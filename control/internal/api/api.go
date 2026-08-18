@@ -57,6 +57,11 @@ type Server struct {
 	// trustedProxies 审计源 IP 的信任边界（BAIDI_TRUSTED_PROXIES，CIDR 逗号分隔）：
 	// 只有直连对端落在这些网段内，X-Forwarded-For 才被采信。见 clientIP。
 	trustedProxies []netip.Prefix
+	// devSess 终端接入会话存储（FR-POLICY-29/30 的判定材料）。
+	// nil = 当前后端不支持（纯 Memory），此时接入策略整块不生效并在页面上如实说明。
+	devSess store.DevSessionStore
+	// accessDenied 并发上限拒绝的节流表（键 = 账号|指纹）。
+	accessDenied map[string]int64
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
 	lockout *lockout.Guard
 	// metricsRetentionHours 设备状态时序的留存小时数，由 main 用清理循环真正消费的
@@ -203,6 +208,17 @@ func (s *Server) noteLoginSuccess(ctx context.Context, account string) {
 	if err := w.TouchLastLogin(ctx, account); err != nil {
 		slog.Warn("last_login 刷新失败（不影响本次登录）", "account", account, "err", err.Error())
 	}
+	// 一次完整认证 = 「接入超时注销」的解除条件（FR-POLICY-30 原文就是"重新登录"）。
+	//
+	// ★按**账号**恢复而不是按设备：TOTP / passkey 的第二回合结构上拿不到设备指纹
+	// （第一回合的 deviceId 不会带到第二回合），按设备恢复的话，开了二次认证的部署里
+	// 用户**永远解不开**这道注销——那比"多恢复了一台"糟得多。
+	// 代价是同账号另一台已注销的终端会一起恢复，方向是 fail-open，写在页面提示里。
+	if ds, ok := s.writer.(store.DevSessionStore); ok {
+		if err := ds.ReviveDeviceSessions(ctx, account, ""); err != nil {
+			slog.Warn("恢复已注销的接入会话失败（不影响本次登录）", "account", account, "err", err.Error())
+		}
+	}
 }
 
 // lookupDirUser 按谓词查目录用户。store 读失败时返回 error——调用方须 fail-closed，
@@ -258,6 +274,12 @@ type GwSession struct {
 	User  string `json:"user"`
 	Role  string `json:"role"`
 	Since int64  `json:"since"`
+	// LastActive 最近一次**业务连接**的 Unix 时刻。★三态指针：
+	// nil = 这台网关不报活跃时刻（旧版本）→ FR-POLICY-30 对经它接入的会话不生效；
+	// &0  = 报了，但这条会话自建立起从未承载业务连接；&ts = 最近一次业务连接时刻。
+	// 敲门保活**不刷新**它（客户端不退出就每 15s 敲一次，拿保活当活跃等于让
+	// 「无业务流量超时」永远不触发）。
+	LastActive *int64 `json:"lastActive"`
 }
 
 // New 构造 Server。postureStrict 由 BAIDI_POSTURE_ENFORCE=strict 开启（默认 observe：缺报放行、坏报告仍执行）。
@@ -275,7 +297,11 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		grayObserved:    map[string]int64{},
 		deviceObserved:  map[string]int64{},
 		standbyAudited:  map[string]int64{},
-		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{}}
+		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{},
+		accessDenied: map[string]int64{}}
+	if v, ok := wr.(store.DevSessionStore); ok {
+		s.devSess = v
+	}
 	// 登录防爆破守卫：SQLite 后端实现持久化（重启不丢锁定）；纯 Memory 后端退化为进程内锁定。
 	var ls lockout.Store
 	if v, ok := wr.(lockout.Store); ok {
@@ -401,8 +427,6 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/overview", s.handleOverview)
 
 	// 策略：继承树 + 用户策略清单
-	mux.HandleFunc("GET /api/v1/policies", s.handlePolicies)
-
 	// 应用管理：分类 + 应用清单
 	mux.HandleFunc("GET /api/v1/apps", s.handleApps)
 
@@ -568,10 +592,15 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("DELETE /api/v1/authpolicy/{id}", s.handleDeleteAuthPolicy) // 删策略（admin）
 
 	// ── 写操作（落 SQLite）──
-	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                        // 发布应用
-	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval)  // 设备绑定审批
-	mux.HandleFunc("PUT /api/v1/policies/{node}", s.handleSavePolicy)             // 保存用户策略覆盖
-	mux.HandleFunc("GET /api/v1/policies/{node}", s.handleGetPolicy)              // 读取用户策略覆盖
+	mux.HandleFunc("POST /api/v1/apps", s.handleCreateApp)                       // 发布应用
+	mux.HandleFunc("POST /api/v1/approvals/{id}/decide", s.handleDecideApproval) // 设备绑定审批
+	// 接入策略（FR-POLICY-29 同时在线设备上限 / FR-POLICY-30 接入超时注销）。
+	// 读=任意管理员（角色现算），写=PermSecurity——它决定谁能接入，与资源授权同权。
+	// ★路由必须排在 /policies/{node} 之前：Go 1.22 的方法路由里字面段优先于通配段，
+	// 顺序其实不影响匹配，但放在一起是为了让下一个人一眼看见这两条不是同一套东西
+	// （{node} 那对是已摘除的继承编辑器遗留，只剩落库不判定的 JSON blob）。
+	mux.HandleFunc("GET /api/v1/policies/access", s.handleAccessPolicy)
+	mux.HandleFunc("PUT /api/v1/policies/access", s.handleSaveAccessPolicy)
 	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                      // 新增用户
 	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)       // 禁用/启用/解锁
 	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
@@ -1147,6 +1176,13 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "终端未获授信："+adm.Reason)
 		return
 	}
+	// 接入策略闸（第五道，wave8 行动 13-①）：同时在线设备上限 + 接入超时注销。
+	// ★在设备准入之后：那道问「这台设备允不允许接入」（长期授信），
+	// 这道问「此刻的名额与活跃度」（运行态）。反过来的话，一台未授信设备
+	// 会先占掉别人的名额，再被上一道拒掉。
+	if !s.accessSessionGate(w, r, c.Name, kb.Device) {
+		return
+	}
 	// Use=knock 是给数据面的用途自证：网关 strict 模式只接受本处签发的令牌，
 	// 会话令牌/MFA 票据（Use 为空）一律拒绝敲门——堵死"持 8h 会话令牌直连数据面、
 	// 绕过封禁/账号状态/终端合规三道闸"的旁路。改 knockTTL 须同步网关 -knock-max-ttl 上界。
@@ -1348,6 +1384,11 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	// 落库失败只记日志：指标是观测通道，不该让一次写库抖动把网关判成离线。
 	s.recordGatewayMetrics(r, id, b.Metrics)
 	s.recordGatewayIfaces(r, id, b.Ifaces)
+	// 业务活跃回执落库（FR-POLICY-30 的唯一判据来源）。
+	// ★只有网关**真的报了** lastActive（指针非 nil）才落——旧网关不报时保持 NULL，
+	// 也就是"不可判定"，那条超时规则对经它接入的会话一律不生效。把 nil 当 0 落库
+	// 等于给每条会话盖一个 1970 年的时间戳，下一个保活周期全员被判超时注销。
+	s.recordSessionActivity(r, b.Sessions)
 
 	// 数据面回执逐条落审计：category=dataplane，行为人=网关自身。措辞只转述网关报告的
 	// 既成事实（「网关 X 报告：…」），控制面不在此替网关下任何断言——审计失实是大忌。
@@ -1844,43 +1885,6 @@ func (s *Server) handleDecideApproval(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, resp)
 }
 
-func (s *Server) handleSavePolicy(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePerm(w, r, store.PermSecurity) {
-		return
-	}
-	node := r.PathValue("node")
-	var body struct {
-		Title       string `json:"title"`
-		Settings    any    `json:"settings"`
-		CustomCount int    `json:"customCount"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "invalid policy payload")
-		return
-	}
-	raw, _ := json.Marshal(body.Settings)
-	if err := s.writer.SavePolicyOverride(r.Context(), node, body.Title, string(raw), body.CustomCount); err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to save policy")
-		return
-	}
-	s.audit(r, "admin", "保存用户策略覆盖「"+body.Title+"」("+node+")", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "node": node})
-}
-
-func (s *Server) handleGetPolicy(w http.ResponseWriter, r *http.Request) {
-	node := r.PathValue("node")
-	po, ok, err := s.writer.GetPolicyOverride(r.Context(), node)
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load policy")
-		return
-	}
-	if !ok {
-		httpx.JSON(w, http.StatusOK, map[string]any{"exists": false, "node": node})
-		return
-	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"exists": true, "override": po})
-}
-
 // handleAuthSrc 认证源页顶部聚合（源清单 + 归属账号计数）。
 //
 // ★权限必须与 GET /api/v1/authsrc/sources 同档（requireAdmin，角色现算）：
@@ -1910,8 +1914,16 @@ func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
 	// 会让该基线对全平台终端永远判违规（详见 handleSaveBaseline 里那道入口校验）。
 	// 与入口校验读的是同一份 store.CollectableChecks——前端自己抄一份的话，
 	// 加采集项时前端不跟进，页面上就永远选不到新项。
+	// orgs/groups 适用范围选择器的候选（与资源授权、认证策略同一处 subjectOptions）。
+	// ★读失败不 500：基线本体已经取到了，范围选择器少一份候选顶多是编辑不便，
+	// 而 500 会让整个安全中心页空白。前端拿到空数组时选择器为空、已配的范围按 id 显示。
+	orgs, groups, err := s.subjectOptions(r.Context())
+	if err != nil {
+		orgs, groups = []subjectOption{}, []subjectOption{}
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
-		"baselines": b.Baselines, "checkCatalog": store.CollectableChecks()})
+		"baselines": b.Baselines, "checkCatalog": store.CollectableChecks(),
+		"orgs": orgs, "groups": groups})
 }
 
 // handleDevices 已搬到 devices.go（授信终端主线）：它现在有权限闸、有真实数据源、
@@ -2027,15 +2039,6 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpx.JSON(w, http.StatusOK, b)
-}
-
-func (s *Server) handlePolicies(w http.ResponseWriter, r *http.Request) {
-	pb, err := s.store.PolicyBundle(r.Context())
-	if err != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load policies")
-		return
-	}
-	httpx.JSON(w, http.StatusOK, pb)
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {

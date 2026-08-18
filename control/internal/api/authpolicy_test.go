@@ -72,7 +72,7 @@ func savePolicy(t *testing.T, h http.Handler, p store.AuthPolicy) (int, map[stri
 func vendorPolicy(mut func(*store.AuthPolicy)) store.AuthPolicy {
 	p := store.AuthPolicy{
 		ID: "ap-test-vendor", Name: "外包协作 · 加严", Directory: "local", Priority: 5, Enabled: true,
-		Scope: "外包协作组", PC: store.AuthMethodSet{Primary: "local"}, Mobile: store.AuthMethodSet{Primary: "local"},
+		Scope:       "外包协作组",
 		ScopeGroups: []string{"g-test-vendor"},
 	}
 	if mut != nil {
@@ -566,4 +566,84 @@ func jsonStr(t *testing.T, v any) string {
 		t.Fatalf("marshal: %v", err)
 	}
 	return string(b)
+}
+
+// ── wave8 行动 13-②：Secondary 的唯一执行语义 ──
+
+// TestPolicyMethodsRejectLegacyFallback 策略声明了二次认证方式 → legacy 演示验证码不成立。
+//
+// ★这条是 `AuthPolicy.Secondary` **不是装饰**的全部证据。改造前它零消费方：
+// 管理员在页面上勾了「动态令牌」，而一个没绑任何认证器的账号照样能用写死的
+// 123456 通过「二次认证」——加严配置被降级成一句提示。
+// 裸 IP 演示站（RP 未配置）正是这条唯一生效的地方。
+func TestPolicyMethodsRejectLegacyFallback(t *testing.T) {
+	h, _ := policyEnv(t, nil) // rp=nil：RP 未配置，正是 legacy 回落存在的形态
+	putVendorGroup(t, h)      // g-test-vendor = { li.fang }
+
+	// ① 策略声明了 totp：li.fang 没绑 passkey 也没绑 TOTP → 要求先注册，**不给验证码入口**。
+	if code, out := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.Enhance.Always = true
+		p.Secondary = []string{"totp"}
+	})); code != http.StatusOK {
+		t.Fatalf("保存策略失败 %d: %v", code, out)
+	}
+	out := policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.9:5000", "", "")
+	if out["ok"] == true {
+		t.Fatal("命中 always 增强条件应要求二次认证")
+	}
+	if out["needEnroll"] != true {
+		t.Fatalf("策略声明了方式时应要求先注册认证器，而不是回落到演示验证码：%v", out)
+	}
+	if out["needMfa"] == true {
+		t.Fatal("legacy 演示验证码入口不该出现——「要求二次认证」不能由写死的 123456 满足")
+	}
+	if r := str(out["reason"]); !strings.Contains(r, "动态令牌") && !strings.Contains(r, "TOTP") {
+		t.Fatalf("提示要点名策略要求的方式，得到 %q", r)
+	}
+	// 直接把 123456 递上去同样不通。
+	out = policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.9:5000", "", "123456")
+	if out["ok"] == true {
+		t.Fatal("演示验证码不该能满足一条声明了 totp 的策略")
+	}
+
+	// ② 策略留空方式（= 不额外约束）：回到 legacy 回落，行为与改造前一致。
+	if code, out := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.Enhance.Always = true
+		p.Secondary = []string{}
+	})); code != http.StatusOK {
+		t.Fatalf("保存策略失败 %d: %v", code, out)
+	}
+	out = policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.9:5000", "", "")
+	if out["needMfa"] != true {
+		t.Fatalf("未声明方式时应保留 legacy 回落（否则这是一次静默的加严）：%v", out)
+	}
+	out = policyLogin(t, h, "li.fang", "baidi@123", "203.0.113.9:5000", "", "123456")
+	if out["ok"] != true {
+		t.Fatalf("未声明方式时演示验证码应照旧可用：%v", out)
+	}
+}
+
+// TestPolicySecondaryIsSingleDimension PC/移动端两栏已合并——两端在登录链路上区分不了。
+func TestPolicySecondaryIsSingleDimension(t *testing.T) {
+	h, _ := policyEnv(t, nil)
+	putVendorGroup(t, h)
+	if code, _ := savePolicy(t, h, vendorPolicy(func(p *store.AuthPolicy) {
+		p.Secondary = []string{"totp"}
+	})); code != http.StatusOK {
+		t.Fatal("保存策略失败")
+	}
+	code, out := doJSON(t, h, "GET", "/api/v1/authpolicy", adminToken(), nil)
+	if code != http.StatusOK {
+		t.Fatalf("读策略 %d", code)
+	}
+	for _, raw := range out["policies"].([]any) {
+		p := raw.(map[string]any)
+		if _, bad := p["pc"]; bad {
+			t.Error("pc/mobile 两栏已合并成 secondary——两端走同一个 /portal/login，请求里没有端标识，" +
+				"并排显示会让人以为「移动端可以配得更严」")
+		}
+		if _, ok := p["secondary"]; !ok {
+			t.Errorf("应下发 secondary：%v", p)
+		}
+	}
 }

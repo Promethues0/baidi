@@ -294,7 +294,6 @@ func TestDeleteUserGroupRefusedWhenAuthPolicyReferencesIt(t *testing.T) {
 	}
 	if _, err := s.SaveAuthPolicy(ctx, AuthPolicy{
 		Name: "外包协作组 · 一律二次认证", Directory: "local", Priority: 20, Enabled: true,
-		PC: AuthMethodSet{Primary: "local"}, Mobile: AuthMethodSet{Primary: "local"},
 		ScopeGroups: []string{g.ID}, Enhance: EnhanceRule{Always: true},
 	}); err != nil {
 		t.Fatalf("存策略: %v", err)
@@ -475,19 +474,13 @@ func TestPolicyBundleTreeFromDB(t *testing.T) {
 	if root := keys["root"]; root.Members != 8 {
 		t.Errorf("根节点应显示子树合计 8 人，得到 %d", root.Members)
 	}
-	if keys["dev"].HasCustom {
-		t.Error("尚未保存覆盖时 dev 不应标记 hasCustom")
-	}
-	// 新建部门 + 给它存一份策略覆盖 → 树上立刻反映
+	// 新建部门 → 树上立刻反映（HasCustom 已随策略覆盖一并摘除，见 store/policy.go）
 	n, _ := s.SaveOrgUnit(ctx, Org{Name: "风控组", ParentID: "root"})
-	if err := s.SavePolicyOverride(ctx, n.ID, "风控组", "{}", 3); err != nil {
-		t.Fatalf("SavePolicyOverride: %v", err)
-	}
 	pb2, _ := s.PolicyBundle(ctx)
 	keys = map[string]OrgNode{}
 	walk(pb2.Tree)
-	if got, ok := keys[n.ID]; !ok || !got.HasCustom {
-		t.Errorf("新建部门与它的策略覆盖应出现在树上，得到 %+v", got)
+	if got, ok := keys[n.ID]; !ok || got.Title != "风控组" {
+		t.Errorf("新建部门应出现在树上，得到 %+v", got)
 	}
 }
 

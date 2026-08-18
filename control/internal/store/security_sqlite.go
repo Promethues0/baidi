@@ -12,7 +12,8 @@ import (
 
 // Baselines 从库读安全基线清单。
 func (s *SQLiteStore) Baselines(ctx context.Context) ([]BaselinePolicy, error) {
-	rows, err := s.db.QueryContext(ctx, `SELECT id,name,type,scope,disposal,status,platforms_json,checks_json FROM baseline_policies ORDER BY id`)
+	rows, err := s.db.QueryContext(ctx, `SELECT id,name,disposal,status,platforms_json,checks_json,
+  COALESCE(scope_orgs,'[]'),COALESCE(scope_groups,'[]') FROM baseline_policies ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -20,17 +21,27 @@ func (s *SQLiteStore) Baselines(ctx context.Context) ([]BaselinePolicy, error) {
 	out := []BaselinePolicy{}
 	for rows.Next() {
 		var b BaselinePolicy
-		var plats, checks string
-		if err := rows.Scan(&b.ID, &b.Name, &b.Type, &b.Scope, &b.Disposal, &b.Status, &plats, &checks); err != nil {
+		var plats, checks, sorgs, sgroups string
+		if err := rows.Scan(&b.ID, &b.Name, &b.Disposal, &b.Status, &plats, &checks, &sorgs, &sgroups); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(plats), &b.Platforms)
 		_ = json.Unmarshal([]byte(checks), &b.Checks)
+		_ = json.Unmarshal([]byte(sorgs), &b.ScopeOrgs)
+		_ = json.Unmarshal([]byte(sgroups), &b.ScopeGroups)
 		if b.Platforms == nil {
 			b.Platforms = []string{}
 		}
 		if b.Checks == nil {
 			b.Checks = []BaselineCheck{}
+		}
+		// ★空数组而不是 nil：两者在 JSON 里是 [] 与 null，前端对 null 会渲染成
+		// "未配置范围"而不是"对全体生效"——同一件事两个说法。
+		if b.ScopeOrgs == nil {
+			b.ScopeOrgs = []string{}
+		}
+		if b.ScopeGroups == nil {
+			b.ScopeGroups = []string{}
 		}
 		out = append(out, b)
 	}
@@ -40,11 +51,15 @@ func (s *SQLiteStore) Baselines(ctx context.Context) ([]BaselinePolicy, error) {
 func (s *SQLiteStore) upsertBaseline(ctx context.Context, b BaselinePolicy) error {
 	plats, _ := json.Marshal(b.Platforms)
 	checks, _ := json.Marshal(b.Checks)
-	_, err := s.db.ExecContext(ctx, `INSERT INTO baseline_policies(id,name,type,scope,disposal,status,platforms_json,checks_json,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?)
-ON CONFLICT(id) DO UPDATE SET name=excluded.name, type=excluded.type, scope=excluded.scope, disposal=excluded.disposal,
-  status=excluded.status, platforms_json=excluded.platforms_json, checks_json=excluded.checks_json, updated_at=excluded.updated_at`,
-		b.ID, b.Name, b.Type, b.Scope, b.Disposal, b.Status, string(plats), string(checks), nowStr())
+	sorgs, _ := json.Marshal(nonNil(b.ScopeOrgs))
+	sgroups, _ := json.Marshal(nonNil(b.ScopeGroups))
+	// type/scope 两列保留但恒写空串（删列要重建表；它们已无人读，见 BaselinePolicy 注释）。
+	_, err := s.db.ExecContext(ctx, `INSERT INTO baseline_policies(id,name,type,scope,disposal,status,platforms_json,checks_json,scope_orgs,scope_groups,updated_at)
+VALUES(?,?,'','',?,?,?,?,?,?,?)
+ON CONFLICT(id) DO UPDATE SET name=excluded.name, disposal=excluded.disposal,
+  status=excluded.status, platforms_json=excluded.platforms_json, checks_json=excluded.checks_json,
+  scope_orgs=excluded.scope_orgs, scope_groups=excluded.scope_groups, updated_at=excluded.updated_at`,
+		b.ID, b.Name, b.Disposal, b.Status, string(plats), string(checks), string(sorgs), string(sgroups), nowStr())
 	return err
 }
 
@@ -137,4 +152,19 @@ func (s *SQLiteStore) backfillClientVersionCheckLabel() error {
 		}
 	}
 	return s.SetSetting(ctx, clientVersionLabelMarker, "1")
+}
+
+// backfillBaselineScope 给既有基线补上空的适用范围（= 对全体生效）。
+//
+// ★必须回填：补列只加列不填值，留 NULL 的话 COALESCE 虽能兜住读，
+// 但「未配置」与「对全体生效」在页面上会变成两种说法。回填成 '[]' 让它们统一，
+// 且与改造前自由文本时代的实际行为（没人读那个字段 = 对全体生效）逐字一致。
+func (s *SQLiteStore) backfillBaselineScope() error {
+	for _, col := range []string{"scope_orgs", "scope_groups"} {
+		if _, err := s.db.Exec(
+			`UPDATE baseline_policies SET ` + col + `='[]' WHERE ` + col + ` IS NULL OR trim(` + col + `)=''`); err != nil {
+			return err
+		}
+	}
+	return nil
 }

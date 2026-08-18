@@ -173,9 +173,15 @@ type Input struct {
 // Decision 一次决策的可解释结论。Reasons / ExemptReasons 直接进审计与前端提示，
 // 所以措辞必须是"已经发生的事实"，不能是推测。
 type Decision struct {
-	PolicyID      string   `json:"policyId"`
-	PolicyName    string   `json:"policyName"`
-	RequireMFA    bool     `json:"requireMfa"`
+	PolicyID   string `json:"policyId"`
+	PolicyName string `json:"policyName"`
+	RequireMFA bool   `json:"requireMfa"`
+	// Methods 这条策略声明的可接受二次认证方式（AuthPolicy.Secondary 原样带出）。
+	//
+	// ★它**不决定用哪个因子**（那由账号已注册的认证器决定，passkey > TOTP）。
+	// 它唯一的执行语义是：非空时，legacy 演示验证码回落对这条策略覆盖的人**不成立**——
+	// 「要求二次认证」不能由一个写死在代码里的 123456 来满足。见 api.secondFactor。
+	Methods       []string `json:"methods"`
 	Reasons       []string `json:"reasons"`       // 命中的增强条件
 	Exempted      bool     `json:"exempted"`      // 命中了增强条件、但被豁免
 	ExemptReasons []string `json:"exemptReasons"` // 命中的豁免条件
@@ -201,7 +207,8 @@ func Evaluate(pols []store.AuthPolicy, in Input) Decision {
 	if !ok {
 		return Decision{}
 	}
-	d := Decision{PolicyID: p.ID, PolicyName: p.Name, Reasons: []string{}, ExemptReasons: []string{}}
+	d := Decision{PolicyID: p.ID, PolicyName: p.Name, Methods: trimAll(p.Secondary),
+		Reasons: []string{}, ExemptReasons: []string{}}
 
 	if p.Enhance.Always {
 		d.Reasons = append(d.Reasons, "策略范围内账号一律二次认证")
@@ -274,23 +281,10 @@ func Match(pols []store.AuthPolicy, in Input) (store.AuthPolicy, bool) {
 }
 
 // covers 报告策略的适用范围是否覆盖该账号（组织含子树 / 用户组）。
+// 判定本体在 store.SubjectIndex.Covers 一处——认证策略、安全基线、资源授权
+// 对"谁在这个组织里"必须是同一个答案。
 func covers(p store.AuthPolicy, in Input) bool {
-	acct := strings.ToLower(strings.TrimSpace(in.Account))
-	for _, oid := range p.ScopeOrgs {
-		for _, a := range in.Subjects.OrgAccounts[strings.TrimSpace(oid)] {
-			if a == acct {
-				return true
-			}
-		}
-	}
-	for _, gid := range p.ScopeGroups {
-		for _, a := range in.Subjects.GroupAccounts[strings.TrimSpace(gid)] {
-			if a == acct {
-				return true
-			}
-		}
-	}
-	return false
+	return in.Subjects.Covers(in.Account, p.ScopeOrgs, p.ScopeGroups)
 }
 
 // matchNetwork 报告 ip 是否落在任一网段内，并回传命中的那一条（写进审计与提示）。
@@ -407,7 +401,7 @@ func Validate(p store.AuthPolicy) error {
 		return fmt.Errorf("「%s」不可启用：%s", c.Label, c.Reason)
 	}
 	// 二次认证方式：未实现的方式拒绝入库（与冻结开关同一条纪律）。
-	for _, m := range append(trimAll(p.PC.Secondary), trimAll(p.Mobile.Secondary)...) {
+	for _, m := range trimAll(p.Secondary) {
 		mc, known := MethodOf(m)
 		if !known {
 			return fmt.Errorf("未知的二次认证方式「%s」", m)

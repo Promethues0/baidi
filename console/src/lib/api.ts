@@ -86,18 +86,43 @@ export interface Overview {
   truncated?: boolean;
 }
 
-/* ── 与 store.PolicyBundle 同构（策略继承树） ── */
-export interface OrgNode {
-  key: string;
-  title: string;
-  hasCustom: boolean;
-  members: number;
-  children?: OrgNode[];
+/* ── 接入策略（FR-POLICY-29 同时在线设备上限 / FR-POLICY-30 接入超时注销）──
+ *
+ * ★这里原来是 PolicyBundle / OrgNode（策略继承树）+ 8 项继承编辑器。那 8 项落进
+ * policy_overrides.settings 之后**全仓零消费方**，而保存 toast 写着「已下发至代理网关」。
+ * 整批摘除（wave8 行动 13-①），换成下面这两条真有执行方的规则：执行点是敲门令牌
+ * （api.accessSessionGate → handleKnockToken），撤销在一个 15s 保活周期内必然生效。 */
+export interface AccessPolicy {
+  /** 是否启用「同时在线设备上限」。★与 maxDevices=0 不是一回事：0 = 禁止接入（PRD 原文）。 */
+  deviceLimitEnabled: boolean;
+  maxDevices: number;
+  splitPlatform: boolean;
+  maxDevicesMobile: number;
+  idleEnabled: boolean;
+  idleMinutes: number;
 }
-/** 只有 tree。后端原来还下发一份 list（5 条编造的策略清单），控制台从来没渲染过它，
- *  已随 store.PolicyBundle 一并删除——"哪个节点自己定了策略"由 OrgNode.hasCustom 表达。 */
-export interface PolicyBundle {
-  tree: OrgNode[];
+/** 一台终端的接入会话（页面上「谁在线、哪台机器、多久没业务流量」）。 */
+export interface DeviceSessionRow {
+  account: string;
+  fingerprint: string;
+  platform: string;
+  ip: string;
+  firstSeen: number;
+  lastKnock: number;
+  lastActive: number;
+  /** false = 没有任何网关报过这条会话的活跃时刻 → 超时规则对它**不生效**（页面必须显示"不可判定"）。 */
+  activityKnown: boolean;
+  state: 'active' | 'timeout';
+  endedReason?: string;
+}
+export interface AccessPolicyResp {
+  policy: AccessPolicy;
+  onlineWindowSec: number;
+  storeReady: boolean;
+  sessions?: DeviceSessionRow[];
+  activityKnown?: number;
+  /** false = 目前没有任何活跃回执，开了「接入超时注销」也不会触发。页面必须当面说清。 */
+  idleReady?: boolean;
 }
 
 /* ── 应用管理（store.AppBundle）── */
@@ -637,9 +662,21 @@ export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: 
  * 命中增强条件且未被豁免 → 登录被要求二次认证。因此界面上任何一个勾都必须是真能生效的，
  * 判不了的规则由后端 capabilities 声明为不可用并在此置灰（不是静默无效）。
  */
-export type PrimaryMethod = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
+/** 可作为「用户目录」出现的取值。★这个类型此前叫 PrimaryMethod、兼作"主认证方式"，
+ *  而主认证那一维已摘除（wave8 行动 13-②）；radius/oauth/sms/cert 四个从来没有实现，
+ *  留在这里只是因为存量策略的 directory 字段里可能还有它们。 */
+export type DirectoryKind = 'local' | 'ad' | 'ldap' | 'oidc' | 'radius' | 'oauth' | 'sms' | 'cert';
 export type SecondaryMethod = 'sms' | 'totp' | 'radius' | 'cert' | 'http';
-export interface AuthMethodSet { primary: PrimaryMethod | ''; secondary: SecondaryMethod[] }
+/** 可接受的二次认证方式（AuthPolicy.secondary）。
+ *
+ *  ★PC / 移动端两栏已合并（wave8 行动 13-②）：三端走**同一个** /portal/login，
+ *  请求里没有任何端标识，两栏并排会让人以为「移动端可以配得更严」。
+ *  同批摘掉了每栏里的 primary（主认证方式）——策略匹配第一步就按目录筛，
+ *  一条策略只作用于已经被该目录认出来的人，对他说"主认证用证书"不可能生效。
+ *
+ *  **唯一执行语义**：非空时，本策略要求二次认证而账号又没绑任何认证器的情况下，
+ *  不接受 legacy 演示验证码回落（回「请先注册」）。它不决定用哪个因子——
+ *  那由账号已注册的认证器决定（passkey > TOTP）。 */
 export interface ExemptRule {
   trustedDevice: boolean;
   trustedNetwork: boolean;
@@ -659,13 +696,17 @@ export interface EnhanceRule {
   geoAnomaly: boolean;
 }
 export interface AuthPolicy {
-  id: string; name: string; directory: PrimaryMethod | string; isDefault: boolean;
+  id: string; name: string; directory: DirectoryKind | string; isDefault: boolean;
   /** scope 只是文字说明；真正参与匹配的是 scopeOrgs / scopeGroups。 */
   scope: string; priority: number; enabled: boolean;
-  pc: AuthMethodSet; mobile: AuthMethodSet;
+  secondary: SecondaryMethod[];
   /** 适用范围：组织（含子树）与用户组。非默认策略两者皆空则匹配不到任何账号，后端拒绝保存。 */
   scopeOrgs: string[]; scopeGroups: string[];
-  exempt: ExemptRule; enhance: EnhanceRule; authzApps: string;
+  exempt: ExemptRule; enhance: EnhanceRule;
+  /** ★这里曾经有 authzApps（"默认授权应用"，自由文本）。已摘除（wave8 行动 13-③）：
+   *  它零执行方，而策略卡把空值渲染成「不授权」、种子还预置「默认授权全部应用」——
+   *  两者都在暗示这条策略决定了能访问哪些应用。授权的唯一真相是**资源侧的主体清单**
+   *  （allowUsers/allowGroups/allowOrgs + JIT 授予），与认证策略无关。 */
 }
 /** 一条规则的能力声明：能不能判、判据是什么、判不了是为什么（后端 authpolicy.Capabilities）。 */
 export interface AuthRuleCapability {
@@ -698,7 +739,16 @@ export interface AuthPolicyResp {
 
 /* ── 安全中心（store.SecurityBundle）── */
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
-export interface BaselinePolicy { id: string; name: string; type: 'app-protect' | 'onboarding'; scope: string; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
+/** 安全基线。
+ *
+ *  ★`type`（上线准入 / 应用防护）已删：风险引擎 risk.Evaluate 从不读它——两类基线的
+ *  检测项、处置、判定路径完全一样，它只是列表上的一个色块。留着就是"看起来有分类、
+ *  实际上没有任何行为差异"。
+ *
+ *  ★`scope` 自由文本已换成 scopeOrgs/scopeGroups **结构化范围**（组织含子树）。
+ *  自由文本那栏写着「个人 BYOD 设备」而判定对全体终端生效，是本项目最典型的
+ *  「界面上写了、代码里没人读」。两者皆空 = 对全体生效。 */
+export interface BaselinePolicy { id: string; name: string; scopeOrgs: string[]; scopeGroups: string[]; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
 /** 只有 baselines。原来还有一段 spa（G3 / 已隐身 / 敲门正常）是纯种子——控制面既不实测
  *  端口可见性、也不代数据面宣布敲门是否正常，整段连同安全中心页那张卡片已删除。
  *  真实出处是「网关与隐身」页：那里每一项都来自网关 mTLS 注册心跳。 */
@@ -706,7 +756,7 @@ export interface BaselinePolicy { id: string; name: string; type: 'app-protect' 
  *  采集器不报的 key 会让该基线对全平台终端永远判违规（接入准入基线默认处置是 block，
  *  等于一键给所有人拒发敲门令牌）。后端 handleSaveBaseline 与本页下拉读同一份。 */
 export interface CheckSpec { key: string; label: string; expect: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; note?: string }
-export interface SecurityBundle { baselines: BaselinePolicy[]; checkCatalog?: CheckSpec[] }
+export interface SecurityBundle { baselines: BaselinePolicy[]; checkCatalog?: CheckSpec[]; orgs?: SubjectOption[]; groups?: SubjectOption[] }
 
 /* ── 终端 posture（安全中心 · 终端合规） ── */
 /** unknown = 终端探不到该项（权限不足/命令缺失），既非合规也非不合规。

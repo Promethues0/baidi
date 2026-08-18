@@ -33,8 +33,15 @@ type Allowlist struct {
 type entry struct {
 	until time.Time
 	since time.Time // 首次敲门放行时刻（供上报会话在线时长；重复敲门保活不重置）
-	user  string
-	role  string
+	// lastActive 最近一次**业务连接**到达的时刻（由 proxy 在鉴权通过后 Touch）。
+	//
+	// ★零值有确定语义：**这条放行窗口从未承载过业务连接**，不是"刚刚活跃过"。
+	// 它是 FR-POLICY-30「无业务流量超时注销」在控制面侧的唯一判据来源，
+	// 而敲门保活（Allow 续窗）**刻意不刷新它**——客户端只要不退出就每 15s 敲一次门，
+	// 拿保活当活跃的话那条规则永远不会触发，等于又造一条永不生效的假开关。
+	lastActive time.Time
+	user       string
+	role       string
 }
 
 // Session 一条活跃放行会话（供网关向控制面上报真实在线用户）。
@@ -43,6 +50,8 @@ type Session struct {
 	User  string
 	Role  string
 	Since time.Time
+	// LastActive 最近一次业务连接时刻；**零值 = 从未有过业务连接**（不可判定，不是"很久以前"）。
+	LastActive time.Time
 }
 
 func NewAllowlist() *Allowlist {
@@ -110,16 +119,33 @@ func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) bool {
 		delete(a.deny, normUser(user)) // 懒清理过期封禁
 	}
 	since := time.Now()
+	var lastActive time.Time
 	if prev, ok := a.m[ip]; ok && time.Now().Before(prev.until) {
-		since = prev.since // 保活续窗：保留首次敲门时刻
+		since = prev.since           // 保活续窗：保留首次敲门时刻
+		lastActive = prev.lastActive // ★同样保留：保活不是业务流量，见 entry.lastActive
 	}
-	a.m[ip] = entry{until: time.Now().Add(ttl), since: since, user: user, role: role}
+	a.m[ip] = entry{until: time.Now().Add(ttl), since: since, lastActive: lastActive, user: user, role: role}
 	cb := a.OnAllow
 	a.mu.Unlock()
 	if cb != nil {
 		cb(ip, user)
 	}
 	return true
+}
+
+// Touch 记一次**业务连接**到达（proxy 鉴权通过后调用）。
+//
+// 窗口不存在或已过期时什么都不做——那种情况下这个连接本来也进不来，
+// 凭空建一条 lastActive 会让「从未有过业务流量」与「刚活跃过」混成一谈。
+func (a *Allowlist) Touch(ip string) {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	e, ok := a.m[ip]
+	if !ok || time.Now().After(e.until) {
+		return
+	}
+	e.lastActive = time.Now()
+	a.m[ip] = e
 }
 
 // Reap 删除并返回已过期的源 IP（供防火墙模式回收 pf 放行规则）。
@@ -156,7 +182,7 @@ func (a *Allowlist) Sessions() []Session {
 	out := make([]Session, 0, len(a.m))
 	for ip, e := range a.m {
 		if now.Before(e.until) {
-			out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since})
+			out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since, LastActive: e.lastActive})
 		}
 	}
 	return out

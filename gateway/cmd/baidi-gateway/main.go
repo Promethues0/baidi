@@ -233,7 +233,14 @@ func main() {
 			ss := al.Sessions()
 			out := make([]cplane.Session, 0, len(ss))
 			for _, s := range ss {
-				out = append(out, cplane.Session{IP: s.IP, User: s.User, Role: s.Role, Since: s.Since.Unix()})
+				// 本网关**一定**报这个字段（哪怕是 0），控制面据此区分
+				// 「网关不会报」（字段缺席）与「报了但从未有业务连接」（0）。
+				var la int64
+				if !s.LastActive.IsZero() {
+					la = s.LastActive.Unix()
+				}
+				out = append(out, cplane.Session{IP: s.IP, User: s.User, Role: s.Role,
+					Since: s.Since.Unix(), LastActive: &la})
 			}
 			return al.ActiveCount(), proxy.Active(), int64(time.Since(started).Seconds()), out
 		}

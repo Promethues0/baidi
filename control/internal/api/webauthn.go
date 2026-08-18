@@ -110,9 +110,21 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 				"reason": dec.Summary() + "；该账号尚未注册 passkey 或 TOTP，请先注册后再接入（可联系管理员协助录入）",
 			}, true
 		}
-		// legacy 演示回落：RP 未配置（如裸 IP 演示站）**且未注册 TOTP**（注册了在
-		// 上面的无条件分支就拦下了），保留演示验证码路径。真 MFA 的出路是引导
-		// 用户去门户注册 TOTP——它不依赖可注册域名，裸 IP 下也可用。
+		// ★策略声明了可接受的二次认证方式（当前唯一真实现的是 totp）时，
+		// **legacy 演示验证码回落不成立**：「这条策略要求二次认证」不能由一个
+		// 写死在代码里的 123456 来满足——那等于把加严配置降级成一句提示。
+		// 这是 AuthPolicy.Secondary 的**唯一执行语义**，也是它不是装饰的证据。
+		// 裸 IP 演示站（RP 未配置）正是这条唯一生效的地方，出路是去门户注册 TOTP。
+		if len(dec.Methods) > 0 {
+			return map[string]any{
+				"ok": false, "needEnroll": true,
+				"reason": dec.Summary() + "；策略要求的二次认证方式为「" +
+					strings.Join(methodLabels(dec.Methods), "、") +
+					"」，而该账号尚未注册。请先在门户「安全设置」里绑定后再登录",
+			}, true
+		}
+		// 策略没声明方式（留空 = 不额外约束）：RP 未配置且未注册 TOTP 时，
+		// 保留演示验证码路径。
 		return s.legacySecondFactor(r, cred, dec)
 	case dec.Exempted:
 		// 豁免也是一次发生过的判定，必须留痕：否则"为什么这次没要二次认证"无从回答。
@@ -500,4 +512,17 @@ func challengeFromClientData(body []byte) (string, error) {
 		return "", errors.New("missing challenge")
 	}
 	return cd.Challenge, nil
+}
+
+// methodLabels 把方式 key 换成中文名（提示语里出现的是给人看的名字，不是 key）。
+func methodLabels(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		if mc, ok := authpolicy.MethodOf(k); ok {
+			out = append(out, mc.Label)
+			continue
+		}
+		out = append(out, k)
+	}
+	return out
 }

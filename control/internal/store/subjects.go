@@ -141,3 +141,35 @@ func (ix SubjectIndex) SubjectAllows(res Resource, account string) bool {
 	}
 	return ix.accountSet(res)[normAccount(account)]
 }
+
+// Covers 报告 account 是否被这组组织/用户组主体覆盖（组织含子树）。
+//
+// ★与 SubjectAllows 的区别只在取参形状：那个吃 Resource，这个吃裸的两个切片，
+// 给「不是资源」的判定点用（认证策略适用范围、安全基线适用范围）。
+// 两者共用同一份展开索引，所以「授权/策略/基线」三处对"谁在这个组织里"的理解不可能分叉。
+//
+// **两者都空返回 false**——"覆盖谁"的问题在集合为空时答案就是"谁也不覆盖"。
+// 调用方若把"都空"定义成"对全体生效"，那是调用方的语义，必须在调用方显式写出来
+// （见 api.baselinesInScope 与 authpolicy.pick 的 IsDefault 分支），
+// 绝不能藏在这里——藏进来的话，两个调用方里只要有一个的语义是相反的，就会静默走反。
+func (ix SubjectIndex) Covers(account string, orgs, groups []string) bool {
+	acct := normAccount(account)
+	if acct == "" {
+		return false
+	}
+	for _, oid := range orgs {
+		for _, a := range ix.OrgAccounts[strings.TrimSpace(oid)] {
+			if a == acct {
+				return true
+			}
+		}
+	}
+	for _, gid := range groups {
+		for _, a := range ix.GroupAccounts[strings.TrimSpace(gid)] {
+			if a == acct {
+				return true
+			}
+		}
+	}
+	return false
+}

@@ -3,7 +3,7 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">策略管理</div>
-        <div class="bd-page__sub">全局兜底 + 个性覆盖 · 用户策略沿组织树继承，差异处按需打破继承做个性化</div>
+        <div class="bd-page__sub">接入策略（同时在线设备上限 / 接入超时注销）+ 全局防爆破 · 每一项都有真实执行方</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
@@ -12,97 +12,177 @@
 
     <!-- Tab 切换 -->
     <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'user' }" @click="tab = 'user'">用户策略 · 继承编辑器</span>
+      <span class="bd-tab" :class="{ on: tab === 'access' }" @click="tab = 'access'">接入策略</span>
       <span class="bd-tab" :class="{ on: tab === 'global' }" @click="tab = 'global'">全局策略</span>
     </div>
 
-    <!-- ============ 用户策略（继承编辑器）============ -->
-    <div v-show="tab === 'user'" class="bd-two">
-      <!-- 左：继承树 -->
-      <div class="bd-card bd-tree">
-        <div class="bd-tree__h">组织 / 用户组继承树</div>
-        <button
-          v-for="n in flatTree"
-          :key="n.key"
-          class="bd-tnode"
-          :class="{ on: n.key === selected }"
-          :style="{ paddingLeft: 10 + n.depth * 16 + 'px' }"
-          @click="select(n.key)"
-        >
-          <span class="bd-tnode__dot" :class="n.hasCustom ? 'custom' : 'inherit'" />
-          <span class="bd-tnode__t">{{ n.title }}</span>
-          <span class="bd-tnode__tag" :class="n.hasCustom ? 'custom' : 'inherit'">{{ n.hasCustom ? '自定义' : '继承' }}</span>
-          <span class="bd-tnode__m">{{ n.members }}</span>
-        </button>
+    <!-- ============ 接入策略（FR-POLICY-29/30，真接进敲门令牌）============ -->
+    <div v-show="tab === 'access'" class="bd-acc">
+      <div class="bd-card bd-note">
+        <icon-info-circle />
+        <div>
+          这两条规则的执行点是<b>敲门令牌</b>（客户端每 15 秒回控制面续一次）：改动最迟在一个保活周期内生效，
+          被拒的终端会收到写明原因的提示。<b>不涉及</b>按组织/用户组分级——本版本的接入策略是全局的，
+          PRD 的策略继承（FR-POLICY-02~05）未实现，见下方「本版本未实现」。
+        </div>
       </div>
 
-      <!-- 右：编辑器 -->
-      <div class="bd-editor">
-        <!-- 继承链 -->
-        <div class="bd-card bd-chain">
-          <div class="bd-chain__top">
-            <div>
-              <span class="bd-chain__name">{{ node?.title }}</span>
-              <span class="bd-chain__sub">{{ node?.members }} 名成员 · 有效策略 = 本级自定义项 + 上级继承项</span>
-            </div>
-            <div class="bd-chain__stat">
-              <span class="bd-pill bd-pill--blue">{{ customCount }} 项自定义</span>
-              <span class="bd-pill bd-pill--grey">{{ inheritCount }} 项继承</span>
-            </div>
-          </div>
-          <div class="bd-chain__path">
-            <span class="bd-chain__label">继承链</span>
-            <template v-for="(c, i) in chain" :key="c.key">
-              <span class="bd-node" :class="{ self: i === 0 }">{{ c.title }}</span>
-              <icon-left v-if="i < chain.length - 1" class="bd-chain__arrow" />
-            </template>
-          </div>
-        </div>
+      <div v-if="!live" class="bd-card bd-warn">
+        <icon-exclamation-circle-fill />
+        <div>未连上 baidi-control，下面显示的是本地默认值，改动不会保存。</div>
+      </div>
+      <div v-else-if="!resp.storeReady" class="bd-card bd-warn">
+        <icon-exclamation-circle-fill />
+        <div>当前存储后端不支持接入会话记账，这两条规则<b>整块不生效</b>（需 SQLite 后端）。</div>
+      </div>
 
-        <!-- 设置分区 -->
-        <div v-for="sec in sections" :key="sec.title" class="bd-card bd-sec">
-          <div class="bd-sec__h">{{ sec.title }}</div>
-          <div v-for="row in sec.rows" :key="row.key" class="bd-row">
+      <!-- 规则一：同时在线设备上限 -->
+      <div class="bd-card bd-rule">
+        <div class="bd-rule__h">
+          <div>
+            <div class="bd-rule__t">同时在线设备上限<span class="bd-fr">FR-POLICY-29</span></div>
+            <div class="bd-rule__d">
+              同一账号能同时接入的终端台数（0~1000）。名额<b>先到先得</b>：调小上限后，最晚接入的那几台会在
+              一个保活周期内被挤掉。判据是「最近 {{ resp.onlineWindowSec }} 秒内还在续敲门令牌」。
+            </div>
+          </div>
+          <a-switch v-model="p.deviceLimitEnabled" size="small" @change="save" />
+        </div>
+        <template v-if="p.deviceLimitEnabled">
+          <div class="bd-row">
             <div class="bd-row__main">
               <div class="bd-row__label">
-                {{ row.label }}
-                <span v-if="row.risk" class="bd-risk">高影响</span>
+                上限台数
+                <span v-if="p.maxDevices === 0" class="bd-risk">= 禁止接入</span>
               </div>
-              <div class="bd-row__desc">{{ row.desc }}</div>
+              <div class="bd-row__desc">
+                {{ p.maxDevices === 0
+                  ? 'PRD 原文：0 表示禁止登录。当前配置会拒绝该系统内所有终端的接入请求。'
+                  : '超出上限的终端取不到敲门令牌，隧道在 30 秒内自然关闭。' }}
+              </div>
             </div>
-
-            <!-- 继承态：只读继承值 + 覆盖 -->
-            <template v-if="row.source === 'inherited'">
-              <span class="bd-row__inval">继承值：{{ fmt(row, row.inherited) }}</span>
-              <span class="bd-row__badge inherit">继承</span>
-              <span class="bd-row__act" @click="askOverride(row)">覆盖</span>
-            </template>
-            <!-- 自定义态：可编辑控件 + 恢复继承 -->
-            <template v-else>
-              <span class="bd-row__ctrl">
-                <a-switch v-if="row.type === 'toggle'" v-model="row.value" size="small" />
-                <a-input-number v-else-if="row.type === 'number'" v-model="numRow(row).value" :min="0" size="small" style="width: 92px" />
-                <a-select v-else-if="row.type === 'select'" v-model="row.value" size="small" style="width: 150px">
-                  <a-option v-for="o in row.options" :key="o" :value="o">{{ o }}</a-option>
-                </a-select>
-                <span v-if="row.unit" class="bd-row__unit">{{ row.unit }}</span>
-              </span>
-              <span class="bd-row__badge custom">自定义</span>
-              <span class="bd-row__act" @click="restore(row)">恢复继承</span>
-            </template>
+            <a-input-number v-model="p.maxDevices" :min="0" :max="1000" size="small" style="width: 96px" @change="save" />
+            <span class="bd-row__unit">台</span>
           </div>
-        </div>
+          <div class="bd-row">
+            <div class="bd-row__main">
+              <div class="bd-row__label">区分 PC 与移动端分别计数</div>
+              <div class="bd-row__desc">
+                平台取自终端的 posture 上报（<b>不是</b>客户端在敲门请求里自报——那等于让被判定方自己挑名额）；
+                从未上报过 posture 的终端按 PC 计。
+              </div>
+            </div>
+            <a-switch v-model="p.splitPlatform" size="small" @change="save" />
+          </div>
+          <div v-if="p.splitPlatform" class="bd-row">
+            <div class="bd-row__main">
+              <div class="bd-row__label">移动端上限</div>
+              <div class="bd-row__desc">iOS / Android / HarmonyOS 单独一份名额，与 PC 互不挤占。</div>
+            </div>
+            <a-input-number v-model="p.maxDevicesMobile" :min="0" :max="1000" size="small" style="width: 96px" @change="save" />
+            <span class="bd-row__unit">台</span>
+          </div>
+        </template>
+      </div>
 
-        <div class="bd-editor__foot">
-          <button class="bd-btn--ghost bd-btn" @click="reset">重置改动</button>
-          <button class="bd-btn" @click="impact.open = true">
-            <icon-eye />保存并预览影响
-          </button>
+      <!-- 规则二：接入超时注销 -->
+      <div class="bd-card bd-rule">
+        <div class="bd-rule__h">
+          <div>
+            <div class="bd-rule__t">接入超时注销<span class="bd-fr">FR-POLICY-30</span></div>
+            <div class="bd-rule__d">
+              连续无<b>业务流量</b>超过时长即注销接入，须重新登录。判据来自网关的逐会话回执，
+              <b>不是</b>敲门保活——客户端不退出就会一直敲门，拿保活当活跃的话这条规则永远不会触发。
+            </div>
+          </div>
+          <a-switch v-model="p.idleEnabled" size="small" @change="save" />
         </div>
+        <div v-if="p.idleEnabled && live && resp.storeReady && !resp.idleReady" class="bd-inline-warn">
+          <icon-exclamation-circle-fill />
+          <span>
+            目前<b>没有任何网关</b>报过业务活跃时刻（需网关升级到带 <code>lastActive</code> 回执的版本）。
+            在此之前这条规则<b>不会注销任何人</b>——判据缺席时一律放行，绝不拿「探不到」当「没有流量」。
+          </span>
+        </div>
+        <template v-if="p.idleEnabled">
+          <div class="bd-row">
+            <div class="bd-row__main">
+              <div class="bd-row__label">无流量时长</div>
+              <div class="bd-row__desc">5 分钟 ~ 365 天（PRD 范围）。PC 端「无键鼠操作」未实现——控制面拿不到终端输入事件。</div>
+            </div>
+            <a-input-number v-model="p.idleMinutes" :min="5" :max="525600" size="small" style="width: 116px" @change="save" />
+            <span class="bd-row__unit">分钟</span>
+          </div>
+        </template>
+      </div>
+
+      <!-- 当前接入会话（这两条规则的判定材料，逐条摆出来） -->
+      <div class="bd-card">
+        <div class="bd-sec__h plain">
+          当前接入会话
+          <span class="bd-cnt">{{ sessions.length }} 条</span>
+        </div>
+        <a-table :data="sessions" :pagination="false" size="small" :bordered="false">
+          <template #columns>
+            <a-table-column title="账号" data-index="account" :width="130" />
+            <a-table-column title="终端指纹" :width="150">
+              <template #cell="{ record }">
+                <span class="bd-mono" :title="record.fingerprint">{{ shortFp(record.fingerprint) }}</span>
+              </template>
+            </a-table-column>
+            <a-table-column title="平台" :width="110">
+              <template #cell="{ record }">
+                <span :class="{ 'bd-dim': !record.platform }">{{ record.platform || '不可判定' }}</span>
+                <span v-if="p.splitPlatform" class="bd-tg bd-tg--sm">{{ isMobile(record.platform) ? '移动端' : 'PC' }}</span>
+              </template>
+            </a-table-column>
+            <a-table-column title="来源 IP" data-index="ip" :width="130" />
+            <a-table-column title="最近敲门" :width="130">
+              <template #cell="{ record }">{{ ago(record.lastKnock) }}</template>
+            </a-table-column>
+            <a-table-column title="最近业务流量" :width="180">
+              <template #cell="{ record }">
+                <!-- ★三态：不可判定 / 从未 / 具体时刻。绝不把"网关没报"画成"刚刚活跃过"，
+                     也不画成"很久没动"——前者会误放行，后者会把正在干活的人踢下线。 -->
+                <span v-if="!record.activityKnown" class="bd-dim" title="没有任何网关报过这条会话的活跃时刻，超时规则对它不生效">
+                  不可判定
+                </span>
+                <span v-else-if="!record.lastActive" class="bd-dim" title="网关明确报告：这条会话自建立起从未承载业务连接">
+                  从未有业务连接
+                </span>
+                <span v-else>{{ ago(record.lastActive) }}</span>
+              </template>
+            </a-table-column>
+            <a-table-column title="状态" :width="180">
+              <template #cell="{ record }">
+                <span class="bd-tg" :style="tagStyle(record.state === 'active' ? '#00B42A' : '#F53F3F')">
+                  {{ record.state === 'active' ? '接入中' : '已注销' }}
+                </span>
+                <span v-if="record.endedReason" class="bd-dim bd-reason" :title="record.endedReason">{{ record.endedReason }}</span>
+              </template>
+            </a-table-column>
+          </template>
+          <template #empty>
+            <div class="bd-empty">暂无接入会话（终端取过敲门令牌后出现在这里）</div>
+          </template>
+        </a-table>
+        <div class="bd-tblnote">
+          活跃时刻按 <b>(账号, 来源 IP)</b> 与网关回执对应——网关的会话表按源 IP 记，它不知道终端指纹。
+          同一 NAT 出口下的两台终端会共用一个 IP，此时活跃时刻互相顶替，方向是「不该踢的不踢」。
+        </div>
+      </div>
+
+      <!-- 如实声明 -->
+      <div class="bd-card bd-unimpl">
+        <div class="bd-unimpl__h"><icon-info-circle />本版本未实现（此前这里是一整套不生效的继承编辑器，已摘除）</div>
+        <div v-for="n in ACCESS_UNIMPL" :key="n.label" class="bd-unimpl__row">
+          <b>{{ n.label }}</b><span>{{ n.why }}</span>
+        </div>
+        <div class="bd-unimpl__f">取舍与理由见 docs/SCOPE.md 与 docs/ARCHITECTURE.md 第七节</div>
       </div>
     </div>
 
-    <!-- ============ 全局策略（复刻设计稿开关行）============ -->
+<!-- ============ 全局策略（复刻设计稿开关行）============ -->
     <div v-show="tab === 'global'" class="bd-two">
       <div class="bd-card bd-gsec-nav">
         <button v-for="g in globalSecs" :key="g.key" class="bd-gnav" :class="{ on: gsec === g.key }" @click="gsec = g.key">
@@ -156,229 +236,76 @@
       </div>
     </div>
 
-    <!-- 打破继承确认 -->
-    <a-modal v-model:visible="brk.open" title="打破继承" :width="460" @ok="confirmOverride" ok-text="确认覆盖" cancel-text="取消">
-      <div class="bd-brk">
-        <icon-exclamation-circle-fill class="bd-brk__ic" />
-        <div>
-          将对<b>「{{ node?.title }}」</b>的<b>「{{ brk.row?.label }}」</b>打破继承：该项今后<b>不再随上级
-          「{{ parentTitle }}」</b>的策略更新而变化，需在本级单独维护。
-        </div>
       </div>
-    </a-modal>
-
-    <!-- 提交影响预览（P4） -->
-    <a-modal v-model:visible="impact.open" title="保存前 · 影响预览" :width="560" :footer="false">
-      <div class="bd-imp">
-        <div class="bd-imp__hl">
-          本次变更将作用于 <b>{{ node?.title }}</b> 的 <b class="num">{{ node?.members }}</b> 名成员
-          （{{ customCount }} 项自定义，其余继承自 {{ parentTitle }}）。
-        </div>
-
-        <div class="bd-imp__t">受影响终端平台分布</div>
-        <div v-for="p in platforms" :key="p.name" class="bd-bar">
-          <span class="bd-bar__l">{{ p.name }}</span>
-          <span class="bd-bar__track"><span class="bd-bar__fill" :style="{ width: p.pct + '%' }" /></span>
-          <span class="bd-bar__v">{{ p.count }}</span>
-        </div>
-
-        <div class="bd-imp__t">与全局策略的冲突检查</div>
-        <div class="bd-conf warn">
-          <icon-exclamation-circle-fill />
-          全局「禁止浏览器登录」开启，本级未配置客户端强制安装 —— <b>{{ Math.round(node!.members * 0.18) }}</b> 名纯浏览器用户可能无法登录。
-        </div>
-        <div class="bd-conf ok"><icon-check-circle-fill />其余 5 项设置与全局策略无冲突。</div>
-
-        <div class="bd-imp__risk">
-          风险评级 <a-tag color="orange">中</a-tag>
-          <span class="bd-imp__rk">建议先在小范围灰度后再全量。</span>
-        </div>
-
-        <a-checkbox v-model="impact.ack" class="bd-imp__ack">我已知悉上述影响范围与冲突</a-checkbox>
-        <div class="bd-imp__foot">
-          <button class="bd-btn--ghost bd-btn" @click="impact.open = false">取消</button>
-          <button class="bd-btn" :disabled="!impact.ack" :style="{ opacity: impact.ack ? 1 : 0.5 }" @click="doSave">确认保存并下发</button>
-        </div>
-      </div>
-    </a-modal>
-
-    <!-- 30s 撤销条（P3） -->
-    <transition name="bd-fade">
-      <div v-if="undo.row" class="bd-undo">
-        <icon-info-circle-fill />
-        已打破「{{ undo.row.label }}」的继承
-        <span class="bd-undo__btn" @click="doUndo">撤销</span>
-        <span class="bd-undo__t">{{ undo.left }}s</span>
-      </div>
-    </transition>
-  </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, reactive, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type PolicyBundle, type OrgNode, type LockoutConfig } from '@/lib/api';
+import { api, type AccessPolicy, type AccessPolicyResp, type DeviceSessionRow, type LockoutConfig } from '@/lib/api';
 
-type Src = 'inherited' | 'custom';
-type Val = string | number | boolean;
-interface Row {
-  key: string; label: string; desc: string;
-  type: 'toggle' | 'number' | 'select';
-  source: Src; value: Val; inherited: Val;
-  unit?: string; options?: string[]; risk?: boolean;
-}
-interface Section { title: string; rows: Row[] }
-
-const tab = ref<'user' | 'global'>('user');
+const tab = ref<'access' | 'global'>('access');
 const live = ref(false);
 
-/* ── 继承树 ── */
-const MOCK_TREE: OrgNode[] = [
-  { key: 'root', title: '根策略（全局兜底）', hasCustom: true, members: 1284, children: [
-    { key: 'east', title: '华东大区', hasCustom: true, members: 420, children: [
-      { key: 'east-sales', title: '销售部', hasCustom: true, members: 86 },
-      { key: 'east-dev', title: '研发部', hasCustom: false, members: 210 }
-    ] },
-    { key: 'south', title: '华南大区', hasCustom: false, members: 300, children: [
-      { key: 'south-cs', title: '客服中心', hasCustom: true, members: 64 }
-    ] },
-    { key: 'contractor', title: '外包人员', hasCustom: true, members: 48 }
-  ] }
+/* ── 接入策略（FR-POLICY-29/30）── */
+const p = reactive<AccessPolicy>({
+  deviceLimitEnabled: false, maxDevices: 3, splitPlatform: false, maxDevicesMobile: 2,
+  idleEnabled: false, idleMinutes: 480
+});
+const resp = reactive<{ onlineWindowSec: number; storeReady: boolean; idleReady: boolean }>({
+  onlineWindowSec: 90, storeReady: true, idleReady: false
+});
+const sessions = ref<DeviceSessionRow[]>([]);
+
+/** 摘除的那套编辑器里，每一项在这里都要有交代——不写的话，下一波审计会把它当"漏做"再实现一遍。 */
+const ACCESS_UNIMPL: { label: string; why: string }[] = [
+  { label: '按组织/用户组分级的策略继承（FR-POLICY-02~05）', why: '不做：接入策略当前是全局的。此前那棵继承树上的 8 个设置项落库后全仓零消费方，摘除而不是保留一个能点开却不生效的编辑器' },
+  { label: '专用 DNS 下发 / 虚拟专线隔离（FR-POLICY-26/27）', why: '不做：分离式 DNS 由客户端接入剖面下发（已实现，但不经这一页配置）；虚拟专线需要终端侧全局路由接管 + 白名单，现架构未做' },
+  { label: '登录时段限制（FR-POLICY-32）', why: '已实现，但在「安全防护 → 认证策略」里（offHours 规则），不在这一页——同一件事只留一个入口' },
+  { label: '二次认证豁免期（FR-POLICY-33）', why: '不做：现有豁免是「授信终端」维度（认证策略 trustedDevice），没有基于浏览器 Cookie 的天数豁免' },
+  { label: '卸载防护 / 进程防护', why: '不做：需要终端侧驱动或系统服务，桌面客户端是普通用户态进程' },
+  { label: 'PC 端「无键鼠操作」超时（FR-POLICY-30 的另一半）', why: '不做：控制面拿不到终端输入事件。已实现的是「无业务流量」那一半，判据来自网关逐会话回执' }
 ];
-const tree = ref<OrgNode[]>(MOCK_TREE);
-const selected = ref('east-sales');
 
-interface Flat extends OrgNode { depth: number }
-const flatTree = computed<Flat[]>(() => {
-  const out: Flat[] = [];
-  const walk = (ns: OrgNode[], d: number) => ns.forEach((n) => { out.push({ ...n, depth: d }); n.children && walk(n.children, d + 1); });
-  walk(tree.value, 0);
-  return out;
-});
-const node = computed(() => flatTree.value.find((n) => n.key === selected.value));
-
-/** 找从根到目标的路径，返回 [self, parent, ..., root] */
-function pathTo(key: string): OrgNode[] {
-  const res: OrgNode[] = [];
-  const walk = (ns: OrgNode[], trail: OrgNode[]): boolean => {
-    for (const n of ns) {
-      const t = [...trail, n];
-      if (n.key === key) { res.push(...t.reverse()); return true; }
-      if (n.children && walk(n.children, t)) return true;
-    }
-    return false;
-  };
-  walk(tree.value, []);
-  return res;
+function shortFp(fp: string) { return fp && fp.length > 14 ? fp.slice(0, 14) + '…' : fp; }
+function isMobile(plat: string) { return ['ios', 'android', 'harmonyos'].includes((plat || '').toLowerCase()); }
+function tagStyle(color: string) { return { color, background: color + '14' }; }
+function ago(ts: number) {
+  if (!ts) return '—';
+  const d = Math.max(0, Math.floor(Date.now() / 1000) - ts);
+  if (d < 60) return d + ' 秒前';
+  if (d < 3600) return Math.floor(d / 60) + ' 分钟前';
+  if (d < 86400) return Math.floor(d / 3600) + ' 小时前';
+  return Math.floor(d / 86400) + ' 天前';
 }
-const chain = computed(() => pathTo(selected.value));
-const parentTitle = computed(() => chain.value[1]?.title ?? '上级');
 
-/* ── 设置模型（按节点是否 hasCustom 播种自定义项）── */
-const CUSTOM_KEYS = new Set(['concurrency', 'idle', 'vline', 'procGuard']);
-function seed(custom: boolean): Section[] {
-  const mk = (r: Omit<Row, 'source'>): Row => ({ ...r, source: custom && CUSTOM_KEYS.has(r.key) ? 'custom' : 'inherited' });
-  return [
-    { title: '设备与会话', rows: [
-      mk({ key: 'concurrency', label: '设备并发数', desc: '同一账号允许的同时在线终端数（0 = 不限）', type: 'number', value: 2, inherited: 3, unit: '台' }),
-      mk({ key: 'idle', label: '会话空闲超时', desc: 'PC 端无流量超时自动注销', type: 'number', value: 15, inherited: 30, unit: '分钟' })
-    ] },
-    { title: '网络与路由', rows: [
-      mk({ key: 'dns', label: '专用 DNS 下发', desc: '为隧道应用下发专用 DNS 与解析白名单', type: 'toggle', value: false, inherited: false }),
-      mk({ key: 'vline', label: '虚拟专线隔离', desc: '仅放行已发布应用 + 白名单，其余互联网阻断（仅 Windows）', type: 'toggle', value: true, inherited: false, risk: true })
-    ] },
-    { title: '访问控制', rows: [
-      mk({ key: 'window', label: '登录时段限制', desc: '仅允许在指定时段内登录', type: 'select', value: '不限', inherited: '不限', options: ['不限', '工作日 09-18', '夜班 20-06'] }),
-      mk({ key: 'mfaExempt', label: '二次认证豁免期', desc: '授信终端在豁免期内免二次认证', type: 'number', value: 7, inherited: 7, unit: '天' })
-    ] },
-    { title: '客户端防护', rows: [
-      mk({ key: 'uninstall', label: '卸载防护', desc: '禁止用户自行卸载客户端', type: 'toggle', value: true, inherited: true }),
-      mk({ key: 'procGuard', label: '进程防护', desc: '防调试 / 防 dump / 防 hook 摘除', type: 'toggle', value: true, inherited: false })
-    ] }
-  ];
-}
-const sections = ref<Section[]>(seed(true));
-const allRows = computed(() => sections.value.flatMap((s) => s.rows));
-const customCount = computed(() => allRows.value.filter((r) => r.source === 'custom').length);
-const inheritCount = computed(() => allRows.value.filter((r) => r.source === 'inherited').length);
-
-async function select(key: string) {
-  selected.value = key;
-  const n = flatTree.value.find((x) => x.key === key);
-  sections.value = seed(!!n?.hasCustom);
-  clearUndo();
-  // 已保存的覆盖优先（落库的编辑回填）
+async function loadAccess() {
   try {
-    const r = await api<{ exists: boolean; override?: { settings: string } }>(`/policies/${key}`);
-    if (r.exists && r.override?.settings) {
-      const saved = JSON.parse(r.override.settings);
-      if (Array.isArray(saved) && saved.length) sections.value = saved;
-    }
-  } catch { /* 离线则用种子 */ }
+    const r = await api<AccessPolicyResp>('/policies/access');
+    Object.assign(p, r.policy);
+    resp.onlineWindowSec = r.onlineWindowSec ?? 90;
+    resp.storeReady = r.storeReady !== false;
+    resp.idleReady = !!r.idleReady;
+    sessions.value = r.sessions ?? [];
+    live.value = true;
+  } catch { live.value = false; }
 }
-function fmt(row: Row, v: unknown) {
-  if (row.type === 'toggle') return v ? '开启' : '关闭';
-  return `${v}${row.unit ?? ''}`;
-}
-/**
- * Arco a-input-number 的 modelValue 严格类型为 number|undefined（第三方组件类型限制）；
- * Row.value/inherited 是 toggle/number/select 三种控件共用的 Val 联合类型，
- * MOCK 数据保证 row.type === 'number' 分支下其值恒为 number。仅此处按最窄范围断言收窄，
- * 不改变运行时取值/赋值语义（同一 row 引用，读写均直达原属性）。
- */
-function numRow(row: Row) {
-  return row as Row & { value: number };
-}
-
-/* ── 打破继承（P3）── */
-const brk = reactive<{ open: boolean; row: Row | null }>({ open: false, row: null });
-function askOverride(row: Row) { brk.row = row; brk.open = true; }
-function confirmOverride() {
-  const row = brk.row!;
-  row.source = 'custom';
-  row.value = row.inherited;
-  brk.open = false;
-  startUndo(row);
-}
-
-/* ── 30s 撤销条 ── */
-const undo = reactive<{ row: Row | null; left: number }>({ row: null, left: 30 });
-let undoTimer: number | undefined;
-function startUndo(row: Row) {
-  undo.row = row; undo.left = 30;
-  clearInterval(undoTimer);
-  undoTimer = window.setInterval(() => { if (--undo.left <= 0) clearUndo(); }, 1000);
-}
-function clearUndo() { clearInterval(undoTimer); undo.row = null; }
-function doUndo() { if (undo.row) undo.row.source = 'inherited'; clearUndo(); }
-function restore(row: Row) { row.source = 'inherited'; if (undo.row === row) clearUndo(); }
-function reset() { select(selected.value); clearUndo(); Message.info('已重置为最近一次保存的状态'); }
-onUnmounted(() => clearInterval(undoTimer));
-
-/* ── 影响预览（P4）── */
-const impact = reactive({ open: false, ack: false });
-const platforms = computed(() => {
-  const m = node.value?.members ?? 0;
-  const win = Math.round(m * 0.62), mac = Math.round(m * 0.16), mob = m - win - mac;
-  const max = Math.max(win, mac, mob, 1);
-  return [
-    { name: 'Windows', count: win, pct: Math.round((win / max) * 100) },
-    { name: 'macOS', count: mac, pct: Math.round((mac / max) * 100) },
-    { name: '移动端', count: mob, pct: Math.round((mob / max) * 100) }
-  ];
-});
-async function doSave() {
-  const title = node.value?.title ?? '';
+let saving = false;
+async function save() {
+  if (saving) return;
+  // 输入框被清空的瞬间（undefined/NaN）不提交，等填回合法值。
+  if (p.maxDevices == null || p.maxDevicesMobile == null || p.idleMinutes == null) return;
+  saving = true;
   try {
-    await api(`/policies/${selected.value}`, {
-      method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title, settings: sections.value, customCount: customCount.value })
+    await api('/policies/access', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(p)
     });
-    Message.success(`策略已保存并下发至「${title}」的代理网关（已落库）`);
+    Message.success('接入策略已保存，最迟一个保活周期（约 15 秒）后生效');
+    await loadAccess();
   } catch {
-    Message.error('保存失败，请检查后端连接');
-  }
-  impact.open = false; impact.ack = false;
+    Message.error('保存失败（需管理员登录 / 后端在线）');
+    await loadAccess(); // 回读生效值，避免界面停在一个没保存上的状态
+  } finally { saving = false; }
 }
 
 /* ── 全局策略（复刻设计稿开关行）── */
@@ -431,14 +358,9 @@ async function saveLockoutCfg() {
   }
 }
 
-/* ── 拉取 ── */
 onMounted(async () => {
-  try {
-    const pb = await api<PolicyBundle>('/policies');
-    tree.value = pb.tree; live.value = true;
-  } catch { live.value = false; }
+  await loadAccess();
   await loadLockoutCfg();
-  await select(selected.value); // 回填初始节点的已存覆盖
 });
 </script>
 
@@ -453,43 +375,6 @@ onMounted(async () => {
 
 .bd-two { display: flex; gap: 16px; align-items: flex-start; }
 
-/* 树 */
-.bd-tree { width: 286px; flex: none; padding: 10px; }
-.bd-tree__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; }
-.bd-tnode {
-  width: 100%; display: flex; align-items: center; gap: 8px; height: 38px; padding-right: 10px;
-  border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px;
-  color: var(--bd-t2); text-align: left; transition: background .12s;
-}
-.bd-tnode:hover { background: var(--bd-fill-2); }
-.bd-tnode.on { background: var(--bd-primary-1); }
-.bd-tnode.on .bd-tnode__t { color: var(--bd-primary); font-weight: 600; }
-.bd-tnode__dot { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.bd-tnode__dot.custom { background: var(--bd-primary); }
-.bd-tnode__dot.inherit { background: #fff; border: 1.5px solid var(--bd-t4); }
-.bd-tnode__t { flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bd-tnode__tag { font-size: 10px; padding: 1px 6px; border-radius: 4px; flex: none; }
-.bd-tnode__tag.custom { background: var(--bd-primary-1); color: var(--bd-primary); }
-.bd-tnode__tag.inherit { background: var(--bd-fill-2); color: var(--bd-t3); }
-.bd-tnode__m { font-size: 11px; color: var(--bd-t3); width: 38px; text-align: right; flex: none; }
-
-/* 编辑器 */
-.bd-editor { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
-.bd-chain { padding: 16px 18px; }
-.bd-chain__top { display: flex; align-items: flex-start; }
-.bd-chain__name { font-size: 16px; font-weight: 700; }
-.bd-chain__sub { font-size: 12px; color: var(--bd-t3); margin-left: 10px; }
-.bd-chain__stat { margin-left: auto; display: flex; gap: 8px; }
-.bd-pill { font-size: 12px; padding: 3px 10px; border-radius: 12px; font-weight: 500; }
-.bd-pill--blue { background: var(--bd-primary-1); color: var(--bd-primary); }
-.bd-pill--grey { background: var(--bd-fill-2); color: var(--bd-t3); }
-.bd-chain__path { display: flex; align-items: center; gap: 8px; margin-top: 14px; flex-wrap: wrap; }
-.bd-chain__label { font-size: 12px; color: var(--bd-t3); }
-.bd-node { font-size: 12px; padding: 4px 12px; border-radius: 6px; background: var(--bd-fill-2); color: var(--bd-t2); }
-.bd-node.self { background: var(--bd-primary); color: #fff; font-weight: 600; }
-.bd-chain__arrow { color: var(--bd-t4); font-size: 13px; }
-
-.bd-sec { padding: 4px 20px 8px; }
 .bd-sec__h { font-size: 14px; font-weight: 600; padding: 16px 0 6px; border-bottom: 1px solid var(--bd-fill-2); }
 .bd-sec__h.plain { border: none; padding: 8px 0 12px; }
 .bd-row { display: flex; align-items: center; gap: 12px; padding: 15px 0; border-bottom: 1px solid var(--bd-fill-1); }
@@ -498,18 +383,8 @@ onMounted(async () => {
 .bd-row__label { font-size: 13.5px; font-weight: 500; color: var(--bd-t1); display: flex; align-items: center; gap: 6px; }
 .bd-row__desc { font-size: 12px; color: var(--bd-t3); margin-top: 3px; }
 .bd-risk { font-size: 11px; color: var(--bd-warning); background: var(--bd-tag-gold-bg); padding: 1px 6px; border-radius: 4px; font-weight: 400; }
-.bd-row__inval { font-size: 12.5px; color: var(--bd-t3); }
-.bd-row__ctrl { display: inline-flex; align-items: center; gap: 6px; }
 .bd-row__unit { font-size: 12.5px; color: var(--bd-t3); }
-.bd-row__badge { font-size: 11px; padding: 2px 8px; border-radius: 4px; font-weight: 500; }
-.bd-row__badge.inherit { background: var(--bd-fill-2); color: var(--bd-t3); }
-.bd-row__badge.custom { background: var(--bd-primary-1); color: var(--bd-primary); }
-.bd-row__act { font-size: 12.5px; color: var(--bd-primary); cursor: pointer; font-weight: 500; }
-.bd-row__act:hover { text-decoration: underline; }
 .bd-thr { font-size: 12.5px; color: var(--bd-t2); }
-.bd-thr b { display: inline-block; min-width: 30px; text-align: center; }
-
-.bd-editor__foot { display: flex; justify-content: flex-end; gap: 10px; padding: 4px 0 10px; }
 
 /* 全局策略 */
 .bd-unimpl { margin: 10px 0 4px; padding: 12px 14px; background: var(--color-fill-1); border-radius: 8px; }
@@ -524,36 +399,28 @@ onMounted(async () => {
 .bd-gnav.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 600; }
 .bd-gbody { flex: 1; min-width: 0; padding: 8px 24px 14px; }
 
-/* 打破继承 modal */
-.bd-brk { display: flex; gap: 12px; font-size: 13.5px; line-height: 1.7; color: var(--bd-t2); }
-.bd-brk__ic { color: var(--bd-warning); font-size: 20px; flex: none; margin-top: 2px; }
-
-/* impact modal */
-.bd-imp__hl { font-size: 13.5px; line-height: 1.7; color: var(--bd-t2); background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: 8px; padding: 12px 14px; }
-.bd-imp__hl .num { color: var(--bd-primary); }
-.bd-imp__t { font-size: 13px; font-weight: 600; margin: 18px 0 10px; }
-.bd-bar { display: flex; align-items: center; gap: 12px; padding: 5px 0; }
-.bd-bar__l { width: 64px; font-size: 12.5px; color: var(--bd-t2); }
-.bd-bar__track { flex: 1; height: 10px; background: var(--bd-fill-2); border-radius: 6px; overflow: hidden; }
-.bd-bar__fill { display: block; height: 100%; background: var(--bd-primary); border-radius: 6px; }
-.bd-bar__v { width: 44px; text-align: right; font-size: 12.5px; }
-.bd-conf { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; line-height: 1.6; padding: 10px 12px; border-radius: 8px; margin-bottom: 8px; }
-.bd-conf.warn { background: var(--bd-tag-gold-bg); color: #9A6300; }
-.bd-conf.ok { background: var(--bd-tag-green-bg); color: #0B8235; }
-.bd-imp__risk { display: flex; align-items: center; gap: 8px; margin: 14px 0; font-size: 13px; }
-.bd-imp__rk { font-size: 12.5px; color: var(--bd-t3); }
-.bd-imp__ack { margin: 4px 0 16px; }
-.bd-imp__foot { display: flex; justify-content: flex-end; gap: 10px; }
-.bd-btn[disabled] { cursor: not-allowed; }
-
-/* 撤销条 */
-.bd-undo {
-  position: fixed; left: 50%; bottom: 28px; transform: translateX(-50%); z-index: 1000;
-  display: flex; align-items: center; gap: 10px; background: #1D2129; color: #fff;
-  padding: 10px 16px; border-radius: 8px; font-size: 13px; box-shadow: 0 6px 20px rgba(0, 0, 0, .25);
+/* ── 接入策略页专属样式（wave8 行动 13-①）── */
+.bd-acc { display: flex; flex-direction: column; gap: 16px; }
+.bd-note, .bd-warn { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2); }
+.bd-note :deep(svg) { color: var(--bd-primary); margin-top: 3px; flex: none; }
+.bd-warn { color: var(--bd-warning); }
+.bd-warn :deep(svg) { margin-top: 3px; flex: none; }
+.bd-rule__h { display: flex; align-items: flex-start; gap: 16px; padding-bottom: 10px; border-bottom: 1px solid var(--bd-fill-1); }
+.bd-rule__h > div:first-child { flex: 1; }
+.bd-rule__t { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-rule__d { font-size: 12px; color: var(--bd-t3); line-height: 1.7; margin-top: 5px; }
+.bd-fr { margin-left: 8px; font-size: 11px; font-weight: 500; color: var(--bd-t4); }
+.bd-inline-warn {
+  display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding: 9px 11px;
+  background: rgba(255, 125, 0, .08); border-radius: 6px; font-size: 12px; line-height: 1.7; color: var(--bd-t2);
 }
-.bd-undo__btn { color: #6AA1FF; cursor: pointer; font-weight: 600; }
-.bd-undo__t { color: #86909C; font-variant-numeric: tabular-nums; }
-.bd-fade-enter-active, .bd-fade-leave-active { transition: opacity .2s; }
-.bd-fade-enter-from, .bd-fade-leave-to { opacity: 0; }
+.bd-inline-warn :deep(svg) { color: var(--bd-warning); margin-top: 3px; flex: none; }
+.bd-inline-warn code { font-family: var(--bd-font-mono, monospace); font-size: 11.5px; }
+.bd-cnt { margin-left: 8px; font-size: 12px; font-weight: 400; color: var(--bd-t3); }
+.bd-mono { font-family: var(--bd-font-mono, monospace); font-size: 12px; }
+.bd-dim { color: var(--bd-t4); }
+.bd-reason { margin-left: 8px; font-size: 11.5px; }
+.bd-tg--sm { margin-left: 6px; font-size: 10.5px; padding: 0 5px; }
+.bd-empty { padding: 26px 0; text-align: center; color: var(--bd-t4); font-size: 12.5px; }
+.bd-tblnote { margin-top: 10px; font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; }
 </style>

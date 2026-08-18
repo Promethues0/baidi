@@ -33,7 +33,7 @@ func TestBaselinesSeededAndSecurityOverride(t *testing.T) {
 func TestSaveDeleteBaseline(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
-	nb, err := s.SaveBaseline(ctx, BaselinePolicy{Name: "外包收紧基线", Type: "onboarding", Disposal: "block", Status: "enabled",
+	nb, err := s.SaveBaseline(ctx, BaselinePolicy{Name: "外包收紧基线", Disposal: "block", Status: "enabled",
 		Platforms: []string{"macOS"}, Checks: []BaselineCheck{{Key: "disk_encrypted", Label: "磁盘已加密", Platform: "All", Severity: "high"}}})
 	if err != nil || nb.ID == "" {
 		t.Fatalf("save new: %+v %v", nb, err)

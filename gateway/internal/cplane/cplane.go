@@ -336,6 +336,16 @@ type Session struct {
 	User  string `json:"user"`
 	Role  string `json:"role"`
 	Since int64  `json:"since"` // 首次敲门放行的 Unix 时刻
+	// LastActive 最近一次业务连接的 Unix 时刻。**三态，指针不是摆设**：
+	//
+	//	nil  → 这台网关根本不报活跃时刻（旧版本）＝ 不可判定
+	//	&0   → 报了，但这条会话自建立起从未承载过业务连接
+	//	&ts  → 报了，最近一次业务连接在 ts
+	//
+	// ★写成 int64+omitempty 会把 &0 与 nil 压成同一种线上表示，
+	// 而这两者在 FR-POLICY-30 下的处置正好相反：前者是「该踢」，
+	// 后者是「判据缺席，绝不能踢」。踢错的代价是把正在干活的人断线。
+	LastActive *int64 `json:"lastActive,omitempty"`
 }
 
 // Register 向控制面注册/心跳，同时上报真实活性指标与活跃会话：clients=放行窗口内已授权源数，

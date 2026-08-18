@@ -1,7 +1,9 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -20,7 +22,6 @@ var validDisposal = map[string]bool{
 }
 var validSeverity = map[string]bool{"high": true, "medium": true, "low": true}
 var validCheckPlatform = map[string]bool{"Windows": true, "macOS": true, "Linux": true, "All": true}
-var validBaselineType = map[string]bool{"onboarding": true, "app-protect": true}
 var validBaselineStatus = map[string]bool{"enabled": true, "disabled": true}
 
 // handleSaveBaseline 新增/修改一条安全基线（admin）。落库后风险引擎即用新规则评估后续上报。
@@ -33,8 +34,18 @@ func (s *Server) handleSaveBaseline(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "基线名称不能为空")
 		return
 	}
-	if !validBaselineType[b.Type] || !validDisposal[b.Disposal] || !validBaselineStatus[b.Status] {
-		httpx.Error(w, http.StatusBadRequest, "type/disposal/status 取值非法")
+	if !validDisposal[b.Disposal] || !validBaselineStatus[b.Status] {
+		httpx.Error(w, http.StatusBadRequest, "disposal/status 取值非法")
+		return
+	}
+	// 适用范围引用的组织/用户组必须真实存在（与资源授权、认证策略共用同一处校验）。
+	// ★不校验的话，引用一个已删组织的基线会**对谁都不生效**而页面照常显示"已启用"——
+	// 又一处「配了却静默不生效」。
+	if msg, err := s.validateSubjectRefs(r.Context(), b.ScopeOrgs, b.ScopeGroups); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "校验适用范围失败")
+		return
+	} else if msg != "" {
+		httpx.Error(w, http.StatusBadRequest, msg)
 		return
 	}
 	// 顶层 platforms 与上报 platform 精确匹配（risk.platformApplies）：存进 "macos"/"All" 这类
@@ -115,4 +126,44 @@ func (s *Server) handleDeleteBaseline(w http.ResponseWriter, r *http.Request) {
 	s.audit(r, "policy", "删除安全基线 "+id, "ok")
 	s.warnIfNoEnabledBaseline(r)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+}
+
+// baselinesInScope 只保留适用范围覆盖该账号的基线（wave8 行动 13-④）。
+//
+// 判据：ScopeOrgs / ScopeGroups **两者都空 = 对全体生效**（与认证策略同口径，
+// 也是改造前自由文本时代的实际行为——没人读那个字段）。组织含子树，
+// 展开只有一处实现 store.SubjectIndex，与资源授权、认证策略共用。
+//
+// ★取数失败时**保留全部基线**而不是清空：基线是安全闸门，
+// 一次 SubjectIndex 读失败不该让全体终端瞬间"合规"。这与
+// 「源不可用绝不动手」方向相反是有意的——那条防的是误伤，这条防的是误放。
+func (s *Server) baselinesInScope(ctx context.Context, account string, all []store.BaselinePolicy) []store.BaselinePolicy {
+	// 先看有没有基线真的配了范围：全都没配就不必查库。
+	scoped := false
+	for _, b := range all {
+		if len(b.ScopeOrgs) > 0 || len(b.ScopeGroups) > 0 {
+			scoped = true
+			break
+		}
+	}
+	if !scoped {
+		return all
+	}
+	ix, err := s.store.SubjectIndex(ctx)
+	if err != nil {
+		slog.Error("基线适用范围展开失败，本次按「全部基线都适用」处理（安全闸门不因取数失败而放宽）",
+			"账号", account, "err", err.Error())
+		return all
+	}
+	out := make([]store.BaselinePolicy, 0, len(all))
+	for _, b := range all {
+		if len(b.ScopeOrgs) == 0 && len(b.ScopeGroups) == 0 {
+			out = append(out, b)
+			continue
+		}
+		if ix.Covers(account, b.ScopeOrgs, b.ScopeGroups) {
+			out = append(out, b)
+		}
+	}
+	return out
 }

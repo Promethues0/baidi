@@ -18,16 +18,34 @@ type SecurityBundle struct {
 	Baselines []BaselinePolicy `json:"baselines"`
 }
 
-// BaselinePolicy 安全基线策略（应用防护 / 上线准入），含分平台条件与处置。
+// BaselinePolicy 安全基线策略，含适用范围、分平台条件与处置。
 type BaselinePolicy struct {
-	ID        string          `json:"id"`
-	Name      string          `json:"name"`
-	Type      string          `json:"type"`     // app-protect | onboarding
-	Scope     string          `json:"scope"`    // 适用范围
-	Disposal  string          `json:"disposal"` // allow | degrade | block | gray
-	Status    string          `json:"status"`   // enabled | disabled
-	Platforms []string        `json:"platforms"`
-	Checks    []BaselineCheck `json:"checks"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	// ★这里曾经有 Type（app-protect | onboarding）与自由文本 Scope（"全体访问者 / 持续验证"）。
+	//
+	// Type 已摘除（wave8 行动 13-④）：risk.Evaluate 一眼都不看它，而页面按策略属性
+	// 渲染成蓝标签——一条标着「应用防护」的基线若 disposal=block，实际行为是
+	// **拒发敲门令牌 + 撤窗断隧道**，也就是上线准入，标签与行为方向相反。
+	// 处置的真相只有一个字段：Disposal。
+	//
+	// Scope 改成了结构化的 ScopeOrgs/ScopeGroups 并**真的接进判定**（见下）。
+	// 自由文本写什么都不影响任何人，而它长得像个筛选条件。
+	Disposal string `json:"disposal"` // allow | degrade | block | gray
+	// ScopeOrgs / ScopeGroups 适用范围（组织含子树 / 用户组）。
+	//
+	// **两者都空 = 对全体生效**（与认证策略同口径，也是改造前自由文本时代的实际行为，
+	// 所以存量基线回填成空数组即行为不变）。展开只有一处实现：store.SubjectIndex，
+	// 与资源授权、认证策略共用——各写一份的话，同一个「这个人算不算在范围内」
+	// 会在三个页面上给出不同答案。
+	//
+	// ★过滤在**调用方**（api.handlePostureReport）做，不在 risk.Evaluate 里：
+	// Evaluate 是纯函数、不碰 IO，把取数塞进去就再也测不动了。
+	ScopeOrgs   []string        `json:"scopeOrgs"`
+	ScopeGroups []string        `json:"scopeGroups"`
+	Status      string          `json:"status"` // enabled | disabled
+	Platforms   []string        `json:"platforms"`
+	Checks      []BaselineCheck `json:"checks"`
 }
 
 type BaselineCheck struct {
@@ -108,13 +126,13 @@ func (m *Memory) Security(_ context.Context) (SecurityBundle, error) {
 		// 种子基线：check key 与桌面客户端采集键一致（disk_encrypted/sys_integrity/firewall_on/os_version/edr_online/client_version）。
 		// 接入准入=block（典型开发 Mac 默认通过：FileVault+SIP），终端健康=degrade（常见部分失败→风险抬升可见）。
 		Baselines: []BaselinePolicy{
-			{ID: "bl-admission", Name: "接入准入基线", Type: "onboarding", Scope: "全体访问者 / 数据面接入", Disposal: "block", Status: "enabled",
+			{ID: "bl-admission", Name: "接入准入基线", Disposal: "block", Status: "enabled",
 				Platforms: []string{"Windows", "macOS", "Linux"},
 				Checks: []BaselineCheck{
 					{Key: "disk_encrypted", Label: "磁盘已加密", Platform: "All", Expect: "FileVault / BitLocker = On", Severity: "high"},
 					{Key: "sys_integrity", Label: "系统完整性保护开启", Platform: "macOS", Expect: "SIP = enabled", Severity: "high"},
 				}},
-			{ID: "bl-health", Name: "终端健康基线", Type: "app-protect", Scope: "全体访问者 / 持续验证", Disposal: "degrade", Status: "enabled",
+			{ID: "bl-health", Name: "终端健康基线", Disposal: "degrade", Status: "enabled",
 				Platforms: []string{"Windows", "macOS", "Linux"},
 				Checks: []BaselineCheck{
 					{Key: "firewall_on", Label: "系统防火墙启用", Platform: "All", Expect: "firewall = enabled", Severity: "medium"},

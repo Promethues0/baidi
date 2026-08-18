@@ -124,8 +124,7 @@ func TestSecurityAdminCannotReadAuditAndAuditAdminCannotWrite(t *testing.T) {
 	// 安全管理员：能存认证策略
 	code, out := doJSON(t, h, "POST", "/api/v1/authpolicy", secTok, map[string]any{
 		"name": "探针策略", "directory": "local", "enabled": true,
-		"pc":        map[string]any{"primary": "password"},
-		"mobile":    map[string]any{"primary": "password"},
+		"secondary": []string{},
 		"scopeOrgs": []string{"dev"},
 	})
 	if code != http.StatusOK {

@@ -251,8 +251,7 @@ func TestSaveAuthPolicyRejectsFrozenMethods(t *testing.T) {
 	h := totpFixture(t)
 	body := map[string]any{
 		"name": "测试策略", "directory": "local", "isDefault": false, "enabled": true,
-		"pc":        map[string]any{"primary": "local", "secondary": []string{"sms"}},
-		"mobile":    map[string]any{"primary": "local", "secondary": []string{}},
+		"secondary": []string{"sms"},
 		"scopeOrgs": []string{"ext"}, "scopeGroups": []string{},
 	}
 	code, out := doJSON(t, h, "POST", "/api/v1/authpolicy", adminToken(), body)
@@ -264,7 +263,7 @@ func TestSaveAuthPolicyRejectsFrozenMethods(t *testing.T) {
 		t.Fatalf("sms 应保存即拒，实得 %d %v", code, out)
 	}
 	// totp 是真实现，应可保存
-	body["pc"] = map[string]any{"primary": "local", "secondary": []string{"totp"}}
+	body["secondary"] = []string{"totp"}
 	if code, out := doJSON(t, h, "POST", "/api/v1/authpolicy", adminToken(), body); code != http.StatusOK {
 		t.Fatalf("totp 应可保存，实得 %d %v", code, out)
 	}
@@ -304,7 +303,7 @@ func TestCleanFrozenSecondaryMethods(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, p := range pols {
-		for _, m := range append(p.PC.Secondary, p.Mobile.Secondary...) {
+		for _, m := range p.Secondary {
 			if m != "totp" {
 				t.Fatalf("策略 %s 残留冻结方式 %s", p.ID, m)
 			}

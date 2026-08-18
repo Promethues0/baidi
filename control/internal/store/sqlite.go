@@ -46,8 +46,6 @@ type Writer interface {
 	// PurgeStaleDevices 清理陈旧设备（跳过 revoked，理由见实现顶部）。
 	PurgeStaleDevices(ctx context.Context, staleDays int) ([]Device, error)
 	SaveDeviceTrustSetting(ctx context.Context, st DeviceTrustSetting) (DeviceTrustSetting, error)
-	SavePolicyOverride(ctx context.Context, node, title, settings string, customCount int) error
-	GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
 	// SetUserPassword 落口令哈希 + 首登改密标志 + 口令强度标记（strength 见 auth.PasswordStrength）。
@@ -114,14 +112,14 @@ type Writer interface {
 	RemoveAdmin(ctx context.Context, account string) error
 }
 
-// PolicyOverride 持久化的用户策略覆盖（按组织/组节点）。
-type PolicyOverride struct {
-	Node        string `json:"node"`
-	Title       string `json:"title"`
-	Settings    string `json:"settings"` // 前端 sections 的 JSON 快照
-	CustomCount int    `json:"customCount"`
-	UpdatedAt   string `json:"updatedAt"`
-}
+// ★这里原先有 PolicyOverride（按组织/组节点存的"用户策略覆盖"）与它的读写方法。
+// 那套东西的消费方只有控制台自己：8 个设置项序列化成 JSON 存进 policy_overrides.settings，
+// 读出来再渲染回同一个编辑器，**控制面从不解析它，数据面更不知道它存在**，
+// 而保存成功的提示写着「已下发至「X」的代理网关」。整套已摘除（wave8 行动 13-①），
+// 换成 store.AccessPolicy 那两条**真有执行方**的规则（FR-POLICY-29/30，执行点是敲门令牌）。
+//
+// policy_overrides 表本身保留不删：删表要重建库，而一张没人读的空表不构成任何风险；
+// 留着它也让"曾经存过什么"在事故排查时还查得到。
 
 // SQLiteStore 在内存种子（*Memory）之上，把 apps / approvals / policy_overrides
 // 三类可变实体落到 SQLite；其余只读 bundle 直接走 Memory 种子。
@@ -440,6 +438,22 @@ CREATE TABLE IF NOT EXISTS trusted_devices (
 );
 CREATE INDEX IF NOT EXISTS idx_trusted_devices_account ON trusted_devices(account);
 CREATE INDEX IF NOT EXISTS idx_trusted_devices_approval ON trusted_devices(approval_id);
+-- device_sessions 终端接入会话（FR-POLICY-29 同时在线设备上限 / FR-POLICY-30 接入超时注销）。
+--
+-- ★与 trusted_devices 分表，理由同 ipsec_sites.status / ipsec_sa_state 那次拆分：
+-- 一张表不能同时表达「管理员登记了这台设备」（台账，长期意图）与「它此刻正接入着」
+-- （运行态，秒级变化）。混在一起的直接后果是台账页上的授信态随接入状态闪烁。
+--
+-- last_active 允许为 NULL 且**语义与 0 不同**：NULL = 没有任何网关报过这条会话的
+-- 活跃时刻（旧网关 / 还没连上过），0 = 网关报了「自建立起从未有业务连接」。
+-- 前者下 FR-POLICY-30 一律不生效（判据缺席不能当确定结论），后者是真的该注销。
+CREATE TABLE IF NOT EXISTS device_sessions (
+  account TEXT, fingerprint TEXT, platform TEXT, ip TEXT,
+  first_seen INTEGER, last_knock INTEGER, last_active INTEGER,
+  state TEXT, ended_reason TEXT,
+  PRIMARY KEY(account, fingerprint)
+);
+CREATE INDEX IF NOT EXISTS idx_device_sessions_ip ON device_sessions(account, ip);
 CREATE TABLE IF NOT EXISTS access_requests (
   id TEXT PRIMARY KEY, usr TEXT, resource_id TEXT, resource_name TEXT, reason TEXT,
   ttl_minutes INTEGER, status TEXT, timeline TEXT, submitted_at TEXT,
@@ -760,6 +774,11 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// DecideApproval 那道 kind 闸会把既有设备审批单一律拒掉——升级那一刻
 		// 所有待批设备都批不了，而报错说的是「这不是设备审批单」。
 		{"approvals", "kind", "TEXT"},
+		// 安全基线的适用范围（wave8 行动 13-④）：从自由文本 scope 换成结构化的
+		// 组织/用户组，并真的接进判定。★回填成 '[]'（= 对全体生效）——那正是
+		// 自由文本时代的实际行为（没人读那个字段），所以升级不改变任何人的判定。
+		{"baseline_policies", "scope_orgs", "TEXT"},
+		{"baseline_policies", "scope_groups", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -769,6 +788,9 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		return err
 	}
 	if err := s.backfillApprovalKind(); err != nil {
+		return err
+	}
+	if err := s.backfillBaselineScope(); err != nil {
 		return err
 	}
 	// ★两条回填并列挂在这里不是排版偏好：补列迁移只加列不填值，是本项目
@@ -1624,28 +1646,6 @@ func (s *SQLiteStore) CreateApp(ctx context.Context, a App) (App, error) {
 		return App{}, err
 	}
 	return a, tx.Commit()
-}
-
-// SavePolicyOverride upsert 用户策略覆盖。
-func (s *SQLiteStore) SavePolicyOverride(ctx context.Context, node, title, settings string, customCount int) error {
-	_, err := s.db.ExecContext(ctx, `INSERT INTO policy_overrides(node,title,settings,custom_count,updated_at) VALUES(?,?,?,?,?)
-ON CONFLICT(node) DO UPDATE SET title=excluded.title, settings=excluded.settings, custom_count=excluded.custom_count, updated_at=excluded.updated_at`,
-		node, title, settings, customCount, nowStr())
-	return err
-}
-
-// GetPolicyOverride 读取某节点的已存覆盖。
-func (s *SQLiteStore) GetPolicyOverride(ctx context.Context, node string) (PolicyOverride, bool, error) {
-	var po PolicyOverride
-	err := s.db.QueryRowContext(ctx, `SELECT node,title,settings,custom_count,updated_at FROM policy_overrides WHERE node=?`, node).
-		Scan(&po.Node, &po.Title, &po.Settings, &po.CustomCount, &po.UpdatedAt)
-	if err == sql.ErrNoRows {
-		return PolicyOverride{}, false, nil
-	}
-	if err != nil {
-		return PolicyOverride{}, false, err
-	}
-	return po, true, nil
 }
 
 func pick(a, b string) string {

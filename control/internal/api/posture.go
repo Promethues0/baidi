@@ -78,6 +78,10 @@ func (s *Server) handlePostureReport(w http.ResponseWriter, r *http.Request) {
 	checks := risk.ResolveClientVersion(b.Checks, b.ClientVersion, s.minClientVersion(r.Context(), b.Platform))
 	// StrictUnknown 跟随 postureStrict：strict 已是「说不清楚就不放行」（缺报/过期即拒），
 	// 探不到的检查项同口径处理；observe 下不可判定只单列展示，不误拒真实合规的终端。
+	// ★按适用范围过滤（wave8 行动 13-④）：只把「这个账号在范围内」的基线交给判定。
+	// 过滤放在这里而不是 risk.Evaluate 里——Evaluate 是纯函数、不碰 IO，
+	// 把 SubjectIndex 取数塞进去就再也测不动了。
+	baselines = s.baselinesInScope(r.Context(), normUser(c.Name), baselines)
 	v := risk.Evaluate(b.Platform, checks, baselines, risk.Options{StrictUnknown: s.postureStrict})
 
 	user := normUser(c.Name)

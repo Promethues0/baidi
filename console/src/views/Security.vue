@@ -36,10 +36,10 @@
             <span class="bd-st"><span class="d" :style="{ background: b.status === 'enabled' ? 'var(--bd-success)' : 'var(--bd-t4)' }" /></span>
           </div>
           <div class="bd-bnode__tags">
-            <span class="bd-tg" :style="tagStyle('#165DFF')">{{ typeText(b.type) }}</span>
             <span class="bd-tg" :style="tagStyle(disposalColor(b.disposal))">{{ disposalText(b.disposal) }}</span>
+            <span class="bd-tg" :style="tagStyle(scopeAll(b) ? '#165DFF' : '#00B42A')">{{ scopeBrief(b) }}</span>
           </div>
-          <div class="bd-bnode__scope">{{ b.scope }}</div>
+          <div class="bd-bnode__scope">{{ scopeDetail(b) }}</div>
         </button>
       </div>
 
@@ -50,7 +50,6 @@
           <div class="bd-bhead__top">
             <div style="display: flex; align-items: center; gap: 10px">
               <a-input v-model="cur.name" size="small" style="width: 220px; font-weight: 700" />
-              <span class="bd-bhead__type bd-tg" :style="tagStyle('#165DFF')">{{ typeText(cur.type) }}</span>
             </div>
             <div class="bd-bhead__sw">
               <span class="bd-bhead__swt">{{ cur.status === 'enabled' ? '已启用' : '已停用' }}</span>
@@ -63,7 +62,29 @@
               <a-button size="small" status="danger" @click="removeBaseline">删除</a-button>
             </div>
           </div>
-          <div class="bd-kv"><span>适用范围</span><b>{{ cur.scope }}</b></div>
+          <!-- ★适用范围是**真判据**：上报 posture 的账号不在范围内，这条基线就不参与他的判定。
+               判定点在控制面 api.baselinesInScope，与资源授权、认证策略共用同一次组织子树展开。
+               两栏都不选 = 对全体生效（与改造前自由文本时代的实际行为一致）。 -->
+          <div class="bd-kv bd-kv--scope">
+            <span>适用范围</span>
+            <b>
+              <div class="bd-scope">
+                <a-select v-model="cur.scopeOrgs" multiple allow-clear size="small"
+                          placeholder="不限组织" style="min-width: 210px">
+                  <a-option v-for="o in orgOpts" :key="o.id" :value="o.id">
+                    {{ o.name }}（{{ o.accounts.length }} 人）
+                  </a-option>
+                </a-select>
+                <a-select v-model="cur.scopeGroups" multiple allow-clear size="small"
+                          placeholder="不限用户组" style="min-width: 210px">
+                  <a-option v-for="g in groupOpts" :key="g.id" :value="g.id">
+                    {{ g.name }}（{{ g.accounts.length }} 人）
+                  </a-option>
+                </a-select>
+              </div>
+              <div class="bd-scope__hint">{{ scopeDetail(cur) }}</div>
+            </b>
+          </div>
           <div class="bd-kv"><span>覆盖平台</span>
             <b><span v-for="p in cur.platforms" :key="p" class="bd-tg bd-plat">{{ p }}</span></b>
           </div>
@@ -226,7 +247,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp } from '@/lib/api';
+import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp, type SubjectOption } from '@/lib/api';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
@@ -237,36 +258,21 @@ const live = ref(false);
 /* ── 内置 mock（结构同后端 SecurityBundle）── */
 const MOCK_BASELINES: BaselinePolicy[] = [
   {
-    id: 'bl-onboard', name: '上线准入基线 · 全员', type: 'onboarding',
-    scope: '全部访问者 / 所有终端', disposal: 'block', status: 'enabled',
-    platforms: ['Windows', 'macOS', 'Linux'],
+    id: 'bl-admission', name: '接入准入基线', scopeOrgs: [], scopeGroups: [],
+    disposal: 'block', status: 'enabled', platforms: ['Windows', 'macOS', 'Linux'],
     checks: [
-      { key: 'av', label: '杀毒软件运行中', platform: 'All', expect: '进程存活 + 病毒库 ≤ 7 天', severity: 'high' },
-      { key: 'patch', label: '高危补丁已安装', platform: 'Windows', expect: 'KB 缺失 = 0', severity: 'high' },
-      { key: 'disk', label: '磁盘加密已开启', platform: 'Windows', expect: 'BitLocker = On', severity: 'medium' },
-      { key: 'filevault', label: '磁盘加密已开启', platform: 'macOS', expect: 'FileVault = On', severity: 'medium' },
-      { key: 'firewall', label: '系统防火墙启用', platform: 'macOS', expect: 'pf 状态 = enabled', severity: 'medium' },
-      { key: 'selinux', label: '强制访问控制开启', platform: 'Linux', expect: 'SELinux = enforcing', severity: 'low' }
+      { key: 'disk_encrypted', label: '磁盘已加密', platform: 'All', expect: 'FileVault / BitLocker = On', severity: 'high' },
+      { key: 'sys_integrity', label: '系统完整性保护开启', platform: 'macOS', expect: 'SIP = enabled', severity: 'high' }
     ]
   },
   {
-    id: 'bl-app-core', name: '核心业务防护基线', type: 'app-protect',
-    scope: '财务系统 / OA / 代码仓库', disposal: 'degrade', status: 'enabled',
-    platforms: ['Windows', 'macOS'],
+    id: 'bl-health', name: '终端健康基线', scopeOrgs: [], scopeGroups: [],
+    disposal: 'degrade', status: 'enabled', platforms: ['Windows', 'macOS', 'Linux'],
     checks: [
-      { key: 'client-guard', label: '客户端进程防护开启', platform: 'All', expect: '防调试 / 防 dump = On', severity: 'high' },
-      { key: 'screen-lock', label: '锁屏超时合规', platform: 'All', expect: '空闲锁屏 ≤ 5 分钟', severity: 'medium' },
-      { key: 'usb', label: '外设存储管控', platform: 'Windows', expect: 'USB 大容量存储 = 禁用', severity: 'high' },
-      { key: 'gatekeeper', label: '应用来源校验', platform: 'macOS', expect: 'Gatekeeper = On', severity: 'low' }
-    ]
-  },
-  {
-    id: 'bl-byod', name: '个人设备灰度基线', type: 'onboarding',
-    scope: '个人 BYOD 设备', disposal: 'gray', status: 'disabled',
-    platforms: ['Windows', 'macOS', 'Linux'],
-    checks: [
-      { key: 'managed', label: '已注册受管', platform: 'All', expect: '资产纳管 = true', severity: 'medium' },
-      { key: 'root', label: '未越狱 / 未提权', platform: 'Linux', expect: 'root 异常 = 无', severity: 'low' }
+      { key: 'firewall_on', label: '系统防火墙启用', platform: 'All', expect: 'firewall = enabled', severity: 'medium' },
+      { key: 'os_version', label: '系统版本合规', platform: 'All', expect: 'macOS ≥ 13 / Win ≥ 10', severity: 'medium' },
+      { key: 'edr_online', label: 'EDR 终端防护在线', platform: 'All', expect: 'EDR 进程存活', severity: 'low' },
+      { key: 'client_version', label: '客户端版本合规', platform: 'All', expect: '≥ 灰度发布里配置的稳定版', severity: 'low' }
     ]
   }
 ];
@@ -297,7 +303,6 @@ const DISPOSALS: { key: BaselinePolicy['disposal']; label: string; desc: string;
 ];
 
 /* ── 颜色 / 文案 ── */
-function typeText(t: BaselinePolicy['type']) { return t === 'onboarding' ? '上线准入' : '应用防护'; }
 function disposalText(d: BaselinePolicy['disposal']) {
   return d === 'allow' ? '放行' : d === 'degrade' ? '降权' : d === 'block' ? '阻断' : '灰度';
 }
@@ -309,6 +314,32 @@ function severityColor(s: BaselineCheck['severity']) {
   return s === 'high' ? '#F53F3F' : s === 'medium' ? '#FF7D00' : '#86909C';
 }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
+
+/* ── 适用范围（真判据）──
+ * 候选与账号展开由后端随 /security 下发，与资源授权、认证策略共用同一次组织子树展开；
+ * 前端不自己算"这个组织有几个人"——各算一份必然与判定分叉。 */
+const orgOpts = ref<SubjectOption[]>([]);
+const groupOpts = ref<SubjectOption[]>([]);
+function scopeAll(b: BaselinePolicy) { return !(b.scopeOrgs ?? []).length && !(b.scopeGroups ?? []).length; }
+function scopeBrief(b: BaselinePolicy) { return scopeAll(b) ? '全体终端' : '限定范围'; }
+/** 展开后覆盖的账号数（与判定用的是同一份展开）。 */
+function scopeAccounts(b: BaselinePolicy) {
+  const set = new Set<string>();
+  for (const id of b.scopeOrgs ?? []) orgOpts.value.find((o) => o.id === id)?.accounts.forEach((a) => set.add(a));
+  for (const id of b.scopeGroups ?? []) groupOpts.value.find((g) => g.id === id)?.accounts.forEach((a) => set.add(a));
+  return set.size;
+}
+function scopeDetail(b: BaselinePolicy) {
+  if (scopeAll(b)) return '未限定范围 · 对全体上报终端生效';
+  const names = [
+    ...(b.scopeOrgs ?? []).map((id) => orgOpts.value.find((o) => o.id === id)?.name || id),
+    ...(b.scopeGroups ?? []).map((id) => groupOpts.value.find((g) => g.id === id)?.name || id)
+  ];
+  // ★展开为 0 人时当面说出来。限定了范围却一个人都不在里面 = 这条基线**对谁都不生效**，
+  // 而它在列表上仍显示「已启用 · 阻断」——正是这次要消灭的那种"看着在管、实际不管"。
+  const n = scopeAccounts(b);
+  return names.join('、') + (n ? `　·　展开 ${n} 个账号` : '　·　展开后 0 个账号，这条基线当前对谁都不生效');
+}
 
 /* ── 编辑动作（真实落库：整条基线 POST /security/baselines）── */
 const saving = ref(false);
@@ -322,7 +353,7 @@ async function saveBaseline() {
 }
 async function addBaseline() {
   const nb: BaselinePolicy = {
-    id: '', name: '新建基线', type: 'onboarding', scope: '全体访问者', disposal: 'degrade', status: 'enabled',
+    id: '', name: '新建基线', scopeOrgs: [], scopeGroups: [], disposal: 'degrade', status: 'enabled',
     platforms: ['Windows', 'macOS', 'Linux'], checks: []
   };
   try {
@@ -401,7 +432,11 @@ async function removePosture(p: PostureRow) {
 onMounted(async () => {
   try {
     const b = await api<SecurityBundle>('/security');
-    baselines.value = b.baselines;
+    // 归一化：旧后端不带这两个字段时给空数组，否则 v-model 绑到 undefined 上，
+    // 选一次组织就把整条基线的其它字段一起提交回一个 undefined。
+    baselines.value = b.baselines.map((x) => ({ ...x, scopeOrgs: x.scopeOrgs ?? [], scopeGroups: x.scopeGroups ?? [] }));
+    orgOpts.value = b.orgs ?? [];
+    groupOpts.value = b.groups ?? [];
     // 目录取不到就给空数组——宁可「加不了检测项」，也不能回退成自由填 key：
     // 那正是这次要消灭的、会把全平台终端判违规的入口。
     catalog.value = b.checkCatalog ?? [];
@@ -427,6 +462,10 @@ onMounted(async () => {
 .bd-kv:last-child { border-bottom: none; }
 .bd-kv span { color: var(--bd-t3); }
 .bd-kv b { font-weight: 500; color: var(--bd-t1); }
+.bd-kv--scope { align-items: flex-start; }
+.bd-kv--scope > span { padding-top: 5px; }
+.bd-scope { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
+.bd-scope__hint { margin-top: 6px; font-size: 11.5px; color: var(--bd-t3); text-align: right; font-weight: 400; }
 
 /* 左：基线列表 */
 .bd-blist { width: 300px; flex: none; padding: 10px; }
@@ -452,7 +491,6 @@ onMounted(async () => {
 .bd-bhead { padding: 16px 20px; }
 .bd-bhead__top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .bd-bhead__name { font-size: 16px; font-weight: 700; color: var(--bd-t1); }
-.bd-bhead__type { margin-left: 10px; }
 .bd-bhead__sw { display: flex; align-items: center; gap: 8px; }
 .bd-bhead__swt { font-size: 12.5px; color: var(--bd-t3); }
 .bd-plat { margin-right: 6px; }

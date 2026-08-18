@@ -147,6 +147,10 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 		_ = c.Close()
 		return
 	}
+	// 记一次业务活跃（FR-POLICY-30「无业务流量超时注销」的信号源）。
+	// ★位置刻意在**两道放行复核之后**：未授权连接不该刷新活跃时刻，
+	// 否则任何人往隧道口打一个包就能替别人的会话续命。
+	al.Touch(ip)
 
 	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 的 Accept 不在 Accept 内握手，
 	// 若把握手推迟到带 3s deadline 的前导 Peek 里触发会与之卡死（gotlcp 在 Accept 即握手故无此问题）。

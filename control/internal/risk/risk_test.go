@@ -8,7 +8,7 @@ import (
 )
 
 func bl(id, disposal, status string, platforms []string, checks ...store.BaselineCheck) store.BaselinePolicy {
-	return store.BaselinePolicy{ID: id, Name: id, Type: "onboarding", Disposal: disposal, Status: status, Platforms: platforms, Checks: checks}
+	return store.BaselinePolicy{ID: id, Name: id, Disposal: disposal, Status: status, Platforms: platforms, Checks: checks}
 }
 func chk(key, platform, severity string) store.BaselineCheck {
 	return store.BaselineCheck{Key: key, Label: "检查-" + key, Platform: platform, Severity: severity}

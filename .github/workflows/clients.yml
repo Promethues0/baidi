@@ -67,6 +67,11 @@ on:
       - 'gateway/cmd/baidi-tun/**'
       - 'gateway/cmd/baidi-knock/**'
       - 'gateway/internal/dataplane/**'
+      # scripts/**：预检那一步的实现搬到 scripts/ 之后，本流水线就**依赖**它了。
+      # 不列进来的话，改了检查脚本本身却不会重跑用它的流水线——
+      # 与「一条全仓检查只有一个子树的触发面」是同一个拓扑错误，只是高一层。
+      # （实测踩到：6e3bfbb 只动 scripts/，clients.yml 一轮都没起。）
+      - 'scripts/**'
       - '.github/workflows/clients.yml'
   pull_request:
     paths:
@@ -74,6 +79,7 @@ on:
       - 'gateway/cmd/baidi-tun/**'
       - 'gateway/cmd/baidi-knock/**'
       - 'gateway/internal/dataplane/**'
+      - 'scripts/**'
       - '.github/workflows/clients.yml'
 
 permissions:

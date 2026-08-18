@@ -203,6 +203,8 @@ import { session, login, authed, validateConfig, profile, setProfile, setProfile
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, type TunView } from '@/lib/tunnel';
 import { postureState, collectPosture } from '@/lib/posture';
+import { explainControlFailure, type TcpProbe } from '@/lib/diagnose';
+import { invoke } from '@tauri-apps/api/core';
 
 const authedNow = computed(() => authed());
 const isTauri = tauriRuntime();
@@ -246,7 +248,31 @@ async function doLogin(withMfa: boolean) {
     else if (r.needWebauthn) { err.value = '该账号已启用 passkey 二次认证：客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP。'; }
     else if (r.needMfa) { needMfa.value = true; mfaReason.value = r.reason || ''; err.value = ''; }
     else { err.value = r.reason || '登录失败'; }
-  } catch { err.value = '无法连接控制中心（检查「设置」里的控制中心地址）'; } finally { loading.value = false; }
+  } catch {
+    // ★不要再统一说「检查地址」：最常见的那种失败地址恰恰是对的（自签证书被系统拒）。
+    //   先探一次 TCP 再下结论，见 diagnose.ts 的 explainControlFailure。
+    err.value = await explainControl();
+  } finally { loading.value = false; }
+}
+
+/**
+ * 控制面连不上时给一句**说得出原因**的话。
+ *
+ * ★先 TCP 探一次再下结论：webview 的 fetch 把「TLS 被拒」和「连不上」压成同一个
+ * TypeError，而这两者的下一步动作完全相反（导证书 vs 改地址）。
+ * 探测本身失败就如实回落到通用文案，不猜。
+ */
+async function explainControl(): Promise<string> {
+  const u = config.control.trim();
+  let probe: TcpProbe | undefined;
+  try {
+    const m = u.match(/^(https?):\/\/([^/:]+)(?::(\d+))?/i);
+    if (m) {
+      const port = m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'https' ? 443 : 80);
+      probe = await invoke<TcpProbe>('probe_tcp', { host: m[2], port });
+    }
+  } catch { /* 探不到就不猜，交给下面的通用文案 */ }
+  return explainControlFailure(u, probe);
 }
 
 /** TOTP 第二回合：口令已验票据 + 动态验证码换会话令牌（同码只能成功一次）。 */

@@ -691,6 +691,49 @@ slog 改写 stdout 在 2026-06-23，而 elevate.rs 在 2026-08-11 落地时注�
 **这条与 C1 的失败没有因果关系**（建卡与写日志互不相干），但它正是 C1 排不动的原因：
 用户在接入页看不到任何数据面日志。修完之后再排 C1 才有材料。
 
+### 10.3e C1 的真正死因：**自签证书**，而提示把人指去改一个正确的设置
+
+C1 FAIL 的因果链查清了，**与提权、与 Windows 都无关**：
+
+```
+install-remote.sh 给每台新部署签自签证书（CN=baidi，SAN 含该 IP）
+      ↓
+桌面客户端用 **webview 的 fetch** 请求控制面（api.ts），走系统信任库
+      ↓
+WebView2 拒绝该证书 → 登录请求直接失败
+      ↓
+拿不到会话令牌 → 客户端从不拉起 baidi-tun → **UAC 当然不弹** → 没有 baidi0
+```
+
+实测证据：`openssl s_client` 对演示站回 `verify error:num=18 self signed certificate`，
+`subject == issuer == CN=baidi`；今天早些时候 `baidi-knock` 打同一台也是
+`x509: certificate signed by unknown authority`。
+
+**比这个更该修的是那句提示。** 客户端说的是「无法连接控制中心（检查「设置」里的
+控制中心地址）」，而地址、端口、网络**全都是对的**——它把人支去改一个正确的设置。
+根因是 webview 的 `fetch` 把「TLS 被拒」与「连不上」压成同一个 `TypeError`，
+浏览器故意不给原因。
+
+已修：新增 `diagnose.ts::explainControlFailure`，**先用 Rust 侧现成的 `probe_tcp`
+探一次再下结论**——
+
+| 探测结果 | 结论 |
+|---|---|
+| TCP refused / timeout | 「TCP 都没通」→ 这才是地址 / 网络 / 防火墙问题 |
+| TCP 通 + https 请求失败 | 「**地址是对的，问题在证书**」+ 点명自签证书与两条解法 |
+| TCP 通 + http 请求失败 | 「端口有东西在听，但它可能不是 baidi-control」 |
+| 探测本身失败 | 回落通用文案，**不猜** |
+
+登录失败（`Connect.vue`）与运维诊断页（`Diagnostics.vue`）两处都接了同一个函数。
+
+**这条影响面远超 Windows**：`install-remote.sh` 是参考部署路径，它签的就是自签证书，
+所以**每一个第一次用桌面客户端接入自建部署的人都会撞上**，然后被那句话带偏。
+macOS 上同样会撞（WKWebView 也校验系统钥匙串），只是此前所有开发都走 dev 模式
+（vite 反代到 127.0.0.1:8090 的明文 HTTP），从没碰过这条路。
+
+**验证阶段 C 的前提因此要写清楚**：要么把控制面证书导入本机信任库，
+要么给控制面换一张受信任的证书。演示站是自签，所以跑阶段 C 之前必须先导。
+
 ### 10.4 脚本随包走（不用去仓库里找）
 
 `verify-windows.ps1` 现在**装在 CI 产物里**，与 msi/nsis 同目录，

@@ -201,3 +201,40 @@ export function overall(states: DiagState[]): { level: 'fail' | 'warn' | 'pass' 
   if (n('pass') === 0) return { level: 'skip', say: '诊断完成：未接入，多数检查项不适用' };
   return { level: 'pass', say: `诊断完成：${n('pass')} 项正常${n('skip') ? `，${n('skip')} 项不适用` : ''}` };
 }
+
+/* ── 三、控制中心连不上时，到底是哪一环 ───────────────────────── */
+
+/**
+ * 控制面请求失败的**归因**。
+ *
+ * ★为什么必须归因：webview 的 `fetch` 对 TLS 失败与连不上给的是同一个
+ * `TypeError: Failed to fetch`——浏览器故意不告诉你原因。于是客户端此前统一说
+ * 「无法连接控制中心（检查「设置」里的控制中心地址）」，而**最常见的那种失败地址恰恰是对的**：
+ * `deploy/install-remote.sh` 给每台新部署签的是**自签证书**，WebView2 / WKWebView 都按
+ * 系统信任库校验，于是第一次接入的人必然撞墙，然后被这句话支去改一个本来就正确的设置。
+ * 2026-08-18 首次真机验证就是这么卡住的：地址、网络、端口全对，UAC 因此从未弹出。
+ *
+ * 判据很简单，且只用现成材料：TCP 连得上而 HTTPS 请求失败 ⇒ 传输层没问题，
+ * 问题在 TLS。**探不到就不猜**：TCP 探测本身失败时如实回落到通用文案。
+ */
+export function explainControlFailure(control: string, probe?: TcpProbe): string {
+  const u = control.trim();
+  if (!u) return '未配置控制中心地址';
+  const https = /^https:/i.test(u);
+  if (!probe || probe.kind === 'error') {
+    return `无法连接控制中心 ${u}——请在「运维诊断」里跑一次探测看是哪一环`;
+  }
+  if (probe.kind === 'refused' || probe.kind === 'timeout') {
+    return `连不上 ${u}：TCP 都没通（${probe.kind === 'refused' ? '连接被拒' : '超时'}）——` +
+      '这才是地址 / 网络 / 防火墙的问题，先核对「设置」里的控制中心地址。';
+  }
+  // TCP 通了，HTTP 层却失败。
+  if (https) {
+    return `${u} 的 TCP 端口连得通（${probe.ms}ms），但 HTTPS 请求失败——` +
+      '**地址是对的，问题在证书**：按 install-remote.sh 部署出来的控制面用的是**自签证书**，' +
+      '系统不信任它，浏览器内核会直接掐断请求。解法二选一：' +
+      '① 把该站点证书导入本机受信任的根证书颁发机构；② 给控制面换一张受信任的证书。';
+  }
+  return `${u} 的 TCP 端口连得通（${probe.ms}ms），但 HTTP 请求失败——` +
+    '端口是通的，说明那头有东西在听，但它可能不是 baidi-control（端口写错？被别的服务占了？）。';
+}

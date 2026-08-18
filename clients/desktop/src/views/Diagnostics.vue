@@ -64,7 +64,7 @@ import { ping } from '@/lib/api';
 import { tunnelStatus, effectiveDNS } from '@/lib/tunnel';
 import { config } from '@/lib/store';
 import {
-  judgeGateway, judgeDNS, judgeTunnel, judgeKnock, overall,
+  judgeGateway, judgeDNS, judgeTunnel, judgeKnock, overall, explainControlFailure,
   type DiagState, type DiagVerdict, type TcpProbe, type DnsProbe
 } from '@/lib/diagnose';
 
@@ -117,7 +117,7 @@ async function run() {
   const ctlOK = await ping();
   put('ctl', ctlOK
     ? { state: 'pass', say: '正常', detail: `${config.control || '（默认地址）'} 健康检查通过` }
-    : { state: 'fail', say: '不可达', detail: `连不上 ${config.control || '控制中心'}——先在「设置」里核对控制中心地址与网络。` });
+    : { state: 'fail', say: '不可达', detail: await explainCtl() });
 
   // 2) 隧道 / 3) 敲门保活：读真实进程状态
   mark('tun', 'running');
@@ -173,6 +173,18 @@ async function probeTCP(host: string, port: number): Promise<TcpProbe | undefine
     return undefined;
   }
 }
+/** 控制中心不可达时的归因：先 TCP 探一次，再决定该说「改地址」还是「导证书」。
+ *  ★这一项此前一律说「先在设置里核对控制中心地址与网络」，而按 install-remote.sh
+ *  部署出来的控制面用的是自签证书——最常见的那种失败地址恰恰是对的。 */
+async function explainCtl(): Promise<string> {
+  const u = config.control.trim();
+  const m = u.match(/^(https?):\/\/([^/:]+)(?::(\d+))?/i);
+  const probe = m
+    ? await probeTCP(m[2], m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'https' ? 443 : 80))
+    : undefined;
+  return explainControlFailure(u, probe);
+}
+
 async function probeDNS(server: string, name: string): Promise<DnsProbe | undefined> {
   try {
     return await invoke<DnsProbe>('probe_dns', { server, name });

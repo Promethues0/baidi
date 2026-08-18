@@ -260,34 +260,59 @@ function Invoke-StageB {
     if (-not $dir) { Add-Result 'B1' '拉起数据面' 'SKIP' '未定位到安装目录'; return }
     $tun = Join-Path $dir 'baidi-tun.exe'
 
-    # B1 只验「能不能加载 wintun 并建卡」，不接服务端：用一个必然连不通的网关地址，
+    # B1/B2 只验「能不能加载 wintun 并建卡」，不接服务端：用一个必然连不通的网关地址，
     # 让它走到建卡那一步就够了。建卡失败与连不上网关是两种完全不同的错误。
+    #
+    # ★-token 必须给（哪怕是假的）：baidi-tun 的第一道入口校验就是「没有令牌直接 log.Fatal」，
+    #   它排在 CreateTUN **之前**。不给的话进程在碰到 wintun 之前就退了，B2 永远 FAIL——
+    #   而那是**脚本自己的错**，却会被读成「这台机器建不出虚拟网卡」。2026-08-18 首次真机
+    #   实测就栽在这里。令牌只需非空即可走到建卡：从这里到 CreateTUN 之间全是参数校验与
+    #   读文件（loadGateways 在 -gateways 为空时只校验 -spa/-proxy），一次网络都不碰。
+    # ★stdout 也要收：baidi-tun 的 slog 显式写 os.Stdout（main.go 首行 SetDefault），
+    #   只收 stderr 的话拿到的日志是空的，而空日志会让下面的判据全部退化（见 B1）。
     Write-Host '  正在拉起 baidi-tun.exe（约 12 秒）…' -ForegroundColor DarkGray
-    $out = Join-Path $env:TEMP 'baidi-tun-verify.log'
-    $p = Start-Process -FilePath $tun -PassThru -NoNewWindow -RedirectStandardError $out `
+    $out    = Join-Path $env:TEMP 'baidi-tun-verify.log'
+    $outErr = Join-Path $env:TEMP 'baidi-tun-verify.err.log'
+    $p = Start-Process -FilePath $tun -PassThru -NoNewWindow `
+        -RedirectStandardOutput $out -RedirectStandardError $outErr `
         -ArgumentList @('-spa', '127.0.0.1:1', '-proxy', '127.0.0.1:1',
-                        '-route', '10.99.99.0/24', '-ip', '10.99.99.2', '-control', 'http://127.0.0.1:1')
+                        '-route', '10.99.99.0/24', '-ip', '10.99.99.2',
+                        '-control', 'http://127.0.0.1:1',
+                        '-token', 'stage-b-fake-token-not-a-credential')
     Start-Sleep -Seconds 12
-    $log = if (Test-Path $out) { Get-Content $out -Raw } else { '' }
-
-    if ($log -match 'Unable to load library|wintun') {
-        Add-Result 'B1' 'wintun.dll 可被加载' 'FAIL' `
-            ("日志里出现加载失败：" + (($log -split "`n" | Where-Object { $_ -match 'Unable to load|wintun' }) -join ' / '))
-    } else {
-        Add-Result 'B1' 'wintun.dll 可被加载' 'PASS' '日志中无加载失败'
+    $log = ''
+    foreach ($f in @($out, $outErr)) {
+        if (Test-Path $f) { $log += (Get-Content $f -Raw -ErrorAction SilentlyContinue) }
     }
 
-    # B2 网卡是否真的建出来了
-    $ad = Get-NetAdapter -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'baidi0' -or $_.InterfaceDescription -like '*Wintun*' }
+    # B2 先判：网卡建没建出来是**唯一的事实判据**，B1 的结论要靠它来定。
+    $ad = Get-NetAdapter -ErrorAction SilentlyContinue |
+          Where-Object { $_.Name -eq 'baidi0' -or $_.InterfaceDescription -like '*Wintun*' }
+    $tail = if ($log.Trim()) { (($log -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 6) -join ' / ') }
+            else { '（两个日志文件都是空的：' + $out + ' / ' + $outErr + '）' }
+
     if ($ad) {
+        # 网卡在 → wintun 必然被加载过。这是 B1 唯一能得出 PASS 的路径。
+        Add-Result 'B1' 'wintun.dll 可被加载' 'PASS' '虚拟网卡已建出，加载必然成功'
         Add-Result 'B2' '虚拟网卡已建出' 'PASS' ("{0}（{1}）状态={2}" -f $ad[0].Name, $ad[0].InterfaceDescription, $ad[0].Status)
-        # B3 路由
         $rt = Get-NetRoute -ErrorAction SilentlyContinue | Where-Object { $_.DestinationPrefix -eq '10.99.99.0/24' }
         if ($rt) { Add-Result 'B3' '路由已落表' 'PASS' ($rt[0].DestinationPrefix + ' → ifIndex ' + $rt[0].ifIndex) }
         else     { Add-Result 'B3' '路由已落表' 'FAIL' '网卡建出来了但 10.99.99.0/24 没有进路由表' }
-    } else {
-        Add-Result 'B2' '虚拟网卡已建出' 'FAIL' `
-            ("没找到 baidi0 / Wintun 网卡。日志尾部：" + (($log -split "`n" | Select-Object -Last 6) -join ' / '))
+    }
+    elseif ($log -match 'Unable to load library|wintun') {
+        # 日志里指名道姓是 wintun 加载失败 → 这才是 B1 的 FAIL。
+        Add-Result 'B1' 'wintun.dll 可被加载' 'FAIL' `
+            ("日志里出现加载失败：" + (($log -split "`n" | Where-Object { $_ -match 'Unable to load|wintun' }) -join ' / '))
+        Add-Result 'B2' '虚拟网卡已建出' 'FAIL' "wintun 加载失败，没能建卡"
+        Add-Result 'B3' '路由已落表' 'SKIP' '网卡都没建出来'
+    }
+    else {
+        # ★没建出卡、日志里也没有加载失败 → **不可判定**，绝不能报 PASS。
+        #   旧版这里是 `else { PASS '日志中无加载失败' }`：日志为空时它恒真——
+        #   一个空日志能让「wintun 可被加载」拿到 PASS，而 wintun 根本没被碰过。
+        #   这正是本项目反复在杀的假绿（见 CLAUDE.md「采不到就报不可判定」）。
+        Add-Result 'B1' 'wintun.dll 可被加载' 'UNKNOWN' "进程没走到建卡这一步，无从判断 wintun 能否加载。日志尾部：$tail"
+        Add-Result 'B2' '虚拟网卡已建出' 'FAIL' "没找到 baidi0 / Wintun 网卡。日志尾部：$tail"
         Add-Result 'B3' '路由已落表' 'SKIP' '网卡都没建出来'
     }
 
@@ -322,10 +347,14 @@ Write-Host ("主机 {0} / {1} / PowerShell {2}" -f $env:COMPUTERNAME,
     (Get-CimInstance Win32_OperatingSystem -ErrorAction SilentlyContinue).Caption, $PSVersionTable.PSVersion)
 
 function Write-Report {
-    $pass = ($script:Results | Where-Object Verdict -eq 'PASS').Count
-    $fail = ($script:Results | Where-Object Verdict -eq 'FAIL').Count
-    $unk  = ($script:Results | Where-Object Verdict -eq 'UNKNOWN').Count
-    $skip = ($script:Results | Where-Object Verdict -eq 'SKIP').Count
+    # ★必须 @(...) 强制成数组：Windows PowerShell 5.1 下 Where-Object **恰好命中一条**时
+    #   返回的是标量，.Count 渲染成空串——于是汇总行写成「失败  · 跳过 」。
+    #   0 条与 2 条以上都正常，只有 1 条会空，所以最容易漏。后果不是排版难看：
+    #   一份「失败 (空)」的汇总会被读成「没有失败」。2026-08-18 首次真机实测撞到。
+    $pass = @($script:Results | Where-Object Verdict -eq 'PASS').Count
+    $fail = @($script:Results | Where-Object Verdict -eq 'FAIL').Count
+    $unk  = @($script:Results | Where-Object Verdict -eq 'UNKNOWN').Count
+    $skip = @($script:Results | Where-Object Verdict -eq 'SKIP').Count
 
     Write-Host ("`n结果：通过 {0} · 失败 {1} · 不可判定 {2} · 跳过 {3}" -f $pass, $fail, $unk, $skip) `
         -ForegroundColor $(if ($fail -gt 0) { 'Red' } else { 'Green' })

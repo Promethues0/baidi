@@ -774,6 +774,47 @@ const core = await import(/* @vite-ignore */ mod);   // ← Vite 被明确告知
 （`tauri.conf.json` 的 `beforeBuildCommand` 调的就是它，所以打包链同样受保护）。
 变异验证：把坏写法塞回 tunnel.ts，构建当场退出码 1 并指名文件与模块。
 
+### 10.3g 提权脚本缺 UTF-8 BOM：中文安装路径下 Windows 数据面 **100% 起不来**
+
+修掉裸说明符之后 UAC 终于弹了，接着卡在下一环：
+
+```
+启动数据面失败：提权进程以退出码 1 结束，且没有可显示的错误输出。
+```
+
+四个事实凑成的：
+
+| 事实 | 出处 |
+|---|---|
+| Windows 上 `write_private` 是裸 `fs::write`，**不带 BOM** | `main.rs`（`#[cfg(not(unix))]` 那支） |
+| 提权用 `powershell.exe`，即 **Windows PowerShell 5.1** | `elevate.rs::platform_shell` |
+| 默认安装目录 `C:\Program Files\白帝安全接入客户端\`，**含中文** | 阶段 A 实测 |
+| 脚本首行是 `$ErrorActionPreference = 'Stop'` | `windows_start_script` |
+
+PowerShell 5.1 读 `.ps1` 时**没有 BOM 就按系统 ANSI 代码页解码**（中文 Windows 是 GBK）。
+于是脚本里 `Start-Process -FilePath 'C:\Program Files\白帝安全接入客户端\baidi-tun.exe'`
+的路径变成乱码 → 找不到文件 → `Stop` 让脚本当场终止 → **退出码 1**。
+
+**而那句报错拿不回来**：外层用 `-Verb RunAs` 请求提权，`-Verb` 与 `-RedirectStandard*`
+是互斥参数集，被提升那一侧的 stderr 结构上就无法重定向。所以用户看到的是
+「退出码 1，且没有可显示的错误输出」，baidi-tun 一次都没被拉起，日志文件也不存在。
+
+**这个坑本仓库早就知道**：`.github/workflows/clients.yml` 有一条「PowerShell 脚本必须带
+UTF-8 BOM」的检查，注释里连「pwsh 7 无 BOM 也按 UTF-8 读，所以在 macOS/Linux 上
+怎么试都是好的」都写了。但那条守的是**仓库里那份 `verify-windows.ps1`**，
+而提权 launcher 是**运行时生成**的——**同一种文件，纪律只覆盖了一半**。
+
+已修：新增 `elevate::script_bytes(content, platform)`（纯函数）与 `main.rs::write_script`。
+**BOM 只加给脚本，绝不加给 JSON**——同一个写文件函数还在落 gateways / resmap / dnsrec
+三份 JSON，由 Go 侧 `json.Unmarshal` 读，带 BOM 会当场解析失败，所以调用点必须分开。
+两条纯函数断言（Windows 必须有 BOM / unix 必须没有；BOM 不作用于 JSON）在 mac 上就能跑，
+变异（去掉 BOM）实测双双转红。
+
+顺带把 `failure_message` 改对：它此前只指 `baidi-tun.log`（stderr），而 slog 写的是
+**stdout**（`.out.log`）——排障时会把人引去看一个多半是空的文件。现在两个都指，
+并写明「两个文件都不存在 = baidi-tun 根本没被拉起来，问题在提权脚本本身」，
+以及 stderr 为什么结构上取不回来。
+
 ### 10.4 脚本随包走（不用去仓库里找）
 
 `verify-windows.ps1` 现在**装在 CI 产物里**，与 msi/nsis 同目录，

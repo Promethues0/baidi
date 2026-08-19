@@ -158,6 +158,36 @@ fn write_private(path: &str, content: &str) -> Result<(), String> {
     fs::write(path, content).map_err(|e| format!("写 {path} 失败：{e}"))
 }
 
+/// 落一份**提权脚本**（与 `write_private` 的区别只有一个：Windows 上带 UTF-8 BOM）。
+///
+/// ★为什么不能直接给 `write_private` 加 BOM：同一个函数还在落 gateways / resmap /
+/// dnsrec 三份 **JSON**，那三份由 Go 侧 `json.Unmarshal` 读，BOM 会让解析当场失败。
+/// 判据（带不带 BOM）抽在 `elevate::script_bytes` 里做成纯函数，好让它在 mac 上被断言——
+/// 只活在 `#[cfg(windows)]` 里的分支在这台开发机上一次都验不到，而这条恰恰是
+/// 「中文安装路径下 Windows 数据面 100% 起不来」的成因。
+fn write_script(path: &str, content: &str) -> Result<(), String> {
+    let bytes = elevate::script_bytes(content, Platform::host());
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = fs::OpenOptions::new()
+            .write(true)
+            .create(true)
+            .truncate(true)
+            .mode(0o600)
+            .open(path)
+            .map_err(|e| format!("写 {path} 失败：{e}"))?;
+        f.write_all(&bytes).map_err(|e| format!("写 {path} 失败：{e}"))?;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))
+            .map_err(|e| format!("收紧 {path} 权限失败：{e}"))
+    }
+    #[cfg(not(unix))]
+    {
+        fs::write(path, bytes).map_err(|e| format!("写 {path} 失败：{e}"))
+    }
+}
+
 #[derive(serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct TunOpts {
@@ -355,8 +385,10 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
         &StartReq { tun: &tun.to_string_lossy(), args: &args, env: &env, paths: p, elevator: &elevator },
     );
     if let Some(sc) = &plan.script {
-        // 仅所有者可读（token 短暂落盘）；Windows 上退化为继承 ACL，见 write_private
-        write_private(&sc.path, &sc.content)?;
+        // 仅所有者可读（token 短暂落盘）；Windows 上退化为继承 ACL，见 write_private。
+        // ★必须走 write_script（Windows 上带 UTF-8 BOM），不能用 write_private：
+        //   无 BOM 时 PowerShell 5.1 按 ANSI 解，中文安装路径直接变乱码。
+        write_script(&sc.path, &sc.content)?;
     }
     let out = run_elevator(&plan.elevator);
     if let Some(sc) = &plan.script {
@@ -517,7 +549,7 @@ fn tunnel_stop() -> Result<(), String> {
     let elevator = elevate::resolve_elevator(plat, &elevate::RealProbe)?;
     let plan = elevate::with_elevator(elevate::plan_stop(plat, &pid, p), &elevator);
     if let Some(sc) = &plan.script {
-        write_private(&sc.path, &sc.content)?;
+        write_script(&sc.path, &sc.content)?;   // 同上：Windows 上必须带 BOM
     }
     let out = run_elevator(&plan.elevator);
     if let Some(sc) = &plan.script {

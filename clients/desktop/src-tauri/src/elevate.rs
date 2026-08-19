@@ -484,6 +484,43 @@ fn windows_start_script(req: &StartReq) -> String {
     s
 }
 
+/// 提权脚本落盘时的**字节**（纯函数：BOM 这件事必须能在 mac 上被断言）。
+///
+/// ★Windows 必须带 UTF-8 BOM。`powershell.exe`（Windows PowerShell 5.1）读 `.ps1` 时，
+/// **没有 BOM 就按系统 ANSI 代码页解码**——中文 Windows 上是 GBK/CP936。
+/// 于是脚本里那条
+///
+/// ```text
+/// Start-Process -FilePath 'C:\Program Files\白帝安全接入客户端\baidi-tun.exe' ...
+/// ```
+///
+/// 的路径被解成乱码，`Start-Process` 找不到文件，而脚本首行的
+/// `$ErrorActionPreference = 'Stop'` 让它当场终止 → 提权进程以**退出码 1** 结束。
+/// 更糟的是那句报错**拿不回来**：外层用 `-Verb RunAs` 请求提权，而 `-Verb` 与
+/// `-RedirectStandard*` 互斥，被提升那一侧的 stderr 根本无法重定向。
+/// 用户看到的就是「提权进程以退出码 1 结束，且没有可显示的错误输出」，
+/// 而 baidi-tun 一次都没被拉起来，日志文件自然也不存在。
+///
+/// ★这个坑本仓库**早就知道**：`.github/workflows/clients.yml` 有一条
+/// 「PowerShell 脚本必须带 UTF-8 BOM」的检查，注释里连「pwsh 7 无 BOM 也按 UTF-8 读，
+/// 所以在 macOS/Linux 上怎么试都是好的」都写了。但那条检查守的是**仓库里那个
+/// verify-windows.ps1**，而提权 launcher 是**运行时生成**的——同一种文件，
+/// 纪律只覆盖了一半。2026-08-19 首次真机验证暴露：安装目录含中文
+/// （`C:\Program Files\白帝安全接入客户端\`）时，Windows 数据面 100% 起不来。
+///
+/// ★**只给脚本加 BOM，绝不给 JSON 加**：同一个写文件函数还在落 gateways/resmap/dnsrec
+/// 三份 JSON，它们由 Go 侧 `json.Unmarshal` 读——BOM 会让解析当场失败。
+pub fn script_bytes(content: &str, platform: Platform) -> Vec<u8> {
+    if platform.is_windows() {
+        let mut v = Vec::with_capacity(content.len() + 3);
+        v.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+        v.extend_from_slice(content.as_bytes());
+        v
+    } else {
+        content.as_bytes().to_vec()
+    }
+}
+
 /// Windows 断开脚本。
 ///
 /// ★与 unix 不同，这里**没有 SIGTERM 可发**：Windows 上 `Stop-Process -Force` 走的是
@@ -796,7 +833,16 @@ pub fn failure_message(action: &str, code: Option<i32>, stderr: &str, log_path: 
         return format!("{action}失败：{e}");
     }
     let c = code.map(|c| c.to_string()).unwrap_or_else(|| String::from("未知（进程被信号中止）"));
-    format!("{action}失败：提权进程以退出码 {c} 结束，且没有可显示的错误输出。数据面日志见 {log_path}")
+    // ★「没有可显示的错误输出」这句要说清它**为什么**没有，并且**别只指一个文件**。
+    //   外层用 `-Verb RunAs` 请求提权，而 `-Verb` 与 `-RedirectStandard*` 互斥——
+    //   被提升那一侧的 stderr 结构上就拿不回来，不是我们忘了收。
+    //   而 baidi-tun 的 slog 写的是 **stdout**：只指 stderr 那份（.log）会把人引去看一个
+    //   多半是空的文件。2026-08-19 真机排障时就在这上面绕了一圈。
+    //   更要紧的是：两个文件**都不存在**时，结论是 baidi-tun 一次都没被拉起来——
+    //   那是完全不同的一条排查线（提权脚本本身就挂了），必须说出来。
+    format!(
+        "{action}失败：提权进程以退出码 {c} 结束。\n         提权那一侧的错误输出结构上取不回来（Start-Process 的 -Verb RunAs 与 -RedirectStandard* 互斥）。\n         请看数据面日志：{log_path}（stderr）与同目录的 baidi-tun.out.log（stdout，slog 写这里）。\n         ★如果这两个文件都不存在，说明 baidi-tun 根本没被拉起来——问题在提权脚本本身，不在数据面。"
+    )
 }
 
 // ── sidecar 定位 ──
@@ -967,6 +1013,40 @@ mod tests {
 
     // ── 路径 ──
 
+
+    /// Windows 的提权脚本**必须带 UTF-8 BOM**，unix 的**必须不带**。
+    ///
+    /// ★这条只能靠纯函数断言：`#[cfg(windows)]` 里的分支在 mac 上一次都跑不到，
+    /// 而它正是「安装路径含中文时 Windows 数据面 100% 起不来」的成因——
+    /// PowerShell 5.1 读无 BOM 的 .ps1 按 ANSI 解，`C:\Program Files\白帝安全接入客户端\`
+    /// 变乱码 → Start-Process 找不到文件 → $ErrorActionPreference='Stop' → 退出码 1，
+    /// 而 `-Verb RunAs` 与 `-RedirectStandard*` 互斥，那句报错**根本拿不回来**。
+    #[test]
+    fn windows_脚本必须带_utf8_bom_而_unix_不带() {
+        let 脚本 = "$ErrorActionPreference = 'Stop'\nStart-Process -FilePath 'C:\\Program Files\\白帝安全接入客户端\\baidi-tun.exe'\n";
+        let w = script_bytes(脚本, Platform::Windows);
+        assert_eq!(&w[..3], &[0xEF, 0xBB, 0xBF], "Windows 脚本缺 BOM：PowerShell 5.1 会按 ANSI 解，中文路径直接变乱码");
+        assert_eq!(&w[3..], 脚本.as_bytes(), "BOM 之后必须是原文逐字节");
+
+        for p in [Platform::MacOS, Platform::Linux] {
+            let u = script_bytes(脚本, p);
+            assert_ne!(&u[..3.min(u.len())], &[0xEF, 0xBB, 0xBF],
+                "unix 脚本不该带 BOM：bash 会把它当成脚本首行的一部分");
+            assert_eq!(u, 脚本.as_bytes());
+        }
+    }
+
+    /// BOM 只给脚本，**绝不给 JSON**：gateways/resmap/dnsrec 由 Go 侧 json.Unmarshal 读，
+    /// 带 BOM 会当场解析失败。这条守的是「别顺手把 BOM 加进 write_private」。
+    #[test]
+    fn bom_只作用于脚本不作用于json() {
+        let json = r#"[{"id":"gw-1"}]"#;
+        // script_bytes 是**脚本专用**的；JSON 走 write_private（不经这里）。
+        // 这里断言的是：一旦有人把 JSON 误传进来，Windows 分支会给它加 BOM——
+        // 所以调用点必须分开，不能合并成一个函数。
+        assert_eq!(&script_bytes(json, Platform::Windows)[..3], &[0xEF, 0xBB, 0xBF]);
+        assert_eq!(script_bytes(json, Platform::Linux), json.as_bytes());
+    }
     #[test]
     fn 临时文件不再硬编码_tmp_且分隔符跟平台() {
         let u = paths_in("/var/folders/ab/cd/T", Platform::MacOS);

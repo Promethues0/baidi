@@ -332,6 +332,54 @@ function Invoke-StageB {
     Write-Host "  （baidi-tun 原始日志：$out）" -ForegroundColor DarkGray
 }
 
+# 没建出 baidi0 时，按**现场证据**说明卡在哪一环，而不是抛一句猜测。
+#
+# 判据取自客户端自己的运行期目录（%TEMP%\baidi\，见 elevate::paths_in）：
+#   - 两份日志都不存在 → baidi-tun 一次都没被拉起来，问题在提权脚本本身（这才轮到 elevate.rs）；
+#   - 日志在但空 → 拉起来了，还没来得及写一个字就退了；
+#   - 日志里有内容 → 直接把尾部给出来，多半一眼能看出是被控制面拒了还是建卡失败。
+# 读不到就如实说读不到（baidi-tun 以管理员身份写的文件，普通权限不一定读得着），绝不猜。
+function Explain-NoAdapter {
+    $rt   = Join-Path $env:TEMP 'baidi'
+    $log  = Join-Path $rt 'baidi-tun.log'       # stderr（Go 标准 log 的 Fatal 走这里）
+    $out  = Join-Path $rt 'baidi-tun.out.log'   # stdout（slog 写这里，信息量大的一路）
+    $lp   = Join-Path $rt 'baidi-tun-launch.ps1'
+    $proc = @(Get-Process -Name 'baidi-tun' -ErrorAction SilentlyContinue)
+
+    $msg = '没找到 baidi0（隧道网卡不在）。现场证据：'
+    $msg += "`n           运行期目录：$rt " + $(if (Test-Path $rt) { '（存在）' } else { '（不存在）' })
+    $msg += "`n           baidi-tun 进程：" + $(if ($proc.Count -gt 0) { "在跑（$($proc.Count) 个，PID $($proc.Id -join ',')）" } else { '不在' })
+
+    $hasLog = (Test-Path $log) -or (Test-Path $out)
+    if (-not $hasLog) {
+        $msg += "`n           两份日志都不存在（$log / $out）"
+        if (Test-Path $lp) {
+            $msg += "`n           → 提权脚本已写出（$lp），但 baidi-tun 一次都没被拉起来。"
+            $msg += "`n             这才是「问题在提权路径」的情形：脚本被 powershell.exe 读进去却没能执行成功。"
+            $msg += "`n             注意外层 -Verb RunAs 与 -RedirectStandard* 互斥，被提升那侧的 stderr 结构上取不回来。"
+        } else {
+            $msg += "`n           → 连提权脚本都没写出来：客户端可能压根没走到 tunnel_start（前端报错？没点接入？）。"
+            $msg += "`n             请看客户端「接入」页有没有红字错误。"
+        }
+        return $msg
+    }
+
+    # 有日志：把尾部原样给出来——它通常直接写着原因（敲门被拒 / 建卡失败 / 网关不可达）。
+    foreach ($f in @($log, $out)) {
+        if (-not (Test-Path $f)) { $msg += "`n           ${f}：不存在"; continue }
+        $len = (Get-Item $f -ErrorAction SilentlyContinue).Length
+        if ($null -eq $len) { $msg += "`n           ${f}：读不到（权限不足？以管理员身份重跑可看到）"; continue }
+        if ($len -eq 0) { $msg += "`n           ${f}：存在但为空（0 字节）"; continue }
+        $tail = (Get-Content $f -Tail 6 -ErrorAction SilentlyContinue) -join "`n             "
+        if ($tail) { $msg += "`n           $f 尾部：`n             $tail" }
+        else { $msg += "`n           ${f}：$len 字节，但读不出内容（权限不足？）" }
+    }
+    $msg += "`n           → 日志存在说明 baidi-tun **被成功拉起过**，提权那一环是好的。"
+    $msg += "`n             若尾部提到 403 / 不合规 / 敲门，那是控制面的接入闸在拒绝，与 Windows 无关："
+    $msg += "`n             请在管理台「审计」页按本账号检索，理由会写在那条 deny 记录里。"
+    return $msg
+}
+
 function Invoke-StageC {
     Write-Host "`n═══ 阶段 C：完整链路（客户端自己走一遍）═══" -ForegroundColor Cyan
     if (-not $Control) {
@@ -355,8 +403,17 @@ function Invoke-StageC {
     $ad = Get-NetAdapter -ErrorAction SilentlyContinue |
           Where-Object { $_.Name -eq 'baidi0' -or $_.InterfaceDescription -like '*Wintun*' }
     if (-not $ad) {
-        Add-Result 'C1' '客户端自行提权并建卡' 'FAIL' `
-            '没找到 baidi0：客户端没能建起隧道网卡（若 UAC 框根本没弹，问题在提权路径 elevate.rs）'
+        # ★不抛猜测，去查证据再下结论。
+        #
+        #   旧文案是「若 UAC 框根本没弹，问题在提权路径 elevate.rs」——2026-08-21 真机上
+        #   连着两次 C1 FAIL，**两次都不是提权问题**（UAC 都弹了、baidi-tun 都起来了、
+        #   都成功换到过敲门令牌），一次是终端合规判 block、一次是 posture 上报的时序竞态。
+        #   一句猜测把排查引向了唯一没问题的那个组件，两次都是。
+        #
+        #   客户端的运行期文件就在 %TEMP%\baidi\ 下（elevate::paths_in），脚本够得着：
+        #   进程在不在、两份日志在不在、日志里说了什么，足以把「没起来」「起来了又退了」
+        #   「被控制面拒了」分开——它们的下一步完全不同。
+        Add-Result 'C1' '客户端自行提权并建卡' 'FAIL' (Explain-NoAdapter)
         Add-Result 'C2' '受保护网段已接管' 'SKIP' '网卡不在'
         Add-Result 'C3' '业务地址可达' 'SKIP' '网卡不在'
         Add-Result 'C4' '分离式 DNS（NRPT）' 'SKIP' '网卡不在'

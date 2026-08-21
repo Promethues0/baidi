@@ -647,6 +647,24 @@ fn main() {
     use tauri::WindowEvent;
 
     tauri::Builder::default()
+        // ★单实例守卫必须是**第一个**注册的插件：它靠"抢不到就把参数交给已有实例、
+        //   自己立刻退出"生效，排在后面的话，第二个进程会先把其它插件、托盘、
+        //   后台线程都初始化一遍才退出——那正是它要消灭的东西。
+        //
+        // 为什么本客户端非有它不可（不是体验问题，是数据面安全问题）：
+        //   关窗口 = 隐藏到托盘（见下面的 on_window_event），进程仍活着。用户点 X
+        //   之后再点图标，就起了第二个进程。而 runtime_dir() 每用户一份、路径固定，
+        //   两个实例共用同一批运行期文件：
+        //     - 后开的实例点「接入」→ 覆盖 pid / launcher / resmap / dnsrec，
+        //       并再拉起一个 root 数据面去抢同一张 wintun 网卡；
+        //     - 任一实例点「断开」→ 读出的 pid 可能是另一个实例写的，然后以 root kill 它，
+        //       顺带 remove_file 掉对方正在用的 resmap / dnsrec（路由与 DNS 当场失效）。
+        //   两种后果都不报错，表现成"接入了但访问不了"或"隧道莫名断开"。
+        //
+        // 回调在**已有实例**里执行：把它的窗口叫到前台，用户看到的就是"点图标=窗口回来了"。
+        .plugin(tauri_plugin_single_instance::init(|app, _argv, _cwd| {
+            show_main(app);
+        }))
         .plugin(tauri_plugin_shell::init())
         .invoke_handler(tauri::generate_handler![
             tunnel_start,
@@ -857,5 +875,36 @@ mod tests {
         // 写不进去必须报错，绝不静默成功
         assert!(write_private(&format!("{base}/没有这个目录/x"), "y").is_err());
         let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 单实例守卫必须在场，且必须是**第一个**注册的插件。
+    ///
+    /// 两条都不能少，而且都是"打破了也不报错"的那种约束：
+    ///   - 插件被删掉 → 编译照过、程序照跑，只在用户点 X（隐藏到托盘）之后再点图标时
+    ///     起第二个进程，两个实例共用同一批运行期文件互相踩（细节见 Cargo.toml 与
+    ///     main() 里的注释）。症状是"接入了但访问不了"/"隧道莫名断开"，零日志线索。
+    ///   - 顺序被挪到后面 → 守卫**仍然生效**（第二个进程最终还是会退出），但它会先把
+    ///     其它插件、托盘图标、后台判活线程整套初始化一遍再退——用户会看到托盘里
+    ///     闪出第二个图标，而这正是这个插件本该消灭的现象。
+    ///
+    /// 用源码文本断言而不是构造 Builder：插件注册顺序是运行期构造链，测不了；
+    /// 而这条纪律要守的恰恰是"源码里写在第几行"。同 elevate.rs 里那批打包配置守卫。
+    #[test]
+    fn 单实例守卫必须是第一个注册的插件() {
+        let src = include_str!("main.rs");
+        let single = src
+            .find(".plugin(tauri_plugin_single_instance::init(")
+            .expect("main() 里必须注册 tauri-plugin-single-instance——缺了它，关窗口后再点图标就会起第二个实例");
+        // 第一个 .plugin( 的位置就该是它自己。
+        let first = src.find(".plugin(").expect("至少要有一处 .plugin( 注册");
+        assert_eq!(
+            single, first,
+            "单实例插件必须排在所有 .plugin( 之前，否则第二个进程会先初始化托盘与后台线程再退出"
+        );
+        // 依赖也得真的在 Cargo.toml 里（只改 main.rs 是编译不过的，这条是给"顺手删依赖"兜底）。
+        assert!(
+            include_str!("../Cargo.toml").contains("tauri-plugin-single-instance"),
+            "Cargo.toml 里缺 tauri-plugin-single-instance 依赖"
+        );
     }
 }

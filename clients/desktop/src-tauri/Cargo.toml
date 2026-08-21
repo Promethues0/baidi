@@ -10,6 +10,12 @@ tauri-build = { version = "2", features = [] }
 [dependencies]
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-shell = "2"
+# 单实例守卫。★不只是"别开两个窗口"的体验问题：本客户端关窗口是**隐藏到托盘**
+# （on_window_event 里 hide + prevent_close），于是用户点 X 之后再点图标就会起第二个
+# 进程，而两个进程共用同一个私有运行目录（runtime_dir 每用户一份、路径固定）——
+# 后开的那个点「接入」会覆盖 pid/launcher/resmap/dnsrec，点「断开」则会读到
+# 别人写的 pid 并以 root kill 它。多个实例还各自跑一条 60s 的 posture 上报循环。
+tauri-plugin-single-instance = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 

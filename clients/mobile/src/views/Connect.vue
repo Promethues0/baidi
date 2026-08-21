@@ -31,32 +31,46 @@
     <div v-else-if="stage === 'connected'" class="m-card cn__info">
       <div class="cn__info-row"><span>安全网关</span><b class="m-mono">{{ ti.gateway }}</b></div>
       <div class="cn__info-row"><span>隧道加密</span><b>{{ ti.cipher }}</b></div>
-      <div class="cn__info-row"><span>SPA 隐身</span><b class="ok">端口对未授权者不可见</b></div>
+      <!-- 同桌面端：只说本机敲门状态，不替网关断言隐身效果（客户端拿不到那份回执，
+           而参考部署默认不开 -pf，未敲门的 TCP 仍会被 nmap 判 open）。 -->
+      <div class="cn__info-row"><span>SPA 敲门</span><b class="ok">已完成 · 已开放行窗口</b></div>
       <div class="cn__info-row"><span>受保护网段</span><b class="m-mono">{{ ti.route }} → 隧道</b></div>
       <div class="cn__info-row"><span>虚拟 IP</span><b class="m-mono">{{ ti.vip }}</b></div>
     </div>
 
-    <!-- 终端环境检测 -->
+    <!-- 终端环境检测：移动端**尚未实现采集**，如实说明而不是画一张全绿的卡片。
+         此处此前是四行硬编码 ok:true（磁盘已加密 / 未越狱 / 版本合规 / 客户端最新），
+         对着一台从没被检测过的手机显示「终端安全检测 合规」——而合规判定权在控制面，
+         它对这台设备根本没有任何数据。 -->
     <div v-else class="m-card cn__posture">
-      <div class="cn__posture-h"><icon-safe /> 终端安全检测 <em :class="{ ok: allOk }">{{ allOk ? '合规' : '有风险' }}</em></div>
-      <div v-for="p in posture" :key="p.label" class="cn__p">
-        <component :is="p.ok ? IconCheckCircleFill : IconCloseCircleFill" :class="['cn__p-ic', p.ok ? 'ok' : 'bad']" />
-        {{ p.label }}
+      <div class="cn__posture-h"><icon-safe /> 终端安全检测 <em class="na">未采集</em></div>
+      <div class="cn__na">
+        移动端暂未实现终端环境采集：原生 VPN 扩展只暴露了建立/断开隧道的接口，
+        webview 侧读不到磁盘加密、越狱、系统版本等状态。
+      </div>
+      <div class="cn__na">
+        因此控制面对本机按<b>缺报</b>处理——默认（observe）放行；
+        若管理员开启了 <code>BAIDI_POSTURE_ENFORCE=strict</code>，本机将<b>无法接入</b>。
+        桌面客户端已实现三平台真实采集。
       </div>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, reactive, computed } from 'vue';
+import { ref, computed } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import {
-  IconPoweroff, IconCheckCircleFill, IconCloseCircleFill, IconCheck, IconLoading
+  IconPoweroff, IconCheckCircleFill, IconCheck, IconLoading
 } from '@arco-design/web-vue/es/icon';
 import { session, validateConfig } from '@/lib/store';
 import { startTunnel, stopTunnel, platformLabel, tunnelInfo } from '@/lib/vpn';
 
-const STEPS = ['终端环境检测上报', 'SPA 敲门（单包授权）', '建立国密 TLCP 隧道', '下发策略 / utun 引流'];
+// ★「终端环境检测上报」这一步已删除：移动端根本没有采集能力（见模板里的说明），
+// 而它此前是一句 `await sleep(500)` 假装出来的——进度条走过一步，什么都没发生。
+// 其余三步里只有「SPA 敲门」是本 UI 真发起的；后两步由原生扩展在自己进程里完成，
+// webview 拿不到进度回报，故按固定节奏推进（见 connect() 里的说明）。
+const STEPS = ['SPA 敲门（单包授权）', '建立国密 TLCP 隧道', '下发策略 / utun 引流'];
 const ti = computed(() => tunnelInfo());
 const stage = ref<'idle' | 'connecting' | 'connected'>(session.connected ? 'connected' : 'idle');
 const step = ref(0);
@@ -64,13 +78,6 @@ const stageLabel = computed(() => (stage.value === 'connected' ? '已接入企�
 const stageDot = computed(() => (stage.value === 'connected' ? '● 在线' : stage.value === 'connecting' ? '◐ 连接中' : '○ 离线'));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
-const posture = reactive([
-  { label: '磁盘已加密', ok: true },
-  { label: '系统未越狱 / 未 root', ok: true },
-  { label: '系统版本合规', ok: true },
-  { label: '客户端为最新版本 v0.1.0', ok: true }
-]);
-const allOk = computed(() => posture.every((p) => p.ok));
 
 function toggle() {
   if (stage.value === 'connected') return disconnect();
@@ -81,16 +88,20 @@ async function connect() {
   const bad = validateConfig();
   if (bad) { Message.warning(bad); return; }   // 接入前配置校验（端口/网段/虚拟IP/控制中心）
   stage.value = 'connecting'; step.value = 0;
-  await sleep(500);                     // ① 终端环境检测上报
-  step.value = 1;                       // ② SPA 敲门 —— 真实链路（携带 JWT 身份）
+  // ① SPA 敲门 —— 这一步是**真的**：携带 JWT 身份，原生壳里交给 VPN 扩展发包，
+  //    dev 浏览器里经 knock-agent 发真实 SPA 单包。
   const r = await startTunnel(session.token);
   if (!r.ok) {
     stage.value = 'idle';
     Message.error('SPA 敲门失败：' + (r.detail || '网关不可达'));
     return;
   }
-  step.value = 2; await sleep(450);     // ③ 建立国密 TLCP 隧道
-  step.value = 3; await sleep(350);     // ④ 下发策略 / 引流
+  // ②③ 建隧道与引流由原生扩展在自己的进程里完成，webview **收不到进度回报**
+  //    （NativeBridge 只有 startTunnel/stopTunnel 两个方法）。这里按固定节奏推进
+  //    进度条，是展示性的——不代表这两步各自何时真正完成。要把它变成真进度，
+  //    得先给原生桥加一个状态查询接口，三端各实现一遍。
+  step.value = 1; await sleep(450);
+  step.value = 2; await sleep(350);
   step.value = STEPS.length; stage.value = 'connected'; session.connected = true;
   Message.success('已接入企业内网');
 }
@@ -143,7 +154,11 @@ async function disconnect() {
 
 .cn__posture-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
 .cn__posture-h em { font-style: normal; font-size: 12px; padding: 1px 8px; border-radius: 4px; background: var(--bd-tag-red-bg, #FFECE8); color: var(--bd-danger); margin-left: auto; }
-.cn__posture-h em.ok { background: var(--bd-tag-green-bg, #E8FFEA); color: var(--bd-success); }
+/* 「未采集」是不可判定，既不是合规也不是风险——用中性灰，别用绿或红替它表态。 */
+.cn__posture-h em.na { background: var(--bd-fill-2); color: var(--bd-t3); }
+.cn__na { font-size: 12.5px; line-height: 1.7; color: var(--bd-t3); margin-top: 8px; }
+.cn__na b { color: var(--bd-t2); font-weight: 600; }
+.cn__na code { font-family: var(--bd-mono, ui-monospace, monospace); font-size: 11.5px; background: var(--bd-fill-2); padding: 1px 5px; border-radius: 3px; }
 .cn__p { gap: 8px; padding: 7px 0; font-size: 14px; color: var(--bd-t2); }
 .cn__p-ic { font-size: 17px; }
 .cn__p-ic.ok { color: var(--bd-success); }

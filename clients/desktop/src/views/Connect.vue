@@ -83,6 +83,15 @@
             <div class="ck-denied__b">
               <div class="ck-denied__t">接入已被控制面拒绝</div>
               <div class="ck-denied__r">{{ deniedReason }}</div>
+              <!-- ★这条附注只在「本次接入前没能把终端环境报上去」时出现，而它恰恰是
+                   最容易误导人的场合：拒绝理由（如"磁盘已加密 未通过"）来自控制面
+                   **上一次**的判定，终端此刻可能已经整改好了。不说明的话，用户会
+                   照着一个过期结论去反复检查一台已经合规的机器。 -->
+              <div v-if="!postureSynced" class="ck-denied__h">
+                注意：本次接入前的终端环境上报未完成（超时或网络失败），上面的理由可能来自
+                控制面上一次的判定，未必反映此刻的终端状态。请确认网络通畅后重试一次；
+                若终端刚整改过，重试即可让新结果生效。
+              </div>
               <div class="ck-denied__h">隧道已断开。请联系管理员解除后重试——重复接入不会成功。</div>
             </div>
           </div>
@@ -179,7 +188,16 @@
                 <b :class="{ ok: !switchedEndpoint }">第 {{ tun.endpointIndex }} / 共 {{ tun.endpointTotal }} 个{{ tun.endpointTotal > 1 ? '（失败自动切下一个）' : '（单落点，无容灾余量）' }}</b>
               </div>
               <div class="ck-kv"><span>加密隧道</span><b class="ok">已建立 · {{ tun.cipher }}</b></div>
-              <div class="ck-kv"><span>SPA 服务隐身</span><b class="ok">{{ tun.keepalive ? '敲门保活中 · 业务对外不可见' : '已敲门 · 业务对外不可见' }}</b></div>
+              <!-- ★这一行陈述的是**本机的敲门状态**，不替网关断言隐身效果。
+                   「业务对外不可见」取决于网关有没有启用内核态隐身（-pf），而客户端
+                   根本不知道——剖面里没有隐身回执字段。参考部署默认**不开** -pf，
+                   此时未敲门的 TCP 会完成三次握手再被 accept-then-close 断开，
+                   nmap 判 open。控制台侧那批「攻击面 = 0」已在 wave8 行动 7 改成跟随
+                   网关实测回执渲染，客户端这处当时漏了，同一条纪律只覆盖了一半。 -->
+              <div class="ck-kv">
+                <span>SPA 敲门</span>
+                <b class="ok" :title="'隐身效果（未授权者能否看到端口）由网关侧内核态防火墙决定，请在管理台「网关」页看该网关的实测回执'">{{ tun.keepalive ? '保活中 · 放行窗口持续续期' : '已完成 · 已开放行窗口' }}</b>
+              </div>
               <div class="ck-kv"><span>虚拟网卡 / IP</span><b class="dk-mono">{{ tun.dev || 'utun' }} · {{ tun.vip }}</b></div>
               <div class="ck-kv"><span>引流网段</span><b class="dk-mono">{{ tun.route }} → 隧道</b></div>
               <div v-if="isTauri" class="ck-logwrap">
@@ -202,7 +220,7 @@ import { api, fetchProfile, checkClientUpdate, type PortalLoginResp, type Client
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, type TunView } from '@/lib/tunnel';
-import { postureState, collectPosture } from '@/lib/posture';
+import { postureState, collectPosture, reportPosture } from '@/lib/posture';
 import { explainControlFailure, type TcpProbe } from '@/lib/diagnose';
 import { invoke } from '@tauri-apps/api/core';
 
@@ -356,7 +374,24 @@ async function openDownloads() {
 }
 
 /* 接入状态机 —— 真 utun 数据面 */
-const STEPS = ['请求管理员授权', '创建 utun 虚拟网卡', 'SPA 敲门 · 建立加密隧道', '受保护网段引流接管'];
+// ★第一步「终端环境检测上报」是 2026-08-21 真机验证时补上的，而且是**真做**这件事：
+// 此前 connect() 只刷新剖面（"剖面可能过期…接入前刷新一次"），却不刷新 posture——
+// 可 posture 判定是接入闸里最先拦人的那道（api.entryGates 第三道，早于隧道、早于授权）。
+// 后果在真机上抓到过：终端刚整改完（BitLocker 已开），库里还是上一次的 block，
+// 于是接入被拒、提示"终端环境不合规：磁盘已加密 未通过"——而此刻它是合规的，
+// 用户照着提示去查 BitLocker 只会更糊涂。反方向同样错：刚关掉防火墙的终端能凭
+// 一份最多 60s 前的 allow 快照照常接入。
+// 登录时 startPostureLoop 会立刻报一次，但"登录后马上点接入"必然抢在它前面——
+// 那正是这条竞态的真实触发方式。
+const STEPS = ['终端环境检测上报', '请求管理员授权', '创建 utun 虚拟网卡', 'SPA 敲门 · 建立加密隧道', '受保护网段引流接管'] as const;
+
+/** 按**名字**取步骤下标，而不是在各处写 0/1/2/3 这样的魔数。
+ *
+ *  ★这就是 STEPS 与进度映射之间那份耦合的执行方：`as const` 让参数是字面量联合类型，
+ *  于是改文案、调顺序、增删项时**编译当场报错**，而写死数字的话只会静默错位——
+ *  症状是"进度条停在'创建虚拟网卡'不动，其实隧道早就通了"，没人会为此报障，
+ *  但它会让下一个排障的人从错误的一环开始查。 */
+const stepAt = (label: (typeof STEPS)[number]) => STEPS.indexOf(label);
 const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
@@ -382,9 +417,9 @@ const denied = ref(false);            // 被控制面强制下线 / 账号禁用
 const deniedReason = ref('');
 function stepFromTun(v: TunView): number {
   if (v.ready) return STEPS.length;
-  if (v.keepalive) return 3;
-  if (v.dev) return 2;
-  return 1;
+  if (v.keepalive) return stepAt('受保护网段引流接管'); // 已在保活 → 敲门那步做完了
+  if (v.dev) return stepAt('SPA 敲门 · 建立加密隧道');   // 网卡已建 → 正在敲门 / 建隧道
+  return stepAt('创建 utun 虚拟网卡');                   // 进程起来了，还没建出网卡
 }
 
 /**
@@ -400,8 +435,31 @@ async function loadProfile(): Promise<void> {
   }
 }
 
+/** 接入前的终端环境同步是否成功（false = 上报失败或超时，本次接入用的是控制面上一次的判定）。
+ *  只在一次接入的生命周期内有意义，每次 connect() 开头重置。 */
+const postureSynced = ref(true);
+
+/** 采集 + 上报的等待上限。
+ *
+ *  采集要串行拉起好几个探测子进程（Windows 上查 BitLocker / Secure Boot / EDR 进程），
+ *  一台慢机器上几秒是正常的；但**不能没有上限**——某个 wmic/PowerShell 子进程卡死时，
+ *  用户看到的会是「点了接入，界面停在第一步不动」，而那与"网关连不上"完全同形。
+ *  超时不是失败：继续接入，只是把 postureSynced 置 false 让后续提示说得出实情。 */
+const POSTURE_SYNC_TIMEOUT = 10_000;
+
+/** 接入前同步一次终端环境判定。返回是否真的同步上了。绝不抛错、绝不阻断接入。 */
+async function syncPostureBeforeConnect(): Promise<boolean> {
+  // reportPosture 自身吞掉网络错误回 null，这里再套一层超时兜住"采集子进程卡死"。
+  const timeout = new Promise<null>((r) => setTimeout(() => r(null), POSTURE_SYNC_TIMEOUT));
+  try {
+    return (await Promise.race([reportPosture(), timeout])) !== null;
+  } catch {
+    return false;
+  }
+}
+
 async function connect() {
-  err2.value = ''; connectTimedOut.value = false; denied.value = false; deniedReason.value = '';
+  err2.value = ''; connectTimedOut.value = false; denied.value = false; deniedReason.value = ''; postureSynced.value = true;
   if (!isTauri) { await connectDev(); return; }   // 浏览器联调：真敲门探测，不接管流量
   // 剖面可能过期（管理员改了资源/网关重启换了证书指纹），接入前刷新一次，
   // 拿到的路由表与钉扎指纹才与当前策略一致。
@@ -420,7 +478,19 @@ async function connect() {
   // 现在改成**照常尝试 + 显著提示**：真连不上会在下面 25s 超时那条路上如实报出来。
   const gws = profile.data?.gateways?.length ? profile.data.gateways : profile.data ? [profile.data.gateway] : [];
   allOffline.value = gws.length > 0 && !gws.some((g) => g.online);
-  stage.value = 'connecting'; step.value = 0;
+  stage.value = 'connecting'; step.value = stepAt('终端环境检测上报');
+  // ── 第 0 步：把**此刻**的终端环境交给控制面重新判定 ──
+  //
+  // 必须等它回来再往下走：baidi-tun 一被拉起来就去换敲门令牌，而那道闸读的是
+  // posture_reports 里的最新一条。不等的话，判定用的是上一次上报的快照——
+  // 真机上实测过差 1 秒的时序（敲门被拒 14:16:09，判定解除 14:16:11）。
+  //
+  // best-effort：上报失败/超时**不阻断接入**（网络抖一下不该让人连不上），
+  // 但要把"这次没同步上"记下来——它是随后那句"终端环境不合规"的重要背景，
+  // 见下面 denied 区块里的附注。判不了就说判不了，别让用户对着一个可能过期的
+  // 结论去排查自己的机器。
+  postureSynced.value = await syncPostureBeforeConnect();
+  step.value = stepAt('请求管理员授权');
   try {
     await tunnelStart();                            // 触发管理员授权 + 后台拉起 baidi-tun（root）
   } catch (e) {
@@ -428,7 +498,7 @@ async function connect() {
     err2.value = String((e as Error)?.message ?? e);
     return;
   }
-  step.value = 1;
+  step.value = stepAt('创建 utun 虚拟网卡');
   startPolling();
   clearTimeout(connectTO);
   connectTO = window.setTimeout(() => {

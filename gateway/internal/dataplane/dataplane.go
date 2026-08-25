@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
+	"github.com/emmansun/gmsm/smx509"
 	"golang.zx2c4.com/wireguard/tun"
 
 	"baidi.dev/gateway/internal/knock"
@@ -384,9 +385,20 @@ func (t *tunneler) dialTunnel(dst string) (net.Conn, Endpoint, error) {
 func (t *tunneler) dialEndpoint(ep Endpoint) (net.Conn, error) {
 	d := &net.Dialer{Timeout: 5 * time.Second}
 	if t.cfg.Gm {
-		// 国密路径走 TLCP 的 CA 链校验，信任材料与指纹钉扎完全不同、不可混用，
-		// 故这里不读 ep.Pin（网关证书由国密 CA 签，客户端认的是那条链）。
-		return tlcp.DialWithDialer(d, "tcp", ep.ProxyAddr, t.cfg.TLCPConfig)
+		// ★国密路径同样做指纹钉扎（此前这里完全不认证服务端，见 PinVerifier 的说明）。
+		// 钉扎与 CA 链校验不互斥：链校验（RootCAs）在有 CA 时照常生效，钉扎是**额外**
+		// 那一层"只认这一张证书"；没有 CA、且客户端带 -insecure 时，钉扎就是唯一的
+		// 服务端身份保证——而那正是参考部署的形态（网关证书自签，客户端手里没有国密 CA）。
+		cfg := t.cfg.TLCPConfig
+		if ep.Pin != "" {
+			c := cfg.Clone()
+			c.VerifyPeerCertificate = PinVerifierTLCP(ep.Pin)
+			cfg = c
+		} else {
+			slog.Warn("国密隧道未启用证书钉扎（控制面未下发该落点的证书指纹）：若同时带 -insecure 则不认证网关身份",
+				"gateway", ep.Label())
+		}
+		return tlcp.DialWithDialer(d, "tcp", ep.ProxyAddr, cfg)
 	}
 	return tls.DialWithDialer(d, "tcp", ep.ProxyAddr, tlsClientConfig(ep.Pin))
 }
@@ -424,26 +436,57 @@ func tlsClientConfig(pin string) *tls.Config {
 		slog.Warn("隧道未启用证书钉扎（控制面未下发网关证书指纹）：链路加密但不认证网关身份")
 		return &tls.Config{InsecureSkipVerify: true}
 	}
-	want := strings.ToLower(strings.TrimSpace(pin))
 	return &tls.Config{
 		// 自签证书过不了链校验，故关闭内建校验，改由下面的回调做钉扎——
 		// 回调返回 error 即中止握手，安全性由钉扎承担。
-		InsecureSkipVerify: true,
-		VerifyPeerCertificate: func(rawCerts [][]byte, _ [][]*x509.Certificate) error {
-			if len(rawCerts) == 0 {
-				return errors.New("网关未出示证书")
-			}
-			// 与网关 certFingerprint 同口径：对叶子证书 DER 原文取 SHA-256。
-			sum := sha256.Sum256(rawCerts[0])
-			got := hex.EncodeToString(sum[:])
-			// 定长比较用 subtle.ConstantTimeCompare：指纹比对虽非高价值侧信道目标，
-			// 但常数时间比较无额外成本，不给计时侧信道留口子。
-			if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
-				return fmt.Errorf("网关证书指纹不匹配（疑似中间人）：期望 %s，实得 %s", want, got)
-			}
-			return nil
-		},
+		InsecureSkipVerify:    true,
+		VerifyPeerCertificate: PinVerifier(pin),
 	}
+}
+
+// PinVerifier 生成一个「只认这一张证书」的对端校验回调。
+//
+// ★抽出来是为了让**国密 TLCP 路径也能用同一份判据**（tlcp.Config 的
+// VerifyPeerCertificate 与 crypto/tls 同签名，且 gotlcp 明确写明
+// 「InsecureSkipVerify 与 ClientAuth 不影响该函数运行」）。
+//
+// 此前 TLCP 那条路上没有任何服务端认证：
+//   - 网关侧**专门**算了 TLCP 签名证书的指纹上报（cmd/baidi-gateway/main.go，
+//     注释写着"钉扎必须钉签名证书，否则客户端永远比对不上"）；
+//   - 控制面经接入剖面把它下发到客户端；
+//   - 而 dialEndpoint 的 gm 分支不读 ep.Pin（注释说"走 CA 链校验"），
+//     桌面客户端又在 gm 时无条件附加 -insecure（把那条链校验也关掉）。
+// 三处注释各自看着都合理，合起来是「谁都没在做校验」——而 gm 是**默认开**的，
+// 也就是参考部署下隧道服务端身份零校验，中间人可直接冒充网关。
+// ★判据只写一遍，两条路径各自套一层签名适配：crypto/tls 与 gotlcp 的
+// VerifyPeerCertificate 第二个参数类型不同（x509 / smx509），但**钉扎根本不看它**
+// ——只认 rawCerts[0]。让两边共用同一个 matchPin，杜绝"改了一处、另一处还在放行"。
+func matchPin(want string, rawCerts [][]byte) error {
+	if len(rawCerts) == 0 {
+		return errors.New("网关未出示证书")
+	}
+	// 与网关 certFingerprint 同口径：对叶子证书 DER 原文取 SHA-256。
+	// TLCP 双证书握手中 rawCerts[0] 是**签名证书**，与网关上报的那份一致。
+	sum := sha256.Sum256(rawCerts[0])
+	got := hex.EncodeToString(sum[:])
+	// 定长比较用 subtle.ConstantTimeCompare：指纹比对虽非高价值侧信道目标，
+	// 但常数时间比较无额外成本，不给计时侧信道留口子。
+	if subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		return fmt.Errorf("网关证书指纹不匹配（疑似中间人）：期望 %s，实得 %s", want, got)
+	}
+	return nil
+}
+
+// PinVerifier 通用 TLS 路径的钉扎回调。
+func PinVerifier(pin string) func(rawCerts [][]byte, verifiedChains [][]*x509.Certificate) error {
+	want := strings.ToLower(strings.TrimSpace(pin))
+	return func(rawCerts [][]byte, _ [][]*x509.Certificate) error { return matchPin(want, rawCerts) }
+}
+
+// PinVerifierTLCP 国密 TLCP 路径的钉扎回调（判据与 PinVerifier 同源）。
+func PinVerifierTLCP(pin string) func(rawCerts [][]byte, verifiedChains [][]*smx509.Certificate) error {
+	want := strings.ToLower(strings.TrimSpace(pin))
+	return func(rawCerts [][]byte, _ [][]*smx509.Certificate) error { return matchPin(want, rawCerts) }
 }
 
 // pumpInbound：从 TUN 读 IP 包注入网络栈；dev 读错（关闭）即返回该错误。

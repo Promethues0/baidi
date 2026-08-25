@@ -199,7 +199,12 @@ struct TunOpts {
     // join(',') 后传入——只接管单一手填网段正是「隧道通了但点开应用不走隧道」的根因。
     route: String,
     ip: String, // utun 虚拟 IP，如 10.99.0.2
-    gm: bool,   // 国密 TLCP 隧道（自签网关证书 → 附带 -insecure 跳过校验）
+    // gm 国密 TLCP 隧道。附带的 -insecure 关掉的是 **CA 链**校验（网关证书自签，
+    // 客户端手里也没有国密 CA），**不等于不认证网关身份**——证书指纹钉扎独立生效，
+    // 且 gotlcp 明确写明 InsecureSkipVerify 不影响 VerifyPeerCertificate 运行。
+    // ★这条注释此前只写了"跳过校验"，而数据面 gm 分支当时确实不读 pin，
+    //   合起来就是默认配置下隧道服务端零认证——修复见 dataplane.PinVerifierTLCP。
+    gm: bool,
     token: String, // 会话 JWT
     // resmap 控制面剖面下发的 "host:port" → 资源 id 映射（JSON 字符串）。
     // 空串表示没有可路由资源，此时不写文件、不传 -resmap，隧道回退网关默认后端。
@@ -316,10 +321,16 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     }
     if opts.gm {
         args.push("-gm".into());
+        // -insecure 只关 CA 链校验（自签证书 + 客户端无国密 CA 的常规姿态）；
+        // 服务端身份由下面的 -pin 指纹钉扎承担，两者不互斥。
         args.push("-insecure".into());
-    } else if !opts.pin.trim().is_empty() {
-        // 通用 TLS 隧道：用控制面下发的指纹钉扎网关证书。国密路径走 TLCP 的 CA 校验，
-        // 两条路径的信任材料不同，不能混用，故只在非 -gm 时传 -pin。
+    }
+    // ★指纹**两条路径都要传**：国密 TLCP 与通用 TLS 现在共用同一份钉扎判据
+    //   （dataplane.matchPin）。此前只在非 gm 分支传，而 gm 是默认开的——
+    //   于是参考部署下控制面辛苦下发的 tunnelPin 被装载后原样丢弃，
+    //   隧道零服务端认证，中间人可直接冒充网关，且日志里一个字都没有。
+    //   注：多落点时权威来源是 -gateways 清单里逐落点各自的 pin，这里是单落点旧入口。
+    if !opts.pin.trim().is_empty() {
         args.push("-pin".into());
         args.push(opts.pin.trim().into());
     }

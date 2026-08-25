@@ -47,9 +47,12 @@ func main() {
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP，否则通用 TLS")
 	caDir := flag.String("ca", "certs", "CA 证书目录（国密隧道校验网关证书链）")
 	serverName := flag.String("servername", "baidi-gateway", "校验的服务器名（须在网关证书 SAN 内）")
-	insecure := flag.Bool("insecure", false, "跳过证书校验（仅排障）")
+	insecure := flag.Bool("insecure", false,
+		"国密 TLCP 跳过 CA **链**校验（自签网关证书的常规姿态）。★它不再等于"+
+			"「不认证网关身份」——只要控制面下发了证书指纹，钉扎照常生效且是**更严**的一层；"+
+			"两者都没有时才是真的零认证，启动日志会当面写出来")
 	resmapPath := flag.String("resmap", "", "\"host:port\"→资源id 映射 JSON 文件（多资源路由；由控制面剖面生成，空=用 -resource 默认）")
-	pin := flag.String("pin", "", "网关隧道证书 SHA-256 指纹（hex，控制面剖面下发）：对通用 TLS 隧道做证书钉扎；空=不认证网关身份")
+	pin := flag.String("pin", "", "网关隧道证书 SHA-256 指纹（hex，控制面剖面下发）：对通用 TLS **与国密 TLCP** 隧道都做证书钉扎；空=不认证网关身份")
 	defaultRes := flag.String("resource", "", "默认资源 id（resmap 未命中时用；空=网关回退默认后端）")
 	control := flag.String("control", "", "baidi-control 地址（必填）：换短时效一次性敲门令牌 + 定期保活续窗")
 	reknock := flag.Duration("reknock", 15*time.Second, "敲门保活间隔（须 < 网关 SPA TTL；-control 模式生效）")
@@ -76,7 +79,14 @@ func main() {
 		log.Fatal("需 -control（baidi-control 地址）：敲门令牌的唯一合规来源")
 	}
 
-	// 国密隧道客户端配置：默认 CA 根校验，-insecure 仅排障
+	// 国密隧道客户端配置。
+	//
+	// ★认证姿态有两层，互不替代：
+	//   ① 证书指纹钉扎——由控制面经接入剖面逐落点下发，在 dataplane.dialEndpoint 里生效，
+	//      **不受 -insecure 影响**（gotlcp 明确写明 VerifyPeerCertificate 照跑）。这是
+	//      参考部署下唯一的服务端身份保证（网关证书自签，客户端手里没有国密 CA）。
+	//   ② CA 链校验——需要 -ca 指向国密 CA 目录；-insecure 关掉的是**这一层**。
+	// 两层都没有时才是真的零认证，下面会当面打 WARN。
 	tlcpCfg := &tlcp.Config{ServerName: *serverName}
 	if *gm {
 		if *insecure {
@@ -98,6 +108,32 @@ func main() {
 	endpoints, err := loadGateways(*gatewaysPath, *spaAddr, *proxyAddr, *pin)
 	if err != nil {
 		log.Fatalf("网关落点清单不可用: %v", err)
+	}
+	// ★隧道服务端认证姿态必须是**回执**而不是断言：逐落点报出它此刻到底靠什么认网关。
+	//   零认证这件事绝不能只存在于代码里——它此前正是这样：gm 默认开、客户端恒传
+	//   -insecure、数据面 gm 分支又不读 pin，三处各自看着合理，合起来是中间人可直接
+	//   冒充网关，而日志里一个字都没有。
+	{
+		pinned, bare := 0, make([]string, 0, len(endpoints))
+		for _, e := range endpoints {
+			if e.Pin != "" {
+				pinned++
+			} else {
+				bare = append(bare, e.Label())
+			}
+		}
+		switch {
+		case pinned == len(endpoints):
+			slog.Info("隧道服务端认证：全部落点已启用证书指纹钉扎",
+				"落点数", len(endpoints), "国密", *gm, "链校验", *gm && !*insecure)
+		case pinned > 0:
+			slog.Warn("隧道服务端认证：部分落点无证书指纹，切换到它们时不认证网关身份",
+				"已钉扎", pinned, "未钉扎", strings.Join(bare, ","))
+		default:
+			slog.Warn("⚠ 隧道服务端**零认证**：控制面未下发任何证书指纹"+
+				"（国密路径若同时带 -insecure 则链校验也已关闭）——链路加密，但无法证明对面就是你的网关",
+				"落点数", len(endpoints), "国密", *gm, "insecure", *insecure)
+		}
 	}
 	if len(endpoints) == 1 {
 		slog.Info("只有一个网关落点：无故障转移余量", "gateway", endpoints[0].ProxyAddr)

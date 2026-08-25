@@ -1,0 +1,58 @@
+// 白帝安卓数据面运行态 · 进程内单例
+//
+// ★为什么需要它：桥的 startTunnel 是 @JavascriptInterface，返回 Unit——JS 侧结构上
+// 拿不到任何结果。改造前 BRIDGE_JS 因此写成「600ms 后无条件 resolve {ok:true,
+// detail:'VpnService 已建立隧道'}」，于是：用户拒绝 VPN 授权、TUN 建不出来、
+// 引擎起不来、网关连不上……UI 一律显示「已接入企业内网」。
+//
+// baidimobile.Session 早就提供了 Running()/Reason()（注释明写"供移动端 UI 轮询观察终态"），
+// 只是**全仓零消费方**。这个单例就是把那份真状态接出来的地方。
+package dev.baidi.mobile
+
+import baidimobile.Session
+
+object TunnelState {
+    /** 阶段：idle=未接入 / starting=已下发但尚未确认 / up=引擎在跑 / failed=起不来或已中断 */
+    @Volatile var stage: String = "idle"
+        private set
+
+    /** 失败或中断的原因（可直接显示给用户）；运行中为空。 */
+    @Volatile var reason: String = ""
+        private set
+
+    @Volatile private var session: Session? = null
+
+    @Synchronized fun markStarting() {
+        stage = "starting"; reason = ""; session = null
+    }
+
+    @Synchronized fun markUp(s: Session) {
+        session = s; stage = "up"; reason = ""
+    }
+
+    /** 起不来（VPN 未授权 / TUN 建不出 / 引擎启动报错）。why 必须是人能照着做的一句话。 */
+    @Synchronized fun markFailed(why: String) {
+        session = null; stage = "failed"; reason = why
+    }
+
+    @Synchronized fun markStopped() {
+        session?.stop(); session = null; stage = "idle"; reason = ""
+    }
+
+    /**
+     * 当前真实状态。**每次都问引擎**（Session.Running()），不缓存——
+     * 引擎因强制下线 / 账号禁用 / 终端合规阻断而停机时，stage 必须跟着翻，
+     * 否则 UI 会一直显示「已接入」而隧道早就断了。
+     */
+    @Synchronized fun snapshot(): String {
+        val s = session
+        if (stage == "up" && s != null && !s.running()) {
+            // 引擎自己停了：Reason() 带出可显示的原因（区别于用户主动断开）
+            val r = s.reason()
+            session = null
+            stage = "failed"
+            reason = if (r.isNullOrBlank()) "隧道已中断（原因未知）" else r
+        }
+        return """{"stage":"$stage","reason":"${reason.replace("\"", "\\\"")}"}"""
+    }
+}

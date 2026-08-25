@@ -14,6 +14,7 @@
  * 隧道可达性探测——同桌面 dev 路径，便于在移动视口里验证 UI 与后端链路。
  */
 import { config } from './store';
+import { api } from './api';
 
 export interface TunnelResult { ok: boolean; detail?: string }
 
@@ -26,6 +27,41 @@ export interface TunnelConfig {
   route: string;     // 受保护网段（引流进 TUN）
   ip: string;        // utun 虚拟 IP
   gm: boolean;       // 国密 TLCP 隧道
+  // ★以下三项来自控制面接入剖面，此前**整条链路上都不存在**：
+  //   pin 缺席 → 隧道对网关身份零校验（桌面端专门做的钉扎在移动端结构性没有）；
+  //   resmap 缺席 → 每条连接都不发 CONNECT 前导，落进网关那条跳过资源鉴权的回退路径
+  //   （wave9 已把它改成 fail-closed，所以现在缺 resmap = 什么都访问不到，而非"越权访问"）。
+  pin: string;              // 网关隧道证书 SHA-256 指纹（hex）
+  resmap: string;           // {"host:port":"资源id"} 的 JSON 串（gomobile 不能传 map）
+  defaultResource: string;  // 默认资源 id（resmap 未命中时的兜底，通常为空）
+}
+
+/** 接入剖面里本端要用的那几项（GET /client/profile 的子集）。 */
+interface ProfileLite {
+  gateway?: { host?: string; spaPort?: string; proxyPort?: string; tunnelPin?: string };
+  routes?: string[];
+  tunIP?: string;
+  resmap?: Record<string, string>;
+}
+
+/** 最近一次成功拉取的接入剖面。null = 还没拉到（此时回退到「我的」页的手填配置）。 */
+let profile: ProfileLite | null = null;
+
+/**
+ * 拉取接入剖面。**接入前必须调一次**——网关落点、该接管哪些网段、资源映射、
+ * 证书指纹全都只有控制面知道，终端不该自己猜（同桌面端 loadProfile 的纪律）。
+ *
+ * 拉不到不阻断接入：退回手填配置并把原因交给调用方显示——但那种接入多半是
+ * 「隧道起来了却什么都访问不了」的半成功状态（无 resmap → 无前导 → 网关 fail-closed）。
+ */
+export async function loadProfile(): Promise<string> {
+  try {
+    profile = await api<ProfileLite>('/client/profile');
+    return '';
+  } catch (e) {
+    profile = null;
+    return String((e as Error)?.message ?? e);
+  }
 }
 
 interface NativeBridge {
@@ -53,24 +89,39 @@ export function platformLabel(): string {
  *  而网关 strict 模式下没有 control 就换不到敲门令牌，隧道直接连不上。 */
 export function tunnelConfig(): TunnelConfig {
   const nb = (window as unknown as { __BAIDI_NATIVE__?: { apiBase?: string } }).__BAIDI_NATIVE__;
+  const g = profile?.gateway;
+  // 剖面优先、手填兜底：控制面同时知道网关在哪、业务在哪、当前用户有权访问什么，
+  // 三者只有它凑得齐；手填配置只是剖面拉不到时的降级。
+  const routes = profile?.routes?.length ? profile.routes.join(',') : config.route;
+  const resmap = profile?.resmap && Object.keys(profile.resmap).length
+    ? JSON.stringify(profile.resmap) : '';
   return {
     control: (nb?.apiBase || config.control || '').replace(/\/+$/, ''),
-    gateway: config.gateway,
-    spaPort: config.spaPort,
-    proxyPort: config.proxyPort,
-    route: config.route,
-    ip: config.ip,
-    gm: config.gm
+    gateway: g?.host || config.gateway,
+    spaPort: g?.spaPort || config.spaPort,
+    proxyPort: g?.proxyPort || config.proxyPort,
+    route: routes,
+    ip: profile?.tunIP || config.ip,
+    gm: config.gm,
+    pin: g?.tunnelPin || '',
+    resmap,
+    defaultResource: ''
   };
 }
 
 /** 接入信息卡展示用（真实来自当前配置，而非硬编码）。 */
 export function tunnelInfo() {
+  const c = tunnelConfig();
   return {
-    gateway: config.gateway ? `${config.gateway}:${config.proxyPort}` : '（原生下发）',
-    vip: config.ip,
-    route: config.route,
-    cipher: config.gm ? '国密 TLCP · SM2 / SM4-GCM / SM3' : '通用 TLS 1.3'
+    gateway: c.gateway ? `${c.gateway}:${c.proxyPort}` : '（原生下发）',
+    vip: c.ip,
+    route: c.route,
+    // ★算法名后面要跟上**是否认证了网关身份**：只写"国密 TLCP · SM2/SM4-GCM/SM3"
+    //   读起来比钉扎那档还强，而它此前恰恰是零认证的那一档。
+    cipher: (c.gm ? '国密 TLCP · SM2 / SM4-GCM / SM3' : '通用 TLS 1.3')
+      + (c.pin ? ' · 已钉扎网关证书' : ' · 未钉扎（加密但不认证网关身份）'),
+    pinned: !!c.pin,
+    resources: c.resmap ? Object.keys(JSON.parse(c.resmap)).length : 0
   };
 }
 

@@ -8,8 +8,10 @@
 package baidimobile
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -32,6 +34,21 @@ type Config struct {
 	ServerName      string // 校验的服务器名（须命中网关证书 SAN）
 	DefaultResource string // 默认资源 id（隧道前导 CONNECT）
 	Mtu             int    // 链路 MTU（默认 1420）
+
+	// Pin 网关隧道证书的 SHA-256 指纹（hex，控制面经接入剖面下发）。
+	//
+	// ★此前这个字段**不存在**，于是移动端隧道对网关身份一个字节都不校验：
+	// 通用 TLS 走 InsecureSkipVerify 且无回调，国密 TLCP 因 CaPEM 恒空同样跳过——
+	// 而控制面剖面里明明逐网关下发了 tunnelPin。桌面端专门做的「隧道证书钉扎」
+	// 在移动端结构性不存在，ARCHITECTURE 第七节那张表却把它列为已实现且不带限定。
+	Pin string
+
+	// ResmapJSON 目的地址 → 资源 id 的映射表，JSON 对象字符串（如 {"10.99.0.36:8080":"oa"}）。
+	//
+	// ★gomobile 不能导出 map，故用 JSON 串；解析失败**不静默忽略**，Start 直接报错——
+	// 静默忽略的后果是每条连接都退化成"不发 CONNECT 前导"，而网关对无前导连接
+	// 自 wave9 起 fail-closed（此前更糟：直连默认后端且完全跳过资源鉴权）。
+	ResmapJSON string
 }
 
 // Session 运行中的隧道句柄。移动端 UI 轮询 Running()/Reason() 观察终态——
@@ -84,6 +101,13 @@ func Start(tunFd int, c *Config) (*Session, error) {
 	if c.Control == "" {
 		return nil, errors.New("缺少控制中心地址（敲门令牌的唯一合规来源）")
 	}
+	// ★配置解析一律排在建 TUN **之前**：填错要在动系统状态之前失败
+	//   （同 baidi-tun 里 loadGateways 那条纪律）。放在后面的话，坏配置会先
+	//   建出一张 TUN、再报一个与真实成因无关的错——本用例就是这么抓到的。
+	resmap, err := parseResmap(c.ResmapJSON)
+	if err != nil {
+		return nil, err
+	}
 	mtu := c.Mtu
 	if mtu <= 0 {
 		mtu = 1420
@@ -91,6 +115,12 @@ func Start(tunFd int, c *Config) (*Session, error) {
 
 	tlcpCfg := &tlcp.Config{ServerName: c.ServerName}
 	if c.Gm {
+		// 指纹钉扎与 CA 链校验并存、互不替代（gotlcp 明确写明 InsecureSkipVerify
+		// 不影响 VerifyPeerCertificate 运行）。参考部署下网关证书自签、移动端手里
+		// 也没有国密 CA，钉扎因此是**唯一**的服务端身份保证——桌面端同款判据。
+		if c.Pin != "" {
+			tlcpCfg.VerifyPeerCertificate = dataplane.PinVerifierTLCP(c.Pin)
+		}
 		if c.CaPEM == "" {
 			tlcpCfg.InsecureSkipVerify = true
 		} else {
@@ -112,11 +142,27 @@ func Start(tunFd int, c *Config) (*Session, error) {
 	cfg := &dataplane.Config{
 		SpaAddr: c.SpaAddr, ProxyAddr: c.ProxyAddr, Token: c.Token, Control: c.Control,
 		Gm: c.Gm, TLCPConfig: tlcpCfg, DefaultRes: c.DefaultResource,
+		TunnelPin: c.Pin, Resmap: resmap,
 		Reknock: 15 * time.Second, MTU: mtu,
 	}
 	sess := &Session{dev: dev}
 	go func() { sess.markStopped(dataplane.Run(dev, cfg)) }()
 	return sess, nil
+}
+
+// parseResmap 解析 gomobile 侧传来的 JSON 映射表。空串 = 没有映射（合法：纯默认资源场景）。
+// ★坏 JSON 一律报错而不是当空表：当空表的话，每条连接都不发 CONNECT 前导，
+// 而网关对无前导连接 fail-closed——用户看到的会是"隧道建起来了但什么都访问不了"，
+// 且两侧日志都不会说是映射表坏了。
+func parseResmap(s string) (map[string]string, error) {
+	if strings.TrimSpace(s) == "" {
+		return nil, nil
+	}
+	m := map[string]string{}
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		return nil, errors.New("资源映射表不是 {\"host:port\":\"资源id\"} 形式的 JSON: " + err.Error())
+	}
+	return m, nil
 }
 
 // Stop 关闭隧道（关 TUN → 引擎双向泵退出）。

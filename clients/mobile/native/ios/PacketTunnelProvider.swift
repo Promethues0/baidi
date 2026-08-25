@@ -49,6 +49,13 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             cfg.caPEM      = (opts["caPEM"] as? String)   ?? ""
             cfg.serverName = "baidi-gateway"
             cfg.mtu        = 1420
+            // ★钉扎指纹与资源映射：由控制面接入剖面下发。缺了它们，隧道对网关身份
+            //   零校验、且每条连接都不发 CONNECT 前导（网关侧对无前导连接 fail-closed）。
+            //   本文件目前没有 Xcode 工程（见 clients/BUILD.md 第九节），但必须与
+            //   Android 侧保持同构——否则建工程那天会原样复现同一个洞。
+            cfg.pin             = (opts["pin"] as? String)             ?? ""
+            cfg.resmapJSON      = (opts["resmap"] as? String)          ?? ""
+            cfg.defaultResource = (opts["defaultResource"] as? String) ?? ""
 
             var startErr: NSError?
             self.session = BaidimobileStart(fd, cfg, &startErr)

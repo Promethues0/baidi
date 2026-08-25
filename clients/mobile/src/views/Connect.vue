@@ -30,12 +30,20 @@
     <!-- 已接入信息（真实来自当前接入配置） -->
     <div v-else-if="stage === 'connected'" class="m-card cn__info">
       <div class="cn__info-row"><span>安全网关</span><b class="m-mono">{{ ti.gateway }}</b></div>
-      <div class="cn__info-row"><span>隧道加密</span><b>{{ ti.cipher }}</b></div>
+      <!-- 算法名后面必须跟上「有没有认证网关身份」：只写 SM2/SM4-GCM/SM3 读起来
+           比钉扎那档还强，而移动端此前恰恰是零认证的那一档（Config 里连 pin 字段都没有）。 -->
+      <div class="cn__info-row"><span>隧道加密</span><b :class="{ ok: ti.pinned }">{{ ti.cipher }}</b></div>
+      <div class="cn__info-row"><span>可达资源</span><b>{{ ti.resources ? ti.resources + ' 项（经资源映射鉴权）' : '（无资源映射）' }}</b></div>
       <!-- 同桌面端：只说本机敲门状态，不替网关断言隐身效果（客户端拿不到那份回执，
            而参考部署默认不开 -pf，未敲门的 TCP 仍会被 nmap 判 open）。 -->
       <div class="cn__info-row"><span>SPA 敲门</span><b class="ok">已完成 · 已开放行窗口</b></div>
       <div class="cn__info-row"><span>受保护网段</span><b class="m-mono">{{ ti.route }} → 隧道</b></div>
       <div class="cn__info-row"><span>虚拟 IP</span><b class="m-mono">{{ ti.vip }}</b></div>
+      <!-- 剖面拉不到时的降级必须当面说：这种接入多半是"隧道起来了却什么都访问不了"。 -->
+      <div v-if="profileErr" class="cn__warn2">
+        接入剖面未取到（{{ profileErr }}），本次使用「我的」页手填配置：
+        网关落点 / 受保护网段 / 资源映射 / 证书指纹均非控制面下发，业务多半访问不到。
+      </div>
     </div>
 
     <!-- 终端环境检测：移动端**尚未实现采集**，如实说明而不是画一张全绿的卡片。
@@ -64,7 +72,7 @@ import {
   IconPoweroff, IconCheckCircleFill, IconCheck, IconLoading
 } from '@arco-design/web-vue/es/icon';
 import { session, validateConfig } from '@/lib/store';
-import { startTunnel, stopTunnel, platformLabel, tunnelInfo } from '@/lib/vpn';
+import { startTunnel, stopTunnel, platformLabel, tunnelInfo, loadProfile } from '@/lib/vpn';
 
 // ★「终端环境检测上报」这一步已删除：移动端根本没有采集能力（见模板里的说明），
 // 而它此前是一句 `await sleep(500)` 假装出来的——进度条走过一步，什么都没发生。
@@ -77,6 +85,9 @@ const step = ref(0);
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入企业内网' : stage.value === 'connecting' ? '正在接入' : '未接入'));
 const stageDot = computed(() => (stage.value === 'connected' ? '● 在线' : stage.value === 'connecting' ? '◐ 连接中' : '○ 离线'));
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+/** 接入前拉剖面失败的原因。非空时接入信息卡上会当面写出来——退回手填配置的接入
+ *  多半是半成功状态（无资源映射 → 发不出 CONNECT 前导 → 网关 fail-closed）。 */
+const profileErr = ref('');
 
 
 function toggle() {
@@ -88,6 +99,12 @@ async function connect() {
   const bad = validateConfig();
   if (bad) { Message.warning(bad); return; }   // 接入前配置校验（端口/网段/虚拟IP/控制中心）
   stage.value = 'connecting'; step.value = 0;
+  // ★接入前拉一次接入剖面。移动端此前**全仓零处**拉它，接入配置全靠用户在「我的」页手填——
+  //   于是网关落点、受保护网段、资源映射、证书指纹一概由终端自己猜，而只有控制面
+  //   同时知道这四样。拉不到不阻断（退回手填配置），但要把原因说出来：那种接入多半是
+  //   「隧道起来了却什么都访问不了」——无 resmap 就发不出 CONNECT 前导，而网关对
+  //   无前导连接是 fail-closed 的。
+  profileErr.value = await loadProfile();
   // ① SPA 敲门 —— 这一步是**真的**：携带 JWT 身份，原生壳里交给 VPN 扩展发包，
   //    dev 浏览器里经 knock-agent 发真实 SPA 单包。
   const r = await startTunnel(session.token);
@@ -163,4 +180,6 @@ async function disconnect() {
 .cn__p-ic { font-size: 17px; }
 .cn__p-ic.ok { color: var(--bd-success); }
 .cn__p-ic.bad { color: var(--bd-danger); }
+.cn__warn2 { margin-top: 10px; padding: 9px 11px; font-size: 12px; line-height: 1.65;
+  color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); border-radius: 8px; }
 </style>

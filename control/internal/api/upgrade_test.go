@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/upgrade"
 
@@ -229,36 +230,51 @@ func keysOf(m map[string][]byte) []string {
 //     而各网关 L7 监听装的还是旧的 web.pub → 所有 B/S 应用点开都验不过票，
 //     而隧道路径一切正常（最难往"备份缺了个文件"上想的一种失效）。
 //
-// 现在：库/审计密钥问 store 要真正在用的那份，三把签名私钥逐一收集。
+//   - **本轮（wave9）**：上面那次修复只补齐了"少列哪几项"，判据仍是
+//     `os.Getenv("BAIDI_JWT_*_KEY")` 与 `os.Getenv("BAIDI_PKI_DIR")`——而这四项在
+//     config 里**都有非空默认值**（jwt-ed25519{,-knock,-web}.pem / pki）。标准部署
+//     根本不设那些环境变量，于是四项材料在 add() 里因空路径被静默跳过，
+//     备份照样"成功"、备机校验（解得开 + 含 baidi.db）照样通过。
+//     ★而这条用例当时是靠 `t.Setenv` 设上环境变量才通过的——它证明的是
+//     「设了环境变量时收得到」，恰恰守不住真实部署那种不设的形态，
+//     给了一种虚假的安全感。现在改成：**一个环境变量都不设**，用真实装载的
+//     Keys/CA（它们各自记住自己实际装载自哪里），与 store.AuditKeyPath() 同构。
+//
+// 现在：库/审计密钥/三把签名私钥/内部 CA，一律问**真正在用它们的那个对象**要路径。
 func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 	dir := t.TempDir()
-	// 三把签名密钥各造一份（内容不重要，测的是"有没有被收进备份"）
-	for _, k := range []struct{ env, name string }{
-		{"BAIDI_JWT_KEY", "jwt-ed25519.pem"},
-		{"BAIDI_JWT_KNOCK_KEY", "jwt-ed25519-knock.pem"},
-		{"BAIDI_JWT_WEB_KEY", "jwt-ed25519-web.pem"},
+	// ★一个环境变量都不设——这正是标准部署的形态，也是旧判据失效的地方。
+	for _, k := range []string{
+		"BAIDI_PKI_DIR", "BAIDI_JWT_KEY", "BAIDI_JWT_KNOCK_KEY", "BAIDI_JWT_WEB_KEY",
+		"BAIDI_AUDIT_HMAC_KEY_FILE",
 	} {
-		p := filepath.Join(dir, k.name)
-		if err := os.WriteFile(p, []byte("-----BEGIN PRIVATE KEY-----\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(p+".pub", []byte("-----BEGIN PUBLIC KEY-----\n"), 0o644); err != nil {
-			t.Fatal(err)
-		}
-		t.Setenv(k.env, p)
+		t.Setenv(k, "")
+		_ = os.Unsetenv(k)
 	}
-	// ★刻意**不设** BAIDI_AUDIT_HMAC_KEY_FILE：这正是出问题的那种标准部署。
+	// 三把私钥落在真实路径上；LoadOrCreateKeys 会记住它们（auth.Keys.Paths()）。
+	realKeys, err := auth.LoadOrCreateKeys(
+		filepath.Join(dir, "jwt-ed25519.pem"),
+		filepath.Join(dir, "jwt-ed25519-knock.pem"),
+		filepath.Join(dir, "jwt-ed25519-web.pem"), testSecret, true)
+	if err != nil {
+		t.Fatalf("生成签名密钥: %v", err)
+	}
+	ca, err := pki.LoadOrCreate(filepath.Join(dir, "pki"))
+	if err != nil {
+		t.Fatalf("生成内部 CA: %v", err)
+	}
 	st, err := store.OpenSQLite(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { st.Close() })
-	s := New(st, st, testKeys, "test", t.TempDir(), nil, nil, false)
-	h := auth.Middleware(testKeys, s.IsOpen)(s.Routes())
+	s := New(st, st, realKeys, "test", t.TempDir(), nil, ca, false)
+	h := auth.Middleware(realKeys, s.IsOpen)(s.Routes())
 
 	req := httptest.NewRequest("POST", "/api/v1/upgrade/backup",
 		strings.NewReader(`{"passphrase":"correct-horse-battery"}`))
-	req.Header.Set("Authorization", "Bearer "+adminToken())
+	req.Header.Set("Authorization", "Bearer "+realKeys.Sign(auth.Claims{
+		Sub: "admin", Role: "admin", Name: "admin"}, tokenTTL))
 	req.Header.Set("Content-Type", "application/json")
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
@@ -271,13 +287,25 @@ func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 	}
 	for _, want := range []string{
 		"baidi.db", "audit-hmac.key",
-		"jwt-ed25519.pem", "jwt-ed25519-knock.pem", "jwt-ed25519-web.pem",
-		"jwt-ed25519-web.pem.pub",
+		"jwt-ed25519.pem", "jwt-ed25519.pem.pub",
+		"jwt-ed25519-knock.pem", "jwt-ed25519-knock.pem.pub",
+		"jwt-ed25519-web.pem", "jwt-ed25519-web.pem.pub",
 	} {
 		if _, ok := files[want]; !ok {
 			t.Errorf("备份里缺 %s（恢复出来的系统会以一种没人看得出的方式坏掉）；实际：%v",
 				want, keysOf(files))
 		}
+	}
+	// 内部 CA 整个目录：丢了就签不出网关 mTLS 证书、也验不了已签发的那些——
+	// 恢复之后网关全部连不上控制面，而库、令牌、页面一切正常。
+	var hasCA bool
+	for n := range files {
+		if strings.HasPrefix(n, "pki/") {
+			hasCA = true
+		}
+	}
+	if !hasCA {
+		t.Errorf("备份里缺内部 CA 目录（pki/）；实际：%v", keysOf(files))
 	}
 }
 

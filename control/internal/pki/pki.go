@@ -39,6 +39,19 @@ type CA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
 	der  []byte
+	// dir 这套 CA 实际装载自哪个目录。★同 auth.Keys.paths：配置备份此前读
+	// os.Getenv("BAIDI_PKI_DIR") 来找它，而 config 里该项默认值是 "pki"——
+	// 标准部署不设那个环境变量，于是**内部 CA 私钥整个目录都不进备份**。
+	// 恢复后签不出网关证书、也验不了已签发的那些，网关全部连不上控制面。
+	dir string
+}
+
+// Dir 返回这套 CA 实际装载自哪个目录。供配置备份收集材料——不要再去读环境变量。
+func (c *CA) Dir() string {
+	if c == nil {
+		return ""
+	}
+	return c.dir
 }
 
 // LoadOrCreate 载入 dir 下的 CA；不存在则生成（key 0600、cert 0644，原子写）。
@@ -62,7 +75,7 @@ func LoadOrCreate(dir string) (*CA, error) {
 		if err != nil {
 			return nil, err
 		}
-		return &CA{cert: cert, key: key, der: cblk.Bytes}, nil
+		return &CA{cert: cert, key: key, der: cblk.Bytes, dir: dir}, nil
 	} else if !os.IsNotExist(err) {
 		return nil, err
 	}
@@ -102,7 +115,7 @@ func LoadOrCreate(dir string) (*CA, error) {
 	if err := writeAtomic(certPath, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der}), 0o644); err != nil {
 		return nil, err
 	}
-	return &CA{cert: cert, key: key, der: der}, nil
+	return &CA{cert: cert, key: key, der: der, dir: dir}, nil
 }
 
 // CertPEM 返回 CA 证书 PEM（分发给网关做服务端校验锚 + control 做客户端校验池）。

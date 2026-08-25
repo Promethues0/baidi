@@ -484,15 +484,27 @@ func (s *Server) backupSources(ctx context.Context) ([]upgrade.BackupSource, fun
 		return nil, func() {}, err
 	}
 	add("baidi.db", snap)
-	add("pki", os.Getenv("BAIDI_PKI_DIR"))
-	// 三把签名私钥都要进备份。**web 那把此前漏了**：恢复后 control 会重新生成一把，
-	// 而各网关 L7 监听装的还是旧的 web.pub —— 七层 Web 代理整体失效，
-	// 症状是所有 B/S 应用点开都验不过票，而隧道路径一切正常（最难往"备份缺了个文件"上想）。
-	for _, envKey := range []string{"BAIDI_JWT_KEY", "BAIDI_JWT_KNOCK_KEY", "BAIDI_JWT_WEB_KEY"} {
-		if k := os.Getenv(envKey); k != "" {
-			add(filepath.Base(k), k)
-			add(filepath.Base(k)+".pub", k+".pub")
+	// ★内部 CA 与三把签名私钥：问**真正在用它们的那个对象**要路径，绝不重读环境变量。
+	//
+	//   此前这里是 os.Getenv("BAIDI_PKI_DIR") 与三个 BAIDI_JWT_*_KEY，而这四项在
+	//   config 里**都有非空默认值**（pki / jwt-ed25519{,-knock,-web}.pem）——标准部署
+	//   根本不设那些环境变量，于是四项材料全部静默跳过（add 对空路径直接 return）。
+	//   备份照样"成功"，备机校验（解得开 + 含 baidi.db）照样通过，页面显示同步新鲜。
+	//   只在真正恢复的那天暴露：
+	//     - 内部 CA 丢了 → 签不出网关 mTLS 证书、也验不了已签发的那些 → 网关全部连不上控制面；
+	//     - 三把私钥丢了 → control 重新生成，而各网关装的还是旧公钥 → 敲门令牌验不过
+	//       （全员无法接入）、web 票据验不过（B/S 全挂）。
+	//   同一个函数里审计链密钥那条早就改成问 store 要真路径了（见下），这四项是漏网的那半。
+	if s.ca != nil {
+		add("pki", s.ca.Dir())
+	}
+	kp := s.keys.Paths()
+	for _, k := range []string{kp.Sess, kp.Knock, kp.Web} {
+		if k == "" {
+			continue
 		}
+		add(filepath.Base(k), k)
+		add(filepath.Base(k)+".pub", k+".pub")
 	}
 	// ★审计链密钥问 store 要真正在用的那份，不读环境变量。
 	// 该变量默认为空（默认路径由 OpenSQLite 按库文件目录推导），照旧写法的后果是

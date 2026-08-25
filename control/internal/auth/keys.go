@@ -59,6 +59,28 @@ type Keys struct {
 	web          keypair
 	legacy       []byte
 	acceptLegacy bool
+	// paths 三把私钥**实际装载自**哪些路径，按 LoadOrCreateKeys 收到的参数原样记下。
+	//
+	// ★为什么要记：配置备份此前读 os.Getenv("BAIDI_JWT_KEY") 等三个环境变量来找它们，
+	// 而这三项在 config 里都有非空默认值（jwt-ed25519*.pem）——标准部署根本不设那些
+	// 环境变量，于是**三把签名私钥全部静默不进备份**，而备份照样"成功"、备机校验
+	// （解得开 + 含 baidi.db）照样通过。恢复那天才发现：control 重新生成三把新私钥，
+	// 而各网关装的还是旧公钥 —— 敲门令牌验不过（全员无法接入）、web 票据验不过
+	// （B/S 全挂）。判据必须问**真正在用它的那个对象**，同 store.AuditKeyPath()。
+	paths KeyPaths
+}
+
+// KeyPaths 三把签名私钥的实际路径（公钥恒为同名 .pub）。
+type KeyPaths struct {
+	Sess, Knock, Web string
+}
+
+// Paths 返回三把私钥实际装载自哪里。供配置备份收集材料——**不要再去读环境变量**。
+func (k *Keys) Paths() KeyPaths {
+	if k == nil {
+		return KeyPaths{}
+	}
+	return k.paths
 }
 
 // KidOf 由公钥算 kid（SHA-256 前 8 字节 base64url）。
@@ -88,7 +110,8 @@ func LoadOrCreateKeys(sessPath, knockPath, webPath string, legacy []byte, accept
 	if err != nil {
 		return nil, fmt.Errorf("Web 票据签名密钥: %w", err)
 	}
-	return &Keys{sess: sess, knock: knock, web: web, legacy: legacy, acceptLegacy: acceptLegacy}, nil
+	return &Keys{sess: sess, knock: knock, web: web, legacy: legacy, acceptLegacy: acceptLegacy,
+		paths: KeyPaths{Sess: sessPath, Knock: knockPath, Web: webPath}}, nil
 }
 
 func loadKeypair(path string) (keypair, error) {

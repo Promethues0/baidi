@@ -1713,6 +1713,14 @@ func (s *Server) handleSaveResource(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// 后端拨号目标必须是 host:port。★这是这个 handler 里此前唯一没校验的字段，
+	// 而它恰恰是网关**唯一**读的那个——写成裸地址会落一条"存在但对谁都不生效"的资源，
+	// 接口回 200、列表正常，剖面静默丢弃、网关拨不出去。判据与读侧同一个
+	// net.SplitHostPort（见 appAccessState），读侧兜底保留：存量库里可能已有这样的行。
+	if err := validateBackend(res.Backend); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	// 对象库引用须指向真实对象（backend 仍是权威拨号目标，refs 仅供编辑器回填 + 反查）。
 	if res.AddrRef != "" {
 		if ok, err := s.objectExists(r.Context(), "addr", res.AddrRef); err != nil {

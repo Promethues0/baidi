@@ -208,7 +208,8 @@ var alertKindSpecs = []AlertKindSpec{
 	{
 		Kind: AlertKindAppUnlinked, Name: "应用未关联受控资源", Category: AlertCategoryAuthz,
 		Severity:    AlertSevWarning,
-		Signal:      "apps 中 status=running 且 resource_id 为空的应用（同一条信号也出现在客户端接入剖面的 warnings 里）",
+		Signal: "apps 中 status=running、mode≠global，且「未关联资源」或「关联的资源已不存在」的应用" +
+			"（与客户端接入剖面的 warnings 同一条判据；直连书签不经网关、本就不需要资源，故排除）",
 		Thresholds:  map[string]float64{},
 		ThresholdZh: map[string]string{},
 	},

@@ -18,8 +18,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -298,6 +300,39 @@ func validateWebEntry(v string) error {
 	}
 	if strings.Trim(u.Path, "/") != "" || u.RawQuery != "" || u.Fragment != "" {
 		return errors.New("对外访问入口只能填到主机[:端口]，不要带路径或查询串")
+	}
+	return nil
+}
+
+// validateBackend 校验受控资源的后端拨号目标必须是 host:port。
+//
+// ★为什么非拦不可：backend 是**网关唯一的拨号目标**（resource.Resource 里数据面只读这一个
+// 字段）。写成裸地址 "10.91.0.1" 落库后，接口回 200、资源列表看起来完全正常，而：
+//   - 客户端剖面会静默丢弃它（appAccessState 里那条 SplitHostPort 分支）；
+//   - 网关拿到也拨不出去。
+// 管理员配了一条"存在但对谁都不生效"的资源，全程零报错——正是本项目反复消灭的静默失效。
+// 控制台在「选了地址对象、没选服务对象」时就会写出这种裸地址。
+//
+// ★判据与读侧**同一个** net.SplitHostPort：两处各写一套迟早会出现"入口放行、剖面丢弃"
+// 或反过来。读侧兜底保留不动——存量库里可能已有裸地址的行，入口只能挡新写入，
+// 绝不能让旧行读不出来（那会把一次校验收紧变成一次数据不可见）。
+func validateBackend(v string) error {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return errors.New("后端地址不能为空")
+	}
+	host, port, err := net.SplitHostPort(v)
+	if err != nil {
+		// 措辞要说得出**正确形态**：笼统的"格式不对"会让人反复换写法试
+		// （同 IPSec peer 拒收 FQDN 那条的教训，wave8 行动 17）。
+		return fmt.Errorf("后端地址 %q 不是 host:port 形式——必须带端口，如 10.20.1.10:8080 或 oa.corp.internal:443（IPv6 写 [::1]:8080）", v)
+	}
+	if strings.TrimSpace(host) == "" {
+		return fmt.Errorf("后端地址 %q 缺主机名", v)
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("后端地址 %q 的端口不合法（须为 1~65535 的数字）", v)
 	}
 	return nil
 }

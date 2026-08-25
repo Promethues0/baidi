@@ -458,3 +458,84 @@ func str(v any) string {
 	s, _ := v.(string)
 	return s
 }
+
+// backend 是网关**唯一**的拨号目标，写成裸地址会落一条"存在但对谁都不生效"的资源：
+// 接口回 200、资源列表正常，而剖面静默丢弃、网关拨不出去。入口必须拦。
+//
+// ★同批钉住「收紧入口不能让存量行读不出来」：库里可能已有裸地址的行（这道校验之前写进去的），
+// 读侧的兜底判据要照旧把它标成不可用并说清原因，而不是让它从列表里消失。
+func TestSaveResourceRejectsBadBackend(t *testing.T) {
+	f := newIsoFixture(t)
+	for _, bad := range []struct{ v, why string }{
+		{"10.91.0.1", "裸地址无端口（控制台选了地址对象、没选服务对象时就会写出这个）"},
+		{"10.91.0.1:", "有冒号但端口为空"},
+		{"10.91.0.1:abc", "端口不是数字"},
+		{"10.91.0.1:0", "端口 0 不可拨"},
+		{"10.91.0.1:70000", "端口越界"},
+		{":8080", "缺主机名"},
+	} {
+		code, out := f.saveResource(map[string]any{
+			"id": "r-bad-be", "name": "坏后端", "backend": bad.v,
+		})
+		if code != http.StatusBadRequest {
+			t.Fatalf("backend=%q（%s）应 400，实得 %d: %v", bad.v, bad.why, code, out)
+		}
+	}
+	// 合法形态一律放行：IPv4 / 域名 / IPv6 字面量
+	for _, ok := range []string{"10.20.1.10:8080", "oa.corp.internal:443", "[::1]:8080"} {
+		if code, out := f.saveResource(map[string]any{
+			"id": "r-ok-" + ok, "name": "好后端", "backend": ok,
+		}); code != http.StatusOK {
+			t.Fatalf("backend=%q 应放行，实得 %d: %v", ok, code, out)
+		}
+	}
+}
+
+// 「应用未关联受控资源」告警的判据必须与客户端剖面 warnings 同真同假。
+//
+// 改造前只看 resource_id 是否为空，两个方向都错：
+//   - 悬空引用（资源被删、apps.resource_id 仍留着那个 id）漏报——而剖面会报 warning；
+//   - mode=global（直连书签）误报——它不经网关、本就不需要资源，管理员点「已处理」下轮又冒出来。
+func TestUnlinkedAppSignalMatchesProfile(t *testing.T) {
+	f := newIsoFixture(t)
+	ctx := context.Background()
+
+	if code, out := f.saveResource(map[string]any{
+		"id": "res-live", "name": "在册资源", "backend": "10.20.1.10:8080",
+	}); code != http.StatusOK {
+		t.Fatalf("建资源失败 %d: %v", code, out)
+	}
+	mk := func(name, mode, resID string) string {
+		code, out := doJSON(t, f.h, "POST", "/api/v1/apps", adminToken(), map[string]any{
+			"name": name, "addr": "10.20.1.10:8080", "mode": mode,
+			"category": "office", "resourceId": resID,
+		})
+		if code != http.StatusCreated {
+			t.Fatalf("发布应用 %s 失败 %d: %v", name, code, out)
+		}
+		return out["id"].(string)
+	}
+	idDangling := mk("悬空引用", "tunnel", "res-已经不存在了")
+	mk("直连书签", "global", "")
+	mk("正常关联", "tunnel", "res-live")
+	idNoRes := mk("完全没关联", "tunnel", "")
+
+	got := map[string]bool{}
+	for _, a := range f.s.alertSnapshot(ctx, false).UnlinkedApps {
+		got[a.ID] = true
+	}
+	if !got[idDangling] {
+		t.Error("悬空引用（关联的资源已不存在）必须报——剖面对它会给 warning，两者不同真同假就等于告警在替坏状态背书")
+	}
+	if !got[idNoRes] {
+		t.Error("完全没关联受控资源的应用必须报（改造前唯一会报的那种，不能回归）")
+	}
+	for _, a := range f.s.alertSnapshot(ctx, false).UnlinkedApps {
+		if a.Name == "直连书签" {
+			t.Error("直连书签（mode=global）不经网关、不需要资源，报它等于给管理员一条无法处置的待办")
+		}
+		if a.Name == "正常关联" {
+			t.Error("关联了在册资源的应用不该报")
+		}
+	}
+}

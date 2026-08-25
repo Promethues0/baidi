@@ -146,10 +146,38 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 	} else {
 		slog.Warn("告警评估：读过期未回收授予失败，本轮跳过该规则", "err", err.Error())
 	}
-	// 授权信息 ③：应用未关联受控资源（与客户端剖面 warnings 同一条信号）。
+	// 授权信息 ③：应用无法经隧道访问（与客户端剖面 warnings 同一条信号）。
+	//
+	// ★判据此前是 `ResourceID == ""`，两个方向都错：
+	//   - **漏报悬空引用**：资源被删掉后 apps.resource_id 仍留着那个 id（没有外键、
+	//     下架不级联），此时剖面会报 warning「未关联受控资源」而告警一声不响——
+	//     而 Signal 里自称"与剖面 warnings 同一条信号"，两者实际不同真同假；
+	//   - **误报直连书签**：mode=global 不经网关、不进隧道路由，本来就不需要资源
+	//     （appAccessState 直接给 Accessible:true）。演示库里「知网文献」因此永久挂着
+	//     一条无法处置的待办——管理员点「已处理」，下一轮评估又冒出来。
+	// 判据收敛到一处：先排除 global，再判"没关联"或"关联了但资源不存在"。
 	if ab, err := s.store.Apps(ctx); err == nil {
+		known := map[string]bool{}
+		if rs, rerr := s.store.Resources(ctx); rerr == nil {
+			for _, r := range rs {
+				known[r.ID] = true
+			}
+		} else {
+			// 读不到资源清单就只判"完全没关联"那一半——**绝不把全部应用当成悬空**，
+			// 那会在一次读库抖动时给每个应用各产生一条告警。降级方向恒为少报。
+			slog.Warn("告警评估：读资源清单失败，本轮只判「未关联」不判「悬空引用」", "err", rerr.Error())
+			known = nil
+		}
 		for _, a := range ab.Apps {
-			if a.Status == "running" && strings.TrimSpace(a.ResourceID) == "" {
+			if a.Status != "running" || a.Mode == "global" {
+				continue
+			}
+			rid := strings.TrimSpace(a.ResourceID)
+			if rid == "" {
+				snap.UnlinkedApps = append(snap.UnlinkedApps, alerting.AppRef{ID: a.ID, Name: a.Name})
+				continue
+			}
+			if known != nil && !known[rid] {
 				snap.UnlinkedApps = append(snap.UnlinkedApps, alerting.AppRef{ID: a.ID, Name: a.Name})
 			}
 		}

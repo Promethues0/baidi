@@ -67,7 +67,28 @@ type matrixCase struct {
 	backend     string
 	want        bool   // li.fang 此刻应否可访问
 	unavailable bool   // 期望磁贴标「结构性不可用」（配置缺口，不是授权结论）
+	direct      bool   // 绕过 POST /resources 直写 store：构造入口校验上线之前的存量行
 	note        string // 这一格在说什么（断言失败时原样打出来）
+}
+
+// resFromMap 把用例里的 map 形态资源转成 store.Resource，供 direct 用例直写。
+// 只覆盖矩阵用到的字段——它不是通用转换器，多写字段反而会掩盖用例的意图。
+func resFromMap(m map[string]any) store.Resource {
+	toStrs := func(v any) []string {
+		if v == nil {
+			return nil
+		}
+		if ss, ok := v.([]string); ok {
+			return ss
+		}
+		return nil
+	}
+	return store.Resource{
+		ID: asStr(m["id"]), Name: asStr(m["name"]), Backend: asStr(m["backend"]),
+		Sensitivity: asStr(m["sensitivity"]),
+		AllowUsers:  toStrs(m["allowUsers"]), AllowRoles: toStrs(m["allowRoles"]),
+		AllowOrgs:   toStrs(m["allowOrgs"]), AllowGroups: toStrs(m["allowGroups"]),
+	}
 }
 
 // portalMatrix 落一套覆盖「敏感度 × 是否受限 × 主体命中与否」全部组合的资源与应用。
@@ -105,14 +126,22 @@ func portalMatrix(f *isoFixture) map[string]matrixCase {
 		// ★后端缺端口：这是剖面的**第二条**丢弃路径。它必须与「未关联资源」一样被判成
 		// Unavailable，否则「剖面缺席 ⟺ 门户标不可用」只单向成立，门户会继续把按钮亮着
 		// （点「访问」→ 票据签得出来 → 网关拿一个没有端口的地址必然拨不通）。
-		// handleSaveResource 至今不校验 backend 形态，故这一行是能真的落库的。
-		{backend: "10.60.0.9", want: false, unavailable: true, note: "★后端不是 host:port（剖面的第二条丢弃路径）",
+		// ★入口已收（handleSaveResource → validateBackend），故这一行**直写 store**
+		// 模拟"校验上线之前就躺在库里的存量行"——读侧兜底正是为它们留的，
+		// 收紧入口绝不能让旧行从列表里消失。
+		{backend: "10.60.0.9", want: false, unavailable: true, direct: true,
+			note: "★后端不是 host:port（剖面的第二条丢弃路径；存量行，绕入口直写）",
 			res: map[string]any{"id": "m-badbackend", "name": "缺端口资源", "sensitivity": store.SensitivityNormal}},
 	}
 	out := map[string]matrixCase{}
 	for _, c := range cases {
 		c.res["backend"] = c.backend
-		if code, o := f.saveResource(c.res); code != http.StatusOK {
+		if c.direct {
+			// 绕过入口校验直写：构造"校验上线之前的存量行"。
+			if err := f.st.SaveResource(context.Background(), resFromMap(c.res)); err != nil {
+				f.t.Fatalf("直写资源 %v: %v", c.res["id"], err)
+			}
+		} else if code, o := f.saveResource(c.res); code != http.StatusOK {
 			f.t.Fatalf("保存资源 %v http %d: %v", c.res["id"], code, o)
 		}
 		a, err := f.st.CreateApp(context.Background(), store.App{
@@ -367,14 +396,14 @@ func TestPortalTile_结构性不可用不是可访问也不是需申请(t *testi
 	if err != nil {
 		t.Fatalf("CreateApp 未关联应用: %v", err)
 	}
-	if code, out := f.saveResource(map[string]any{
-		"id": "r-badbackend", "name": "缺端口资源", "backend": "10.64.0.2",
-		"sensitivity": store.SensitivityNormal,
-	}); code != http.StatusOK {
-		// 这里不是断言 handleSaveResource **应该**收——恰恰相反，它至今不校验 backend 形态
-		// 是一处独立缺口（见 docs/charter/wave8.md 边界建议）。此处只需要它能落库，
-		// 好让读侧那道兜底被验到；哪天入口真的开始拒收，这条用例会红并提醒改用例。
-		t.Fatalf("保存缺端口资源 http %d: %v（若入口已加校验，本用例改用直写 store 构造）", code, out)
+	// ★直写 store 而不是走 POST /resources：入口现在会拒收裸地址（validateBackend）。
+	// 这里要的正是"校验上线之前就躺在库里的那种行"——读侧兜底就是为它们留的。
+	// 两侧合起来才是完整语义：**入口挡住新写入，读侧仍能读出旧行并说清它为什么不可用**。
+	if err := f.st.SaveResource(ctx, store.Resource{
+		ID: "r-badbackend", Name: "缺端口资源", Backend: "10.64.0.2",
+		Sensitivity: store.SensitivityNormal,
+	}); err != nil {
+		t.Fatalf("直写缺端口资源: %v", err)
 	}
 	badBackend, err := f.st.CreateApp(ctx, store.App{Name: "缺端口应用", Addr: "10.64.0.2",
 		Mode: "web", Category: "office", Status: "running", ResourceID: "r-badbackend"})

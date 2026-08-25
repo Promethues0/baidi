@@ -48,7 +48,25 @@ func (r Resource) DialScheme() string {
 type Registry struct {
 	mu      sync.RWMutex
 	byID    map[string]Resource
-	Default string // 无前导/未命中前导时回退的后端 host:port（兼容旧 demo）
+	Default string // 无前导时回退的后端 host:port（**仅在 AllowNoPreamble 为真时可达**）
+	// AllowNoPreamble 是否允许「不带 CONNECT 前导的连接直连 Default」。**默认 false（fail-closed）**。
+	//
+	// ★为什么必须默认关：那条路径上 Lookup / Authorize / DenyUsers 一个都不执行——
+	// 资源 ACL、组织与用户组展开、JIT 授予、风险降权全部跳过，即「五道门」的第 5 道
+	// 在这条路上根本不存在。而参考部署把 Default 设成了**控制面自身的回环监听**
+	// （deploy/systemd/baidi-gateway.service 的 -backend 127.0.0.1:<CONTROL_PORT>），
+	// 于是任意一个能敲开门的 role=user 账号都能把请求直接送进控制面：
+	//   - 绕过 nginx 那份登录/API 限流（它只在 nginx 那一跳生效）；
+	//   - 控制面看到的对端是 127.0.0.1，落在 defaultTrustedProxies 内，于是采信
+	//     请求方自带的 X-Forwarded-For——审计源 IP、攻击源统计、以及认证策略里
+	//     trustedNetwork 那条**削弱二次认证**的豁免判据，全都可被伪造；
+	//   - 反过来还能给某个正常办公出口 IP 刷失败登录，把整段办公网锁掉。
+	// 同一个文件里「前导不完整」那条分支早就是 fail-closed 的，注释写着
+	// 「绝不降级回退默认后端」——只是当初没把「根本没有前导」也归进同一条纪律。
+	//
+	// 置真是**过渡逃生舱**（老客户端/demo 场景），与 BAIDI_GW_KNOCK_STRICT=0 同族：
+	// 开着就等于宣布"本网关的默认后端对所有已敲门的账号开放"，网关启动期会当面告警。
+	AllowNoPreamble bool
 }
 
 // New 建注册表，def 为默认回退后端。

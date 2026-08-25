@@ -17,7 +17,12 @@ echo "==> 启动网关（暗；proxy=$PROXY spa=$SPA → ${BACKEND}）"
 # 网关只持 control 的**敲门**公钥验证令牌（会话令牌用另一把密钥签，在此从密码学上验不过）
 PUB="${BAIDI_GW_JWT_PUBKEY:-$HERE/../control/jwt-ed25519-knock.pem.pub}"
 [ -f "$PUB" ] || { echo "   ✗ 找不到 control 的敲门公钥：$PUB"; echo "     （先启动一次 baidi-control 让它生成，或用 BAIDI_GW_JWT_PUBKEY 指定）"; exit 1; }
-nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -ttl 30s -jwt-pubkey "$PUB" >/tmp/baidi-gateway.log 2>&1 &
+# ★带 -allow-no-preamble：本脚本第③步用 curl 直打隧道口，发的是 `GET /`（首字节非 'C'），
+#   走的是**无 CONNECT 前导**那条路。该路径自 wave9 起默认 fail-closed——它不做任何
+#   资源鉴权（Lookup/Authorize/DenyUsers 全跳过），而参考部署的默认后端正是控制面自身。
+#   这里显式开启是为了让这个「暗→敲门→通→重暗」的最小演示仍然跑得动；**真实客户端
+#   不走这条路**：它们经接入剖面拿到 resmap，每条连接都发 `CONNECT <资源id>` 并逐条鉴权。
+nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -allow-no-preamble -ttl 30s -jwt-pubkey "$PUB" >/tmp/baidi-gateway.log 2>&1 &
 sleep 1
 
 echo ""; echo "① 敲门前：curl 隧道端口（期望失败=对未授权者隐身）"
@@ -30,6 +35,8 @@ TOK=$(curl -s -X POST localhost:8090/api/v1/portal/login -H 'Content-Type: appli
 "$KNOCK" -spa "$SPA" -token "$TOK" -control http://127.0.0.1:8090; sleep 0.6
 
 echo "③ 敲门后：curl 隧道端口（期望成功，经 TLS 隧道代理到后端 OA）"
+echo "   ⚠ 本步演示的是 SPA 隐身的开合，**不是资源鉴权**：curl 不发 CONNECT 前导，"
+echo "     走的是 -allow-no-preamble 兼容路径（该路径不查资源 ACL）。资源级鉴权见 e2e.sh。"
 OUT=$(curl -k -s --max-time 4 "https://$PROXY/" | head -2)
 [ -n "$OUT" ] && echo "   ✓ 成功，后端响应：" && echo "$OUT" | sed 's/^/     /' || echo "   ✗ 失败"
 

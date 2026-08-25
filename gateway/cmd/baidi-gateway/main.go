@@ -46,7 +46,11 @@ var version = "dev"
 func main() {
 	spaAddr := flag.String("spa", env("BAIDI_GW_SPA", ":18201"), "SPA 敲门 UDP 监听地址")
 	proxyAddr := flag.String("proxy", env("BAIDI_GW_PROXY", ":18443"), "TLS 隧道代理监听地址")
-	backend := flag.String("backend", env("BAIDI_GW_BACKEND", "127.0.0.1:9999"), "后端业务 host:port")
+	backend := flag.String("backend", env("BAIDI_GW_BACKEND", "127.0.0.1:9999"),
+		"后端业务 host:port（仅在 -allow-no-preamble 开启时可达；正常路径按 CONNECT 前导查资源表）")
+	allowNoPreamble := flag.Bool("allow-no-preamble", env("BAIDI_GW_ALLOW_NO_PREAMBLE", "") == "1",
+		"允许**不带 CONNECT 前导**的隧道连接直连 -backend。★该路径不做任何资源鉴权"+
+			"（Lookup/Authorize/DenyUsers 全部跳过），默认关；仅作兼容老客户端的过渡逃生舱")
 	secret := flag.String("secret", env("BAIDI_JWT_SECRET", ""), "旧 HS256 共享密钥（仅 -accept-hs256=true 的过渡逃生舱用；收口后留空即可）")
 	ttl := flag.Duration("ttl", 30*time.Second, "SPA 放行窗口")
 	gm := flag.Bool("gm", false, "隧道用国密 TLCP（SM2 双证书 + SM3/SM4），否则通用 TLS")
@@ -163,6 +167,16 @@ func main() {
 	al := spa.NewAllowlist()
 
 	reg := resource.New(*backend)
+	reg.AllowNoPreamble = *allowNoPreamble
+	if *allowNoPreamble {
+		// ★逃生舱必须当面告警（同 BAIDI_GW_KNOCK_STRICT=0 那条纪律）：
+		//   开着它就等于宣布「本网关的默认后端对所有已敲门的账号开放，不查资源授权」。
+		slog.Warn("⚠ 已开启 -allow-no-preamble：不带 CONNECT 前导的隧道连接将直连默认后端，"+
+			"**该路径不执行资源鉴权**（资源 ACL / 组织与用户组 / JIT 授予 / 风险降权全部跳过）",
+			"默认后端", *backend,
+			"风险", "若默认后端是控制面自身的回环口，任意已敲门账号即可绕过前置限流直达控制面并伪造 X-Forwarded-For",
+			"建议", "仅在兼容老客户端时临时开启；新客户端一律经剖面下发 resmap 并发 CONNECT 前导")
+	}
 	if *resources != "" {
 		if err := reg.LoadFile(*resources); err != nil {
 			log.Fatalf("加载资源注册表失败: %v", err)

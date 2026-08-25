@@ -22,6 +22,7 @@ var AttackCatZh = map[string]string{
 	"proxy-unauth":      "未敲门直连隧道口",
 	"proxy-revoked":     "隧道放行已撤销",
 	"proxy-preamble":    "隧道前导不完整",
+	"proxy-nopreamble":  "隧道未声明目标资源（无 CONNECT 前导）",
 	"proxy-ssrf":        "隧道资源未注册/疑似 SSRF",
 	"proxy-authz":       "隧道无资源授权",
 	"web-ticket":        "Web 票据无效",

@@ -336,8 +336,21 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 	if rid == "" {
 		rid = c.DefaultRes
 	}
-	if rid != "" {
-		_, _ = remote.Write([]byte("CONNECT " + rid + "\n"))
+	if rid == "" {
+		// ★不再"静默不发前导"。那样做的后果是这条连接落进网关的无前导回退分支——
+		//   资源 ACL / DenyUsers / JIT 授予一个都不查（见 resource.Registry.AllowNoPreamble），
+		//   而参考部署里那个默认后端正是控制面自身。也就是说：**剖面缺一条映射，
+		//   合法客户端自己就把流量送上了一条不鉴权的路**，两侧都不报错。
+		//   现在明确断开并说清原因——路由把包引进来了、却不知道它属于哪个资源，
+		//   这本身就是配置缺口（剖面过期 / 资源被删 / route 与 resmap 不同步）。
+		slog.Warn("引流已捕获但无法归属资源，拒绝经隧道转发（剖面缺少该目的地址的映射）",
+			"captured_dst", dst,
+			"提示", "该地址在受保护网段内却不在 resmap 里：请刷新接入剖面；若资源已下架，应同时收回路由")
+		return
+	}
+	if _, err := remote.Write([]byte("CONNECT " + rid + "\n")); err != nil {
+		slog.Warn("发送 CONNECT 前导失败", "captured_dst", dst, "resource", rid, "err", err.Error())
+		return
 	}
 	slog.Info("引流 · 经隧道转发", "captured_dst", dst, "resource", rid, "via", ep.ProxyAddr, "gm", c.Gm)
 	go func() { _, _ = io.Copy(remote, local) }()

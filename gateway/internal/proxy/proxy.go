@@ -196,8 +196,22 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 		// 节流键是 (账号,资源) 而不是源 IP：同一个人访问三个资源是三件事。
 		rep.ReportAllow("tunnel-allow", ip, user+"|"+rid,
 			"隧道放行：账号 "+user+" 经隧道访问资源 "+rid+"（后端 "+backend+"）")
+	} else if !reg.AllowNoPreamble {
+		// ★fail-closed：无前导 = 不知道要访问哪个资源 = 无法鉴权，直接断。
+		//   与上面「前导不完整」那条同一条纪律（那里的注释写着"绝不降级回退默认后端"）。
+		//   放行的话，Lookup / Authorize / DenyUsers 一个都不执行，而参考部署里
+		//   Default 正是控制面自身的回环口——详见 resource.Registry.AllowNoPreamble。
+		slog.Warn("代理拒绝（无 CONNECT 前导，fail-closed）", "src", ip, "user", user,
+			"提示", "客户端未声明目标资源；若确需兼容无前导的老客户端，用 -allow-no-preamble 显式开启（该路径不做资源鉴权）")
+		rep.Report("proxy-nopreamble", ip, "隧道代理拒绝（未声明目标资源，账号 "+user+"）")
+		_ = c.Close()
+		return
 	} else {
-		slog.Info("隧道无前导 · 回退默认后端", "src", ip, "user", user, "backend", backend)
+		// 兼容模式（-allow-no-preamble）：**必须留痕**。此前这里只有一行本机 slog，
+		// 网关一重启即灭失——「谁在用这条不鉴权的路」在中心侧完全查不到。
+		slog.Warn("隧道无前导 · 回退默认后端（该路径不做资源鉴权）", "src", ip, "user", user, "backend", backend)
+		rep.ReportAllow("tunnel-nopreamble", ip, user+"|<default>",
+			"隧道放行：账号 "+user+" 未声明资源，按兼容模式直连默认后端 "+backend+"（**未经资源鉴权**）")
 	}
 
 	b, err := net.DialTimeout("tcp", backend, 5*time.Second)

@@ -362,8 +362,12 @@ Windows 这边要把后果说全：`tauri.conf.json` 里既没有 `certificateTh
 
 ## 七、这份流水线的验证状态
 
-`.github/workflows/clients.yml` **没有在 GitHub Actions 上真实运行过**（本机无法运行 Actions）。
-已做的验证到此为止：
+`.github/workflows/clients.yml` **已在 GitHub Actions 上真实运行过**（截至 2026-08-25 共 37 轮，
+最近连续多轮全绿）。这句话此前写的是"没有真实运行过"——那是流水线刚写好那阵子的事实，
+CI 跑起来之后没人回来改它，属于本项目反复点名的「注释停在旧事实上」。
+
+真机运行暴露并已修的问题记在 10.3c~10.3g（四个在验证脚本自己身上、四个是产品缺陷）。
+下面这些是**本机侧**的验证，仍然有效：
 
 - `actionlint`（含 `shellcheck` 集成）对该 workflow 零告警；
 - `build-sidecars.sh` 的四条分支在本机用假 `rustc`（伪造 host 三元组）**真跑过**：
@@ -376,8 +380,10 @@ Windows 这边要把后果说全：`tauri.conf.json` 里既没有 `certificateTh
   那正是旧判据 `git diff --quiet -- clients/` 判成干净、包因此冒充一个干净 commit 的场景；
 - 该用例还断言 `clients.yml` 的两份 UNVERIFIED 产物里确实带上了 `build-provenance.env`。
 
-也就是说：**构建脚本是验过的，runner 上的步骤编排没有。** 第一次真实运行大概率还要修，
-红了先看步骤名。
+步骤编排现在也由 CI 自己验着：Windows 那条腿有「PowerShell 5.1 语法解析」与
+「冒烟跑一次 verify-windows.ps1 并断言它写得出报告」两道——**那是 macOS 上验不了的部分**
+（本机没有 pwsh，而 pwsh 7 与 Windows PowerShell 5.1 对无 BOM 文件的解码行为不同，
+这正是 10.3g 那个 BOM 缺陷能潜伏到真机才暴露的原因）。
 
 ## 八、Android：在 CI 上出 debug APK（`.github/workflows/clients-mobile.yml`）
 
@@ -845,3 +851,72 @@ UTF-8 BOM」的检查，注释里连「pwsh 7 无 BOM 也按 UTF-8 读，所以�
   连敲两三轮跨过一个心跳周期再看。
 
 用自建环境同理，把 `-Control` 指向自己的控制面即可。
+
+---
+
+## 十一、macOS 实机验证（2026-08-25，端到端首次打通）
+
+Windows 那条腿卡在真机排障期间，先把 macOS 这条走通——**它和 Windows 共用同一份
+前端与同一套 Rust 提权/落盘代码**，所以这里验通的东西，Windows 上剩下的就只是
+平台专属那几段（NSIS 落位、wintun、NRPT、PowerShell launcher）。
+
+### 11.1 验了什么（全部有证据，不是"应该没问题"）
+
+本机 macOS（Apple Silicon）打包出 `.app` 与 `.dmg`，配一套**本地栈**
+（`baidi-control` 明文 `:8090` + `baidi-gateway -gm` 国密隧道），逐项实测：
+
+| 项 | 结果 | 证据 |
+|---|---|---|
+| 单实例守卫 | ✅ | `open -n` 连开 4 次，`pgrep -x baidi-desktop` 恒为 1 个 PID |
+| 关窗口 = 隐藏到托盘 | ✅ | 关窗后进程仍在 |
+| osascript 提权 | ✅ | `baidi-tun` 以 **root** 运行 |
+| 建虚拟网卡 | ✅ | `utun7`，`inet 10.99.0.2` |
+| 路由接管 | ✅ | 5 个受保护网段经 `utun7` 引流（`ifconfig` + 数据面日志） |
+| SPA 敲门 + 15s 保活 | ✅ | 网关日志连续多条「SPA 敲门放行 user=li.fang」 |
+| 国密 TLCP 隧道 | ✅ | 网关出示 SM2 双证，客户端 `-insecure` 拨通 |
+| **端到端业务流量** | ✅ | 见下 |
+| 分离式 DNS（`/etc/resolver`） | ⚠️ 未验 | 需重启数据面才会读到新剖面的 dns 段（root 进程，要人工点断开→接入） |
+
+端到端那条的完整证据链：
+
+```
+$ curl http://10.99.0.36:8080/...        # VIP，不是后端真实地址
+HTTP 401                                  # ← 真实后端的应答穿过整条链路回来了
+
+网关日志同一时刻：
+  隧道路由命中     user=li.fang resource=oa backend=127.0.0.1:8090
+  隧道建立 · 代理转发  user=li.fang backend=127.0.0.1:8090
+```
+
+`401` 是控制面对未带令牌请求的正常应答——**它证明的是"字节真的走完了
+curl → utun7 → netstack → 国密隧道 → 网关 → 后端 → 原路返回"**，
+而不只是"隧道握手成功"。
+
+### 11.2 一个必须记下来的坑：数错了进程
+
+中途一度判定「单实例守卫在 macOS 上没生效」，因为 `pgrep -f '…app/Contents/MacOS'`
+数出 2 个进程。**那是错的**：`baidi-tun` 这个 sidecar 也住在 `.app/Contents/MacOS/` 下，
+被同一个模式匹配进来了。改用 `pgrep -x baidi-desktop` 之后，连开四次 PID 恒定。
+
+教训与本项目其它几条同族：**判据的口径本身也要验一遍**。一个数得不对的计数器
+会让人去修一个没坏的东西——这次差点就为"macOS 不支持"去加一套多余的实现。
+
+### 11.3 本地栈怎么起（复现用）
+
+```bash
+cd control && go run ./cmd/baidi-control            # :8090，明文，无证书这一环
+cd gateway && go run ./cmd/baidi-gateway -gm -certdir certs \
+    -spa 127.0.0.1:18201 -proxy 127.0.0.1:18443 -backend 127.0.0.1:8090 \
+    -resources <清单.json> -jwt-pubkey ../control/jwt-ed25519-knock.pem.pub
+cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build
+```
+
+**刻意用本地栈而不是在线演示站**：演示站是自签证书，WKWebView 走系统钥匙串会拒，
+症状就是客户端那句「控制中心不可达」（与 10.3e 记的 Windows 那次同一个根因，
+不是平台差异）。往系统信任库塞根证书是敏感操作，验证不该依赖它。
+
+两个容易踩的点：
+- 网关**没配 `-control` 时资源清单为空**（日志 `resources=0`），此时隧道能建、
+  `CONNECT <id>` 送得到，但网关答「资源未注册」。要么配 mTLS 注册，要么用 `-resources` 给静态清单；
+- 种子库里的后端（`10.20.1.10:8080` 等）是**虚构地址**，从网关侧拨不通。
+  要验端到端得把某个资源的 backend 指向一个真实可达的东西（本地栈里指 `127.0.0.1:8090` 最省事）。

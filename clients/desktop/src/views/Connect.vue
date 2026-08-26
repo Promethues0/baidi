@@ -601,7 +601,29 @@ onMounted(async () => {
   if (!isTauri) return;
   try {
     const v = await tunnelStatus();
-    if (v.running) { tun.value = v; stage.value = v.ready ? 'connected' : 'connecting'; session.connected = v.ready; if (!v.ready) startPolling(); else startPolling(); }
+    if (v.running) {
+      tun.value = v;
+      stage.value = v.ready ? 'connected' : 'connecting';
+      session.connected = v.ready;
+      startPolling();
+    } else {
+      // ★此前没有这条 else 分支：v.running 为假时 session.connected / denied / error
+      //   一个都不动。而本视图在切走 Tab 时会被 v-if 卸载（App.vue），轮询随之停掉——
+      //   于是「管理员强制下线」「posture 转 block 导致敲门被拒」「网关重启打断隧道」
+      //   只要发生在用户停留在 应用/诊断/设置 页的时刻，客户端这一侧完全无感：
+      //   session.connected 冻结在 true，标题栏与设置页持续写「已接入企业内网」，
+      //   应用页的「访问」按钮照常放行（点开只会静默不通）。
+      //   切回本页时又因为 v.running 为假整段跳过，denied/deniedReason/error 全部丢弃——
+      //   用户看到的是环形图「待接入」+ 标题栏「已接入企业内网」两句自相矛盾的话，
+      //   且没有任何地方告诉他是被管理员注销的（那条红框代码一直都在，只是永远填不上）。
+      tun.value = v;
+      session.connected = false;
+      stage.value = 'idle';
+      denied.value = v.denied;
+      deniedReason.value = v.deniedReason;
+      if (v.denied) err2.value = '';
+      else if (v.error) err2.value = '数据面已退出：' + v.error;
+    }
   } catch { /* ignore */ }
 });
 onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connectTO); });

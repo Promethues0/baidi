@@ -42,7 +42,16 @@ export interface PortalLoginResp {
   needWebauthn?: boolean; // passkey 断言（移动客户端做不了，引导去浏览器门户）
   ticket?: string;        // 「口令已验」一次性票据（3min）
   reason?: string; token?: string; displayName?: string;
+  /** needDirectory 配了 ≥2 个外部认证域又没指定：服务端**拒绝登录**并带回候选。
+   *  ★不是"可选项"——挨个去问等于把明文口令投递给排在前面的每一台目录服务器
+   *  （wave8 行动 12 的核心不变式：一次登录只把口令交给一台服务器）。
+   *  此前移动端没有这两个字段，服务端那句「请先选择你所属的认证域」只能原样显示成
+   *  一条错误——而移动端**没有任何控件可做这件事**，外部目录账号 100% 登不进去。 */
+  needDirectory?: boolean;
+  domains?: AuthDomainOption[];
 }
+/** 登录页的认证域下拉项（GET /api/v1/auth/domains，免认证；只在 ≥2 个源时非空）。 */
+export interface AuthDomainOption { id: string; name: string; kind: string }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';

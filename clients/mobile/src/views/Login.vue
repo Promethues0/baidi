@@ -7,6 +7,20 @@
     </div>
 
     <div class="lg__form">
+      <!-- 认证域：只有配了 ≥2 个外部认证源时才出现（GET /auth/domains 在单源时回空）。
+           ★它不是"多一个可选项"——不选的话服务端**拒绝登录**，因为挨个去问等于把
+           明文口令投递给排在前面的每一台目录服务器（wave8 行动 12 的核心不变式：
+           一次登录只把口令交给一台服务器）。此前移动端没有这个控件，服务端那句
+           「请先选择你所属的认证域」只能原样显示成一条错误，而用户**无处可选**——
+           任何接了两个及以上外部源的部署，移动端外部目录账号 100% 登不进去。
+           本地账号仍能登录（登录链路先查本地哈希），所以管理员自己在手机上试不出来。 -->
+      <div v-if="domains.length" class="lg__f">
+        <icon-apps class="lg__ic" />
+        <select v-model="form.directory" class="lg__sel">
+          <option value="">选择你所属的认证域</option>
+          <option v-for="d in domains" :key="d.id" :value="d.id">{{ d.name }}（{{ d.kind.toUpperCase() }}）</option>
+        </select>
+      </div>
       <div class="lg__f"><icon-user class="lg__ic" /><input v-model="form.username" placeholder="企业账号" autocapitalize="off" autocorrect="off" /></div>
       <div class="lg__f"><icon-lock class="lg__ic" /><input v-model="form.password" type="password" placeholder="登录口令" @keyup.enter="submit" /></div>
       <div v-if="needMfa || needTotp" class="lg__f"><icon-message class="lg__ic" /><input v-model="form.mfaCode" :placeholder="needTotp ? '6 位动态验证码' : '验证码'" inputmode="numeric" maxlength="6" @keyup.enter="submit" /></div>
@@ -22,13 +36,22 @@
 </template>
 
 <script setup lang="ts">
-import { ref, reactive } from 'vue';
+import { ref, reactive, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { api, type PortalLoginResp } from '@/lib/api';
+import { api, type PortalLoginResp, type AuthDomainOption } from '@/lib/api';
 import { login } from '@/lib/store';
 
 const router = useRouter();
-const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
+const form = reactive({ username: 'li.fang', password: '', mfaCode: '', directory: '' });
+/** 可选认证域（只在 ≥2 个外部源时非空）。取不到不阻断登录——单源部署本来就该是空的。 */
+const domains = ref<AuthDomainOption[]>([]);
+async function loadDomains() {
+  try {
+    const r = await api<{ domains?: AuthDomainOption[] }>('/auth/domains');
+    domains.value = r.domains ?? [];
+  } catch { domains.value = []; }
+}
+onMounted(loadDomains);
 const needMfa = ref(false);
 const needTotp = ref(false);
 const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOTP 第二回合凭它绑定账号
@@ -43,7 +66,7 @@ async function submit() {
   try {
     const r = await api<PortalLoginResp>('/portal/login', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ username: form.username, password: form.password, mfaCode: needMfa.value ? form.mfaCode : '' })
+      body: JSON.stringify({ username: form.username, password: form.password, mfaCode: needMfa.value ? form.mfaCode : '', directory: form.directory })
     });
     if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);
@@ -54,6 +77,13 @@ async function submit() {
       err.value = '该账号已启用 passkey：移动客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP';
     } else if (r.needMfa) {
       needMfa.value = true; mfaReason.value = r.reason || ''; err.value = '';
+    } else if (r.needDirectory) {
+      // 服务端带回了候选：装进下拉让用户真的能选，而不是把「请先选择认证域」
+      // 显示成一条无从执行的错误（此前移动端就是这样）。
+      domains.value = r.domains ?? [];
+      err.value = domains.value.length
+        ? '本系统配置了多个认证域，请在上方选择你所属的认证域后重试'
+        : (r.reason || '需要指定认证域，但服务端未返回候选，请联系管理员');
     } else {
       err.value = r.reason || '登录失败';
     }
@@ -96,4 +126,6 @@ async function submitTotp() {
 .lg__err { font-size: 13px; color: var(--bd-danger); margin: -4px 2px 12px; }
 .lg__demo { text-align: center; font-size: 11px; color: var(--bd-t3); margin-top: 16px; line-height: 1.7; }
 .lg__demo b { color: var(--bd-primary); font-weight: 600; }
+.lg__sel { flex: 1; border: none; outline: none; background: transparent; font-size: 15px;
+  color: var(--bd-t1); appearance: none; padding: 0; }
 </style>

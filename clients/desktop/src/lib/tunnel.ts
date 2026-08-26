@@ -375,6 +375,17 @@ function staleAgainstProfile(running: boolean): { stale: boolean; staleReason: s
   };
 }
 
+/** 解析「数据面健康」行。拿不到（旧壳 / 尚无事件）返回 null，调用方退回旧判据。 */
+function parseHealth(line: string): { knock: boolean; tunnel: boolean; err: string } | null {
+  if (!line) return null;
+  const k = /knock=(true|false)/.exec(line);
+  const t = /tunnel=(true|false)/.exec(line);
+  if (!k || !t) return null;
+  // err 是行尾自由文本（可能含空格与中文标点），取 `err=` 之后的全部；`-` 表示无错误。
+  const e = /err=(.*)$/.exec(line)?.[1]?.trim() ?? '';
+  return { knock: k[1] === 'true', tunnel: t[1] === 'true', err: e === '-' ? '' : e };
+}
+
 function stripTs(l: string): string {
   // 去掉 slog 的 time=... level=... 前缀，留人话
   return l.replace(/^time=\S+\s+level=\S+\s+msg=/, '').replace(/^"|"$/g, '');

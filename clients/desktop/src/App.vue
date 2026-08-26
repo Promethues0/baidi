@@ -77,7 +77,7 @@
 <script setup lang="ts">
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { session, logout, authed } from '@/lib/store';
-import { tauriRuntime, tunnelStop, forceQuit } from '@/lib/tunnel';
+import { tauriRuntime, tunnelStop, forceQuit, tunnelStatus } from '@/lib/tunnel';
 // ★静态 import，别改回「变量做说明符 + @vite-ignore」——那等于告诉 Vite「别管它」，
 //   裸模块名原样进产物，WebView 没有 import map，运行期直接抛
 //   Failed to resolve module specifier。同 tunnel.ts / knock.ts 的教训（28f8f51）：
@@ -99,6 +99,30 @@ const authedNow = computed(() => authed());
    否则 strict 模式下报告过期会掐断隧道。 */
 watch(authedNow, (v) => { if (v) startPostureLoop(); else stopPostureLoop(); }, { immediate: true });
 onBeforeUnmount(stopPostureLoop);
+
+/* ── 接入态心跳：与 posture 上报同一条纪律——**脱离视图** ──
+   session.connected 是全局状态（标题栏、设置页、应用页的「访问」闸都读它），
+   却此前只有「接入」页挂载时才有人维护：切走 Tab 即 v-if 卸载、轮询随之停掉。
+   于是「管理员强制下线」「posture 转 block 导致敲门被拒」「网关重启打断隧道」
+   只要发生在用户停留在 应用/诊断/设置 页的时刻，客户端完全无感——
+   session.connected 冻结在 true，标题栏持续写「已接入企业内网」，
+   应用页照常放行（点开只会静默不通）。
+   这里只维护全局态，不碰「接入」页的细粒度 UI（那仍由该页自己的轮询负责）。 */
+let appTunTimer = 0;
+async function appTunTick() {
+  if (!tauriRuntime() || !authedNow.value) return;
+  try {
+    const v = await tunnelStatus();
+    session.connected = v.running && v.ready;
+  } catch { /* 读不到状态不改判：宁可保持上一次结论，也不凭一次 IO 抖动翻转接入态 */ }
+}
+watch(authedNow, (v) => {
+  clearInterval(appTunTimer);
+  if (!v) { session.connected = false; return; }
+  void appTunTick();
+  appTunTimer = window.setInterval(appTunTick, 5000);
+}, { immediate: true });
+onBeforeUnmount(() => clearInterval(appTunTimer));
 
 /* 退出确认（Rust 托盘「退出白帝」若隧道在跑会发 quit-request 事件） */
 const quitAsk = ref(false);

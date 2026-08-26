@@ -253,6 +253,69 @@ type tunneler struct {
 	pick     *picker    // 网关落点选择器（多活 + 故障转移，见 failover.go）
 	deny     chan error // control 定性拒绝（403：强制下线/账号禁用）单次上报，供 Run 停机
 	denyOnce sync.Once
+
+	// ── 真实健康状态（供客户端展示，见 logHealth）──
+	//
+	// ★接入页此前把「已接入 / 数据面就绪」与「SPA 敲门保活」判成两行**启动日志**的存在
+	// （`/数据面就绪/.test(log)` 与 `/敲门保活/.test(log)`），而那两行分别打印于
+	// 任何一次 knock 与任何一次拨号**之前**——纯粹是"netstack 装好了""ticker 起来了"。
+	// 于是三类真实故障在界面上完全看不见：全部落点拨不通、gm 开关与网关不一致导致
+	// 握手 100% 失败、以及指纹钉扎失败（判定为"疑似中间人"）——界面一律绿色「已接入」。
+	// 现在改成按**真实事件**回报：敲门有没有成功过、隧道有没有拨通过、最近一次失败是什么。
+	hmu        sync.Mutex
+	knockOK    bool   // 至少成功发出过一次 SPA 敲门包
+	tunnelOK   bool   // 至少成功拨通过一次隧道
+	lastErr    string // 最近一次拨号/敲门失败的原因（成功后清空）
+	lastHealth string // 上一次打印的健康行，用于去重（每条流都打会把日志冲爆）
+}
+
+// 健康行的固定前缀。客户端（tunnel.ts）按它解析，改这里要同步改那边的正则。
+const healthPrefix = "数据面健康"
+
+// logHealth 打一行结构固定的健康状态，供客户端解析真实接入态。
+//
+// ★与「网关落点」那行同一条纪律（见 tunnel.ts 对 endpoint 字段的说明）：只在**状态变化**时打，
+// 否则每条流一行会把 4000 字节的日志尾巴瞬间冲满，反而把该看的信息挤出窗口。
+func (t *tunneler) logHealth() {
+	t.hmu.Lock()
+	line := fmt.Sprintf("knock=%t tunnel=%t err=%s", t.knockOK, t.tunnelOK, orNone(t.lastErr))
+	if line == t.lastHealth {
+		t.hmu.Unlock()
+		return
+	}
+	t.lastHealth = line
+	t.hmu.Unlock()
+	slog.Info(healthPrefix, "knock", t.knockOK, "tunnel", t.tunnelOK, "err", orNone(t.lastErr))
+}
+
+func orNone(s string) string {
+	if s == "" {
+		return "-"
+	}
+	return s
+}
+
+// markKnock / markTunnel / markFail 记录真实事件（成功即清掉上一次的错误——
+// 留着会让一次早已恢复的瞬时失败永远挂在界面上）。
+func (t *tunneler) markKnock() {
+	t.hmu.Lock()
+	t.knockOK, t.lastErr = true, ""
+	t.hmu.Unlock()
+	t.logHealth()
+}
+
+func (t *tunneler) markTunnel() {
+	t.hmu.Lock()
+	t.tunnelOK, t.lastErr = true, ""
+	t.hmu.Unlock()
+	t.logHealth()
+}
+
+func (t *tunneler) markFail(reason string) {
+	t.hmu.Lock()
+	t.lastErr = reason
+	t.hmu.Unlock()
+	t.logHealth()
 }
 
 // newTunneler 是构造 tunneler 的**唯一**入口：落点选择器必须随之建好。
@@ -307,16 +370,20 @@ func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
 		// 否则 control 抖动会直接关窗——这是 fail-closed 的代价，须靠 reknock 频度补偿）。
 		slog.Warn("取短时效敲门令牌失败，本轮放弃敲门（等待下轮 reknock 重试）",
 			"gateway", ep.Label(), "err", err.Error())
+		t.markFail("取敲门令牌失败：" + err.Error())
 		return false
 	}
 	uc, err := net.Dial("udp", ep.SPAAddr)
 	if err != nil {
 		slog.Warn("SPA 拨号失败", "gateway", ep.Label(), "err", err.Error())
+		t.markFail("SPA 拨号失败：" + err.Error())
 		return false
 	}
 	defer uc.Close()
 	if sealed, e := knock.Seal(tok); e == nil {
-		_, _ = uc.Write(sealed)
+		if _, werr := uc.Write(sealed); werr == nil {
+			t.markKnock() // 真的发出去了才算——此前界面只看"保活 ticker 起来了没有"
+		}
 	}
 	return false
 }
@@ -329,9 +396,14 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 	remote, ep, err := t.dialTunnel(dst)
 	if err != nil {
 		slog.Warn("隧道拨号失败（未敲门成功/网关隐身?）", "dst", dst, "err", err.Error())
+		// ★这条失败此前**到不了界面**：tunnel.ts 的 error 判据是 `!s.running && …`，
+		//   运行中恒为空串。于是「全部落点拨不通」「gm 开关与网关不一致」
+		//   「指纹钉扎失败（疑似中间人）」三类故障，界面一律显示绿色「已接入」。
+		t.markFail(err.Error())
 		return
 	}
 	defer remote.Close()
+	t.markTunnel()
 	rid := c.Resmap[dst]
 	if rid == "" {
 		rid = c.DefaultRes

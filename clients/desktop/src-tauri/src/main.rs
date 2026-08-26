@@ -431,6 +431,15 @@ struct TunStatus {
     /// 网关地址，还可能把未钉扎的隧道显示成已钉扎。一次性事件在"最近 N 字节"这种
     /// 通道上不可能可靠送达，必须单独带出来。
     endpoint: String,
+    /// 最后一条「数据面健康」行（契约见 dataplane.logHealth）。
+    ///
+    /// ★与 endpoint 同一条纪律、同一个成因：接入页的「已接入 / 敲门保活」此前判的是
+    /// 两行**启动日志**是否出现在尾巴里，而它们分别打印于任何一次 knock 与任何一次拨号
+    /// **之前**——纯粹是"netstack 装好了""ticker 起来了"。于是全部落点拨不通、
+    /// gm 开关与网关不一致、指纹钉扎失败（疑似中间人）三类故障，界面一律绿色「已接入」。
+    /// 而且业务流量一多，那两行还会被挤出 4000 字节的尾巴 → 健康隧道反被判成「未见保活」。
+    /// 现在从**整份日志**里捞真实健康行单独回传，不受尾巴滚动影响。
+    health: String,
 }
 
 /// 日志尾巴的字节预算。按**字符边界**回退，绝不按字节硬切。
@@ -470,6 +479,16 @@ fn last_endpoint_line(log: &str) -> String {
         .to_string()
 }
 
+/// 从整份日志里捞最后一条健康状态行（契约见 dataplane.logHealth）。
+fn last_health_line(log: &str) -> String {
+    log.lines()
+        .filter(|l| l.contains("数据面健康"))
+        .next_back()
+        .unwrap_or_default()
+        .trim()
+        .to_string()
+}
+
 /// 读 pid 文件（非纯数字一律当"没有"，见 elevate::sanitize_pid）。
 ///
 /// ★调用方必须先过 [`secure_paths`]：这个 pid 会被 `tunnel_stop` 拿去**以 root 执行 kill**，
@@ -503,7 +522,8 @@ fn tunnel_status() -> TunStatus {
     // 别人塞进来的。停在一个看起来正常的「未接入」上，用户永远不知道发生了什么。
     let p = match secure_paths() {
         Ok(p) => p,
-        Err(e) => return TunStatus { running: false, pid: String::new(), log: e, endpoint: String::new() },
+        Err(e) => return TunStatus { running: false, pid: String::new(), log: e,
+            endpoint: String::new(), health: String::new() },
     };
     let pid = read_pid(p).unwrap_or_default();
     let running = tun_running();
@@ -536,6 +556,7 @@ fn tunnel_status() -> TunStatus {
         pid,
         log: log_tail(&full, LOG_TAIL_BYTES).to_string(),
         endpoint: last_endpoint_line(&full),
+        health: last_health_line(&full),
     }
 }
 

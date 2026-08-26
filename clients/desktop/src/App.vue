@@ -43,6 +43,25 @@
       </main>
     </div>
 
+    <!-- 隧道运行中「退出登录」的二次确认。
+         ★比退出应用更危险：登出只清前端状态，而 root 数据面还在跑，它手里握着
+         **上一个账号**的会话令牌，每 15s 拿它换敲门令牌（-reknock 15s）。于是
+         网关按上一个账号鉴权、审计也记在他头上；下一个人登录后，隧道仍是前一个人的。
+         此前 logout() 只做 localStorage 清理，这一整段完全没人管。 -->
+    <a-modal v-model:visible="logoutAsk" title="退出登录前需要断开接入" :footer="false" :mask-closable="false" :width="420">
+      <p class="dk-quit__msg">
+        企业内网接入仍在运行。直接退出登录<b>不会断开它</b>：数据面会继续以当前账号
+        <b>{{ session.user }}</b> 的身份保活、访问资源，并在服务端留下该账号的审计记录。
+      </p>
+      <div class="dk-quit__btns">
+        <button class="dk-btn dk-btn--ghost" @click="logoutAsk = false">取消</button>
+        <button class="dk-btn" :disabled="loggingOut" @click="disconnectAndLogout">
+          {{ loggingOut ? '断开中…' : '断开并退出登录' }}
+        </button>
+      </div>
+      <p v-if="logoutErr" class="dk-quit__err">{{ logoutErr }}</p>
+    </a-modal>
+
     <!-- 隧道运行中退出的二次确认（避免遗留无管控 root 数据面） -->
     <a-modal v-model:visible="quitAsk" title="隧道仍在运行" :footer="false" :mask-closable="false" :width="380">
       <p class="dk-quit__msg">接入仍在运行，直接退出会遗留一个无管控的数据面（root）进程。建议先断开再退出。</p>
@@ -59,6 +78,14 @@
 import { ref, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { session, logout, authed } from '@/lib/store';
 import { tauriRuntime, tunnelStop, forceQuit } from '@/lib/tunnel';
+// ★静态 import，别改回「变量做说明符 + @vite-ignore」——那等于告诉 Vite「别管它」，
+//   裸模块名原样进产物，WebView 没有 import map，运行期直接抛
+//   Failed to resolve module specifier。同 tunnel.ts / knock.ts 的教训（28f8f51）：
+//   那次修了那两个文件，**本文件这两处漏了**，于是打包后无边框窗口的三个窗控键
+//   与托盘「退出白帝」的二次确认一直是死的（后者更要命：隧道运行中直接退出，
+//   遗留一个无管控的 root 数据面）。
+import { listen } from '@tauri-apps/api/event';
+import { getCurrentWindow } from '@tauri-apps/api/window';
 import { startPostureLoop, stopPostureLoop } from '@/lib/posture';
 import Connect from '@/views/Connect.vue';
 import Apps from '@/views/Apps.vue';
@@ -78,8 +105,6 @@ const quitAsk = ref(false);
 const quitting = ref(false);
 onMounted(async () => {
   if (!tauriRuntime()) return;
-  const mod = '@tauri-apps/api/event';
-  const { listen } = (await import(/* @vite-ignore */ mod)) as { listen: (e: string, cb: () => void) => Promise<unknown> };
   await listen('quit-request', () => { quitAsk.value = true; });
 });
 async function disconnectAndQuit() {
@@ -92,10 +117,6 @@ async function quitAnyway() { await forceQuit(); }
 /* 自定义标题栏窗控（frameless）：经 Tauri 窗口 API 真实最小化/最大化/关闭 */
 async function win(a: 'min' | 'max' | 'close') {
   if (!tauriRuntime()) return;
-  const mod = '@tauri-apps/api/window';
-  const { getCurrentWindow } = (await import(/* @vite-ignore */ mod)) as {
-    getCurrentWindow: () => { minimize: () => Promise<void>; toggleMaximize: () => Promise<void>; close: () => Promise<void> };
-  };
   const w = getCurrentWindow();
   if (a === 'min') await w.minimize();
   else if (a === 'max') await w.toggleMaximize();
@@ -109,7 +130,42 @@ const TABS = [
   { key: 'settings', label: '设置', icon: 'IconSettings' }
 ] as const;
 
-function doLogout() { logout(); tab.value = 'connect'; }
+/* ── 退出登录：必须带走 root 数据面 ──
+   改造前是 `logout(); tab='connect'`——只清前端状态与 localStorage，而：
+     · baidi-tun 仍以 root 运行，持有上一个账号的会话令牌；
+     · 它每 15s 用那个令牌向控制面换短时效敲门令牌（保活续窗）；
+     · 网关按上一个账号鉴权、放行、写审计；
+     · 下一个人登录后看到的是自己的剖面，而隧道走的还是前一个人的授权。
+   session.connected 被置 false 反而更糟：UI 说"未接入"，实际还接着，且是别人的身份。 */
+const logoutAsk = ref(false);
+const loggingOut = ref(false);
+const logoutErr = ref('');
+
+async function doLogout() {
+  logoutErr.value = '';
+  // 隧道没在跑就直接登出（绝大多数情况）。
+  if (!tauriRuntime() || !session.connected) { logout(); tab.value = 'connect'; return; }
+  logoutAsk.value = true;   // 在跑 → 必须先断开，且要用户明确知道为什么
+}
+
+async function disconnectAndLogout() {
+  loggingOut.value = true;
+  logoutErr.value = '';
+  try {
+    await tunnelStop();
+  } catch (e) {
+    // ★断不开就**不登出**。断开要提权，用户可能取消；此时若照常清掉前端状态，
+    //   就回到了"UI 说没登录、数据面还以他的身份在跑"——那正是本次要消灭的形态。
+    logoutErr.value = '断开失败，未退出登录：' + String((e as Error)?.message ?? e)
+      + '（数据面仍以当前账号运行；请在「接入」页手动断开后重试）';
+    loggingOut.value = false;
+    return;
+  }
+  loggingOut.value = false;
+  logoutAsk.value = false;
+  logout();
+  tab.value = 'connect';
+}
 </script>
 
 <style scoped>
@@ -161,6 +217,8 @@ function doLogout() { logout(); tab.value = 'connect'; }
 
 .dk-content { flex: 1; overflow-y: auto; }
 
+.dk-quit__err { margin-top: 10px; padding: 8px 10px; font-size: 12.5px; line-height: 1.6;
+  color: var(--bd-danger); background: var(--bd-tag-red-bg, #FFECE8); border-radius: 6px; }
 .dk-quit__msg { font-size: 13px; color: var(--bd-t2); line-height: 1.7; margin: 0 0 18px; }
 .dk-quit__btns { display: flex; justify-content: flex-end; gap: 10px; }
 .dk-quit__btns .dk-btn { height: 34px; padding: 0 16px; font-size: 13px; }

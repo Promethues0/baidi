@@ -63,7 +63,7 @@ import { Message } from '@arco-design/web-vue';
 import { IconCheckCircleFill, IconCloseCircleFill } from '@arco-design/web-vue/es/icon';
 import { ping, checkClientUpdate, appVersion, type ClientUpdateResp } from '@/lib/api';
 import { session, config, saveConfig, validateConfig, logout } from '@/lib/store';
-import { platformLabel } from '@/lib/vpn';
+import { platformLabel, stopTunnel } from '@/lib/vpn';
 
 function onCfg() { saveConfig(); const e = validateConfig(); if (e) Message.warning(e); }
 
@@ -106,7 +106,25 @@ async function diag() {
   diaging.value = false;
 }
 
-function doLogout() { logout(); router.replace('/login'); }
+/* 退出登录必须带走数据面。
+   ★移动端的隧道是**系统级 VpnService**：只清 localStorage 的话，它继续以上一个账号的
+   会话令牌保活续窗（-reknock 15s），网关按那个账号鉴权并写审计，而系统状态栏上
+   那把 VPN 钥匙还亮着——下一个人登录后用的仍是前一个人的授权。
+   断不开就**不登出**：否则回到"UI 说没登录、数据面还以他的身份在跑"。 */
+async function doLogout() {
+  if (session.connected) {
+    try {
+      await stopTunnel();
+    } catch (e) {
+      Message.error('断开接入失败，未退出登录：' + String((e as Error)?.message ?? e)
+        + '（数据面仍以当前账号运行，请在「接入」页手动断开后重试）');
+      return;
+    }
+    session.connected = false;
+  }
+  logout();
+  router.replace('/login');
+}
 
 onMounted(() => { void checkCtl(); void checkUpdate(); });
 </script>

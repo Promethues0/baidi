@@ -6,6 +6,7 @@ import (
 	"crypto/ed25519"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -1551,15 +1552,39 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	// 网关拿到后编译成 nft/pf 灌内核；它不知道「哪个网段该上网」，只执行算好的结果。
 	// 取不到时下发空数组而不是省略字段：省略会让新网关误以为「控制面还不支持 NAT」
 	// 从而保留上一轮的旧规则，而空数组的语义是明确的「本网关当前无 NAT 策略」。
-	natOut := []store.NATPolicy{}
+	//
+	// ★这里是**三态**，不是两态（同 gwMetrics/Ifaces/Stealth 的 nil 判定、posture 的 unknown）：
+	//   ① 字段缺席        = 不可判定 → 网关**保持内核规则现状**；
+	//   ② nat: []         = 本网关确实无策略 → 网关清空规则；
+	//   ③ 有策略          = 按清单灌。
+	//
+	// 改造前读库失败也走 ②（"本轮按空集下发"），而网关侧 `natPresent = r.NAT != nil`
+	// 对 JSON 的 `[]` 判 present=true → natfw n==0 → `nft delete table ip baidi_nat`
+	// **整表删除**。也就是说 NATPolicies 只要返回一次错误（modernc SQLite 单写者，
+	// 而 gateway_metrics 每网关 15s 一条、审计、攻击源、告警多条循环并发写，
+	// `database is locked` 不是罕见形态），当轮所有正在轮询的网关就会一起丢掉 NAT：
+	// SNAT 没了内网整段断外网、DNAT 没了对外业务全部不可达，连 FR-NAT-13 的
+	// 隧道/敲门排除规则也一并消失。错误持续多久就断多久，恢复后下一轮自动重灌——
+	// 表现为「偶发、几十秒、无法复现」的出口断网。
+	//
+	// 而网关那侧紧挨着 natPresent 的注释写的正是相反的要求（"别让缺字段被读成把 NAT
+	// 全删掉"）——三态区分本来就在，只是控制面这一侧把「取不到」塞进了「确实没有」。
+	resp := map[string]any{"resources": gwRes, "revoked": revoked}
 	if s.nat != nil {
 		if all, err := s.nat.NATPolicies(r.Context()); err == nil {
-			natOut = store.NATForGateway(all, gatewayIDFrom(r))
+			resp["nat"] = store.NATForGateway(all, gatewayIDFrom(r))
 		} else {
-			slog.Error("下发 NAT 策略失败，本轮按空集下发", "err", err.Error())
+			// 读不到 ≠ 没有。省略字段让网关保持现状——**保留一轮可能已过期的规则，
+			// 远好过把生产 NAT 表整个删掉**（前者最坏是策略晚生效一个轮询周期，
+			// 后者是当场断网）。降级方向恒为"不动手"。
+			slog.Error("下发 NAT 策略失败：本轮**不下发** nat 字段，网关将保持内核规则现状"+
+				"（绝不按空集下发——那会让网关删掉整张 NAT 表）", "err", err.Error())
 		}
+	} else {
+		// 存储后端不具备 NAT 能力（内存演示栈）：这是**确定**的"无策略"，与读失败不同。
+		resp["nat"] = []store.NATPolicy{}
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"resources": gwRes, "revoked": revoked, "nat": natOut})
+	httpx.JSON(w, http.StatusOK, resp)
 }
 
 // gatewayIDFrom 取本次请求的网关身份，**以已认证的那个为准**：
@@ -1811,12 +1836,30 @@ func (s *Server) handleDeleteResource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	id := r.PathValue("id")
+	// ★删之前先算清「删了会影响什么」，删之后就查不到了。
+	//   同 handleDeleteApp 的纪律：不级联删，但必须把连带影响当面说清——
+	//   不说的话管理员以为删资源顺手收回了权限，而实际留下的是：
+	//     · 引用它的应用 → apps.resource_id 变成悬空引用，管理台把它折叠成
+	//       「未关联资源」，**与从未关联过完全同形**，没人能看出这是删资源造成的；
+	//     · 该资源上的 JIT 授予 → 仍留在 jit_grants 里（授权清单显示的是失真状态）。
+	blast := s.resourceDeleteBlastRadius(r.Context(), id)
 	if err := s.writer.DeleteResource(r.Context(), id); err != nil {
+		if errors.Is(err, store.ErrResourceNotFound) {
+			// ★不回 200：那会落一条「删除受控资源 xxx」的审计，而库里根本没有这一行
+			//   ——审计里出现一件没发生过的事（同 handleDeleteApp / handleDecideApproval）。
+			httpx.Error(w, http.StatusNotFound, "受控资源不存在（可能已被删除）")
+			return
+		}
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete resource")
 		return
 	}
-	s.audit(r, "admin", "删除受控资源 "+id, "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
+	s.audit(r, "admin", "删除受控资源 "+id+blast.auditNote(), "ok")
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "id": id,
+		"apps":   blast.Apps,
+		"grants": blast.Grants,
+		"note":   blast.note(),
+	})
 }
 
 func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
@@ -2094,4 +2137,61 @@ func (s *Server) onlineSessionCount() int {
 		return -1
 	}
 	return count
+}
+
+// resourceBlast 删除一条受控资源会连带影响到什么。
+//
+// ★为什么必须在删之前算：删完就查不到了。而这些影响**不会**被级联清理
+// （与应用下架同一条纪律：不替管理员做他没要求的删除），所以唯一的补救是
+// 把它们如实写进审计与回执——让管理员当场知道还要去处理什么。
+type resourceBlast struct {
+	Apps   []string `json:"apps"`   // 引用该资源的应用名（删后变悬空引用）
+	Grants int      `json:"grants"` // 该资源上仍有效的 JIT 授予条数
+}
+
+func (b resourceBlast) note() string {
+	if len(b.Apps) == 0 && b.Grants == 0 {
+		return ""
+	}
+	var parts []string
+	if len(b.Apps) > 0 {
+		parts = append(parts, fmt.Sprintf("%d 个应用仍引用它（%s）：它们在管理台会显示为「未关联资源」，"+
+			"与从未关联过同形，请去「应用管理」重新关联或下架", len(b.Apps), strings.Join(b.Apps, "、")))
+	}
+	if b.Grants > 0 {
+		parts = append(parts, fmt.Sprintf("该资源上还有 %d 条有效的 JIT 授予未回收（授权清单会显示失真状态）", b.Grants))
+	}
+	return strings.Join(parts, "；")
+}
+
+func (b resourceBlast) auditNote() string {
+	if n := b.note(); n != "" {
+		return "（" + n + "）"
+	}
+	return ""
+}
+
+// resourceDeleteBlastRadius 统计连带影响。读失败不阻断删除——但也绝不谎报成 0：
+// 读不到时如实在回执里说"未能统计"，比给一个看起来干净的 0 好。
+func (s *Server) resourceDeleteBlastRadius(ctx context.Context, id string) resourceBlast {
+	var b resourceBlast
+	if ab, err := s.store.Apps(ctx); err == nil {
+		for _, a := range ab.Apps {
+			if strings.TrimSpace(a.ResourceID) == id {
+				b.Apps = append(b.Apps, a.Name)
+			}
+		}
+	} else {
+		slog.Warn("删除资源前统计引用它的应用失败（不阻断删除）", "resource", id, "err", err.Error())
+	}
+	if gs, err := s.store.ActiveGrants(ctx); err == nil {
+		for _, g := range gs {
+			if g.ResourceID == id {
+				b.Grants++
+			}
+		}
+	} else {
+		slog.Warn("删除资源前统计 JIT 授予失败（不阻断删除）", "resource", id, "err", err.Error())
+	}
+	return b
 }

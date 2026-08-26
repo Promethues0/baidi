@@ -478,7 +478,18 @@ func main() {
 			}
 			if changed {
 				slog.Info("地址转换规则已更新", "policies", len(ps))
-				cp.QueueEvent("nat-applied", fmt.Sprintf("地址转换规则已灌入内核：%d 条策略生效", len(ps)))
+				// ★n==0 是**清空整张 NAT 表**，不是"灌入了 0 条"。
+				//   旧文案「已灌入内核：0 条策略生效」读起来像一次正常灌入，而实际动作是
+				//   `nft delete table ip baidi_nat`——SNAT/DNAT 连同 FR-NAT-13 的隧道排除
+				//   规则一起消失。措辞必须让管理员一眼看出「刚刚删掉了什么」。
+				if len(ps) == 0 {
+					slog.Warn("控制面下发了空策略集：已清空本机 NAT 表（SNAT/DNAT 与隧道排除规则一并移除）")
+					cp.QueueEvent("nat-applied",
+						"控制面下发空策略集，已**清空**本机地址转换表：SNAT / DNAT 与隧道排除规则一并移除。"+
+							"若这不是预期，请检查控制面的 NAT 策略是否被误删或读取失败")
+				} else {
+					cp.QueueEvent("nat-applied", fmt.Sprintf("地址转换规则已灌入内核：%d 条策略生效", len(ps)))
+				}
 			}
 		}
 		if err := cp.Register(report()); err != nil {

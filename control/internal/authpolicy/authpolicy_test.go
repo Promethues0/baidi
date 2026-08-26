@@ -336,3 +336,73 @@ func TestValidate(t *testing.T) {
 		})
 	}
 }
+
+// FR-AUTH-21：**同时命中豁免与增强条件时仍需做增强认证**。
+//
+// PRD 7.6 验收原文：「When 登录命中条件（即便同时命中豁免规则），Then 在主认证之后
+// 强制完成一次增强认证方可上线」。它把两件事分开建模：
+//   FR-AUTH-17 免二次认证 —— 授信终端 / 特定网络，免掉的是**基础**那一次；
+//   FR-AUTH-20 增强认证   —— 弱口令 / 异常时段等**风险已经出现**时强制追加。
+//
+// 改造前两者被塌缩成一个 RequireMFA 布尔、豁免命中即 return，方向完全反了：
+// 正好在风险出现的那一刻，一条网段豁免把二次认证整个取消。而出厂那条 AD 默认策略
+// 恰好同时开着 TrustedNetwork(10.8.0.0/16) 与 WeakPwd+OffHours。
+func TestRiskConditionsOverrideExemption(t *testing.T) {
+	// 与出厂 ap-ad-default 同形：豁免与风险增强同时开着。
+	pols := []store.AuthPolicy{scopedPolicy(func(p *store.AuthPolicy) {
+		p.Enhance.WeakPwd = true
+		p.Exempt.TrustedNetwork = true
+		p.Exempt.Networks = []string{"10.8.0.0/16"}
+		p.Exempt.TrustedDevice = true
+	})}
+
+	in := baseInput("ext.zhou")
+	in.ClientIP = netip.MustParseAddr("10.8.2.31") // 在可信网段内
+	in.PwStrength = auth.PwWeak                    // 但口令是弱口令
+
+	d := Evaluate(pols, in)
+	if !d.RequireMFA {
+		t.Fatal("弱口令 + 可信网络：风险条件已命中，豁免不得生效——" +
+			"否则正好在风险出现的那一刻把二次认证整个取消（FR-AUTH-21）")
+	}
+	if d.Exempted {
+		t.Error("被风险条件否决时不应标记为 Exempted（那会让审计写成「已豁免」）")
+	}
+	if !d.ExemptOverridden {
+		t.Error("必须记下「豁免曾命中但被否决」：否则用户会以为豁免坏了、管理员会以为策略配错了")
+	}
+	sum := d.Summary()
+	for _, want := range []string{"弱口令", "10.8.0.0/16", "豁免不生效"} {
+		if !strings.Contains(sum, want) {
+			t.Errorf("摘要要同时说清风险条件、命中的豁免、以及豁免为何不生效；缺 %q：%s", want, sum)
+		}
+	}
+
+	// 授信终端同理（另一条豁免路径，不能只修一条）。
+	in2 := baseInput("ext.zhou")
+	in2.PwStrength = auth.PwWeak
+	in2.DeviceKnown, in2.DeviceVerdict, in2.DeviceID = true, "allow", "f47b0508"
+	if d := Evaluate(pols, in2); !d.RequireMFA || !d.ExemptOverridden {
+		t.Errorf("授信终端 + 弱口令同样要求二次认证：%+v", d)
+	}
+}
+
+// 反例：只命中**基础**档（Always）时，豁免照常生效——FR-AUTH-17 的本意，行为不能被改坏。
+func TestExemptionStillWorksForBaseRequirement(t *testing.T) {
+	pols := []store.AuthPolicy{scopedPolicy(func(p *store.AuthPolicy) {
+		p.Enhance.Always = true // 基础档
+		p.Enhance.WeakPwd = true
+		p.Exempt.TrustedNetwork = true
+		p.Exempt.Networks = []string{"10.8.0.0/16"}
+	})}
+	in := baseInput("ext.zhou")
+	in.ClientIP = netip.MustParseAddr("10.8.2.31")
+	in.PwStrength = auth.PwStrong // 风险条件**未**命中
+	d := Evaluate(pols, in)
+	if d.RequireMFA || !d.Exempted {
+		t.Fatalf("只命中基础档时豁免必须照常生效（FR-AUTH-17）：%+v", d)
+	}
+	if d.ExemptOverridden {
+		t.Error("没有风险条件命中，不该标记为「豁免被否决」")
+	}
+}

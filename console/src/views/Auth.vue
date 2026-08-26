@@ -210,6 +210,13 @@
             <span v-for="e in enhanceChips(p)" :key="'en-' + e" class="bd-mtg bd-mtg--warn"><icon-exclamation-circle />{{ e }}</span>
             <span v-if="!hasAdaptive(p)" class="bd-plat__none">未启用自适应</span>
           </div>
+          <!-- ★同时开了「豁免」与「风险增强」时必须说清谁赢。
+               此前两串标签只是并排列出，而绿色的「免二次」在视觉上更像结论，
+               管理员合理预期是「弱口令增强」更强——真实语义恰恰相反地被理解了。
+               现在按 FR-AUTH-21 的真实行为写：风险条件命中时豁免不生效。 -->
+          <div v-if="exemptVsRisk(p)" class="bd-pcard__note">
+            <icon-info-circle /> {{ exemptVsRisk(p) }}
+          </div>
         </div>
       </div>
     </div>
@@ -1129,6 +1136,19 @@ function workWindowText(e: EnhanceRule): string {
   const ds = days.filter((d) => d >= 1 && d <= 7).map((d) => '周' + names[d - 1]).join('/');
   return `${ds} ${e.workStart || '09:00'}-${e.workEnd || '18:00'}`;
 }
+/** 同时配了豁免与**风险**增强时，说清优先级（FR-AUTH-21：风险条件下豁免不生效）。
+ *  只在两者同时存在时出现——没有冲突时不打扰人。
+ *  ★「范围内一律二次认证」属基础档，可被豁免，故不计入风险档。 */
+function exemptVsRisk(p: AuthPolicy): string {
+  const hasExempt = p.exempt.trustedDevice || p.exempt.trustedNetwork;
+  const risks: string[] = [];
+  if (p.enhance.weakPwd) risks.push('弱密码');
+  if (p.enhance.offHours) risks.push('非工作时段');
+  if (!hasExempt || !risks.length) return '';
+  return `命中「${risks.join('、')}」时，上面的免二次认证豁免**不生效**，仍会要求二次认证`
+    + `（风险已经出现的时刻不该被豁免掉）；豁免只免除「范围内一律二次认证」那一档。`;
+}
+
 function hasAdaptive(p: AuthPolicy): boolean {
   return exemptChips(p).length > 0 || enhanceChips(p).length > 0;
 }
@@ -1536,4 +1556,7 @@ onMounted(async () => {
 .bd-pgroup__warn { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px;
   padding: 9px 12px; font-size: 12.5px; line-height: 1.65; border-radius: 6px;
   color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); }
+.bd-pcard__note { display: flex; align-items: flex-start; gap: 6px; margin-top: 8px;
+  padding: 7px 10px; font-size: 12px; line-height: 1.6; border-radius: 5px;
+  color: var(--bd-t3); background: var(--bd-fill-1); }
 </style>

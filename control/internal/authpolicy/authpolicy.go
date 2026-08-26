@@ -182,14 +182,25 @@ type Decision struct {
 	// 它唯一的执行语义是：非空时，legacy 演示验证码回落对这条策略覆盖的人**不成立**——
 	// 「要求二次认证」不能由一个写死在代码里的 123456 来满足。见 api.secondFactor。
 	Methods       []string `json:"methods"`
-	Reasons       []string `json:"reasons"`       // 命中的增强条件
-	Exempted      bool     `json:"exempted"`      // 命中了增强条件、但被豁免
+	Reasons       []string `json:"reasons"`       // 命中的全部条件（基础档 + 风险档，按此顺序）
+	Exempted      bool     `json:"exempted"`      // 命中了条件、但被豁免（只可能是基础档）
 	ExemptReasons []string `json:"exemptReasons"` // 命中的豁免条件
+	// ExemptOverridden 豁免条件确实命中了，但因风险条件同时命中而**不生效**（FR-AUTH-21）。
+	// ★必须单独表达：审计与提示要说得出「你确实在可信网络里，但口令是弱口令，仍要二次认证」，
+	// 否则用户会觉得豁免坏了、管理员会觉得策略配错了。
+	ExemptOverridden bool `json:"exemptOverridden,omitempty"`
+	// RiskReasons 否决了豁免的那些风险条件（ExemptOverridden 为真时非空）。
+	RiskReasons []string `json:"riskReasons,omitempty"`
 }
 
 // Summary 供审计与前端提示的一句话（已发生的事实，不含推测）。
 func (d Decision) Summary() string {
 	switch {
+	case d.RequireMFA && d.ExemptOverridden:
+		// 这一句是 FR-AUTH-21 在审计里的样子：豁免命中过、但被风险条件否决。
+		return "命中「" + strings.Join(d.RiskReasons, "、") + "」，虽同时命中「" +
+			strings.Join(d.ExemptReasons, "、") + "」但风险条件下豁免不生效，仍要求二次认证（策略「" +
+			d.PolicyName + "」）"
 	case d.RequireMFA:
 		return "因「" + strings.Join(d.Reasons, "、") + "」要求二次认证（策略「" + d.PolicyName + "」）"
 	case d.Exempted:
@@ -210,18 +221,32 @@ func Evaluate(pols []store.AuthPolicy, in Input) Decision {
 	d := Decision{PolicyID: p.ID, PolicyName: p.Name, Methods: trimAll(p.Secondary),
 		Reasons: []string{}, ExemptReasons: []string{}}
 
+	// ★两类条件必须分开收集，**豁免只作用于基础那一档**（FR-AUTH-21，7.6 验收原文：
+	//   「When 登录命中条件（即便同时命中豁免规则），Then 在主认证之后强制完成一次
+	//   增强认证方可上线」）。PRD 把它们建模成两件事：
+	//     FR-AUTH-17 免二次认证 —— 授信终端 / 特定网络区域，免掉的是**基础**那一次；
+	//     FR-AUTH-20 增强认证   —— 弱口令 / 异常时段等**风险已经出现**时强制追加。
+	//
+	//   改造前两者被塌缩成一个 RequireMFA 布尔，且豁免命中即 return —— 方向完全反了：
+	//   正好在风险出现的那一刻，一条网段豁免把二次认证整个取消。出厂那条 AD 默认策略
+	//   （ap-ad-default）恰好同时开着 TrustedNetwork(10.8.0.0/16) 与 WeakPwd+OffHours，
+	//   于是任何 AD 账号只要源 IP 落在该网段，哪怕口令被判弱、哪怕凌晨三点登录，
+	//   也一律单因素放行 —— 而管理员在策略卡上同时看到「弱口令增强」与「可信网络免二次」
+	//   两个已启用标签，合理预期是前者更强。
+	var baseReasons, riskReasons []string
 	if p.Enhance.Always {
-		d.Reasons = append(d.Reasons, "策略范围内账号一律二次认证")
+		baseReasons = append(baseReasons, "策略范围内账号一律二次认证")
 	}
 	// unknown 不命中：口令是在强度判定存在之前设的，判不了不等于弱。
 	if p.Enhance.WeakPwd && in.PwStrength == auth.PwWeak {
-		d.Reasons = append(d.Reasons, "账号口令为弱口令")
+		riskReasons = append(riskReasons, "账号口令为弱口令")
 	}
 	if p.Enhance.OffHours && offHours(p.Enhance, in.Now) {
-		d.Reasons = append(d.Reasons, "非工作时段登录（"+workWindowText(p.Enhance)+"）")
+		riskReasons = append(riskReasons, "非工作时段登录（"+workWindowText(p.Enhance)+"）")
 	}
 	// GeoAnomaly 不在这里求值：它是冻结能力，保存接口不允许开启，
 	// 存量库里为 true 的行也已在迁移回填里清掉（backfillAuthPolicyScope）。
+	d.Reasons = append(append([]string{}, baseReasons...), riskReasons...)
 	if len(d.Reasons) == 0 {
 		return d
 	}
@@ -236,8 +261,16 @@ func Evaluate(pols []store.AuthPolicy, in Input) Decision {
 	}
 	// WinDomain 同样是冻结能力，不参与求值。
 	if len(d.ExemptReasons) > 0 {
-		d.Exempted = true
-		return d
+		if len(riskReasons) == 0 {
+			// 只命中基础档 → 豁免生效（FR-AUTH-17 的本意）。
+			d.Exempted = true
+			return d
+		}
+		// ★风险条件已命中：豁免**不生效**，但必须记下它曾命中——
+		//   审计与前端提示要说得出「你确实在可信网络里，但因为口令是弱口令仍要二次认证」，
+		//   否则用户会觉得豁免坏了、管理员会觉得策略配错了。
+		d.ExemptOverridden = true
+		d.RiskReasons = riskReasons
 	}
 	d.RequireMFA = true
 	return d

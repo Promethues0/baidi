@@ -1330,9 +1330,22 @@ func nonNil(ss []string) []string {
 }
 
 // DeleteResource 删除一条受控资源。
+// ErrResourceNotFound 删/改一个不存在的受控资源。
+//
+// ★SQLite 对 `DELETE FROM resources WHERE id=?` 匹配不到任何行时**不报错**，
+// 所以必须查 RowsAffected——不查的话「删一个早就被删掉的资源」照样回 200，
+// 审计里因此出现一件没发生过的事（同 UpdateApp / DecideApproval 的纪律）。
+var ErrResourceNotFound = errors.New("受控资源不存在")
+
 func (s *SQLiteStore) DeleteResource(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM resources WHERE id=?`, id)
-	return err
+	res, err := s.db.ExecContext(ctx, `DELETE FROM resources WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrResourceNotFound
+	}
+	return nil
 }
 
 func (s *SQLiteStore) insertUser(u DirUser) error {

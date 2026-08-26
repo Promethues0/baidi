@@ -78,16 +78,30 @@
             低于「起始版本」的设备必须先升到「下一跳」，不得直升更高版本。
             白帝目前没有已知的不可直升版本对，故默认为空——留空即不限制。
           </div>
+          <!-- ★两个输入框必须挂保存触发器。此前它们只有 v-model、整张卡也没有保存按钮，
+               而同卡的两个开关挂了 @change 是**真保存**的——三项并排、两真一假，
+               管理员没有任何线索区分：填好的一跳刷新即消失，库里 Rules.Hops 恒为空，
+               于是 upgrade.CheckPackage 的链路约束对任何包都不触发（低版本直升最新包
+               照样回「校验通过」，而这条规则存在的全部理由就是拦住这次升级）。
+               副作用更迷惑：先填好一跳、再顺手拨一下任一开关，这一跳会被顺带存上，
+               表现为「有时能保存有时不能」。 -->
           <div v-for="(h, i) in rules.hops" :key="i" class="bd-hop">
-            <a-input v-model="h.below" placeholder="低于此版本" class="bd-mono" size="small" />
+            <a-input v-model="h.below" placeholder="低于此版本" class="bd-mono" size="small"
+              @blur="saveHops" @press-enter="saveHops" />
             <span>→ 先升到</span>
-            <a-input v-model="h.next" placeholder="下一跳版本" class="bd-mono" size="small" />
+            <a-input v-model="h.next" placeholder="下一跳版本" class="bd-mono" size="small"
+              @blur="saveHops" @press-enter="saveHops" />
             <button type="button" class="bd-link bd-link--danger" :aria-label="`删除第 ${i + 1} 条跳跃规则`"
               @click="rules.hops.splice(i, 1); saveRules()"><icon-delete /></button>
           </div>
           <button type="button" class="bd-link" @click="rules.hops.push({ below: '', next: '' })">
             <icon-plus />添加一跳
           </button>
+          <!-- 半填状态要当面说：saveRules 会 filter 掉只填了一半的行，不说的话
+               管理员会以为它存上了（页面上那一行还在）。 -->
+          <div v-if="halfFilledHops" class="bd-hint bd-hint--warn">
+            有 {{ halfFilledHops }} 条跳跃规则只填了一半，不会被保存——两栏都填完才生效。
+          </div>
         </div>
 
         <!-- 客户端灰度 -->
@@ -249,12 +263,31 @@ async function load() {
     const b = await api<UpgradeBundle>('/upgrade');
     bundle.value = b;
     Object.assign(rules, b.rules, { hops: b.rules.hops ?? [] });
+    // 同步保存基线：不同步的话，进页面后第一次失焦（哪怕什么都没改）就会触发一次
+    // 无谓的 PUT + toast，而那正是「保存触发器」最容易被做成噪声的地方。
+    lastHopsJSON = JSON.stringify(rules.hops.filter((h) => h.below && h.next));
     live.value = true;
   } catch (e) {
     live.value = false;
     err.value = (e as Error).message || '无法读取升级配置';
   }
 }
+
+/** 跳跃链路的保存触发器（失焦 / 回车）。
+ *
+ *  只在**内容真的变了**时才发请求：输入框失焦本身很频繁（点一下别处就触发），
+ *  每次都 PUT 会把审计冲成噪声，也会让「规则已保存」的 toast 在没改任何东西时乱弹。 */
+let lastHopsJSON = '';
+async function saveHops() {
+  const cur = JSON.stringify(rules.hops.filter((h) => h.below && h.next));
+  if (cur === lastHopsJSON) return;
+  lastHopsJSON = cur;
+  await saveRules();
+}
+/** 只填了一半的跳跃规则条数（saveRules 会把它们 filter 掉）。 */
+const halfFilledHops = computed(
+  () => rules.hops.filter((h) => (!!h.below) !== (!!h.next)).length
+);
 
 async function saveRules() {
   try {
@@ -435,4 +468,6 @@ onMounted(load);
 .bd-fld__d { display: block; margin-top: 4px; font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
 .bd-fld--row .bd-fld__d { margin-top: 0; }
 .bd-fld__foot { display: flex; justify-content: flex-end; gap: 10px; }
+.bd-hint--warn { margin-top: 8px; padding: 6px 10px; border-radius: 5px;
+  color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); }
 </style>

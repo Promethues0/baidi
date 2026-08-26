@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"strings"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -193,9 +195,13 @@ func (s *Server) handleSetUserMembership(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		OrgID  *string   `json:"orgId"`
 		Groups *[]string `json:"groups"`
+		// Roles 展示角色（users.roles）。**「按角色派生」的用户组唯一的成员来源**——
+		// 此前全仓没有任何写入路径（建号恒发 []、CSV 导入写死 []、也没有 PUT /users/{id}），
+		// 于是那类组永远 0 人且不可能变成非 0，而建组弹窗恰好写着「只能改角色」。
+		Roles *[]string `json:"roles"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10)).Decode(&body); err != nil {
-		httpx.Error(w, http.StatusBadRequest, "请求体须为 {orgId?, groups?}")
+		httpx.Error(w, http.StatusBadRequest, "请求体须为 {orgId?, groups?, roles?}")
 		return
 	}
 	u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
@@ -222,6 +228,22 @@ func (s *Server) handleSetUserMembership(w http.ResponseWriter, r *http.Request)
 		s.audit(r, "admin", "用户「"+u.Name+"」("+u.Account+") 所属用户组更新为 "+
 			strconv.Itoa(len(*body.Groups))+" 个", "ok")
 	}
+	if body.Roles != nil {
+		rw, ok := s.writer.(userRolesWriter)
+		if !ok {
+			httpx.Error(w, http.StatusServiceUnavailable, "当前存储后端不支持修改展示角色")
+			return
+		}
+		if err := rw.SetUserRoles(r.Context(), id, *body.Roles); err != nil {
+			orgStoreErr(w, err, "failed to set user roles")
+			return
+		}
+		// 角色变更会改变「按角色派生」的用户组成员，而那些组可能正被资源授权、
+		// 认证策略、安全基线引用——审计必须写出改成了什么，否则事后无从追溯
+		// 「这个人是什么时候进的那个组」。
+		s.audit(r, "admin", "用户「"+u.Name+"」("+u.Account+") 展示角色更新为 ["+
+			strings.Join(*body.Roles, "、")+"]（影响按角色派生的用户组成员）", "ok")
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id})
 }
 
@@ -230,4 +252,9 @@ func pickStr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// userRolesWriter 支持修改用户展示角色的存储后端（SQLite 实现之）。
+type userRolesWriter interface {
+	SetUserRoles(ctx context.Context, userID string, roles []string) error
 }

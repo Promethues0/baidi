@@ -210,7 +210,18 @@
           </a-select>
           <div v-if="derivedGroups.length" class="bd-uform__hint" style="margin: 8px 0 0">
             按角色派生：<span v-for="g in derivedGroups" :key="g.id" class="bd-tg bd-tg--sm" :style="tagStyle('#722ED1')">{{ g.name }}</span>
-            —— 由用户展示角色决定，改角色才会变。
+            —— 由用户展示角色决定，改下面的「展示角色」才会变。
+          </div>
+        </div>
+        <!-- ★展示角色是「按角色派生」用户组**唯一**的成员来源。
+             此前全仓没有任何写入路径（建号恒发 []、CSV 导入写死 []、也没有 PUT /users/{id}），
+             于是那类组永远 0 人且不可能变成非 0，而建组弹窗还写着「只能改角色」——
+             把管理员指向一条死路。用它授权的后果：资源侧空展开会下发 DenyAllSubject 哨兵，
+             那条资源对**所有人**拒绝；策略/基线侧则永不命中（fail-open）。 -->
+        <div class="bd-uform__f"><label>展示角色（决定「按角色派生」用户组的成员）</label>
+          <a-input-tag v-model="memberForm.roles" placeholder="回车添加，如：研发 / 销售 / 组长" allow-clear />
+          <div class="bd-uform__hint" style="margin: 6px 0 0">
+            组名与角色名相同的派生组会自动把该用户算作成员。空白与重复项保存时自动去掉。
           </div>
         </div>
         <button class="bd-btn" :disabled="savingMember" @click="saveMembership">保存归属</button>
@@ -544,7 +555,7 @@ function riskColor(r: string) { return r === 'high' ? '#F53F3F' : r === 'low' ? 
 function riskLabel(r: string) { return r === 'high' ? '高风险' : r === 'low' ? '低风险' : '正常'; }
 
 // ── 用户详情 + 归属编辑 ──
-const memberForm = reactive<{ orgId: string; groups: string[] }>({ orgId: '', groups: [] });
+const memberForm = reactive<{ orgId: string; groups: string[]; roles: string[] }>({ orgId: '', groups: [], roles: [] });
 const savingMember = ref(false);
 // 角色派生的归属在这里是只读展示：它由 users.roles 决定，混进可编辑的多选框会让人
 // 以为取消勾选就能移出组，而后端会拒。
@@ -556,6 +567,7 @@ function open(u: DirUser) {
   sel.value = u;
   memberForm.orgId = u.orgId;
   memberForm.groups = u.groups.filter((id) => staticGroups.value.some((g) => g.id === id));
+  memberForm.roles = [...(u.roles ?? [])];
   drawer.value = true;
 }
 async function saveMembership() {
@@ -564,9 +576,9 @@ async function saveMembership() {
   try {
     await api(`/users/${sel.value.id}/membership`, {
       method: 'PUT', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ orgId: memberForm.orgId ?? '', groups: memberForm.groups })
+      body: JSON.stringify({ orgId: memberForm.orgId ?? '', groups: memberForm.groups, roles: memberForm.roles })
     });
-    Message.success('已更新组织归属与用户组');
+    Message.success('已更新组织归属、用户组与展示角色');
     await load();
     const again = users.value.find((u) => u.id === sel.value?.id);
     if (again) open(again);

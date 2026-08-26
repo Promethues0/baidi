@@ -681,3 +681,44 @@ func (s *SQLiteStore) PolicyBundle(ctx context.Context) (PolicyBundle, error) {
 	}
 	return PolicyBundle{Tree: toPolicyTree(buildOrgTree(orgs))}, nil
 }
+
+// SetUserRoles 设置某用户的展示角色（users.roles）。
+//
+// ★这个写入路径此前**整个不存在**：建号表单恒发 roles: []、CSV 导入写死空数组、
+// membership 端点只管组织与 static 组，也没有 PUT /users/{id}。users.roles 的唯一
+// 写入点是种子回灌（把演示账号的「研发/销售/客服/外包/组长」原样落库）。
+//
+// 后果是「按用户角色派生」的用户组**永远 0 人且不可能变成非 0**，而新建用户组的
+// 弹窗恰好写着「改不了成员，只能改角色」——把管理员指向一条死路。用它授权的话：
+//   · 资源侧 → SubjectIndex 展开为空 → 下发 DenyAllSubject 哨兵 → 那条资源对**所有人**
+//     拒绝（原本"不限"的人也进不去，表现为「明明授权了却打不开」）；
+//   · 认证策略 / 安全基线的 scopeGroups → covers 恒 false → 永不命中（fail-open，
+//     该二次认证的人不被要求）。
+// 演示库上完全看不出来，因为 7 个种子账号带着 roles。
+func (s *SQLiteStore) SetUserRoles(ctx context.Context, userID string, roles []string) error {
+	// 去空去重并保序：一个多敲的空行会派生出一个名为 "" 的角色组，
+	// 而它在页面上看不见、却真的参与 roleMembers 分组。
+	seen := map[string]bool{}
+	out := []string{}
+	for _, r := range roles {
+		r = strings.TrimSpace(r)
+		if r == "" || seen[r] {
+			continue
+		}
+		seen[r] = true
+		out = append(out, r)
+	}
+	b, err := json.Marshal(out)
+	if err != nil {
+		return err
+	}
+	res, err := s.db.ExecContext(ctx, `UPDATE users SET roles=? WHERE id=?`, string(b), userID)
+	if err != nil {
+		return err
+	}
+	// 同 SetUserOrg：改一个不存在的用户必须报错，不能静默"成功"。
+	if n, err := res.RowsAffected(); err == nil && n == 0 {
+		return ErrUnknownAccount
+	}
+	return nil
+}

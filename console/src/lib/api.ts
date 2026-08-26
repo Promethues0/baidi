@@ -726,6 +726,11 @@ export interface AuthDirectory {
   /** 该目录下是否有已配置的认证源。false = 当前不会有人从这个目录登录（如已删源的存量策略）。 */
   configured: boolean;
   sources: string[];
+  /** 该目录当前有几条认证策略。★0 是危险值不是中性值：登录链路按目录筛，
+   *  零策略 = 不要求任何二次认证，且那条分支上一条审计都不写。 */
+  policies?: number;
+  /** 该目录的配置问题（后端下发的原话），空 = 无异常。 */
+  warning?: string;
 }
 /** 二次认证方式的能力声明（后端 authpolicy.SecondaryMethods）：
  *  真实现的（totp）可选；未实现的置灰并给出原因，保存端同源拒绝。 */

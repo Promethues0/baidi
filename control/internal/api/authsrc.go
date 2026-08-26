@@ -153,8 +153,22 @@ func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
 			warn = "配置已保存，但当前还不可用：" + berr.Error()
 		}
 	}
+	// FR-AUTH-10：接入一个用户目录后，系统要为它自动生成默认认证策略。
+	// 不补的话，该目录的用户从此**不受任何二次认证约束**且全程无痕（见函数注释）。
+	policyCreated, pwarn := s.ensureDirectoryDefaultPolicy(r.Context(), rec.Kind, rec.Name)
+	if pwarn != "" {
+		warn = strings.TrimSpace(warn + " " + pwarn)
+	}
 	s.audit(r, "admin", "保存认证源「"+rec.Name+"」（"+rec.Kind+"）", "ok")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "source": rec, "warning": warn})
+	if policyCreated {
+		// 自动生成的策略是一次真实的配置变更，必须单独留痕——管理员日后看到
+		// 一条"没人建过"的策略时，要能在审计里查到它是何时因何而来。
+		s.audit(r, "admin", "已为用户目录「"+dirLabel(rec.Kind)+"」自动生成默认认证策略"+
+			"（接入认证源「"+rec.Name+"」触发；该策略未开启任何增强/豁免规则，请按需调整）", "ok")
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "source": rec, "warning": warn, "policyCreated": policyCreated,
+	})
 }
 
 func (s *Server) handleDeleteAuthSource(w http.ResponseWriter, r *http.Request) {
@@ -289,4 +303,66 @@ func (s *Server) handleProbeAuthSource(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"ok": true, "detail": "连接正常", "elapsedMs": time.Since(start).Milliseconds(),
 	})
+}
+
+// ensureDirectoryDefaultPolicy 为某个用户目录补一条默认认证策略（若它一条都没有）。
+//
+// PRD FR-AUTH-10（P0）原文：「配置好认证服务器+用户目录后，系统自动为该用户目录生成
+// 默认认证策略，作用于目录内所有用户」。store.AuthPolicy.IsDefault 的注释也早写着
+// 「是否该目录的默认策略（**自动生成**，不可删除）」——功能声明在字段上，实现从没写过。
+//
+// ★不补的后果是一条彻底静默的降级：登录链路把 Directory 置成该源的 kind（ldap/oidc），
+// 而 authpolicy.Match 第一刀就按目录筛——库里一条该目录的策略都没有 → Evaluate
+// 返回零值 Decision → 二次认证要求为零，且 secondFactor 在零值分支两个 case 都不进，
+// **审计里连「本次未要求二次认证」都没有**。三处都无异常：
+//   ① 认证源保存回 200、连通性测试通过；
+//   ② 认证策略页只按「已有策略」分组渲染，接了 LDAP 之后页面上根本不多出这一栏，
+//      管理员看到的与接入前一模一样；
+//   ③ 用户侧是一次完全正常的成功登录。
+// 管理员在「本地目录 · 默认策略」里配好的规则对这批外部账号一条都不生效——
+// 而外部目录的人恰恰是这些规则最想覆盖的对象。
+//
+// ★生成的策略**刻意不开任何增强/豁免规则**，与种子里 local 那条同一条纪律：
+// 「种子的职责是给出可用的起点，不是替管理员做加严决策」。也就是说它的**判定行为
+// 与"没有策略"完全一致**——这条修复真正改变的是**可见性**：策略页从此会出现这一栏，
+// 管理员看得见、能编辑，而不是以为本地那条覆盖了所有人。
+//
+// best-effort：建不出来不阻断认证源保存（那会让一次读库抖动挡住整个接入配置），
+// 但要把原因带回给管理员，而不是静默跳过。
+func (s *Server) ensureDirectoryDefaultPolicy(ctx context.Context, kind, sourceName string) (created bool, warn string) {
+	if kind == "" || kind == string(authsrc.KindLocal) {
+		return false, "" // 本地目录的默认策略由种子给出
+	}
+	pols, err := s.store.AuthPolicies(ctx)
+	if err != nil {
+		return false, "未能检查该目录的认证策略（" + err.Error() + "）：请到「认证策略」页确认它是否已有默认策略"
+	}
+	for _, p := range pols {
+		if strings.EqualFold(strings.TrimSpace(p.Directory), kind) {
+			return false, "" // 已有（默认或自定义都算），不重复建
+		}
+	}
+	zh := dirLabel(kind) // 复用认证策略页那份目录中文名，不另造第二份
+	p := store.AuthPolicy{
+		ID:        "ap-" + kind + "-default",
+		Name:      zh + " · 默认策略",
+		Directory: kind,
+		IsDefault: true,
+		Scope:     zh + " · 全体用户",
+		Priority:  100,
+		Enabled:   true,
+		// 只列真实现的方式（同种子的纪律：冻结的 sms/radius/cert/http 不许出现）。
+		Secondary:   []string{"totp"},
+		ScopeOrgs:   []string{},
+		ScopeGroups: []string{},
+		Exempt:      store.ExemptRule{Networks: []string{}},
+		Enhance:     store.EnhanceRule{WorkStart: "09:00", WorkEnd: "19:00", WorkDays: []int{1, 2, 3, 4, 5}},
+	}
+	if _, err := s.writer.SaveAuthPolicy(ctx, p); err != nil {
+		return false, "未能为该目录自动生成默认认证策略（" + err.Error() + "）：" +
+			"在补上之前，该目录的用户不受任何二次认证约束，请到「认证策略」页手动新增"
+	}
+	slog.Info("已为新接入的用户目录生成默认认证策略（FR-AUTH-10）",
+		"目录", kind, "认证源", sourceName, "策略", p.ID)
+	return true, ""
 }

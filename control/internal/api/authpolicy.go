@@ -36,6 +36,12 @@ type authDirectory struct {
 	Configured bool `json:"configured"`
 	// Sources 落在该目录的认证源名（展示用，便于管理员认出"这条策略管的是哪个源"）。
 	Sources []string `json:"sources"`
+	// Policies 该目录当前有几条认证策略。**0 是一个危险值**，不是中性值：
+	// 登录链路按目录筛，零策略 = Evaluate 返回零值 Decision = 不要求任何二次认证，
+	// 且 secondFactor 在那条分支上一条审计都不写。
+	Policies int `json:"policies"`
+	// Warning 该目录当前配置的问题（当面说给管理员），空 = 无异常。
+	Warning string `json:"warning,omitempty"`
 }
 
 // dirZh 目录 key 的中文名。未知 key 原样回显（存量策略可能绑着已删源的 kind）。
@@ -92,6 +98,22 @@ func (s *Server) authDirectories(ctx context.Context, pols []store.AuthPolicy) (
 	}
 	for _, p := range pols {
 		add(p.Directory, false, "")
+		if k := strings.ToLower(strings.TrimSpace(p.Directory)); k != "" {
+			if i, ok := idx[k]; ok {
+				out[i].Policies++
+			}
+		}
+	}
+	// ★「已接入认证源、却一条策略都没有」必须当面说出来。
+	//   那种目录的用户登录时 authpolicy.Match 找不到 → Evaluate 返回零值 →
+	//   二次认证要求为零，且 secondFactor 在零值分支一条审计都不写。
+	//   FR-AUTH-10 的自动生成（ensureDirectoryDefaultPolicy）只在保存认证源时触发，
+	//   覆盖不到**这道修复之前就已接入**的存量部署——它们只能靠这条提示被发现。
+	for i := range out {
+		if out[i].Configured && out[i].Policies == 0 {
+			out[i].Warning = "该目录已接入认证源但没有任何认证策略：其用户登录时不受二次认证约束，" +
+				"且不会留下相关审计。请为它新增一条策略（保存任一该目录的认证源也会自动生成默认策略）。"
+		}
 	}
 	return out, nil
 }

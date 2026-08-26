@@ -148,6 +148,10 @@
           <span class="bd-pgroup__name">{{ g.name }}</span>
           <span class="bd-pgroup__cnt">{{ g.list.length }} 条策略</span>
         </div>
+        <!-- 已接入认证源却零策略：这不是"还没配"，是一条正在生效的认证降级。 -->
+        <div v-if="g.warning" class="bd-pgroup__warn">
+          <icon-exclamation-circle-fill /> {{ g.warning }}
+        </div>
 
         <div class="bd-card bd-pcard" :class="{ off: !p.enabled }" v-for="p in g.list" :key="p.id">
           <!-- 行头：名称 + 范围 + 默认/优先级 -->
@@ -1080,14 +1084,26 @@ const directorySources = computed(() =>
 );
 
 /** 按目录分组，组内按优先级升序（小者先匹配，默认策略优先级 100 自然沉底） */
+/* ★分组以**后端下发的目录清单**为准，不是只遍历已有策略。
+   改造前是 `for (const p of policies)` 建 map —— 一个已接入认证源、却一条策略都没有的
+   目录**根本不会出现在这一页上**，管理员看到的与接入前一模一样。而那种目录的用户
+   登录时 authpolicy.Match 找不到 → Evaluate 返回零值 → 二次认证要求为零，
+   且 secondFactor 在零值分支一条审计都不写：三处都无异常，只有把 auth_policies 表
+   和登录链路的 Directory 取值放在一起看才能发现（FR-AUTH-10）。 */
 const grouped = computed(() => {
   const map = new Map<string, AuthPolicy[]>();
   for (const p of policies.value) {
     if (!map.has(p.directory)) map.set(p.directory, []);
     map.get(p.directory)!.push(p);
   }
+  // 已配置认证源的目录一律成组（哪怕零策略），好让下面那条告警有地方显示。
+  const dirs = directories.value ?? [];
+  for (const d of dirs) {
+    if (d.configured && !map.has(d.key)) map.set(d.key, []);
+  }
   return [...map.entries()].map(([dir, list]) => ({
     dir, name: dirName(dir),
+    warning: dirs.find((d) => d.key === dir)?.warning ?? '',
     list: [...list].sort((a, b) => a.priority - b.priority)
   }));
 });
@@ -1517,4 +1533,7 @@ onMounted(async () => {
 .bd-admit__meta { display: flex; flex-wrap: wrap; gap: 12px; font-size: 12px; color: var(--bd-t3); flex: 1; }
 .bd-admit__sub { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bd-admit__act { display: flex; gap: 8px; flex: none; }
+.bd-pgroup__warn { display: flex; align-items: flex-start; gap: 7px; margin: 0 0 10px;
+  padding: 9px 12px; font-size: 12.5px; line-height: 1.65; border-radius: 6px;
+  color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); }
 </style>

@@ -748,7 +748,19 @@ pub fn sanitize_pid(raw: &str) -> Option<String> {
     Some(t.to_string())
 }
 
+/// 数据面进程的映像名（判活时用来确认"这个 pid 真的是 baidi-tun"）。
+/// Windows 上带 .exe 后缀，unix 上没有；比对一律小写、只看基名。
+pub const TUN_PROC_NAME: &str = "baidi-tun";
+
 /// 判活探测命令。unix 用 `ps -p`（不用 `kill -0`：对 root 进程会 EPERM 误判成"已退出"）。
+///
+/// ★同时要回**进程名**，不能只问 pid 在不在。baidi-tun 异常退出（未经 tunnel_stop）后
+/// pid 文件留在原地，一旦该 pid 被系统复用给别的进程：
+///   ① tun_running() 返回 true —— 托盘写「● 已接入企业内网」、接入页走进 connecting
+///      并卡到 25s 超时，而那句错误提示指向「网关未运行 / 国密开关不一致」，方向全错；
+///   ② 用户点「断开」会以 **root** 执行 `kill <那个无关进程的 pid>`。
+/// 模块内其它判活细节（tasklist 退出码、kill -0 的 EPERM）都被逐条推敲过，
+/// 唯独进程身份这一层没有——而它与正确写法只差一个 `-o comm=`。
 pub fn running_probe(platform: Platform, pid: &str) -> (String, Vec<String>) {
     match platform {
         Platform::Windows => (
@@ -765,7 +777,8 @@ pub fn running_probe(platform: Platform, pid: &str) -> (String, Vec<String>) {
                 String::from("-p"),
                 pid.to_string(),
                 String::from("-o"),
-                String::from("pid="),
+                // comm= 同时取回进程名；两列输出形如 "12345 baidi-tun"。
+                String::from("pid=,comm="),
             ],
         ),
     }
@@ -776,16 +789,40 @@ pub fn running_probe(platform: Platform, pid: &str) -> (String, Vec<String>) {
 /// ★Windows 这半必须自己解析，不能看退出码：**没有匹配进程时 tasklist 照样返回 0**，
 /// 只在 stdout 里打一句本地化的「信息: 没有运行的任务匹配指定标准。」。按退出码判的话，
 /// 托盘会永远显示「已接入」——一个只在 Windows 上出现、在 mac 上永远测不到的谎。
+/// ★除了 pid 匹配，还必须确认**进程名是 baidi-tun**（见 running_probe 的说明）。
 pub fn parse_running(platform: Platform, pid: &str, stdout: &str) -> bool {
     match platform {
         Platform::Windows => stdout.lines().any(|l| {
             let f: Vec<&str> = l.split_whitespace().collect();
             // tasklist /NH 的列序固定：映像名称 PID 会话名 会话# 内存使用。
             // 只认第 2 列——按"任意一列等于 pid"匹配会被内存列（"996 K"）误命中。
-            f.len() >= 2 && f[1] == pid
+            // 第 1 列是映像名（baidi-tun.exe），据此确认这个 pid 没有被复用给别的进程。
+            f.len() >= 2 && f[1] == pid && is_tun_image(f[0])
         }),
-        _ => stdout.split_whitespace().any(|t| t == pid),
+        // `ps -p <pid> -o pid=,comm=` 输出形如 "12345 baidi-tun"（comm 可能是完整路径）。
+        _ => stdout.lines().any(|l| {
+            let mut it = l.split_whitespace();
+            match (it.next(), it.next()) {
+                (Some(p), Some(name)) => p == pid && is_tun_image(name),
+                // 只有一列 = 老形态（-o pid=）或 comm 取不到：**判否**。
+                // 宁可把一条真隧道判成"已退出"（用户重连即可），也不能把一个无关进程
+                // 判成数据面——后者会以 root kill 掉它。
+                _ => false,
+            }
+        }),
     }
+}
+
+/// 进程名/映像名是否为数据面。只看基名、忽略大小写与 .exe 后缀。
+pub fn is_tun_image(name: &str) -> bool {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim()
+        .to_ascii_lowercase();
+    let base = base.strip_suffix(".exe").unwrap_or(&base);
+    base == TUN_PROC_NAME
 }
 
 // ── 取消判定 ──
@@ -2132,7 +2169,10 @@ mod tests {
     fn 判活命令分平台() {
         let (p, a) = running_probe(Platform::MacOS, "4321");
         assert_eq!(p, "ps");
-        assert_eq!(a, vec!["-p", "4321", "-o", "pid="]);
+        // ★必须同时取回进程名（comm）：只问 pid 在不在，会把一个被系统复用了
+        //   baidi-tun 旧 pid 的无关进程判成数据面——托盘显示「已接入」，
+        //   而用户点「断开」会以 root kill 掉它。
+        assert_eq!(a, vec!["-p", "4321", "-o", "pid=,comm="]);
         let (p, a) = running_probe(Platform::Windows, "4321");
         assert_eq!(p, "tasklist");
         assert_eq!(a, vec!["/FI", "PID eq 4321", "/NH"]);
@@ -2154,9 +2194,33 @@ mod tests {
 
     #[test]
     fn unix_判活解析_ps_输出() {
-        assert!(parse_running(Platform::MacOS, "4321", " 4321\n"));
+        // 正常：pid 匹配且进程名是 baidi-tun
+        assert!(parse_running(Platform::MacOS, "4321", " 4321 baidi-tun\n"));
+        // comm 可能是完整路径（不同 ps 实现/调用方式）
+        assert!(parse_running(Platform::Linux, "4321", "4321 /opt/baidi/bin/baidi-tun\n"));
         assert!(!parse_running(Platform::MacOS, "4321", "\n"));
-        assert!(!parse_running(Platform::Linux, "4321", " 43210\n"));
+        assert!(!parse_running(Platform::Linux, "4321", " 43210 baidi-tun\n"));
+
+        // ★pid 被系统复用给别的进程：必须判否。
+        //   判是的后果有两条，都不报错：托盘写「已接入企业内网」而隧道早没了；
+        //   用户点「断开」会以 root `kill` 掉那个无关进程。
+        assert!(!parse_running(Platform::MacOS, "4321", " 4321 sshd\n"));
+        assert!(!parse_running(Platform::Linux, "4321", " 4321 /usr/sbin/nginx\n"));
+        // 只有一列（老形态 / comm 取不到）→ 判否：宁可把真隧道判成已退出（重连即可），
+        // 也不能把一个无关进程判成数据面。
+        assert!(!parse_running(Platform::MacOS, "4321", " 4321\n"));
+    }
+
+    /// 映像名比对：只看基名、忽略大小写与 .exe，路径分隔符两种都认。
+    #[test]
+    fn 数据面映像名判定() {
+        for ok in ["baidi-tun", "baidi-tun.exe", "BAIDI-TUN.EXE",
+                   "/opt/baidi/bin/baidi-tun", r"C:\Program Files\x\baidi-tun.exe"] {
+            assert!(is_tun_image(ok), "应认作数据面: {ok}");
+        }
+        for bad in ["sshd", "baidi-tunnel", "baidi-tun-agent", "nginx", ""] {
+            assert!(!is_tun_image(bad), "不应认作数据面: {bad}");
+        }
     }
 
     // ── 取消 ──

@@ -203,6 +203,18 @@ func main() {
 		slog.Warn("未配置 -dns-listen，-dns-domains/-dns-records 不生效：域名类业务将走系统 DNS + 默认出口（直连内网，且没有任何提示）")
 	}
 
+	// ★残留清扫**无条件**先跑一次，而且必须排在建卡与配路由**之前**。
+	//
+	// 上一轮被 SIGKILL/断电杀掉留下的 /etc/resolver 文件（Windows 上是跨重启存活的
+	// NRPT 注册表规则、Linux 退路上改的是 /etc/resolv.conf 真文件）指向一个已消失的 VIP。
+	// 这段清扫原本排在下面建卡/配路由之后——而那两步都是 log.Fatalf：
+	//   遗留 utun/适配器占用、wintun.dll 缺失或架构不符、某条 route 已存在导致 route add 报错……
+	// 这几种失败恰恰是「上一次异常退出」之后**最容易紧接着发生**的，于是清扫永远跑不到：
+	// 用户只看到一句「创建 TUN 失败」，而机器的域名解析（Linux 退路上是**整机**解析）
+	// 仍指着一个不存在的 VIP —— 客户端设计的第二层保险被自己的语句顺序架空了。
+	// 清扫只删带 baidi-tun 标记的内容，不依赖本次是否启用 split-DNS，提前跑没有副作用。
+	sweepStaleDNSConfig()
+
 	// ① 创建 utun（需 root）② 配 IP + 把受保护网段路由进 TUN（需 root，平台实现）
 	dev, err := tun.CreateTUN(*tunName, mtu)
 	if err != nil {
@@ -222,12 +234,7 @@ func main() {
 	// 且没有任何报错。本项目最迷惑人的失败形态就是这种「无报错的静默失效」，宁可起不来。
 	// applySplitDNS 在返回错误前已把本次写过的部分回滚干净，故此处不必再清理。
 	defer runDNSCleanup() // 幂等；正常返回路径的兜底（异常路径见下面的 fatal/信号处理）
-	// ★残留清扫**无条件**先跑一次，不能只在本次启用 split-DNS 时跑。
-	// 上一轮被 SIGKILL/断电杀掉留下的 /etc/resolver 文件（Windows 上是跨重启存活的
-	// NRPT 注册表规则）指向一个已消失的 VIP；若此后控制面停用了 dns 段、或用户权限
-	// 收窄使剖面不再下发搜索域，那些残留就再无回收点——该域名在这台机器上永久解析
-	// 失败，而新一次接入一切显示正常、没有任何日志线索。
-	sweepStaleDNSConfig()
+	// 残留清扫已在建卡之前跑过（见上）——那里才是它唯一能保证被执行的位置。
 	if dnsIP != "" && len(domains) > 0 {
 		cleanup, derr := applySplitDNS(name, dnsIP, domains)
 		if derr != nil {

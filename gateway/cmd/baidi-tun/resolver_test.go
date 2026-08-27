@@ -7,6 +7,7 @@ package main
 // 与测试本身毫无关联，排查成本极高。那部分代码**未经实机验证**，见 resolver_*.go 的说明。
 
 import (
+	"os"
 	"encoding/json"
 	"net"
 	"reflect"
@@ -203,5 +204,41 @@ func TestRoutesCover(t *testing.T) {
 	}
 	if routesCover(nil, net.ParseIP("10.99.0.53")) {
 		t.Error("没有任何接管网段时不应判为已覆盖")
+	}
+}
+
+// 残留清扫必须排在建卡与配路由**之前**。
+//
+// ★这条顺序被打破不会报错、也测不出功能差异——只在「上一轮异常退出留下残留 +
+// 这一轮建卡失败」这个组合下暴露，而那两件事高度相关（遗留 utun/适配器占用、
+// wintun 缺失、route 已存在）。排在后面时清扫永远跑不到：用户只看到一句
+// 「创建 TUN 失败」，而机器的域名解析（Linux 退路上是**整机**解析）仍指着一个
+// 不存在的 VIP —— 第二层保险被语句顺序架空。
+//
+// 用源码文本断言而不是跑 main：那两步都要 root，单测里跑不了；
+// 而这条纪律要守的恰恰是「谁写在谁前面」。同 elevate.rs 里那批打包配置守卫。
+func TestSweepRunsBeforeTunCreation(t *testing.T) {
+	src, err := os.ReadFile("main.go")
+	if err != nil {
+		t.Fatalf("读 main.go: %v", err)
+	}
+	s := string(src)
+	sweep := strings.Index(s, "sweepStaleDNSConfig()")
+	if sweep < 0 {
+		t.Fatal("main.go 里必须无条件调用 sweepStaleDNSConfig()——" +
+			"缺了它，上一轮异常退出留下的解析器残留再无回收点")
+	}
+	create := strings.Index(s, "tun.CreateTUN(")
+	if create < 0 {
+		t.Fatal("找不到 tun.CreateTUN 调用点")
+	}
+	if sweep > create {
+		t.Error("sweepStaleDNSConfig() 必须排在 tun.CreateTUN 之前：" +
+			"建卡失败是 log.Fatalf，排在后面时清扫永远跑不到，而建卡失败恰恰是" +
+			"「上一次异常退出」之后最容易紧接着发生的")
+	}
+	// 顺带钉住它只被调一次（调两次说明有人在后面又补了一处，那是把问题掩盖掉）
+	if n := strings.Count(s, "sweepStaleDNSConfig()"); n != 1 {
+		t.Errorf("sweepStaleDNSConfig() 应恰好调用一次，实得 %d 次", n)
 	}
 }

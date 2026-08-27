@@ -183,7 +183,10 @@ type revokeInfo struct {
 func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // statusZh 目录账号状态中文名（审计/提示文案共用）。
-var statusZh = map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "挂起"}
+// ★idle 正名为「闲置」而不是「挂起」：后者读起来像一种**处置**（被停用），
+// 而它对登录与接入没有任何约束（accountBlocked 只认 disabled/locked）。
+// 保留该项是因为存量库与种子里仍有 status='idle' 的行，读侧要显示得出来。
+var statusZh = map[string]string{"active": "启用", "disabled": "禁用", "locked": "锁定", "idle": "闲置"}
 
 // pwStrengthZh 口令强度标记中文名（审计文案用；unknown = 判定存在之前设的口令）。
 var pwStrengthZh = map[string]string{auth.PwWeak: "弱", auth.PwStrong: "强", auth.PwUnknown: "未知"}
@@ -928,9 +931,25 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Status string `json:"status"`
 	}
-	ok := map[string]bool{"active": true, "disabled": true, "locked": true, "idle": true}
+	// ★入口不再接受 idle。它**不是一种处置**：accountBlocked 只认 disabled/locked，
+	//   而 statusZh 把 idle 译成「挂起」——于是把账号置成 idle 会回 200、审计留下一条
+	//   「状态置「挂起」」、用户列表显示灰标，而这个人可以照常登录门户、照常拿敲门令牌、
+	//   照常建隧道、照常走七层 Web 代理。**审计日志与用户列表一起在陈述一件没有发生的处置。**
+	//   控制台只给 禁用/启用/解锁 三个按钮，所以这条路要靠直接调 API 才走得到——
+	//   而那正是「用户状态」这类接口最典型的用法（运维脚本、按文档集成的调用方）。
+	//
+	//   idle 的真实语义是**闲置**（一个按 last_login 现算的观测结论，见 internal/api/idle.go），
+	//   不由管理员手工设置；闲置治理要停用账号时用的也是 locked。存量库与种子里可能
+	//   仍有 status='idle' 的行，**读侧照常显示**（statusZh 保留该项并已正名为「闲置」）。
+	ok := map[string]bool{"active": true, "disabled": true, "locked": true}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || !ok[body.Status] {
-		httpx.Error(w, http.StatusBadRequest, "status must be active|disabled|locked|idle")
+		msg := "status must be active|disabled|locked"
+		if body.Status == "idle" {
+			msg = "idle（闲置）是按最后登录时间现算的观测结论，不是可手工设置的处置状态——" +
+				"它不会阻断登录与接入。要停用请用 disabled，要锁定请用 locked；" +
+				"批量处置闲置账号见「闲置账号治理」"
+		}
+		httpx.Error(w, http.StatusBadRequest, msg)
 		return
 	}
 	// 目录回查提到写之前：既是为了在动手前判「目标是不是管理员」（安全管理员不得

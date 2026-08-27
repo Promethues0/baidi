@@ -58,7 +58,29 @@ type AccessRequest struct {
 	DecideReason string          `json:"decideReason"`
 	DecidedBy    string          `json:"decidedBy"` // 审批 admin
 	GrantID      string          `json:"grantId"`   // 审批通过回填的 jit_grants.id
+	// Kind 申请类型：request（首次申请）| renew（续期）。
+	//
+	// ★PRD 的 ApprovalFlow 本来就有 requestType「申请/续期」（FR-AUTH-03/04，验收标准
+	// 明写「通过后用户授权延续」），而续期此前**结构上不可能**：CreateAccessRequest 对
+	// 「已有 active 授予」一律回 ErrDuplicateRequest → 未到期提交被 409；等到期了，
+	// 访问已经断了，用户得在中断状态下重新申请并等审批。门户此时连入口都没有——
+	// 已授予资源的磁贴渲染的是「访问」不是「申请」，「剩余 X」红了也没有任何可点的动作。
+	Kind string `json:"kind"`
 }
+
+// 申请类型。
+const (
+	AccessKindRequest = "request" // 首次申请
+	AccessKindRenew   = "renew"   // 续期：延长现有 active 授予的到期时间，不新建授予
+)
+
+// RenewWindowMinutes 允许提交续期的窗口：授予剩余时间 ≤ 该值才算续期。
+//
+// ★必须有这道窗口，否则「续期」会变成刷时长的工具——刚获批就再提一单，
+// 审批通过又加满一个 TTL。取 30 分钟与告警规则 AlertKindGrantExpiring 的
+// beforeMinutes 默认值同源（那条规则正是「JIT 授予即将到期」的提醒），
+// 用户看到提醒的那一刻，正好就是能点「续期」的那一刻。
+const RenewWindowMinutes = 30
 
 // JitGrant 一条时限访问授予（审批通过瞬时创建，到期读时失效；跨 control 重启保序，故落 SQLite）。
 type JitGrant struct {

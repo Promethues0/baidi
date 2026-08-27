@@ -1044,6 +1044,13 @@ export interface PortalTile {
   unavailable?: boolean;
   /** 不可用的具体原因，直接渲染给用户看——他要拿这句话去找管理员。 */
   unavailableReason?: string;
+  /** 有效 JIT 授予的到期时刻（Unix 秒）；0/缺省 = 不是靠 JIT 拿到的访问权
+   *  （静态 ACL / 组织 / 用户组授权没有有效期维度）。 */
+  grantExpiresAt?: number;
+  /** 此刻能不能提交续期（PRD FR-AUTH-03/04）。★判据由服务端下发，与
+   *  store.CreateAccessRequest 的放行条件同源——早于窗口提交必然 409，
+   *  前端自己算一遍就会给出一个点了必然失败的按钮。 */
+  renewable?: boolean;
 }
 /** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线）。
  *  ★门户据此把 Web 磁贴的「访问」按钮置灰并显示原因，而不是让人点了才拿到一个一闪而过的 503。 */

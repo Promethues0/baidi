@@ -143,3 +143,66 @@ func TestRevokeGrant(t *testing.T) {
 		t.Fatalf("撤销不存在授予应 ErrGrantInactive: %v", err)
 	}
 }
+
+// JIT 续期（PRD FR-AUTH-03/04，ApprovalFlow.requestType「申请/续期」，
+// 验收标准：「通过后用户授权延续」）。
+//
+// ★此前续期**结构上不可能**：CreateAccessRequest 对「已有 active 授予」一律回
+// ErrDuplicateRequest —— 未到期提交被 409，等到期了访问已经断了，用户得在中断状态下
+// 重新申请并等审批。而门户此时连入口都没有：已授予资源的磁贴渲染的是「访问」不是
+// 「申请」，「剩余 X」红了也没有任何可点的动作。
+func TestJitRenew(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	r, err := s.CreateAccessRequest(ctx, newReq("bob"))
+	if err != nil {
+		t.Fatalf("首次申请: %v", err)
+	}
+	if r.Kind != AccessKindRequest {
+		t.Errorf("首次申请的 kind 应是 request，实得 %q", r.Kind)
+	}
+	_, g, err := s.DecideAccessRequest(ctx, r.ID, "approved", "同意", "admin", 0)
+	if err != nil {
+		t.Fatalf("审批: %v", err)
+	}
+
+	// ① 刚获批、离到期还早 → 仍是重复提交（否则「续期」会变成刷时长的工具）
+	if _, err := s.CreateAccessRequest(ctx, newReq("bob")); !errors.Is(err, ErrDuplicateRequest) {
+		t.Errorf("离到期还早时应拒（防止把审批当刷时长工具），实得 %v", err)
+	}
+
+	// ② 把授予改成"快到期"：进入续期窗口
+	near := time.Now().Unix() + int64(RenewWindowMinutes)*60 - 60
+	if _, err := s.db.ExecContext(ctx, `UPDATE jit_grants SET expires_at=? WHERE id=?`, near, g.ID); err != nil {
+		t.Fatal(err)
+	}
+	rn, err := s.CreateAccessRequest(ctx, newReq("bob"))
+	if err != nil {
+		t.Fatalf("临近到期应允许提交续期，实得 %v", err)
+	}
+	if rn.Kind != AccessKindRenew {
+		t.Errorf("该单应被标记为续期，实得 %q", rn.Kind)
+	}
+
+	// ③ 审批通过 → **延长现有授予**，不新建
+	_, g2, err := s.DecideAccessRequest(ctx, rn.ID, "approved", "续期同意", "admin", 0)
+	if err != nil {
+		t.Fatalf("审批续期: %v", err)
+	}
+	if g2.ID != g.ID {
+		t.Errorf("续期应延长原授予（id 不变），实得新 id %s（原 %s）——"+
+			"新建的话同一资源上会同时躺着两条 active 授予：网关两条都放行、都到期，"+
+			"而撤销时管理员只会看到并撤掉其中一条", g2.ID, g.ID)
+	}
+	if g2.ExpiresAt <= near {
+		t.Errorf("续期后到期时间应被延长：%d → %d", near, g2.ExpiresAt)
+	}
+	act, err := s.ActiveGrantsFor(ctx, "bob")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(act) != 1 {
+		t.Errorf("续期后该资源上应仍只有 1 条 active 授予，实得 %d 条", len(act))
+	}
+}

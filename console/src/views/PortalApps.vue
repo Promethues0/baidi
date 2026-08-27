@@ -89,6 +89,17 @@
                 :title="browserOpenable(app) && !webProxy.ready ? webProxy.note : ''"
                 @click="openApp(app)"
               ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
+              <!-- 续期（PRD FR-AUTH-03/04）。★只在**服务端说可以续**时出现：
+                   renewable 的判据与 store.CreateAccessRequest 的放行条件同源
+                   （剩余 ≤ RenewWindowMinutes），早于窗口点它必然 409。
+                   此前门户在这条路上什么都没有：磁贴渲染的是「访问」，「我的申请」页
+                   只被动显示「剩余 X」并在 <300s 时标红，**红了也没有任何可点的动作**——
+                   用户只能等它到期、访问断掉之后重新申请并等审批。 -->
+              <button
+                v-if="app.accessible && app.renewable"
+                class="bd-tile__btn bd-tile__btn--ghost"
+                @click="requestAccess(app, true)"
+              ><icon-history />续期</button>
               <button
                 v-else-if="app.degraded"
                 class="bd-tile__btn bd-tile__btn--ghost"
@@ -109,6 +120,9 @@
                 class="bd-tile__btn bd-tile__btn--ghost"
                 @click="requestAccess(app)"
               ><icon-safe />申请权限</button>
+              <div v-if="app.accessible && app.grantExpiresAt" class="bd-tile__exp" :class="{ soon: app.renewable }">
+                <icon-clock-circle />临时授权剩余 {{ remainText(app.grantExpiresAt) }}
+              </div>
               <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
               <div v-if="app.accessible && browserOpenable(app) && !webProxy.ready" class="bd-tile__warn">
                 <icon-exclamation-circle-fill />{{ webProxy.note }}
@@ -127,7 +141,7 @@
     </main>
 
     <!-- JIT 访问申请 -->
-    <a-modal v-model:visible="reqOpen" :title="`申请访问「${reqApp?.name ?? ''}」`" :width="480"
+    <a-modal v-model:visible="reqOpen" :title="`${reqRenew ? '续期' : '申请访问'}「${reqApp?.name ?? ''}」`" :width="480"
       :ok-loading="submitting" @ok="submitRequest" ok-text="提交申请" cancel-text="取消">
       <div class="bd-reqtip">
         <icon-safe class="bd-reqtip__ic" />
@@ -277,8 +291,18 @@ function reason(e: unknown, fallback: string) {
   return m ? m[1] : (msg || fallback);
 }
 
-function requestAccess(app: PortalTile) {
+/** 剩余时长的人话（服务端下发的是 Unix 秒）。 */
+function remainText(exp: number): string {
+  const s = Math.max(0, exp - Math.floor(Date.now() / 1000));
+  if (s < 60) return `${s} 秒`;
+  const m = Math.floor(s / 60);
+  return m < 60 ? `${m} 分钟` : `${Math.floor(m / 60)} 小时 ${m % 60} 分钟`;
+}
+
+const reqRenew = ref(false);
+function requestAccess(app: PortalTile, renew = false) {
   reqApp.value = app;
+  reqRenew.value = renew;
   reqReason.value = '';
   reqTtl.value = 60;
   reqOpen.value = true;
@@ -295,7 +319,9 @@ async function submitRequest() {
       body: JSON.stringify({ appId: app.id, reason: reqReason.value.trim(), ttlMinutes: reqTtl.value })
     });
     reqOpen.value = false;
-    Message.success(`「${app.name}」访问申请已提交，等待管理员审批`);
+    Message.success(reqRenew.value
+      ? `「${app.name}」续期申请已提交，等待管理员审批；批准后在现有授权上延长，访问不会中断`
+      : `「${app.name}」访问申请已提交，等待管理员审批`);
   } catch (e) {
     // 无后端 / 重复申请等：不白屏，提示即可（HTTP 409 = 已有待审批或有效授予）
     const msg = String((e as Error)?.message ?? '');
@@ -436,4 +462,7 @@ onMounted(() => {
 .bd-reqfield { margin-bottom: 14px; }
 .bd-reqfield label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 8px; }
 .bd-reqfield__hint { font-size: 12px; color: var(--bd-t3); margin-left: 10px; }
+.bd-tile__exp { display: flex; align-items: center; gap: 4px; margin-top: 7px;
+  font-size: 11.5px; color: var(--bd-t3); }
+.bd-tile__exp.soon { color: var(--bd-warning); }
 </style>

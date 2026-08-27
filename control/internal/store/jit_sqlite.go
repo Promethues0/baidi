@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -12,7 +13,7 @@ import (
 
 // ── access_requests 读 ──
 
-const accessReqCols = `id,usr,resource_id,resource_name,reason,ttl_minutes,status,timeline,submitted_at,decided_at,decide_reason,decided_by,grant_id`
+const accessReqCols = `id,usr,resource_id,resource_name,reason,ttl_minutes,status,timeline,submitted_at,decided_at,decide_reason,decided_by,grant_id,kind`
 
 func scanAccessRequests(rows *sql.Rows) ([]AccessRequest, error) {
 	defer rows.Close()
@@ -20,13 +21,20 @@ func scanAccessRequests(rows *sql.Rows) ([]AccessRequest, error) {
 	for rows.Next() {
 		var r AccessRequest
 		var tl string
+		// kind 用可空类型扫：回填跑过之后不该有 NULL，但一条 NULL 会让整个列表读不出来，
+		// 而"申请列表突然空了"比"某条 kind 显示成 request"糟得多。
+		var kind sql.NullString
 		if err := rows.Scan(&r.ID, &r.User, &r.ResourceID, &r.ResourceName, &r.Reason, &r.TTLMinutes,
-			&r.Status, &tl, &r.SubmittedAt, &r.DecidedAt, &r.DecideReason, &r.DecidedBy, &r.GrantID); err != nil {
+			&r.Status, &tl, &r.SubmittedAt, &r.DecidedAt, &r.DecideReason, &r.DecidedBy, &r.GrantID, &kind); err != nil {
 			return nil, err
 		}
 		_ = json.Unmarshal([]byte(tl), &r.Timeline)
 		if r.Timeline == nil {
 			r.Timeline = []ApprovalEvent{}
+		}
+		r.Kind = kind.String
+		if r.Kind == "" {
+			r.Kind = AccessKindRequest
 		}
 		out = append(out, r)
 	}
@@ -140,16 +148,33 @@ func (s *SQLiteStore) CreateAccessRequest(ctx context.Context, req AccessRequest
 	}
 	defer tx.Rollback()
 
-	var pend, act int
+	var pend int
 	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_requests WHERE usr=? AND resource_id=? AND status='pending'`,
 		user, req.ResourceID).Scan(&pend); err != nil {
 		return AccessRequest{}, err
 	}
-	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM jit_grants WHERE usr=? AND resource_id=? AND status='active' AND expires_at>?`,
-		user, req.ResourceID, time.Now().Unix()).Scan(&act); err != nil {
+	// 已有 active 授予时，看它**还剩多久**：
+	//   剩余 > RenewWindow → 仍是重复提交（拒），否则「续期」会变成刷时长的工具；
+	//   剩余 ≤ RenewWindow → 这是一次**续期**（放行，审批通过后延长现有授予）。
+	// ★此前这里只数 COUNT>0 就一律 ErrDuplicateRequest，于是续期结构上不可能：
+	//   未到期提交被 409，等到期了访问已经断了——而 PRD FR-AUTH-03/04 要的正是
+	//   「在到期前自助续期，不中断访问」。
+	now := time.Now().Unix()
+	var expiresAt int64
+	err = tx.QueryRowContext(ctx, `SELECT expires_at FROM jit_grants WHERE usr=? AND resource_id=? AND status='active' AND expires_at>? ORDER BY expires_at DESC LIMIT 1`,
+		user, req.ResourceID, now).Scan(&expiresAt)
+	switch {
+	case err == nil:
+		if expiresAt-now > int64(RenewWindowMinutes)*60 {
+			return AccessRequest{}, ErrDuplicateRequest
+		}
+		req.Kind = AccessKindRenew
+	case errors.Is(err, sql.ErrNoRows):
+		req.Kind = AccessKindRequest
+	default:
 		return AccessRequest{}, err
 	}
-	if pend > 0 || act > 0 {
+	if pend > 0 {
 		return AccessRequest{}, ErrDuplicateRequest
 	}
 
@@ -164,8 +189,8 @@ func (s *SQLiteStore) CreateAccessRequest(ctx context.Context, req AccessRequest
 	}
 	tl, _ := json.Marshal(req.Timeline)
 	if _, err := tx.ExecContext(ctx, `INSERT INTO access_requests(`+accessReqCols+`)
-VALUES(?,?,?,?,?,?,?,?,?,'','','','')`,
-		req.ID, req.User, req.ResourceID, req.ResourceName, req.Reason, req.TTLMinutes, req.Status, string(tl), req.SubmittedAt); err != nil {
+VALUES(?,?,?,?,?,?,?,?,?,'','','','',?)`,
+		req.ID, req.User, req.ResourceID, req.ResourceName, req.Reason, req.TTLMinutes, req.Status, string(tl), req.SubmittedAt, req.Kind); err != nil {
 		return AccessRequest{}, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -191,8 +216,9 @@ func (s *SQLiteStore) DecideAccessRequest(ctx context.Context, id, decision, rea
 
 	var req AccessRequest
 	var tl string
-	err = tx.QueryRowContext(ctx, `SELECT id,usr,resource_id,resource_name,ttl_minutes,status,timeline FROM access_requests WHERE id=?`, id).
-		Scan(&req.ID, &req.User, &req.ResourceID, &req.ResourceName, &req.TTLMinutes, &req.Status, &tl)
+	var reqKind sql.NullString
+	err = tx.QueryRowContext(ctx, `SELECT id,usr,resource_id,resource_name,ttl_minutes,status,timeline,kind FROM access_requests WHERE id=?`, id).
+		Scan(&req.ID, &req.User, &req.ResourceID, &req.ResourceName, &req.TTLMinutes, &req.Status, &tl, &reqKind)
 	if err == sql.ErrNoRows {
 		return AccessRequest{}, JitGrant{}, ErrRequestDecided
 	}
@@ -237,14 +263,56 @@ func (s *SQLiteStore) DecideAccessRequest(ctx context.Context, id, decision, rea
 		}
 		ttl = ClampGrantTTL(ttl)
 		now := time.Now().Unix()
-		grant = JitGrant{
-			ID: "grant-" + uuid.NewString()[:8], User: req.User, ResourceID: req.ResourceID, ResourceName: req.ResourceName,
-			RequestID: id, Reason: reason, GrantedBy: decidedBy, GrantedAt: now, ExpiresAt: now + int64(ttl)*60, Status: "active",
+		// ★续期单**延长现有授予**，不新建（PRD 验收：「通过后用户授权延续」）。
+		//   新建的话同一资源上会同时躺着两条 active 授予：网关侧靠 ActiveGrants 展开，
+		//   两条都放行、都到期，审计与授权清单里出现一次根本没发生的"第二次授权"，
+		//   而撤销时管理员只会看到并撤掉其中一条。
+		req.Kind = reqKind.String
+		if req.Kind == "" {
+			req.Kind = AccessKindRequest
 		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO jit_grants(`+grantCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,0,'')`,
-			grant.ID, grant.User, grant.ResourceID, grant.ResourceName, grant.RequestID, grant.Reason,
-			grant.GrantedBy, grant.GrantedAt, grant.ExpiresAt, grant.Status); err != nil {
-			return AccessRequest{}, JitGrant{}, err
+		var renewed bool
+		if req.Kind == AccessKindRenew {
+			var gid string
+			var oldExp int64
+			e := tx.QueryRowContext(ctx, `SELECT id,expires_at FROM jit_grants WHERE usr=? AND resource_id=? AND status='active' AND expires_at>? ORDER BY expires_at DESC LIMIT 1`,
+				req.User, req.ResourceID, now).Scan(&gid, &oldExp)
+			switch {
+			case e == nil:
+				// 从**当前时刻**起算而不是从旧到期时间叠加：叠加会让反复续期无限累积，
+				// 而每一次续期都该是一次独立的、时长受 TTL 上限约束的授权。
+				newExp := now + int64(ttl)*60
+				if newExp < oldExp {
+					newExp = oldExp // 续期不该缩短已有授权
+				}
+				if _, err := tx.ExecContext(ctx, `UPDATE jit_grants SET expires_at=?, reason=?, granted_by=? WHERE id=?`,
+					newExp, reason, decidedBy, gid); err != nil {
+					return AccessRequest{}, JitGrant{}, err
+				}
+				if err := tx.QueryRowContext(ctx, `SELECT `+grantCols+` FROM jit_grants WHERE id=?`, gid).
+					Scan(&grant.ID, &grant.User, &grant.ResourceID, &grant.ResourceName, &grant.RequestID,
+						&grant.Reason, &grant.GrantedBy, &grant.GrantedAt, &grant.ExpiresAt, &grant.Status,
+						&grant.RevokedAt, &grant.RevokeReason); err != nil {
+					return AccessRequest{}, JitGrant{}, err
+				}
+				renewed = true
+			case errors.Is(e, sql.ErrNoRows):
+				// 授予在审批期间到期或被撤销了：退化成新建一条（用户仍该拿到访问权，
+				// 那正是他申请的东西），但这件事要能从 grant.RequestID 追溯回本单。
+			default:
+				return AccessRequest{}, JitGrant{}, e
+			}
+		}
+		if !renewed {
+			grant = JitGrant{
+				ID: "grant-" + uuid.NewString()[:8], User: req.User, ResourceID: req.ResourceID, ResourceName: req.ResourceName,
+				RequestID: id, Reason: reason, GrantedBy: decidedBy, GrantedAt: now, ExpiresAt: now + int64(ttl)*60, Status: "active",
+			}
+			if _, err := tx.ExecContext(ctx, `INSERT INTO jit_grants(`+grantCols+`) VALUES(?,?,?,?,?,?,?,?,?,?,0,'')`,
+				grant.ID, grant.User, grant.ResourceID, grant.ResourceName, grant.RequestID, grant.Reason,
+				grant.GrantedBy, grant.GrantedAt, grant.ExpiresAt, grant.Status); err != nil {
+				return AccessRequest{}, JitGrant{}, err
+			}
 		}
 		if _, err := tx.ExecContext(ctx, `UPDATE access_requests SET grant_id=? WHERE id=?`, grant.ID, id); err != nil {
 			return AccessRequest{}, JitGrant{}, err
@@ -294,4 +362,12 @@ func (s *SQLiteStore) RevokeGrant(ctx context.Context, id, reason string) (JitGr
 	g.RevokedAt = now
 	g.RevokeReason = reason
 	return g, nil
+}
+
+// backfillAccessRequestKind 给存量申请单补 kind='request'。
+// 续期在这道迁移之前结构上不可能提交，所以存量行全都是首次申请。
+func (s *SQLiteStore) backfillAccessRequestKind() error {
+	_, err := s.db.Exec(`UPDATE access_requests SET kind=? WHERE kind IS NULL OR trim(kind)=''`,
+		AccessKindRequest)
+	return err
 }

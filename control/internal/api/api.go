@@ -803,6 +803,15 @@ type PortalTile struct {
 	Unavailable bool `json:"unavailable,omitempty"`
 	// UnavailableReason 具体原因，直接渲染给用户看（他要拿这句话去找管理员）。
 	UnavailableReason string `json:"unavailableReason,omitempty"`
+	// GrantExpiresAt 该资源上有效 JIT 授予的到期时刻（Unix 秒）；0 = 不是靠 JIT 拿到的访问权
+	// （静态 ACL / 组织 / 用户组授权没有有效期维度）。
+	GrantExpiresAt int64 `json:"grantExpiresAt,omitempty"`
+	// Renewable 此刻能不能提交续期（PRD FR-AUTH-03/04）。
+	//
+	// ★判据与 store.CreateAccessRequest 的放行条件**同源**（剩余 ≤ RenewWindowMinutes）：
+	// 早于窗口提交会被 ErrDuplicateRequest 拒，按钮就不该亮着——两处各写一遍的话，
+	// 用户会点到一个必然 409 的按钮，而那正是本项目反复消灭的形态。
+	Renewable bool `json:"renewable,omitempty"`
 }
 
 // handlePortalApps 返回当前用户可见的应用门户。
@@ -840,9 +849,17 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	subjects := s.subjectIndex(r.Context())
 	// 调用方的有效授予集合（resource_id）：把「需申请」磁贴翻回可访问。best-effort，读失败按未授予处理。
 	granted := map[string]bool{}
+	// 授予到期时间：磁贴据此在临近到期时给出「续期」入口（PRD FR-AUTH-03/04）。
+	// ★此前门户只在「我的申请」页被动显示「剩余 X」并在 <300s 时标红，**红了也没有
+	//   任何可点的动作**——而磁贴本身渲染的是「访问」不是「申请」，用户找不到任何
+	//   续期的地方，只能等它到期、访问断掉之后重新申请。
+	grantExpires := map[string]int64{}
 	if gs, err := s.store.ActiveGrantsFor(r.Context(), user); err == nil {
 		for _, g := range gs {
 			granted[g.ResourceID] = true
+			if g.ExpiresAt > grantExpires[g.ResourceID] {
+				grantExpires[g.ResourceID] = g.ExpiresAt
+			}
 		}
 	}
 	// 终端风险降权：高敏磁贴一律标不可访问，且**JIT 授予也翻不回来**——与网关侧
@@ -854,9 +871,16 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		_, st := appAccessState(user, c.Role, a, byRes, subjects, granted, degraded)
-		tiles = append(tiles, PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
+		tile := PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
 			Sensitivity: st.Sensitivity, Accessible: st.Accessible, ResourceID: a.ResourceID,
-			Degraded: st.Degraded, Unavailable: st.Unavailable, UnavailableReason: st.Reason})
+			Degraded: st.Degraded, Unavailable: st.Unavailable, UnavailableReason: st.Reason}
+		if exp := grantExpires[a.ResourceID]; exp > 0 {
+			tile.GrantExpiresAt = exp
+			// 与 store.CreateAccessRequest 的放行判据**同源**：早于窗口提交会被
+			// ErrDuplicateRequest 拒，按钮就不该亮着。
+			tile.Renewable = exp-time.Now().Unix() <= int64(store.RenewWindowMinutes)*60
+		}
+		tiles = append(tiles, tile)
 	}
 	// 七层入口此刻能不能用，如实随磁贴一起下发：Web 磁贴的「访问」按钮要不要给点、
 	// 点不动时该说什么，都靠它。不下发的话用户只会拿到一个一闪而过的 503。

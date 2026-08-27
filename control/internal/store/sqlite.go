@@ -780,12 +780,19 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// 自由文本时代的实际行为（没人读那个字段），所以升级不改变任何人的判定。
 		{"baseline_policies", "scope_orgs", "TEXT"},
 		{"baseline_policies", "scope_groups", "TEXT"},
+		// JIT 申请单的类型：request（首次申请）| renew（续期）。
+		// PRD 的 ApprovalFlow 本来就有 requestType「申请/续期」，只是从没实现过。
+		// 回填 'request'：存量单子全都是首次申请（续期在此之前结构上不可能提交）。
+		{"access_requests", "kind", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
 		}
 	}
 	if err := s.backfillAppResourceID(); err != nil {
+		return err
+	}
+	if err := s.backfillAccessRequestKind(); err != nil {
 		return err
 	}
 	if err := s.backfillApprovalKind(); err != nil {

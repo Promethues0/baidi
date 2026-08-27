@@ -1,6 +1,7 @@
 package natfw
 
 import (
+	"os"
 	"strings"
 	"testing"
 )
@@ -194,5 +195,60 @@ func TestApplySkipsUnchangedRuleset(t *testing.T) {
 	ps[0].SrcAddr = "192.168.0.0/16"
 	if changed, err := a.Apply(ps); err != nil || !changed {
 		t.Fatalf("策略变化后必须重灌：changed=%v err=%v", changed, err)
+	}
+}
+
+// FR-NAT-13：七层 Web 代理口必须进 SNAT 排除集。
+//
+// ★这个字段定义了、nft 与 pf 两个后端都写好了消费方，**唯独没有生产者**——
+// 连本文件顶部的 exempt 变量都不填它。于是同时带 -web 与 -nat 启动的网关
+// （PRD 8.3.3 的 B/S 免客户端接入 + 第 18 章的出口网关复用，正是手册描述的同一台
+// 代理网关），其七层流量不在排除集里。pf 后端尤其真实：
+// `nat on <WAN> from <Src> to <Dst> -> (<WAN>)` 对本机发出的报文同样生效，
+// 只要网关自身地址落在 Src 网段内，L7 监听发回浏览器的回包与它拨向后端的连接
+// 都会被改写源地址——症状是「配了 NAT 之后 B/S 入口时通时不通」。
+func TestWebPortsAreExempted(t *testing.T) {
+	ex := Exempt{TunnelPort: 18443, SPAPort: 18201, WebPorts: []int{18444}}
+
+	nft := strings.Join(nftExemptRules(ex), "\n")
+	for _, want := range []string{"tcp sport 18444 return", "tcp dport 18444 return"} {
+		if !strings.Contains(nft, want) {
+			t.Errorf("nft 排除集缺 %q：\n%s", want, nft)
+		}
+	}
+
+	var hasWeb bool
+	for _, pp := range exemptPorts(ex) {
+		if pp.n == 18444 && pp.proto == "tcp" {
+			hasWeb = true
+		}
+	}
+	if !hasWeb {
+		t.Error("pf 排除集缺 18444/tcp")
+	}
+
+	// 未配 -web 时不该混进一个 0 端口（portOf 对空地址回 0）
+	for _, r := range nftExemptRules(Exempt{TunnelPort: 18443, SPAPort: 18201}) {
+		if strings.Contains(r, " 0 return") {
+			t.Errorf("未配 web 时不该产生 0 端口规则：%s", r)
+		}
+	}
+}
+
+// 生产者那一半：main.go 必须真的把 -web 端口填进 Exempt。
+// ★字段有消费方、没生产者时，上面那些断言全都通过而功能是死的——
+// 这正是本条缺陷此前的形态，所以判据要一直追到调用点。
+func TestWebPortsHaveProducer(t *testing.T) {
+	src, err := os.ReadFile("../../cmd/baidi-gateway/main.go")
+	if err != nil {
+		t.Fatalf("读 main.go: %v", err)
+	}
+	s := string(src)
+	if !strings.Contains(s, "WebPorts:") {
+		t.Fatal("main.go 构造 natfw.Exempt 时必须填 WebPorts——" +
+			"否则 nft/pf 两侧的消费方永远收到空切片，FR-NAT-13 的排除规则等于不存在")
+	}
+	if !strings.Contains(s, "portOf(*webAddr)") {
+		t.Error("WebPorts 应取自 -web 监听地址（portOf(*webAddr)）")
 	}
 }

@@ -392,9 +392,23 @@ func main() {
 		// 症状是「配完 NAT 零信任就断了」，两件事之间没有任何线索。
 		var natApp *natfw.Applier
 		if *natOn || *natDry {
+			// ★七层 Web 代理口同样要排除（FR-NAT-13）。此前 WebPorts 字段定义了、
+			//   nft 与 pf 两个后端都写好了消费方，**唯独没有生产者**——连单测里的
+			//   exempt 变量都不填它。于是同时带 -web 与 -nat 启动的网关
+			//   （PRD 8.3.3 的 B/S 免客户端接入 + 第 18 章的出口网关复用，正是手册
+			//   描述的同一台代理网关），其七层流量不在 SNAT 排除集里。
+			//   pf 后端尤其真实：`nat on <WAN> from <Src> to <Dst> -> (<WAN>)` 对本机
+			//   发出的报文同样生效，只要网关自身地址落在 Src 网段内，L7 监听发回浏览器的
+			//   回包与它拨向后端的连接都会被改写源地址——症状是「配了 NAT 之后 B/S 入口
+			//   时通时不通」。上面那段为隧道口写下的理由，逐字适用于 WEB 口。
+			var webPorts []int
+			if p := portOf(*webAddr); p > 0 {
+				webPorts = append(webPorts, p)
+			}
 			natApp = natfw.New(natfw.Exempt{
 				TunnelPort: portOf(*proxyAddr),
 				SPAPort:    portOf(*spaAddr),
+				WebPorts:   webPorts,
 			})
 			natApp.DryRun = *natDry
 			if *natDry {

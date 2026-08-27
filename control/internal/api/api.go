@@ -1049,8 +1049,28 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		Old string `json:"old"`
 		New string `json:"new"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.New) < 8 {
-		httpx.Error(w, http.StatusBadRequest, "新口令至少 8 位")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpx.Error(w, http.StatusBadRequest, "请求体格式不正确")
+		return
+	}
+	// ★口令复杂度必须在**这里**强制，这是全流程唯一能强制它的时点。
+	//
+	//   BAIDI_SEED_MUST_CHANGE 默认为 1，也就是每一次标准部署的第一个动作就是管理员
+	//   把公开的种子口令 baidi@123 换掉——而此前这里只查 `len >= 8`：超管口令可以被
+	//   改成 `12345678`（8 位、命中内置弱口令表、被 PasswordWeakness 判 weak），
+	//   接口回 200、页面提示「修改成功」，没有任何一处告诉他这是弱口令。
+	//
+	//   而那个 weak 标记的唯一后果，是当且仅当有一条开着 weakPwd 的认证策略覆盖该账号时
+	//   抬一次二次认证——而种子里的本地默认策略 ap-local-default 并没有开 weakPwd。
+	//   于是「弱口令」这件事在标准部署里从头到尾**没有任何执行方**：判定器算得好好的、
+	//   连中文原因都备好了（PasswordWeakness 的第二个返回值），全仓零消费方。
+	//
+	//   现在把它接上：拒收 + 原样告诉用户为什么。判据只有一处（auth.PasswordWeakness），
+	//   与 users.pw_strength 落库用的 PasswordStrength 同源，不会出现"存进去是强、
+	//   拦的时候按弱"这种两套标准。
+	if weak, why := auth.PasswordWeakness(c.Sub, body.New); weak {
+		httpx.Error(w, http.StatusBadRequest, "新口令强度不足："+why+
+			"。要求：至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上的长口令")
 		return
 	}
 	if body.New == body.Old {

@@ -81,17 +81,17 @@
         <!-- 类别筛选 pill：已连控制面时是**服务端检索条件**（全表 WHERE），
              不再只是对最近 200 条的前端过滤 -->
         <div class="bd-pillrow">
-          <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch()">{{ f.label }}</span>
+          <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch(true)">{{ f.label }}</span>
         </div>
         <div style="flex: 1" />
         <!-- 检索：账号精确（查证据链要精确，模糊会把 li 匹配到 alice）+ 事件关键词 -->
         <a-input v-model="q.actor" size="small" style="width: 140px" placeholder="账号（精确）"
-          allow-clear @press-enter="runSearch" @clear="runSearch" />
+          allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <a-input v-model="q.kw" size="small" style="width: 170px" placeholder="事件关键词 / 回车检索"
-          allow-clear @press-enter="runSearch" @clear="runSearch" />
+          allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <!-- 时间快选 pill：此前是装饰件（没接进任何过滤逻辑），现为服务端时间窗 -->
         <div class="bd-pillrow">
-          <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch()">{{ t.label }}</span>
+          <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch(true)">{{ t.label }}</span>
         </div>
       </div>
       <table class="bd-table">
@@ -111,7 +111,13 @@
         </tbody>
       </table>
       <div class="bd-pager">
-        <template v-if="searchTotal >= 0">全表命中 {{ searchTotal }} 条，显示前 {{ shownLogs.length }} 条 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</template>
+        <template v-if="searchTotal >= 0">
+          全表命中 {{ searchTotal }} 条，本页第 {{ shownLogs.length ? page * PAGE_SIZE + 1 : 0 }}–{{ page * PAGE_SIZE + shownLogs.length }} 条 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」
+          <div style="flex: 1" />
+          <span class="bd-pgbtn" :class="{ off: page === 0 }" @click="prevPage">上一页</span>
+          <span class="bd-pgnum">第 {{ page + 1 }} / {{ pageCount }} 页</span>
+          <span class="bd-pgbtn" :class="{ off: page + 1 >= pageCount }" @click="nextPage">下一页</span>
+        </template>
         <template v-else>共 {{ shownLogs.length }} 条记录（最近 200 条快照）· 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」</template>
       </div>
     </div>
@@ -254,17 +260,28 @@ function sinceOf(key: string): string {
   return d.toISOString().slice(0, 10);
 }
 
-async function runSearch() {
-  if (!live.value) { searchResults.value = null; searchTotal.value = -1; return; }
+/** 每页条数。★后端 SearchAudit 一直支持 limit/offset 并回 total，页面却写死
+ *  `limit=200` 且**从不发 offset**——于是命中 5000 条时页脚如实写着「全表命中 5000
+ *  条」，而第 201 条之后没有任何入口能翻到。审计的用途就是查那一条，查不到等于没有。 */
+const PAGE_SIZE = 200;
+const page = ref(0);
+const pageCount = computed(() => Math.max(1, Math.ceil(Math.max(searchTotal.value, 0) / PAGE_SIZE)));
+
+/** reset=true 用于筛选条件变更。★必须归零：改了条件还停在第 3 页，
+ *  新条件只命中 50 条时页面显示「无匹配日志」，而它明明有 50 条。 */
+async function runSearch(reset = false) {
+  if (reset) page.value = 0;
+  if (!live.value) { searchResults.value = null; searchTotal.value = -1; page.value = 0; return; }
   // 全默认（全部类别 + 今天 + 无关键词）退回首屏快照：别让"什么都没筛"看起来像检索过
   const idle = catSel.value === 'all' && timeSel.value === 'today' && !q.actor.trim() && !q.kw.trim();
-  if (idle) { searchResults.value = null; searchTotal.value = -1; return; }
+  if (idle) { searchResults.value = null; searchTotal.value = -1; page.value = 0; return; }
   const qs = new URLSearchParams();
   if (catSel.value !== 'all') qs.set('category', catSel.value);
   if (q.actor.trim()) qs.set('actor', q.actor.trim());
   if (q.kw.trim()) qs.set('q', q.kw.trim());
   qs.set('from', sinceOf(timeSel.value));
-  qs.set('limit', '200');
+  qs.set('limit', String(PAGE_SIZE));
+  qs.set('offset', String(page.value * PAGE_SIZE));
   try {
     const r = await api<{ logs: AuditEntry[]; total: number }>(`/audit?${qs.toString()}`);
     searchResults.value = r.logs;
@@ -273,6 +290,9 @@ async function runSearch() {
     Message.error('审计检索失败（需已连 baidi-control）');
   }
 }
+
+function prevPage() { if (page.value > 0) { page.value--; runSearch(); } }
+function nextPage() { if (page.value + 1 < pageCount.value) { page.value++; runSearch(); } }
 
 function catMeta(c: AuditEntry['category']) {
   // 未知分类兜底：后端新增分类时页面稳定降级（原样显示 key），而不是 undefined.color 崩掉整页

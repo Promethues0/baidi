@@ -252,6 +252,14 @@ jobs:
         working-directory: console
         run: npm run type-check
 
+      # ★装饰性控件 / 死占位守卫。type-check 与 build 对它们全是绿的：
+      #   一个没有 <input> 的「搜索框」是合法的 div，一句 `void _shown;` 是合法的
+      #   表达式语句。而它们在页面上与能用的版本长得一模一样——这一族缺陷只能
+      #   靠专门的守卫抓。
+      - name: 装饰性控件 / 死占位
+        working-directory: console
+        run: npm run check-ui
+
       # ★build 不是 type-check 的重复：vue-tsc 只看类型，vite build 还会做
       #   模块解析、资源引用、按需引入插件那一层。改错一个 import 路径时
       #   type-check 照样过，build 才炸——而用户拿到的是 build 的产物。

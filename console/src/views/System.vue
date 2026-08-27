@@ -142,6 +142,20 @@
       <div v-if="smsNote" class="bd-warn">
         <icon-exclamation-circle-fill />{{ smsNote }}
       </div>
+      <!-- 哪些事件真的会发通知。★不列的话，「没收到」与「这类事件根本没接线」
+           在页面上完全同形——管理员配好通道后无从知道自己会收到什么。
+           与告警规则页展示 alertKindSpecs.Signal 同款做法：逐条写出触发源。 -->
+      <div v-if="notifyEvents.length" class="bd-nev">
+        <div class="bd-nev__h">会触发通知的安全事件</div>
+        <div v-for="e in notifyEvents" :key="e.event" class="bd-nev__i" :class="{ off: !e.wired }">
+          <span class="bd-nev__n">
+            <icon-check-circle-fill v-if="e.wired" class="bd-nev__ok" />
+            <icon-minus-circle v-else class="bd-nev__no" />
+            {{ e.name }}
+          </span>
+          <span class="bd-nev__s">{{ e.wired ? e.signal : (e.reason || '本版本未接线') }}</span>
+        </div>
+      </div>
       <div v-if="notifyErr" class="bd-warn"><icon-exclamation-circle-fill />{{ notifyErr }}</div>
       <div v-if="dropped > 0" class="bd-warn">
         <icon-exclamation-circle-fill />
@@ -674,7 +688,7 @@ import { Message, Modal } from '@arco-design/web-vue';
 import {
   getToken,
   api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo,
-  type NotifyChannel, type NotifyChannelsResp, type NotifyTestResp, type SaveNotifyChannelResp,
+  type NotifyChannel, type NotifyChannelsResp, type NotifyEventSpec, type NotifyTestResp, type SaveNotifyChannelResp,
   type SmtpChannelConfig, type WebhookChannelConfig,
   type AuditForwardTarget, type AuditForwardResp, type SaveAuditForwardResp,
   type AuditForwardTestResp, type AuditForwardFlushResp,
@@ -826,12 +840,14 @@ async function importLicense() {
 const channels = ref<NotifyChannel[]>([]);
 const supportedKinds = ref<string[]>(['smtp', 'webhook', 'sms']);
 const smsNote = ref('');
+const notifyEvents = ref<NotifyEventSpec[]>([]);
 const dropped = ref(0);
 const notifyErr = ref('');
 
 async function loadNotify(toast = false) {
   try {
     const b = await api<NotifyChannelsResp>('/notify/channels');
+    notifyEvents.value = b.events ?? [];
     channels.value = b.channels ?? [];
     supportedKinds.value = b.supportedKinds?.length ? b.supportedKinds : supportedKinds.value;
     smsNote.value = b.smsNote ?? '';
@@ -1362,4 +1378,12 @@ function removeRole(g: AdminRole) {
 .bd-empty--lg :deep(svg) { font-size: 30px; color: var(--bd-t4); }
 .bd-empty__t { font-size: 15px; font-weight: 600; color: var(--bd-t2); }
 .bd-empty__d { font-size: 12.5px; color: var(--bd-t3); line-height: 1.8; max-width: 620px; }
+.bd-nev { margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px; background: var(--bd-fill-1); }
+.bd-nev__h { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 7px; }
+.bd-nev__i { display: flex; gap: 10px; align-items: flex-start; padding: 4px 0; font-size: 12px; line-height: 1.6; }
+.bd-nev__i.off { opacity: 0.72; }
+.bd-nev__n { flex: none; width: 168px; display: flex; align-items: center; gap: 5px; color: var(--bd-t1); }
+.bd-nev__ok { color: var(--bd-success); }
+.bd-nev__no { color: var(--bd-t3); }
+.bd-nev__s { flex: 1; color: var(--bd-t3); }
 </style>

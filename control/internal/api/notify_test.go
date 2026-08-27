@@ -419,18 +419,33 @@ func TestNotify_终端判block只在转入时通知一次(t *testing.T) {
 	f.srv.notices.Wait()
 	// ★不写成 t.Skip：一条"条件不满足就悄悄跳过"的用例，等同于没有这条用例。
 	// 种子基线把 disk_encrypted（severity=high）判成 block，这是本用例的前提。
-	first := got()
-	if len(first) != 1 {
-		t.Fatalf("转入 block 应发 1 条，实得 %d", len(first))
+	// ★按主题分类计数，不数总数：这一次上报同时触发两类事件——
+	//   「新终端首次登记」（EnrollDevice created=true）与「判定转入 block」，
+	//   两条都该发。数总数会把"多接了一类通知"误报成"重复通知"。
+	countBy := func(kw string) int {
+		n := 0
+		for _, m := range got() {
+			if sub, _ := m["subject"].(string); strings.Contains(sub, kw) {
+				n++
+			}
+		}
+		return n
 	}
-	if !strings.Contains(first[0]["subject"].(string), "终端不合规") {
-		t.Errorf("通知主题 = %v", first[0]["subject"])
+	if n := countBy("终端不合规"); n != 1 {
+		t.Fatalf("转入 block 应发 1 条，实得 %d", n)
+	}
+	if n := countBy("新终端首次登录"); n != 1 {
+		t.Errorf("该设备是首次登记，应发 1 条新终端通知，实得 %d", n)
 	}
 
-	// 同一台设备再报一次同样的不合规：状态没变，不该再发。
+	// 同一台设备再报一次同样的不合规：状态没变、设备也不再是"首次"，两类都不该再发。
 	doJSON(t, f.h, "POST", "/api/v1/posture", utok, bad)
 	f.srv.notices.Wait()
-	if n := len(got()); n != 1 {
+	if n := countBy("终端不合规"); n != 1 {
 		t.Fatalf("★状态未变化却又发了通知（%d 条）：按上报频率会把管理员邮箱刷爆", n)
+	}
+	if n := countBy("新终端首次登录"); n != 1 {
+		t.Errorf("★同一设备第二次上报不该再发新终端通知（实得 %d 条）——"+
+			"判据是 EnrollDevice 的 created，不是「当前有几台设备」", n)
 	}
 }

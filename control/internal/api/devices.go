@@ -83,6 +83,27 @@ func (s *Server) enrollReportingDevice(r *http.Request, account, fingerprint, pl
 		s.auditAs(r, account, "security", "新终端首次登记，状态 pending 待批准："+account+" / "+dev.Name+
 			"（指纹 "+shortFP(fingerprint)+"，已生成绑定审批单 "+dev.ApprovalID+"）", "ok")
 	}
+	// 上线风险通知 · 新终端首次登录（FR-POLICY-35 四类事件之一）。
+	//
+	// ★零信任产品里「你的账号在一台从没见过的机器上登录了」是账号被盗**最直接**的
+	//   用户侧信号，也是 PRD 把这条列成 P1 的原因。此前四类里只接了「账号爆破锁定」
+	//   一类——通道体系（SMTP 真实现、有界异步队列、发送成败都落审计、通道页 UI 齐全）
+	//   与信号源两头都就绪，中间少一根线：管理员配好邮件通道后，账号被爆破会收到邮件，
+	//   而「有人在一台新机器上用你的账号登录成功了」不会。
+	//
+	//   判据与上面那两条审计**同源**（EnrollDevice 的 created）：每 15s 一次的 posture
+	//   上报里它只在首次为真，不会刷屏；按"当前有几台设备"发才会随上报频率刷爆邮箱
+	//   （同 posture-block 那条通知的纪律）。
+	zh := "已按「自动绑定」置为授信"
+	if dev.Status != store.DeviceStatusTrusted {
+		zh = "状态为「待批准」，在管理员批准前无法接入"
+	}
+	s.notifySecurityEvent("device-first-seen", "【白帝】新终端首次登录："+account,
+		"账号 "+account+" 首次在一台新终端上登录并完成环境上报。\n\n"+
+			"终端："+dev.Name+"（"+platform+"）\n指纹："+shortFP(fingerprint)+"\n"+
+			"当前状态："+zh+"\n\n"+
+			"若这不是本人操作，请立即修改口令并在「终端管理」中吊销该设备。\n"+
+			"本条只在该终端**首次**登记时发送一次。")
 	return dev, true, nil
 }
 

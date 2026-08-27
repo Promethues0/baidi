@@ -112,6 +112,10 @@ func (s *Server) handleNotifyChannels(w http.ResponseWriter, r *http.Request) {
 		// 诚实标注：短信通道就是一次 webhook 调用，控制台照抄这句话展示。
 		"smsNote": "短信通道本质是一次 webhook 调用（载荷 mobiles + text），" +
 			"白帝不实现任何短信网关协议——需要你自己搭一跳把它转成运营商/云厂商的请求。",
+		// 哪些事件真的会发通知——逐条写明触发源，与告警规则的 alertKindSpecs.Signal 同款做法。
+		// ★不列清单的后果：管理员配好通道后不知道自己会收到什么、不会收到什么，
+		//   而"没收到"与"这类事件根本没接线"在页面上完全同形。
+		"events": notifyEventSpecs(),
 	})
 }
 
@@ -519,5 +523,41 @@ func (s *Server) deliverNotice(ctx context.Context, m notify.Message) {
 	if sent == 0 {
 		// 没配通道不是错误，但也不能完全无声：真出事时"为什么没人收到"要有据可查。
 		slog.Warn("安全事件发生但没有任何启用中的消息通道，通知未发出", "event", m.Event, "subject", m.Subject)
+	}
+}
+
+
+// notifyEventSpec 一类安全事件通知的元信息（是否已接线 + 触发源的事实描述）。
+type notifyEventSpec struct {
+	Event  string `json:"event"`
+	Name   string `json:"name"`
+	Wired  bool   `json:"wired"`  // 是否真的有代码在发它
+	Signal string `json:"signal"` // 触发源：写给排障的人看
+	Reason string `json:"reason,omitempty"` // 未接线时说清为什么
+}
+
+// notifyEventSpecs 全部安全事件通知种类。**新增一项前先回答：真的有代码在发它吗？**
+//
+// PRD FR-POLICY-35 列了四类（账号首次登录 / 新终端首次登录 / 非常用地点登录 /
+// 账号爆破锁定）。此前只接了爆破锁定一类，而通道体系与信号源两头都就绪——
+// 中间少的只是一根线，且页面上没有任何地方说得出"哪些会发、哪些不会"。
+func notifyEventSpecs() []notifyEventSpec {
+	return []notifyEventSpec{
+		{Event: "lockout", Name: "账号爆破锁定", Wired: true,
+			Signal: "登录防爆破守卫（internal/lockout.Guard）判定锁定的那一刻，与登录链路正在执行的是同一份判据"},
+		{Event: "device-first-seen", Name: "新终端首次登录", Wired: true,
+			Signal: "posture 上报时 EnrollDevice 返回 created=true（该指纹首次登记），" +
+				"与同一处那两条 security 审计同源；每 15s 一次的上报里它只在首次为真"},
+		{Event: "posture-block", Name: "终端合规判定转入阻断", Wired: true,
+			Signal: "posture 上报后账号级判定**转入** block 的那一次（不是「当前是 block」——" +
+				"按后者发会随上报频率刷爆邮箱），与审计里那条转换记录同一判据"},
+		{Event: "geo-anomaly", Name: "非常用地点登录", Wired: false,
+			Signal: "需要按源 IP 判定常用地点",
+			Reason: "本版本无 IP 地理库，判不了——与认证策略里 geoAnomaly 同一条冻结理由。" +
+				"配了通道也不会收到这类通知，不做则已，不做假的。"},
+		{Event: "account-first-login", Name: "账号首次登录", Wired: false,
+			Signal: "users.last_login 由空转为非空的那一次",
+			Reason: "信号源已在库里（TouchLastLogin），但尚未接线；与「新终端首次登录」高度重合" +
+				"（新账号的第一次登录必然也是一台新终端），故优先接了后者。"},
 	}
 }

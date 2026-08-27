@@ -449,6 +449,14 @@ export interface NotifyChannelsResp {
   droppedNotices: number;
   /** 短信通道的诚实标注，由后端下发、界面原样展示。 */
   smsNote: string;
+  /** 哪些安全事件真的会发通知（wired=false 的当面说清为什么不发）。
+   *  ★不列清单的话，「没收到」与「这类事件根本没接线」在页面上完全同形。 */
+  events?: NotifyEventSpec[];
+}
+
+/** 一类安全事件通知的元信息（后端 notifyEventSpecs）。 */
+export interface NotifyEventSpec {
+  event: string; name: string; wired: boolean; signal: string; reason?: string;
 }
 
 /** SMTP 通道配置（与 control 的 smtpChannelDTO 对齐）。 */

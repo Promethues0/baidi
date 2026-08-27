@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -35,12 +36,43 @@ func RequestID(next http.Handler) http.Handler {
 	})
 }
 
-// CORS 开发期放行 console 跨端口访问。
-func CORS(origin string) Middleware {
+// CORS 跨源放行。conf 取自 BAIDI_CORS_ORIGIN，两种形态：
+//
+//   - "*"                     任意来源（默认，见 config.Load 与启动告警）
+//   - "a://b,c://d"           逗号分隔白名单：只回显命中的那一个，并发 Vary: Origin
+//
+// ★白名单形态是 wave9 补的能力，默认值**没有**跟着收紧，理由写在
+// config.AllowOrigin 与 main 的启动告警里：客户端 webview 的 origin 逐平台不同
+// （Tauri mac/Linux 是 tauri://localhost、Windows 是 http://tauri.localhost、
+// 安卓 WebViewAssetLoader 是 https://appassets.local、iOS 是 file 派生的 null），
+// 漏掉一个就是那个平台升级即全员连不上，而这条的实际暴露面要小得多
+// （API 认证走 Bearer 不走 Cookie，跨站页面拿不到已认证响应）。
+// 收紧的路径是显式配置 + 逐平台实测，不是把默认值一改了事。
+func CORS(conf string) Middleware {
+	conf = strings.TrimSpace(conf)
+	any := conf == "*" || conf == ""
+	allow := map[string]bool{}
+	for _, o := range strings.Split(conf, ",") {
+		if o = strings.TrimSpace(o); o != "" && o != "*" {
+			allow[o] = true
+		}
+	}
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			h := w.Header()
-			h.Set("Access-Control-Allow-Origin", origin)
+			switch {
+			case any:
+				h.Set("Access-Control-Allow-Origin", "*")
+			case allow[r.Header.Get("Origin")]:
+				h.Set("Access-Control-Allow-Origin", r.Header.Get("Origin"))
+				// ★Vary 不可省：回显值随请求变，中间缓存少了它会把 A 站命中的
+				// 那份 CORS 响应发给 B 站，白名单当场失效。
+				h.Add("Vary", "Origin")
+			default:
+				// 不命中：不发 CORS 头（浏览器据此拒绝），但**不改变响应码**——
+				// 用 403 挡的话，同源请求与非浏览器客户端（curl / 数据面）会一起被误伤。
+				h.Add("Vary", "Origin")
+			}
 			h.Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
 			h.Set("Access-Control-Allow-Headers", "Content-Type,Authorization,X-Request-Id")
 			if r.Method == http.MethodOptions {

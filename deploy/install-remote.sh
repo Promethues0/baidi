@@ -607,6 +607,26 @@ else
   echo "    或立刻用管理员改掉全部种子账号的口令——该开关只在首次建库时生效。"
   echo ""
 fi
+# CORS：默认 "*"。与首登改密同一条纪律——默认值就是绝大多数部署的真实姿态，
+# 不能让它沉默地留在机器上。这条**没有**跟着收紧默认值，理由见 httpx.CORS 的注释
+# （客户端 webview 的 origin 逐平台不同，漏一个 = 那个平台连不上控制面）。
+if [ "${PUBLIC_ORIGIN:-*}" = "*" ]; then
+  echo ""
+  echo "  ⚠ CORS 允许任意来源（config.env 里 PUBLIC_ORIGIN=*，这是默认值）"
+  echo "    任意网页都能对本控制面发跨源请求。API 认证走 Bearer 而非 Cookie，"
+  echo "    跨站页面读不到已认证响应，但**登录端点是免认证的**——任意网页可以把访客的"
+  echo "    浏览器变成登录尝试节点，而 nginx 那三条 20r/m 限流是按源 IP 的，分布式来源"
+  echo "    正好绕开（账号维度的锁定仍挡得住）。"
+  echo "    收紧：把 PUBLIC_ORIGIN 改成逗号分隔的白名单，需覆盖在用客户端的 webview 来源——"
+  echo "      https://<控制台域名>            控制台与门户"
+  echo "      tauri://localhost              桌面客户端（macOS / Linux）"
+  echo "      http://tauri.localhost         桌面客户端（Windows）"
+  echo "      https://appassets.local        安卓客户端"
+  echo "    ★改前请逐平台实测：漏掉一个，该平台的客户端升级后就连不上控制面。"
+  echo ""
+else
+  echo "  ✓ CORS 白名单：$PUBLIC_ORIGIN"
+fi
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
 echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi-proxy-api.inc /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
 systemctl --no-pager status baidi-control | head -5 || true

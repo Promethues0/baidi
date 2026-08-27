@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -166,6 +167,24 @@ func main() {
 	// 清理段末的链锚点由 store 侧共用实现落 audit_meta，防篡改链不因轮转断裂。
 	srv.StartAuditPurgeLoop(alertCtx, cfg.AuditRetentionDays, cfg.AuditMaxDiskPercent)
 	srv.StartExternalRecheckLoop(alertCtx, cfg.ExtRecheckInterval)
+
+	// ★CORS 默认 "*"：任意网页都能对本控制面发跨源请求。API 认证走 Bearer 而非
+	// Cookie，跨站页面读不到已认证响应，真实暴露面只有免认证端点——但其中包含登录，
+	// 即「任意网页可把访客浏览器变成登录爆破节点」，而 nginx 那三条 20r/m 限流是按
+	// 源 IP 的，分布式来源正好绕开（账号维度的 lockout 仍挡得住）。
+	//
+	// 默认值没有跟着收紧，是因为客户端 webview 的 origin 逐平台不同、且我们只实测过
+	// 一个平台：漏掉一个 = 那个平台升级即全员连不上。收紧要显式配置 + 逐平台实测。
+	// 沉默的坏默认改不掉，至少不让它沉默。
+	if strings.TrimSpace(cfg.AllowOrigin) == "*" {
+		slog.Warn("⚠ CORS 允许任意来源（BAIDI_CORS_ORIGIN=*）：任意网页可对本控制面发跨源请求，" +
+			"包括从访客浏览器发起登录尝试（分布式来源绕过 nginx 的 IP 维度限流）。" +
+			"建议改为白名单（逗号分隔），需覆盖在用客户端的 webview 来源：" +
+			"控制台部署域名 / tauri://localhost（桌面 mac·Linux） / http://tauri.localhost（桌面 Windows） / " +
+			"https://appassets.local（安卓）——改前请逐平台实测，漏掉一个该平台即连不上控制面")
+	} else {
+		slog.Info("CORS 白名单生效", "origins", cfg.AllowOrigin)
+	}
 
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,

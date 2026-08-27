@@ -400,26 +400,26 @@
         <div class="bd-uform__group">相一参数（IKE SA）</div>
         <div class="bd-uform__row3">
           <div class="bd-uform__f"><label>加密</label>
-            <a-select v-model="form.phase1.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!e.ok">{{ algLabel(e) }}</a-option></a-select>
+            <a-select v-model="form.phase1.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!algUsable(e)">{{ algLabel(e) }}</a-option></a-select>
           </div>
           <div class="bd-uform__f"><label>哈希</label>
-            <a-select v-model="form.phase1.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!h.ok">{{ algLabel(h) }}</a-option></a-select>
+            <a-select v-model="form.phase1.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!algUsable(h)">{{ algLabel(h) }}</a-option></a-select>
           </div>
           <div class="bd-uform__f"><label>DH 群</label>
-            <a-select v-model="form.phase1.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!d.ok">{{ algLabel(d) }}</a-option></a-select>
+            <a-select v-model="form.phase1.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!algUsable(d)">{{ algLabel(d) }}</a-option></a-select>
           </div>
         </div>
 
         <div class="bd-uform__group">相二参数（IPSec SA）</div>
         <div class="bd-uform__row3">
           <div class="bd-uform__f"><label>加密</label>
-            <a-select v-model="form.phase2.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!e.ok">{{ algLabel(e) }}</a-option></a-select>
+            <a-select v-model="form.phase2.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!algUsable(e)">{{ algLabel(e) }}</a-option></a-select>
           </div>
           <div class="bd-uform__f"><label>哈希</label>
-            <a-select v-model="form.phase2.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!h.ok">{{ algLabel(h) }}</a-option></a-select>
+            <a-select v-model="form.phase2.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!algUsable(h)">{{ algLabel(h) }}</a-option></a-select>
           </div>
           <div class="bd-uform__f"><label>DH 群</label>
-            <a-select v-model="form.phase2.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!d.ok">{{ algLabel(d) }}</a-option></a-select>
+            <a-select v-model="form.phase2.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!algUsable(d)">{{ algLabel(d) }}</a-option></a-select>
           </div>
         </div>
 
@@ -483,7 +483,21 @@ const DH_OPTS: AlgOpt[] = [
   { v: 'group21', ok: false },
   { v: 'group24', ok: false }
 ];
-function algLabel(o: AlgOpt) { return o.ok ? o.v : `${o.v} · 本实现不支持`; }
+/** 走 IANA 私有码点的算法：只有「国密」套件放行（与后端 ipsecPrivateAlgs、
+ *  数据面 ike 的 private 标记一致）。 */
+const PRIVATE_ALGS = new Set(['SM4-GCM', 'SM4-CBC', 'SM3', 'sm2p256']);
+/** 某算法在当前套件下能否选：本实现支持 且（非私有码点 或 已选国密套件）。
+ *  ★不做反向限制——SM4-GCM 配 SHA256 在国密套件下完全可用，数据面明说拒绝它
+ *  没有安全收益（ike/suite.go），入口比实现更严会造成反向假拒绝。 */
+function algUsable(o: AlgOpt): boolean {
+  if (!o.ok) return false;
+  return form.suite === 'gm' || !PRIVATE_ALGS.has(o.v);
+}
+function algLabel(o: AlgOpt) {
+  if (!o.ok) return `${o.v} · 本实现不支持`;
+  if (PRIVATE_ALGS.has(o.v) && form.suite !== 'gm') return `${o.v} · 需切到「国密」套件`;
+  return o.v;
+}
 function algBad(list: AlgOpt[], v: string) { const o = list.find((x) => x.v === v); return !o || !o.ok; }
 
 /* ── 五态展示元数据 ──

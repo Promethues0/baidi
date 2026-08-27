@@ -157,6 +157,15 @@ func ipsecConfigWarning(site store.IpsecSite) string {
 	if site.PqHybrid {
 		warns = append(warns, "后量子混合（pqHybrid）字段保留但网关未实现，会被装载期拒绝")
 	}
+	// 密码套件组合。入口校验（validateIpsecSite）上线后新写入不会有坏套件，
+	// 但**存量库里可能已有**校验之前存进去的行——它们同样会被网关装载期拒绝，
+	// 页面必须说得出，而不是让站点安静地停在 connecting。
+	if m := ipsecSuiteError(site.Suite, site.Phase1, "阶段一"); m != "" {
+		warns = append(warns, m)
+	}
+	if m := ipsecSuiteError(site.Suite, site.Phase2, "阶段二"); m != "" {
+		warns = append(warns, m)
+	}
 	return strings.Join(warns, "；")
 }
 
@@ -174,6 +183,11 @@ func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "name/peer 必填")
 		return
 	}
+	// 套件默认值：管理员只填网段与对端时，按 suite 补一组默认算法，而不是拒收
+	//   （空 enc 在数据面 SpecFromPhase 里 lookupEnc 失败，同样建不起来——但那是
+	//   "没填"，不是"填错"，产品行为应是补默认而非报错）。补默认放在 validate 之前，
+	//   于是"没填"走默认、"填错"被 validateIpsecSite 拦住，两者分开。
+	fillIpsecSuiteDefaults(&it)
 	if msg := validateIpsecSite(it); msg != "" {
 		httpx.Error(w, http.StatusBadRequest, msg)
 		return
@@ -232,6 +246,86 @@ func validateIpsecSite(it store.IpsecSite) string {
 	if it.GatewayID != "" && !strings.HasPrefix(it.GatewayID, ipsecCNPrefix) {
 		return "gatewayId 须以 " + ipsecCNPrefix + " 开头（它就是组网网关 mTLS 证书的 CN）：" +
 			it.GatewayID + " 改成 " + ipsecCNPrefix + it.GatewayID
+	}
+	// 密码套件组合：私有码点算法（SM4-*/SM3/sm2p256）**只有 suite=gm 才放行**，
+	// 标准套件必须全用 RFC 码点。这与数据面 ike.SpecFromPhase 的拒绝判据同真同假
+	// （见 ike/suite.go：enc/hash/dh 的 private 标记 + suiteAllowsPrivate）。
+	//
+	// ★这是 wave8 行动 17 为 peer 收 FQDN 时写下那句「入口与实现必须同口径：
+	// 数据面不解析，控制面就不能收」在同一个函数里的**另一半**——没跟上。
+	// 不校验的后果：管理员选「标准」套件、加密改成 SM4-GCM，页面不置灰、保存回 200、
+	// 站点列表看起来一切正常且无 ConfigWarning，而承载网关在装载期就把它拒掉，隧道
+	// 永远建不起来；若站点尚未指派网关或组网网关未上线，连 SA 的 LastError 都没有，
+	// 站点安静地停在 connecting。控制面/数据面分属两个 go module，不能直接调那个函数，
+	// 故这里复刻判据并由 TestIpsecSuiteMatchesDataplane 钉住两侧对同一组合同真同假。
+	if msg := ipsecSuiteError(it.Suite, it.Phase1, "阶段一"); msg != "" {
+		return msg
+	}
+	if msg := ipsecSuiteError(it.Suite, it.Phase2, "阶段二"); msg != "" {
+		return msg
+	}
+	return ""
+}
+
+// ipsecPrivateAlgs 走 IANA 私有使用段码点的算法（只有 suite=gm 放行）。
+// 与 gateway/internal/ipsec/ike 里带 private 标记的那几个一一对应。
+var ipsecPrivateAlgs = map[string]bool{
+	"SM4-GCM": true, "SM4-CBC": true, // enc.private
+	"SM3":     true,                  // hash.private
+	"sm2p256": true,                  // dh.private
+}
+
+// ipsecKnownAlgs 本实现认识的全部算法（大小写按前端下拉与 store 注释的规范写法）。
+// 不认识的一律拒——同数据面 lookupEnc/lookupHash/lookupDHName 的「不认识就报错」。
+var ipsecKnownAlgs = map[string]bool{
+	"AES256-GCM": true, "AES256-CBC": true, "SM4-GCM": true, "SM4-CBC": true,
+	"SHA256": true, "SM3": true,
+	"group14": true, "group19": true, "sm2p256": true,
+}
+
+// fillIpsecSuiteDefaults 给未填算法的阶段按 suite 补一组默认值。
+//
+// 默认取种子里对应 suite 的那组（store/ipsec.go 的两条种子站点）：
+//   standard → AES256-GCM / SHA256 / group19（RFC 码点）
+//   gm       → SM4-GCM / SM3 / sm2p256（私有码点）
+// 只补**整个阶段都为空**的情况；只填了一半（半配）交给 validateIpsecSite 报错，
+// 不替管理员猜他想要哪个——半配往往是笔误，猜错比报错更糟。
+func fillIpsecSuiteDefaults(it *store.IpsecSite) {
+	def := store.IpsecPhase{Enc: "AES256-GCM", Hash: "SHA256", DH: "group19"}
+	if strings.EqualFold(strings.TrimSpace(it.Suite), "gm") {
+		def = store.IpsecPhase{Enc: "SM4-GCM", Hash: "SM3", DH: "sm2p256"}
+	}
+	fill := func(ph *store.IpsecPhase) {
+		if ph.Enc == "" && ph.Hash == "" && ph.DH == "" {
+			*ph = def
+		}
+	}
+	fill(&it.Phase1)
+	fill(&it.Phase2)
+}
+
+// ipsecSuiteError 校验一个阶段的加密/摘要/DH 与 suite 是否自洽。返回空串表示合法。
+func ipsecSuiteError(suite string, ph store.IpsecPhase, phaseZh string) string {
+	gm := strings.EqualFold(strings.TrimSpace(suite), "gm")
+	for _, a := range []struct{ kind, val string }{
+		{"加密", ph.Enc}, {"摘要", ph.Hash}, {"DH 群", ph.DH},
+	} {
+		v := strings.TrimSpace(a.val)
+		if v == "" {
+			return phaseZh + "的" + a.kind + "不能为空"
+		}
+		if !ipsecKnownAlgs[v] {
+			return phaseZh + "的" + a.kind + " " + v + " 不在本实现支持的算法内"
+		}
+		// 唯一的真判据：私有码点算法只有 suite=gm 放行。
+		// ★**不**反向强制「gm 就必须全套国密」——数据面明写 suite 只是闸门，
+		//   SM4-GCM 配 SHA256 在密码学上完全可用，拒绝它没有任何安全收益
+		//   （ike/suite.go 的 SpecFromPhase 注释）。入口比实现更严会造成反向的
+		//   假拒绝，正是 wave8 行动 17「入口与实现同口径」要避免的另一个方向。
+		if ipsecPrivateAlgs[v] && !gm {
+			return phaseZh + "的" + a.kind + " " + v + " 走 IANA 私有码点，只有 suite=gm 放行；" +
+				"当前 suite=" + pickStr(suite, "standard") + "。改用标准算法（如 AES256-GCM/SHA256/group19），或把套件切到「国密」"
+		}
 	}
 	return ""
 }

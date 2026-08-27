@@ -31,10 +31,7 @@
           <a-input v-model="config.proxyPort" style="width: 116px" placeholder="18443" @change="onSave" />
         </div>
       </div>
-      <div class="st__row">
-        <div><div class="st__l">开机自动启动</div><div class="st__d">登录系统后自动拉起客户端</div></div>
-        <a-switch v-model="session.autostart" @change="save('baidi_client_autostart', session.autostart ? '1' : '0')" />
-      </div>
+
     </div>
 
     <div class="dk-card st__sec">

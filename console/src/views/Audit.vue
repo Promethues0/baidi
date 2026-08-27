@@ -51,7 +51,7 @@
           <span class="bd-mcard__label">今日总量</span>
         </div>
         <div class="bd-mcard__num">{{ fmtNum(bundle.todayTotal) }}</div>
-        <div class="bd-mcard__sub">条 · 较昨日 <span style="color: var(--bd-success)">+6.2%</span></div>
+        <div class="bd-mcard__sub">条 · 今日累计</div>
       </div>
 
       <!-- 审计库占用卡。★主数是**审计库自己**有多大，不是文件系统占用率——

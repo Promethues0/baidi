@@ -28,7 +28,7 @@
           </li>
           <li>
             <span class="bd-sell__ic"><icon-eye-invisible /></span>
-            <span class="bd-sell__t"><b>业务对未授权者隐身</b><i>公网暴露端口 0 · SPA 单包敲门</i></span>
+            <span class="bd-sell__t"><b>先认证后连接</b><i>SPA 单包敲门授权，未授权者看不到业务</i></span>
           </li>
           <li>
             <span class="bd-sell__ic"><icon-common /></span>
@@ -38,7 +38,7 @@
       </div>
 
       <div class="bd-brand__foot">
-        <span class="bd-stealth"><span class="bd-stealth__dot" />服务隐身中 · 先认证后连接</span>
+        <span class="bd-stealth"><span class="bd-stealth__dot" />SPA 敲门授权 · 先认证后连接</span>
       </div>
     </aside>
 
@@ -247,21 +247,25 @@
           </a-button>
         </template>
 
-        <!-- 步骤二（legacy）：未配置 WebAuthn 时的演示验证码 -->
+        <!-- 步骤二（legacy）：未配置 WebAuthn 且账号未注册 TOTP 时的演示验证码回落。
+             ★不写「短信」——系统从不发送任何短信，后端收的是编译进二进制的演示码
+             （webauthn.go 的 legacyDemoCode=123456，其值在门户「我的安全」里公开可见）。
+             写成短信会让用户一直等一条永远不会到的短信。这只在裸 IP 演示站
+             （WebAuthn 需可注册域名、TOTP 未注册）上可达，故文案直接点明它是演示码。 -->
         <template v-else>
           <h2 class="bd-card__h">二次认证</h2>
-          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 完成短信验证</p>
+          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 输入演示验证码</p>
 
           <div class="bd-tip bd-tip--warn">
             <icon-exclamation-circle-fill />
-            <span>{{ mfaReason || '检测到风险，需短信验证码二次确认身份。' }}</span>
+            <span>{{ mfaReason || '该账号未注册 passkey / TOTP，本站回落到演示验证码（123456）——生产环境请在「我的安全」注册 TOTP。' }}</span>
           </div>
 
           <a-form :model="form" layout="vertical" @submit.prevent>
             <a-form-item field="mfaCode" hide-label>
               <a-input
                 v-model="form.mfaCode"
-                placeholder="短信验证码"
+                placeholder="演示验证码（123456）"
                 size="large"
                 allow-clear
                 :max-length="6"
@@ -581,7 +585,7 @@ async function submitTotp() {
 async function submitMfa() {
   errMsg.value = '';
   if (!form.mfaCode.trim()) {
-    Message.warning('请输入短信验证码。');
+    Message.warning('请输入验证码。');
     return;
   }
   loading.value = true;

@@ -52,8 +52,10 @@ export function setDeviceID(id: string): void {
 export const session = reactive({
   token: ls.getItem('baidi_client_token') || '',
   user: ls.getItem('baidi_client_user') || '',
-  connected: false,             // 是否已接入（utun 数据面就绪）
-  autostart: ls.getItem('baidi_client_autostart') === '1'
+  connected: false              // 是否已接入（utun 数据面就绪）
+  // ★不放 autostart：曾有一个「开机自动启动」开关只 setItem 到这里、全仓无消费方
+  //   （没有 LaunchAgent / 注册表 Run 键 / .desktop autostart 写入），已摘除。
+  //   接真需要 tauri-plugin-autostart（三平台实测），届时应由 Rust 侧维护真实状态。
 });
 
 /** 接入配置（设置页可改，持久化）。默认对准本机演示（control + gateway 跑在 localhost）。 */

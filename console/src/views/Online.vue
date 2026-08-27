@@ -68,7 +68,7 @@
         <div style="flex: 1" />
         <div class="bd-searchbox" style="width: 260px">
           <icon-search />
-          <input v-model="keyword" class="bd-searchbox__in" placeholder="按用户 / 账号 / IP / 应用搜索" />
+          <input v-model="keyword" class="bd-searchbox__in" placeholder="按用户 / 账号 / 组织 / IP / 网关搜索" />
         </div>
       </div>
 
@@ -204,7 +204,8 @@ const shown = computed<OnlineSession[]>(() => {
     if (filter.value === 'untrusted' && s.trust !== 'untrusted') return false;
     if (filter.value === 'unknown' && s.trust !== 'unknown' && s.risk !== 'unknown') return false;
     if (kw) {
-      const hay = `${s.user} ${s.account} ${s.ip} ${s.gateway}`.toLowerCase();
+      // 检索维度必须覆盖页面在显示的列（含 org），且与占位文案一致。
+      const hay = `${s.user} ${s.account} ${s.org ?? ''} ${s.ip} ${s.gateway}`.toLowerCase();
       if (!hay.includes(kw)) return false;
     }
     return true;

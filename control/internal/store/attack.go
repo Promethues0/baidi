@@ -35,6 +35,18 @@ var AttackCatZh = map[string]string{
 	"web-cross-origin":  "Web 跨应用请求",
 	"web-banned":        "Web 会话封禁期拒绝",
 	"web-authz":         "Web 逐请求鉴权拒绝",
+	"proxy-capacity":    "网关并发已达上限（我方容量，非攻击）",
+}
+
+// AttackExemptCats 落审计（verdict=deny）但**不计入攻击源统计**的拒绝类别。
+//
+// 判据是**归因**，不是严重性：攻击源面板的用途是「谁在打我，要不要封他」，
+// 而容量打满归因于我方网关的并发上限——把触发它的那个 IP 列进「攻击源 TOP5」，
+// 管理员会去封一个正常用户，而真正该做的是扩容。方向与
+// 「放行绝不进攻击源统计」同源：数错方向的统计比没有统计更坏。
+// 拒绝本身照旧落审计（用户确实没连上，这件事必须查得到）。
+var AttackExemptCats = map[string]bool{
+	"proxy-capacity": true,
 }
 
 // attackCatLabel 类别中文名（未知类别原样回 key，不编造）。

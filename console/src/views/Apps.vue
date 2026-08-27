@@ -32,7 +32,10 @@
         <div class="bd-toolbar">
           <span class="bd-toolbar__c">共 {{ filtered.length }} 个应用</span>
           <div style="flex: 1" />
-          <div class="bd-searchbox" style="width: 240px"><icon-search />按名称 / 地址搜索</div>
+          <div class="bd-searchbox" style="width: 240px">
+            <icon-search />
+            <input v-model="kw" class="bd-searchbox__in" placeholder="按名称 / 地址搜索" />
+          </div>
         </div>
         <table class="bd-table">
           <thead>
@@ -297,7 +300,15 @@ const live = ref(false);
 const categories = ref<AppCategory[]>([{ key: 'all', label: '全部应用', count: 0 }]);
 const apps = ref<App[]>([]);
 const cat = ref('all');
-const filtered = computed(() => (cat.value === 'all' ? apps.value : apps.value.filter((a) => a.category === cat.value)));
+/** 关键词。过滤字段与占位文案逐字对应（名称 / 地址），且与分类筛选是「与」关系
+ *  ——搜索只在当前分类内收窄，不会静默把管理员选中的分类换掉。 */
+const kw = ref('');
+const filtered = computed(() => {
+  let list = cat.value === 'all' ? apps.value : apps.value.filter((a) => a.category === cat.value);
+  const k = kw.value.trim().toLowerCase();
+  if (!k) return list;
+  return list.filter((a) => `${a.name} ${a.addr ?? ''}`.toLowerCase().includes(k));
+});
 
 const MODES = [
   { key: 'tunnel', label: '隧道应用（C/S）', desc: 'SSH / RDP / 数据库等 C/S 业务，走 SSL 访问隧道', icon: 'IconCode', bg: '#F5E8FF', color: '#722ED1' },

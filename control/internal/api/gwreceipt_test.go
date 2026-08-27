@@ -208,3 +208,56 @@ func TestGatewaySecEventsVerdictAndAttackStats(t *testing.T) {
 		t.Fatal("防线应含 attack 格")
 	}
 }
+
+// 网关并发到顶的拒绝：**落审计 deny，但绝不进攻击源统计**。
+//
+// ★判据是归因不是严重性。攻击源面板回答的是「谁在打我、要不要封他」，
+// 而容量打满归因于我方网关的并发上限——把触发它的那个 IP 列进「攻击源 TOP5」，
+// 管理员会去封一个正常用户，真正该做的是扩容。方向与「放行绝不进攻击源统计」同源。
+// 同时拒绝本身必须留在审计里：用户确实没连上，这件事得查得到。
+func Test容量拒绝落审计但不进攻击源统计(t *testing.T) {
+	h, st := gwReceiptServer(t)
+	body := `{
+		"id":"gw-1","proxy":":18443","spa":":18201",
+		"events":[
+			{"ts":1754800000,"kind":"sec-deny","detail":"网关同时活跃隧道连接已达上限 1024，新连接被拒","src":"10.20.30.40","cat":"proxy-capacity","count":9},
+			{"ts":1754800001,"kind":"sec-deny","detail":"SPA 敲门拒绝（令牌重放）","src":"203.0.113.9","cat":"knock-replay","count":4}
+		]}`
+	if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), body); w.Code != http.StatusOK {
+		t.Fatalf("注册返回 %d：%s", w.Code, w.Body.String())
+	}
+	// 两条都得在审计里，且都是 deny——容量拒绝不是"允许"，用户是真没连上。
+	var capacitySeen bool
+	byVerdict := map[string]int{}
+	for _, e := range dataplaneAudits(t, st) {
+		byVerdict[e.Verdict]++
+		if strings.Contains(e.Event, "已达上限") {
+			capacitySeen = true
+			if e.Verdict != "deny" {
+				t.Fatalf("容量拒绝的 verdict 应为 deny，实得 %q", e.Verdict)
+			}
+			if e.SrcIP != "10.20.30.40" {
+				t.Fatalf("容量拒绝应记网关报来的源 IP，实得 %q", e.SrcIP)
+			}
+		}
+	}
+	if !capacitySeen {
+		t.Fatal("容量拒绝没有落审计——网关一重启这件事就查不到了")
+	}
+	if byVerdict["deny"] != 2 {
+		t.Fatalf("两条都应落 deny，实得 %v", byVerdict)
+	}
+	// 攻击统计里只能有敲门重放那一条。
+	atk, err := st.AttackStats(t.Context(), 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atk.Sources != 1 || atk.Denies != 4 {
+		t.Fatalf("容量拒绝混进了攻击源统计：%+v（应只含 knock-replay 的 4 次）", atk)
+	}
+	for _, top := range atk.Top {
+		if top.IP == "10.20.30.40" {
+			t.Fatalf("触发容量上限的正常用户被列进了攻击源 TOP：%+v——管理员会去封他，而该做的是扩容", atk.Top)
+		}
+	}
+}

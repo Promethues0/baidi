@@ -51,16 +51,19 @@
     <!-- 受控资源表 -->
     <div class="bd-tablecard">
       <div class="bd-toolbar">
-        <span class="bd-toolbar__c">受控资源 · {{ resources.length }} 项</span>
+        <span class="bd-toolbar__c">受控资源 · {{ shown.length }} 项<template v-if="kw.trim()"> / 共 {{ resources.length }} 项</template></span>
         <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 240px"><icon-search />按 id / 名称 / 后端搜索</div>
+        <div class="bd-searchbox" style="width: 240px">
+          <icon-search />
+          <input v-model="kw" class="bd-searchbox__in" placeholder="按 id / 名称 / 后端搜索" />
+        </div>
       </div>
       <table class="bd-table">
         <thead>
           <tr><th>资源 id</th><th>名称</th><th>后端</th><th>可达性</th><th>敏感度</th><th>授权角色</th><th>授权用户</th><th>授权组织 / 用户组</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
-          <tr v-for="r in resources" :key="r.id">
+          <tr v-for="r in shown" :key="r.id">
             <td><span class="bd-mono bd-rid">{{ r.id }}</span></td>
             <td>{{ r.name || '—' }}</td>
             <td>
@@ -380,8 +383,15 @@ async function del(r: Resource) {
   } catch { Message.error('删除失败，请检查权限或后端连接'); }
 }
 
-const _shown = computed(() => resources.value); // 预留搜索过滤位
-void _shown;
+/** 关键词检索。★这里原先是 `const _shown = computed(() => resources.value); void _shown;`
+ *  ——一个占位符加一句「预留搜索过滤位」，而页面上那个搜索框是纯装饰的 div。
+ *  过滤字段与占位文案逐字对应（id / 名称 / 后端）。 */
+const kw = ref('');
+const shown = computed(() => {
+  const k = kw.value.trim().toLowerCase();
+  if (!k) return resources.value;
+  return resources.value.filter((r) => `${r.id} ${r.name ?? ''} ${r.backend ?? ''}`.toLowerCase().includes(k));
+});
 
 onMounted(() => {
   load();

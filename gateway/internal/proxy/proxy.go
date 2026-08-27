@@ -10,6 +10,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -84,7 +85,13 @@ const (
 	preamblePrefix  = "CONNECT " // 8 字节
 	preambleMax     = 256        // 前导单行最长，防滥用/无界缓冲
 	preambleTimeout = 3 * time.Second
-	maxConcurrent   = 1024 // 同时处于握手/前导阶段的连接上限，封顶内存/goroutine
+	// maxConcurrent 单台网关**同时活跃的隧道连接**上限，封顶内存/goroutine。
+	//
+	// ★这个名字以前的注释写的是「同时处于握手/前导阶段的连接上限」，比实际窄得多：
+	// 信号量的 slot 在 handle() 返回后才释放，而 handle 末尾是同步的 io.Copy——
+	// 整条隧道会话的寿命里 slot 一直占着。所以它是会话数上限，不是握手数上限。
+	// 按窄的那个读会严重高估容量（握手是毫秒级，会话是小时级）。
+	maxConcurrent = 1024
 )
 
 // Serve 启动通用 TLS 代理监听。reg.Default 为默认回退后端。
@@ -95,7 +102,7 @@ func Serve(addr string, cert tls.Certificate, reg *resource.Registry, al *spa.Al
 		return err
 	}
 	slog.Info("SSL 隧道代理监听（通用 TLS）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al, rep)
+	return serve(ln, reg, al, rep, maxConcurrent)
 }
 
 // ServeTLCP 启动国密 TLCP 代理监听（SM2 双证书 + SM3/SM4 套件）。
@@ -105,18 +112,33 @@ func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al
 		return err
 	}
 	slog.Info("SSL 隧道代理监听（国密 TLCP）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al, rep)
+	return serve(ln, reg, al, rep, maxConcurrent)
 }
 
 // serve 是两种监听共享的接受循环（门控/路由逻辑与加密层无关）；信号量封顶并发。
-func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
-	sem := make(chan struct{}, maxConcurrent)
+// limit 由调用方传入（生产恒为 maxConcurrent）：用例要真的把并发打满才能证明
+// 「到顶时拒绝并留痕」，而 1024 条真连接在单测里既慢又不稳。
+func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, limit int) error {
+	sem := make(chan struct{}, limit)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
 			continue
 		}
-		sem <- struct{}{}
+		// ★打满时**拒绝并留痕**，不阻塞 accept 循环。
+		// 原先是 `sem <- struct{}{}` 直接阻塞：到顶后新连接停在内核 backlog 里，
+		// 客户端表现为拨号后挂住到超时，而网关不拒绝、不记日志、不上报、不落审计——
+		// 控制台上与「一切正常」完全同形。容量到顶是真实运维信号（本项目做不了压测，
+		// 更没有规格表），至少要让它可见：管理员该做的是扩容，而挂住不会告诉他这件事。
+		select {
+		case sem <- struct{}{}:
+		default:
+			ip := hostOf(c.RemoteAddr().String())
+			slog.Warn("代理拒绝（网关并发已达上限）", "src", ip, "limit", limit)
+			rep.Report("proxy-capacity", ip, "网关同时活跃隧道连接已达上限 "+strconv.Itoa(limit)+"，新连接被拒")
+			_ = c.Close()
+			continue
+		}
 		go func() {
 			defer func() { <-sem }()
 			handle(c, reg, al, rep)

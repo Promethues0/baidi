@@ -146,7 +146,10 @@
         <div class="bd-toolbar">
           <span class="bd-toolbar__c">{{ scopeTitle }} · {{ shown.length }} 人</span>
           <div style="flex: 1" />
-          <div class="bd-searchbox" style="width: 240px"><icon-search />按用户名 / 账号 / IP 搜索</div>
+          <div class="bd-searchbox" style="width: 240px">
+            <icon-search />
+            <input v-model="kw" class="bd-searchbox__in" placeholder="按用户名 / 账号 / IP 搜索" />
+          </div>
         </div>
         <table class="bd-table">
           <thead>
@@ -496,14 +499,20 @@ const scopeTitle = computed(() => {
   if (mode.value === 'group') return groups.value.find((g) => g.id === groupSel.value)?.name ?? '全部用户';
   return flatOrg.value.find((n) => n.key === org.value)?.title ?? '全部用户';
 });
+/** 关键词。★过滤字段必须与占位文案逐字对应（用户名 / 账号 / IP）：
+ *  搜得比说的少 = 管理员以为「库里没有」；搜得比说的多 = 搜出一堆解释不了的命中。 */
+const kw = ref('');
 const shown = computed(() => {
+  let list = users.value;
   if (mode.value === 'group') {
-    if (!groupSel.value) return users.value;
-    return users.value.filter((u) => u.groups.includes(groupSel.value));
+    if (groupSel.value) list = list.filter((u) => u.groups.includes(groupSel.value));
+  } else if (org.value) {
+    const keys = subtreeKeys(org.value);
+    list = list.filter((u) => keys.has(u.orgKey));
   }
-  if (!org.value) return users.value;
-  const keys = subtreeKeys(org.value);
-  return users.value.filter((u) => keys.has(u.orgKey));
+  const k = kw.value.trim().toLowerCase();
+  if (!k) return list;
+  return list.filter((u) => `${u.name} ${u.account} ${u.ip}`.toLowerCase().includes(k));
 });
 function groupName(id: string) { return groups.value.find((g) => g.id === id)?.name ?? id; }
 

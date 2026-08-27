@@ -62,3 +62,8 @@ table.bd-table { width: 100%; border-collapse: collapse; }
 .bd-pager { display: flex; align-items: center; padding: 13px 18px; border-top: 1px solid var(--bd-fill-2); font-size: 12.5px; color: var(--bd-t3); }
 .bd-head__right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
 .bd-searchbox { display: flex; align-items: center; height: 32px; background: var(--bd-fill-1); border: 1px solid var(--bd-border); border-radius: 6px; padding: 0 10px; gap: 8px; color: var(--bd-t3); font-size: 13px; }
+/* 搜索框里的真输入。★这条以前只存在于 Objects/Ipsec/Online/System 四页的 scoped 样式里，
+   于是 Users/Resources/Apps 三页的「搜索框」是一个 div + 图标 + 一句静态中文——
+   长得与能用的那四个一模一样，点进去没有光标。提到全局，新增搜索框不必再复制第五份。 */
+.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
+.bd-searchbox__in::placeholder { color: var(--bd-t3); }

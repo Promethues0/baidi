@@ -1483,7 +1483,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		switch ev.Kind {
 		case "sec-deny":
 			verdict = "deny"
-			if ev.Src != "" && ev.Cat != "" && as != nil {
+			if ev.Src != "" && ev.Cat != "" && as != nil && !store.AttackExemptCats[ev.Cat] {
 				// 机读半边：按 (网关, 源IP, 类别) 计入攻击源小时桶。落库失败只记日志——
 				// 统计是观测通道，绝不能挡住同一条事件的审计留痕。
 				if err := as.RecordAttack(r.Context(), id, ev.Src, ev.Cat, ev.Count, time.Now().Unix()); err != nil {

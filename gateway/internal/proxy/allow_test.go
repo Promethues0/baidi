@@ -36,6 +36,19 @@ func (c *capture) sink(cat, src, detail string, count int, allow bool) {
 	}{cat, src, detail, allow})
 }
 
+// denyRecs 拒绝侧记录（"类别|正文"）。
+func (c *capture) denyRecs() []string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var out []string
+	for _, r := range c.recs {
+		if !r.allow {
+			out = append(out, r.cat+"|"+r.detail)
+		}
+	}
+	return out
+}
+
 func (c *capture) allowRecs() []string {
 	c.mu.Lock()
 	defer c.mu.Unlock()

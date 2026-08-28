@@ -37,10 +37,13 @@ fi
 # 绝对路径会 404。
 echo "▸ 构建前端 UI（clients/desktop 那套 Vue，桌面布局；Tauri API 经 webui/shim 替换）"
 ( cd ../desktop && npx vite build -c vite.harmony.config.ts >/dev/null )
+# ★内联成单文件：ArkWeb 的 resource://rawfile/ 不在它自己的 CORS 白名单里，
+# 子资源（JS/CSS）会被拦掉，表现为纯白屏且不报加载失败。详见 inline-webui.py。
+python3 inline-webui.py webui/dist
 RAW=entry/src/main/resources/rawfile
 rm -rf "${RAW:?}"/* 2>/dev/null || true
 mkdir -p "$RAW"
-cp -R webui/dist/* "$RAW/"
+cp webui/dist/index.html "$RAW/"
 echo "  UI 已就位：$(find "$RAW" -type f | wc -l | tr -d ' ') 个文件，$(du -sh "$RAW" | cut -f1)"
 
 echo "▸ 构建 HAP（$MODE）"

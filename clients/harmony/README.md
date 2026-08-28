@@ -14,7 +14,7 @@
 
 | | 状态 |
 |---|---|
-| ArkWeb 壳 + 桌面布局 UI | ✅ 已构建进包（**直接用 `clients/desktop` 那套 Vue 源码**，1.6 MB 打进 rawfile） |
+| ArkWeb 壳 + 桌面布局 UI | ✅ **已在真机跑通**（直接用 `clients/desktop` 那套 Vue 源码，内联成 1.6 MB 单文件进 rawfile） |
 | 原生桥 `window.__BAIDI_NATIVE__` | ✅ 已注入（`platform` / `startTunnel` / `stopTunnel`，契约同安卓/iOS 壳） |
 | 与控制面通信（登录、拉剖面、看应用） | ✅ 走 ArkWeb 的 fetch，控制中心地址在 UI 的「我的」页配 |
 | **数据面（隧道 / 真流量接管）** | ❌ **未实现** |
@@ -85,3 +85,13 @@
 - 打包阶段要 Java，而 macOS 通常没装系统 JDK——`JAVA_HOME` 指到 DevEco 自带的 JBR。
   不设的话构建会一路成功到最后一步才失败（`Unable to locate a Java Runtime`）。
 - 前端必须 `vite build --base=./`：ArkWeb 从 `resource://rawfile/` 加载，绝对路径会 404。
+- **前端必须内联成单个 HTML**（`inline-webui.py`）。`resource://rawfile/` **不在 ArkWeb
+  自己的 CORS 白名单里**（内核只信任 arkweb / chrome / data / http / https），于是
+  index.html 能加载而它引用的 JS/CSS 全被拦掉——表现为**纯白屏，且不报加载失败**，
+  错误只出现在 `hilog` 的 ARKWEB-CONSOLE 里：
+
+      Access to script at 'resource://rawfile/assets/index-*.js' from origin 'null'
+      has been blocked by CORS policy
+
+  内联之后没有子资源请求，整条 CORS 路径不再涉及。另两条路都更重：自定义 scheme
+  handler（要在 ArkTS 侧实现 rawfile 伺服）、或起本地 HTTP server（多一个常驻端口）。

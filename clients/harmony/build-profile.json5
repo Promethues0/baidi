@@ -8,6 +8,9 @@
     // ★签名材料**不入库**。本机的那份在 signing-local.json5（.gitignore），
     // build.sh 构建时自动合并进来。没有它只能产出 unsigned.hap，装不到真机。
     // 生成方式见 README「签名」一节。
+    // ★签名材料**不入库**。本机那份在 signing-local.json5（.gitignore），
+    // build.sh 构建时自动合并进来。没有它只能产出 unsigned.hap，装不到真机。
+    // 生成方式见 README「签名」一节。
     signingConfigs: [],
     products: [
       {
@@ -18,9 +21,27 @@
         runtimeOS: 'HarmonyOS',
       }
     ],
-    buildModeSet: [{ name: 'debug' }, { name: 'release' }]
+    buildModeSet: [
+      {
+        name: 'debug'
+      },
+      {
+        name: 'release'
+      }
+    ]
   },
   modules: [
-    { name: 'entry', srcPath: './entry', targets: [{ name: 'default', applyToProducts: ['default'] }] }
+    {
+      name: 'entry',
+      srcPath: './entry',
+      targets: [
+        {
+          name: 'default',
+          applyToProducts: [
+            'default'
+          ]
+        }
+      ]
+    }
   ]
 }

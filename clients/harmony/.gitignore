@@ -7,3 +7,5 @@ local.properties
 entry/src/main/resources/rawfile/
 signing-local.json5
 webui/dist/
+# IDE 配置
+.idea/

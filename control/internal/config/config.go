@@ -56,6 +56,28 @@ type Config struct {
 	// 「AD 禁号 → 白帝断连」的最大失效窗，按需收紧，代价是对目录的查询频率。
 	ExtRecheckInterval time.Duration
 
+	// ExtAuthTimeout **一次外部认证调用**的总预算（NFR-PERF-03）。
+	//
+	// ★这是一个「只包住外部认证那一次调用」的预算，**不是** handler 的整体 deadline。
+	// 给 handler 加 deadline 是错的：口令校验（bcrypt）不吃 ctx 打不断；而 deadline
+	// 一过期，后面所有吃 ctx 的动作会一起失败——审计写不进库（`/diag` 的 audit-write
+	// 还会翻红并把运维指向磁盘可写性）、锁定落不了库、`stepUpDecision` 的两次库读
+	// 失败即 **fail-closed 拒登录**。那等于把「目录慢」升级成「全员登录不了」，
+	// 而用户看到的文案是「认证策略暂不可用」。
+	//
+	// 默认 8s：PRD 的 3s 是 P95 验收目标，不是容错阈值——跨广域网 AD 的
+	// StartTLS + bind + search 链路慢过 3s 是常态，按 3s 截断等于把「慢但可用的目录」
+	// 判成「认证源不可用」，而那条路径不计入锁定，用户重试也永远进不去。
+	// <=0 表示不设预算（回到改造前的行为，逃生舱）。
+	ExtAuthTimeout time.Duration
+
+	// LDAPConnectTimeout / LDAPRequestTimeout 下发给 ldapsrc 的两个超时。
+	// ★改造前 api 层**从不设**这两个字段，恒取 go-ldap 侧的缺省（5s / 10s），
+	// 管理员在页面上根本没有这个旋钮。而 RequestTimeout 是逐请求的，
+	// 一次口令认证要走两次拨号 + StartTLS + 服务账号 bind + search + 用户 bind。
+	LDAPConnectTimeout time.Duration
+	LDAPRequestTimeout time.Duration
+
 	// AuditForwardInterval 审计外送投递循环的间隔；<=0 关闭投递（队列只增不减，启动时告警）。
 	// ★这条循环是外送功能唯一的执行方——没有它，配置齐全但 SIEM 永远收不到东西。
 	AuditForwardInterval time.Duration
@@ -142,6 +164,9 @@ func Load() Config {
 		// 又不至于把一个空队列查成热点）。上界的唯一定义在 store，别在这里另抄一份。
 		AuditForwardInterval: envDuration("BAIDI_AUDIT_FORWARD_INTERVAL", 5*time.Second),
 		ExtRecheckInterval:   envDuration("BAIDI_EXTAUTH_RECHECK", 5*time.Minute),
+		ExtAuthTimeout:       envDuration("BAIDI_EXTAUTH_TIMEOUT", 8*time.Second),
+		LDAPConnectTimeout:   envDuration("BAIDI_LDAP_CONNECT_TIMEOUT", 3*time.Second),
+		LDAPRequestTimeout:   envDuration("BAIDI_LDAP_REQUEST_TIMEOUT", 5*time.Second),
 		AuditForwardQueueMax: envInt("BAIDI_AUDIT_FORWARD_QUEUE_MAX", store.DefaultForwardQueueMax),
 		// 设备状态留存：启动时 + 每小时清理超期采样点（见 store.PurgeExpiredGatewayMetrics）。
 		MetricsRetentionHours: clampMetricsRetention(envInt("BAIDI_METRICS_RETENTION_HOURS", DefaultMetricsRetentionHours)),

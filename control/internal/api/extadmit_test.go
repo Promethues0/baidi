@@ -359,9 +359,9 @@ func TestAdmitGateBlocksAccountCreation(t *testing.T) {
 	}
 
 	before := countUsers(t, s)
-	_, _, _, hit, err := s.authenticateExternal(
+	ext, err := s.authenticateExternal(
 		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw", "")
-	if hit {
+	if ext.Hit {
 		t.Fatal("准入未获批准，不该认定为登录成功")
 	}
 	d := asAdmitDenied(err)
@@ -398,11 +398,12 @@ func TestAdmitGateBlocksAccountCreation(t *testing.T) {
 	if _, err := as.DecideExtAdmission(ctx, list[0].ApprovalID, store.AdmitApproved, "已核实", "admin"); err != nil {
 		t.Fatalf("批准失败：%v", err)
 	}
-	cred, _, _, hit2, err2 := s.authenticateExternal(
+	ext2, err2 := s.authenticateExternal(
 		httptest.NewRequest(http.MethodPost, "/api/v1/portal/login", nil), "newguy", "pw", "")
-	if !hit2 || err2 != nil {
-		t.Fatalf("批准后应登录成功：hit=%v err=%v", hit2, err2)
+	if !ext2.Hit || err2 != nil {
+		t.Fatalf("批准后应登录成功：hit=%v err=%v", ext2.Hit, err2)
 	}
+	cred := ext2.Cred
 	if after := countUsers(t, s); after != before+1 {
 		t.Fatalf("批准后应恰好建 1 个号：%d → %d", before, after)
 	}

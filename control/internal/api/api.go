@@ -65,6 +65,13 @@ type Server struct {
 	accessDenied map[string]int64
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
 	lockout *lockout.Guard
+	// extAuthTimeout 一次**外部认证调用**的总预算（NFR-PERF-03，见 config.ExtAuthTimeout）。
+	// 只包住 pa.Authenticate 那一次，不覆盖 handler 其余部分——理由写在 SetAuthTimeouts。
+	// 0 = 不设预算（测试栈默认，与改造前行为一致）。
+	extAuthTimeout time.Duration
+	// ldapConnectTimeout / ldapRequestTimeout 下发给 ldapsrc；0 = 用 ldapsrc 自己的缺省。
+	ldapConnectTimeout time.Duration
+	ldapRequestTimeout time.Duration
 	// metricsRetentionHours 设备状态时序的留存小时数，由 main 用清理循环真正消费的
 	// 那一份注入（SetMetricsRetentionHours）。读端点据此把时间窗截断到库里真有数据的
 	// 那一段——不截断的话「周」档会承诺一段早被清掉的历史。0 = 未注入（测试栈）。
@@ -715,7 +722,7 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		//
 		// ★顺序是「先本地、后外部」而不是反过来：本地目录里有 admin 这种
 		// 高权账号，把它交给外部目录先答，等于把本地管理员的认证权外包出去。
-		extCred, srcName, srcKind, hit, aerr := s.authenticateExternal(r, b.Username, b.Password, b.Directory)
+		ext, aerr := s.authenticateExternal(r, b.Username, b.Password, b.Directory)
 		switch {
 		case asAmbiguousDirectory(aerr) != nil:
 			// ★配了多个认证域又没说要用哪一个：拒绝并把候选带回去，让前端渲染下拉。
@@ -738,21 +745,27 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		case aerr != nil:
 			// ★认证源故障绝不能回「用户名或密码错误」：那会让运维去查用户而不是查目录，
 			// 也不该计入账号锁定计数（用户什么都没做错）。
-			s.auditAs(r, b.Username, "auth", "终端用户登录失败（认证源不可用）", "fail")
-			slog.Error("外部认证源不可用", "账号", b.Username, "err", aerr.Error())
+			// ★耗时进审计正文（NFR-PERF-03）：慢到被预算切断的那一次，
+			// 正是最该在事后查得到的一次。审计是本项目唯一持久 + 可检索 + 被
+			// 防篡改链覆盖的承载，而 AuditEntry 没有数值列——拼进文案是既有做法
+			// （对照「自助修改登录口令（强度判定：X）」）。
+			s.auditAs(r, b.Username, "auth",
+				"终端用户登录失败（认证源不可用，"+extAuthTookZh(ext.Elapsed)+"）", "fail")
+			slog.Error("外部认证源不可用", "账号", b.Username, "耗时ms", ext.Elapsed.Milliseconds(), "err", aerr.Error())
 			httpx.JSON(w, http.StatusOK, map[string]any{
 				"ok": false, "reason": "认证服务暂时不可用，请稍后重试或联系管理员"})
 			return
-		case !hit:
+		case !ext.Hit:
 			// 本地与外部都没认出他 → 计一次失败（认证源故障走上面的分支，刻意不计）。
 			s.noteLoginFailure(r, b.Username)
 			s.auditAs(r, b.Username, "auth", "终端用户登录失败（账号或口令错误）", "fail")
 			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
 			return
 		}
-		cred = extCred
-		lc.Directory = srcKind // 认证策略按目录分组：这一步之后才知道是哪个目录认出的他
-		s.auditAs(r, cred.Account, "auth", "经外部认证源「"+srcName+"」认证通过", "ok")
+		cred = ext.Cred
+		lc.Directory = ext.SrcKind // 认证策略按目录分组：这一步之后才知道是哪个目录认出的他
+		s.auditAs(r, cred.Account, "auth",
+			"经外部认证源「"+ext.SrcName+"」认证通过（"+extAuthTookZh(ext.Elapsed)+"）", "ok")
 	}
 	// 账号状态门：禁用/锁定的目录账号口令对了也不放行（也不进 MFA 流程）
 	// ★外部源认证成功的账号同样要过这道闸：本地把某个外部用户禁用了，

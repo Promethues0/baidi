@@ -36,7 +36,7 @@ func (p *Provider) CheckAccount(ctx context.Context, subject string) (authsrc.Ac
 		return "", err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := p.bindService(conn); err != nil {
+	if err := p.bindService(ctx, conn); err != nil {
 		return "", err
 	}
 	// ★先判「还在不在配置的搜索范围内」。base-scope 按 DN 直查是查得到的——

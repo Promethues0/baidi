@@ -354,12 +354,12 @@ func (p *Provider) Authenticate(ctx context.Context, username, password string) 
 		return authsrc.Identity{}, err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := p.bindService(conn); err != nil {
+	if err := p.bindService(ctx, conn); err != nil {
 		return authsrc.Identity{}, err
 	}
 
 	// ② 定位用户条目。
-	entry, err := p.lookup(conn, username)
+	entry, err := p.lookup(ctx, conn, username)
 	if err != nil {
 		return authsrc.Identity{}, err
 	}
@@ -385,6 +385,7 @@ func (p *Provider) Authenticate(ctx context.Context, username, password string) 
 		return authsrc.Identity{}, err
 	}
 	defer func() { _ = userConn.Close() }()
+	userConn.SetTimeout(p.requestTimeout(ctx)) // 认证那一步同样按剩余预算收紧
 	if err := userConn.Bind(entry.DN, password); err != nil {
 		return authsrc.Identity{}, p.classifyUserBind(err, username, entry.DN)
 	}
@@ -406,7 +407,7 @@ func (p *Provider) Probe(ctx context.Context) error {
 		return err
 	}
 	defer func() { _ = conn.Close() }()
-	if err := p.bindService(conn); err != nil {
+	if err := p.bindService(ctx, conn); err != nil {
 		return err
 	}
 
@@ -466,7 +467,7 @@ func (p *Provider) dial(ctx context.Context) (*ldap.Conn, error) {
 	// HTTP handler goroutine + 一个 fd + go-ldap 的两个内部协程，且**一条日志都没有**；
 	// 用户看到的只是登录页转圈，反复重试就能把控制面的 fd 耗光。
 	// LDAPS 路径不受影响（握手在 tls.DialWithDialer 里，由 Dialer.Timeout 覆盖）。
-	conn.SetTimeout(p.cfg.RequestTimeout)
+	conn.SetTimeout(p.requestTimeout(ctx))
 	if p.cfg.TLS == TLSModeStartTLS {
 		if err := conn.StartTLS(p.tls); err != nil {
 			_ = conn.Close()
@@ -495,8 +496,36 @@ func (p *Provider) dialTimeout(ctx context.Context) time.Duration {
 	return d
 }
 
+// requestTimeout 取「配置的请求超时」与「ctx 剩余时间」的较小值，与 dialTimeout 同款推理。
+//
+// ★坑比 dialTimeout 更深一层：go-ldap 的 conn.SetTimeout 对非正值**不做任何 clamp**，
+// 而它内部是 `if requestTimeout > 0` 才起定时器——于是"ctx 已过期"算出来的 0 或负数
+// 不是快速失败，是**不挂定时器 = 无限阻塞**。与 timeLimitSeconds 向下取整到 0
+// 变成"不限时"是同一族坑。故这里兜到 1ms。
+//
+// ★为什么必须折算 ctx：RequestTimeout 是**逐请求**的，而一次口令认证要走
+// 两次拨号 + StartTLS + 服务账号 bind + search + 用户 bind。静态取配置值的话，
+// 总耗时是配置值的五六倍——10s 的配置在 StartTLS 模式下最坏能挂到约 60s，
+// 而调用方给的那个"外部认证预算"完全管不住它（go-ldap 的拨号与请求都不吃 ctx，
+// 只能靠本包把 ctx 折算进它的超时字段）。折算之后，总耗时才真的由 ctx 定上界。
+func (p *Provider) requestTimeout(ctx context.Context) time.Duration {
+	d := p.cfg.RequestTimeout
+	if dl, ok := ctx.Deadline(); ok {
+		if left := time.Until(dl); left < d {
+			d = left
+		}
+	}
+	if d <= 0 {
+		d = time.Millisecond
+	}
+	return d
+}
+
 // bindService 以服务账号 bind。BindDN 为空表示匿名搜索（New 里已 WARN）。
-func (p *Provider) bindService(conn *ldap.Conn) error {
+func (p *Provider) bindService(ctx context.Context, conn *ldap.Conn) error {
+	// 每个请求前按**当前剩余预算**重设：dial 时设的那一次只反映拨号那一刻的剩余，
+	// 后续每一步都会把预算继续吃掉，不重设的话最后一步仍可能超出整体上界。
+	conn.SetTimeout(p.requestTimeout(ctx))
 	if p.cfg.BindDN == "" {
 		return nil
 	}
@@ -516,7 +545,8 @@ func (p *Provider) bindService(conn *ldap.Conn) error {
 }
 
 // lookup 按过滤器定位唯一的用户条目。
-func (p *Provider) lookup(conn *ldap.Conn, username string) (*ldap.Entry, error) {
+func (p *Provider) lookup(ctx context.Context, conn *ldap.Conn, username string) (*ldap.Entry, error) {
+	conn.SetTimeout(p.requestTimeout(ctx))
 	filter := renderUserFilter(p.cfg.UserFilter, username)
 
 	req := ldap.NewSearchRequest(

@@ -146,6 +146,24 @@ func main() {
 	// 那一份**配置（与 SetAuditRetentionDays 同一条纪律）：再读一遍环境变量的副本
 	// 会在两者不一致时让页面承诺一段其实早被删掉的历史。
 	srv.SetMetricsRetentionHours(cfg.MetricsRetentionHours)
+	srv.SetAuthTimeouts(cfg.ExtAuthTimeout, cfg.LDAPConnectTimeout, cfg.LDAPRequestTimeout)
+	// ★外部认证预算是这次唯一可能误伤真实部署的旋钮：配小了，慢但可用的目录会被判成
+	// 「认证源不可用」，而那条路径**不计入锁定**——用户重试也永远进不去，且审计里
+	// 只说「认证源不可用」，看不出是被自己的预算切断的（耗时已一并写进审计正文）。
+	// 生效值必须看得见。
+	switch {
+	case cfg.ExtAuthTimeout <= 0:
+		slog.Warn("⚠ 外部认证预算已关闭（BAIDI_EXTAUTH_TIMEOUT<=0）：一次口令登录最坏可挂到" +
+			"数十秒（LDAP 的连接/请求超时是逐请求的，一次认证要走两次拨号 + StartTLS + " +
+			"服务账号 bind + search + 用户 bind）。这是逃生舱，正常部署请留默认值")
+	case cfg.ExtAuthTimeout < 3*time.Second:
+		slog.Warn("⚠ 外部认证预算偏紧，慢但可用的目录可能被判成「认证源不可用」（该路径不计入锁定，"+
+			"用户重试也进不去）；PRD 的 3s 是 P95 验收目标而不是容错阈值",
+			"预算", cfg.ExtAuthTimeout.String())
+	default:
+		slog.Info("外部认证超时", "预算", cfg.ExtAuthTimeout.String(),
+			"LDAP连接", cfg.LDAPConnectTimeout.String(), "LDAP请求", cfg.LDAPRequestTimeout.String())
+	}
 	if cfg.GwPlaintextCompat {
 		slog.Warn("⚠ 逃生舱开启（BAIDI_GW_PLAINTEXT_COMPAT=1）：/api/v1/gateways/* 仍挂在明文口，" +
 			"可用 JWT role=gateway 调用；全部网关切到 mTLS 后请立即关回")

@@ -72,3 +72,77 @@ func TestDial_StartTLS对着装死的目录必须超时而不是挂死(t *testin
 		t.Fatal("StartTLS 对着装死的目录挂死了——RequestTimeout 没有覆盖握手阶段")
 	}
 }
+
+// ctx 预算必须真的封住**整条**认证的墙上时间，而不是被逐请求超时乘上去。
+//
+// ★RequestTimeout 是**每个请求**的：一次口令认证要走两次拨号 + StartTLS
+// + 服务账号 bind + search + 用户 bind。改造前 conn.SetTimeout 取的是静态配置值，
+// 于是调用方给的整体预算完全管不住它——10s 的配置在 StartTLS 模式下最坏能挂到
+// 约 60s。这正是「给 handler 挂个 deadline 就以为有超时了」的假象来源：
+// go-ldap 的拨号与请求都不吃 ctx，ctx 只有被本包折算进超时字段才有效。
+//
+// 用例把 RequestTimeout 设得比预算**大得多**：若折算没生效，第一步 StartTLS
+// 就会自己吃掉 5s，整体必然超出 2s 预算。
+func TestAuthenticate_ctx预算封住整条认证而不是被逐请求超时乘上去(t *testing.T) {
+	c := Config{
+		Kind: authsrc.KindLDAP, Host: "127.0.0.1", Port: tarpit(t),
+		TLS: TLSModeStartTLS, BaseDN: baseDN,
+		ConnectTimeout: 3 * time.Second,
+		RequestTimeout: 5 * time.Second, // 刻意远大于下面的预算
+		Logger:         discardLogger(),
+	}
+	p := newProvider(t, c)
+
+	const budget = 800 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), budget)
+	defer cancel()
+
+	done := make(chan time.Duration, 1)
+	go func() {
+		start := time.Now()
+		_, err := p.Authenticate(ctx, "alice", "任意口令")
+		if !errors.Is(err, authsrc.ErrSourceUnavailable) {
+			t.Errorf("装死目录应归为认证源不可用，实得 %v", err)
+		}
+		done <- time.Since(start)
+	}()
+
+	select {
+	case el := <-done:
+		// 给一倍余量：折算是逐请求做的，最后一个请求可能刚好在预算边界上起步。
+		if el > 2*budget {
+			t.Fatalf("整条认证耗时 %v，远超 %v 的预算——ctx 没有被折算进逐请求超时，"+
+				"调用方给的预算是假的", el, budget)
+		}
+	case <-time.After(4 * time.Second):
+		t.Fatal("认证在预算到期后仍然挂着——ctx 预算对 go-ldap 完全没有生效")
+	}
+}
+
+// ctx 已过期时，折算出的请求超时**不得**是 0 或负数。
+//
+// ★go-ldap 的 conn.SetTimeout 对非正值不做任何 clamp，而它内部是
+// `if requestTimeout > 0` 才起定时器——非正值不是快速失败，是**不挂定时器 = 无限阻塞**。
+// 与 dialTimeout 那个坑、以及 timeLimitSeconds 向下取整到 0 变成「不限时」是同一族。
+func TestRequestTimeout_ctx已过期时不会退化成永不超时(t *testing.T) {
+	p := newProvider(t, Config{
+		Kind: authsrc.KindLDAP, Host: "127.0.0.1", Port: 389, BaseDN: baseDN,
+		RequestTimeout: 5 * time.Second, Logger: discardLogger(),
+	})
+	ctx, cancel := context.WithTimeout(context.Background(), -time.Second) // 已过期
+	defer cancel()
+	if d := p.requestTimeout(ctx); d <= 0 {
+		t.Fatalf("ctx 已过期时折算出 %v —— go-ldap 会据此不挂定时器，变成永不超时", d)
+	}
+}
+
+// 没有 deadline 的 ctx 原样取配置值（不能因为「没 deadline」就退化成 1ms）。
+func TestRequestTimeout_无deadline时取配置值(t *testing.T) {
+	p := newProvider(t, Config{
+		Kind: authsrc.KindLDAP, Host: "127.0.0.1", Port: 389, BaseDN: baseDN,
+		RequestTimeout: 5 * time.Second, Logger: discardLogger(),
+	})
+	if d := p.requestTimeout(context.Background()); d != 5*time.Second {
+		t.Fatalf("无 deadline 应取配置值 5s，实得 %v", d)
+	}
+}

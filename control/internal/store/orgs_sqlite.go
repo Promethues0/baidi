@@ -196,8 +196,13 @@ func (s *SQLiteStore) roleMembers(ctx context.Context) (map[string][]string, err
 	return out, rows.Err()
 }
 
-// UserGroups 读全部用户组（含实算成员数）。
-func (s *SQLiteStore) UserGroups(ctx context.Context) ([]UserGroup, error) {
+// groupRows 读用户组行本身，**不算成员数**。
+//
+// ★抽出来是因为 GroupMemberships 只用得到 id/name/kind：它要的是「哪些组是角色组」，
+// 成员数对它毫无用处，算完就丢。而 GroupMemberships 又坐在 SubjectIndex 的路上，
+// 后者在网关每 15s 的策略轮询、每次拉剖面、以及部分登录上都要跑一遍——
+// 于是每一轮都白付一次 `user_group_members` 的 GROUP BY COUNT。
+func (s *SQLiteStore) groupRows(ctx context.Context) ([]UserGroup, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT id,name,COALESCE(kind,''),COALESCE(description,''),COALESCE(created_at,'') FROM user_groups ORDER BY name, id`)
 	if err != nil {
@@ -215,7 +220,13 @@ func (s *SQLiteStore) UserGroups(ctx context.Context) ([]UserGroup, error) {
 		}
 		out = append(out, g)
 	}
-	if err := rows.Err(); err != nil {
+	return out, rows.Err()
+}
+
+// UserGroups 读全部用户组（含实算成员数）。
+func (s *SQLiteStore) UserGroups(ctx context.Context) ([]UserGroup, error) {
+	out, err := s.groupRows(ctx)
+	if err != nil {
 		return nil, err
 	}
 	staticN := map[string]int{}
@@ -299,7 +310,9 @@ func (s *SQLiteStore) GroupMembers(ctx context.Context, groupID string) ([]strin
 // GroupMemberships 反向索引：规范化账号 → 所属组 id 清单（含角色组的派生归属）。
 // 用户列表要一次性显示每个人的组，逐人查库会变成 N+1。
 func (s *SQLiteStore) GroupMemberships(ctx context.Context) (map[string][]string, error) {
-	groups, err := s.UserGroups(ctx)
+	// ★用 groupRows 而不是 UserGroups：这里只需要「哪些组是角色组」，
+	// UserGroups 额外做的成员计数（一次 user_group_members 的 GROUP BY）算完即丢。
+	groups, err := s.groupRows(ctx)
 	if err != nil {
 		return nil, err
 	}

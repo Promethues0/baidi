@@ -173,3 +173,31 @@ func (s *SQLiteStore) PostureFreshest(ctx context.Context, account string) (Post
 	}
 	return reports[0], true, nil
 }
+
+// BlockedAccounts 状态为 disabled/locked 的账号（规范化）。
+//
+// ★这是给 handleGatewayPolicy 用的窄接口：那条路径每 G 台网关 × 每 15s 跑一次，
+// 而它此前调的是 Users()——一个整包（5 次全 users 扫 + 一个 O(#组织×#用户) 的
+// 相关子查询 + 逐行 json.Unmarshal(roles) + 目录树 + 用户组 + 成员关系），
+// 却只用得到 u.Account 与 u.Status 两个字段，其余全部算完即丢。
+// 网关数与用户数在那条路径上是**相乘**的，白付的成本也跟着相乘。
+//
+// 仍是全表扫（users.status 无索引），但返回行数极少（正常部署里被封的是少数），
+// 且不建 map、不解 JSON、不碰组织树。差值见 BenchmarkUsers_* 与 BenchmarkBlockedAccounts_*。
+func (s *SQLiteStore) BlockedAccounts(ctx context.Context) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT account FROM users WHERE status IN ('disabled','locked')`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []string{}
+	for rows.Next() {
+		var a string
+		if err := rows.Scan(&a); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
+	}
+	return out, rows.Err()
+}

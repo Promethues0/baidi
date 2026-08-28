@@ -266,3 +266,27 @@ func (s *Server) degradedUsers(ctx context.Context) []string {
 	}
 	return out
 }
+
+// blockedAccounts 取「被禁用/锁定」的账号。读失败回空——与相邻的 posture 并入
+// 同策略（静默跳过，令牌闸仍 fail-closed 把守新令牌签发）。
+func (s *Server) blockedAccounts(ctx context.Context) []string {
+	if r, ok := s.store.(store.BlockedAccountReader); ok {
+		out, err := r.BlockedAccounts(ctx)
+		if err != nil {
+			slog.Warn("读被封禁账号失败（本轮跳过目录并入）", "err", err.Error())
+			return nil
+		}
+		return out
+	}
+	b, err := s.store.Users(ctx)
+	if err != nil {
+		return nil
+	}
+	out := []string{}
+	for _, u := range b.Users {
+		if accountBlocked(u.Status) {
+			out = append(out, u.Account)
+		}
+	}
+	return out
+}

@@ -161,17 +161,23 @@ func (s *Server) handleClientProfile(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	apps, err := s.store.Apps(r.Context())
+	// ★请求作用域备忘：这条路上 SubjectIndex 会被算两次——store 层的 fillAppAuth
+	// （Apps 内部）一次、api 层的 buildProfile 一次，两者之间没有共享。除了白算一遍
+	// （5000 人目录上约 18ms，见 BenchmarkSubjectIndex_5000用户），中间若有目录写入，
+	// 「这个应用可不可达」与「有没有这条路由」会基于两份不同的展开——同一份剖面
+	// 自相矛盾且两处都不报错。备忘只活在这一次请求里，跨请求仍是每次现算。
+	ctx := store.WithSubjectIndexMemo(r.Context())
+	apps, err := s.store.Apps(ctx)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load apps")
 		return
 	}
-	resources, err := s.store.Resources(r.Context())
+	resources, err := s.store.Resources(ctx)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load resources")
 		return
 	}
-	prof := s.buildProfile(r.Context(), normUser(c.Name), c.Role, apps, resources)
+	prof := s.buildProfile(ctx, normUser(c.Name), c.Role, apps, resources)
 	httpx.JSON(w, http.StatusOK, prof)
 }
 

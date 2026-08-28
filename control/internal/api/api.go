@@ -1570,15 +1570,15 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 		seen[normUser(d.User)] = true
 	}
 	until := now + int64(kickBanTTL.Seconds())
-	if b, err := s.store.Users(r.Context()); err == nil {
-		for _, u := range b.Users {
-			if !accountBlocked(u.Status) {
-				continue
-			}
-			if k := normUser(u.Account); !seen[k] {
-				seen[k] = true
-				revoked = append(revoked, revokedDTO{User: u.Account, Until: until})
-			}
+	// ★窄读：这里只要「被禁用/锁定的账号」。此前调的是 Users() 整包
+	// （5 次全 users 扫 + 一个 O(#组织×#用户) 相关子查询 + 逐行 json.Unmarshal
+	// + 目录树 + 用户组 + 成员关系），而用到的只有 Account 与 Status 两个字段。
+	// 这条路径是 G 台网关 × 每 15s 各跑一次，白付的成本跟着网关数一起相乘。
+	// 后端不支持窄读时回落整包（Memory 种子量级上无所谓）。
+	for _, acct := range s.blockedAccounts(r.Context()) {
+		if k := normUser(acct); !seen[k] {
+			seen[k] = true
+			revoked = append(revoked, revokedDTO{User: acct, Until: until})
 		}
 	}
 	// posture-blocked 用户同款并入（滚动续期）：即使持 8h 会话令牌直敲网关也被拒；

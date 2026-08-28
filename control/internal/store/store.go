@@ -225,3 +225,12 @@ func ClampOverviewWindow(h int) int {
 		return h
 	}
 }
+
+// BlockedAccountReader 「被禁用/锁定的账号」的窄读能力（可选，SQLite 后端有）。
+//
+// ★做成可选接口而不是加进 Store：与 AttackStore / DevSessionStore 同款姿势。
+// 调用方断言不到时回落到 Users() 整包——Memory 后端是演示种子，量级上无所谓，
+// 而给它补一份实现只是为了满足接口，没有真实收益。
+type BlockedAccountReader interface {
+	BlockedAccounts(ctx context.Context) ([]string, error)
+}

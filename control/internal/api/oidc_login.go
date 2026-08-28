@@ -28,6 +28,8 @@ package api
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"log/slog"
@@ -140,6 +142,53 @@ func (s *Server) oidcRedirectAuth(ctx context.Context, rec store.AuthSourceRec) 
 	if s.testRedirectAuth != nil {
 		return s.testRedirectAuth(rec)
 	}
+	return s.oidcProviderFor(ctx, rec)
+}
+
+// maxOIDCProviders 缓存上限。认证源是管理员手工配的，量级远小于它；
+// 设上限只是不让一个无界 map 长在免认证端点后面。到顶整表清空（比 LRU 简单，
+// 代价只是下一次重新构造）。
+const maxOIDCProviders = 64
+
+// oidcProvCache 已构造的 OIDC Provider 缓存。零值可用。
+type oidcProvCache struct {
+	mu sync.Mutex
+	m  map[string]oidcProvEntry
+}
+
+type oidcProvEntry struct {
+	fp string // 配置 + 凭据密文的指纹：任一变化即重建
+	ra authsrc.RedirectAuthenticator
+}
+
+// oidcProviderFor 取（或构造）一个源的 Provider，跨请求复用。
+//
+// ★为什么必须复用：oidcsrc 的 Provider 内部有 discoveryCache（TTL 1h）与
+// jwksCache（TTL 1h / minRefresh 1min），而此前每个 HTTP 请求都新建一个 Provider
+// ——两个缓存跨请求**恒不命中**，只在单次 Exchange 内部生效一次。三个后果，
+// 后两个是正确性问题而不是性能问题：
+//
+//  1. 一次登录最坏出网 4 次（authorize 的 discovery + callback 的 discovery/token/JWKS）。
+//  2. jwks.go 与 discovery.go 里两处「拉不动就继续用旧值」的降级分支**永远进不去**
+//     （判据是 len(c.keys)==0 / doc==nil，新 Provider 恒为真）。那两处是有意写的：
+//     IdP 的 discovery 或 JWKS 端点抖一下，登录本不该直接失败。
+//  3. jwks.go 的 minRefresh 防拉取风暴限流**跨不了请求**：拿伪造 kid 反复打回调，
+//     每次都是新 Provider、每次都真去拉一遍 JWKS——对我们自己的 IdP 是放大攻击面。
+//     而 TestJWKS_伪造kid不会打成拉取风暴 在单 Provider 内是**过的**：
+//     测试通过、生产失效。
+//
+// 失效判据是「配置 + 凭据密文」的指纹：改 issuer/clientId 会变，轮换 client_secret
+// 也会变（每次保存都重新加密，nonce 必然不同）。指纹只吃密文，不碰明文——
+// 与凭据「只写不读」的姿态一致。
+func (s *Server) oidcProviderFor(ctx context.Context, rec store.AuthSourceRec) (authsrc.RedirectAuthenticator, error) {
+	fp := s.oidcConfigFingerprint(ctx, rec)
+	s.oidcProv.mu.Lock()
+	if e, ok := s.oidcProv.m[rec.ID]; ok && e.fp == fp && fp != "" {
+		s.oidcProv.mu.Unlock()
+		return e.ra, nil
+	}
+	s.oidcProv.mu.Unlock()
+
 	prov, err := s.buildProvider(ctx, rec)
 	if err != nil {
 		return nil, err
@@ -148,7 +197,40 @@ func (s *Server) oidcRedirectAuth(ctx context.Context, rec store.AuthSourceRec) 
 	if !ok {
 		return nil, errors.New("该认证源不支持重定向式登录")
 	}
+	if fp == "" {
+		// 指纹算不出来（凭据读不到等）：照常返回新建的，但**不入缓存**。
+		// 存一个算不准失效判据的条目，等于把「改了配置不生效」变成常态。
+		return ra, nil
+	}
+	s.oidcProv.mu.Lock()
+	if s.oidcProv.m == nil || len(s.oidcProv.m) >= maxOIDCProviders {
+		s.oidcProv.m = map[string]oidcProvEntry{}
+	}
+	s.oidcProv.m[rec.ID] = oidcProvEntry{fp: fp, ra: ra}
+	s.oidcProv.mu.Unlock()
 	return ra, nil
+}
+
+// oidcConfigFingerprint 算「配置 + 凭据密文」的指纹。读不到凭据时回空串
+// （调用方据此不缓存）；**没有凭据**（公共客户端）是合法形态，照常算指纹。
+func (s *Server) oidcConfigFingerprint(ctx context.Context, rec store.AuthSourceRec) string {
+	h := sha256.New()
+	h.Write([]byte(rec.Kind))
+	h.Write([]byte{0})
+	h.Write([]byte(rec.Config))
+	h.Write([]byte{0})
+	if as := s.authSrcStore(); as != nil {
+		sec, ok, err := as.AuthSourceSecret(ctx, rec.ID)
+		if err != nil {
+			return "" // 读不到就别缓存：宁可每次重建，也不能拿一个错的失效判据
+		}
+		if ok {
+			// 只吃密文与 nonce，不解密。轮换凭据会重新加密 → nonce 必然变。
+			h.Write(sec.Nonce)
+			h.Write(sec.Cipher)
+		}
+	}
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // oidcSourceByID 查一条**已启用**的 OIDC 源。

@@ -72,6 +72,9 @@ type Server struct {
 	// ldapConnectTimeout / ldapRequestTimeout 下发给 ldapsrc；0 = 用 ldapsrc 自己的缺省。
 	ldapConnectTimeout time.Duration
 	ldapRequestTimeout time.Duration
+	// oidcProv 已构造的 OIDC Provider 缓存（见 oidc_login.go 的 oidcProviderFor）。
+	// 零值可用。
+	oidcProv oidcProvCache
 	// metricsRetentionHours 设备状态时序的留存小时数，由 main 用清理循环真正消费的
 	// 那一份注入（SetMetricsRetentionHours）。读端点据此把时间窗截断到库里真有数据的
 	// 那一段——不截断的话「周」档会承诺一段早被清掉的历史。0 = 未注入（测试栈）。

@@ -34,6 +34,56 @@ type Resource struct {
 	// 「哪些资源是 Web 应用、谁能访问」由控制面回答，这里只回答"怎么拨"。
 	// L4 隧道路径完全不读它。
 	WebScheme string `json:"web_scheme,omitempty"`
+
+	// idx 主体清单的预计算查找表（Replace 时构建，JSON 里不存在）。
+	//
+	// ★为什么需要：Authorize 原先是线性扫 + strings.EqualFold，而 AllowUsers 的长度
+	// **由控制面的组织授权展开决定**——一条授权给根组织的资源，在 5000 人目录下会
+	// 带着 5000 个账号下发（api.expandForGateway）。实测（BenchmarkAuthorize_*）
+	// 5000 人时一次判定约 35μs，且成本随账号的**公共前缀长度**上升（同组织账号
+	// 往往共享前缀，EqualFold 要逐字符比到分歧位）。L4 每连接一次尚可，
+	// 而 L7 是**每个 HTTP 请求**都判一次（webproxy 的逐请求鉴权）——
+	// 一个页面五十个请求就是毫秒级的纯授权开销。
+	//
+	// nil 时回落线性扫：直接构造 Resource（测试、以及任何没走 Replace 的路径）
+	// 仍然可用，行为一字不差。
+	idx *subjectSets
+}
+
+// subjectSets 预计算的主体查找表。键一律 strings.ToLower，**不做 TrimSpace**。
+//
+// ★口径必须与它取代的 strings.EqualFold 逐字一致，否则就是在悄悄改变授权判定。
+// 具体到 TrimSpace：`EqualFold(" zhang.wei ", "zhang.wei")` 是 **false**——
+// 名单里带空白的条目匹配不上，那个人进不来（fail-closed）。第一版实现顺手加了
+// TrimSpace，方向正好相反：**放宽**授权。对照用例（TestAuthorize两条路径同真同假
+// 的「首尾空白」一条）当场抓住了它。
+//
+// 大小写：ToLower 后查表 vs EqualFold，对 ASCII 与中文账号完全等价（中文无大小写），
+// 差异只在个别 Unicode 特例（土耳其语无点 i 之类）。控制面下发的账号本来就经
+// normUser 规范化过，实际不会踩到。
+type subjectSets struct {
+	deny, users, roles map[string]struct{}
+}
+
+func newSet(ss []string) map[string]struct{} {
+	if len(ss) == 0 {
+		return nil
+	}
+	m := make(map[string]struct{}, len(ss))
+	for _, v := range ss {
+		m[strings.ToLower(v)] = struct{}{}
+	}
+	return m
+}
+
+// withIndex 返回带预计算查找表的副本。Replace 时调一次，之后热路径只查表。
+func (r Resource) withIndex() Resource {
+	r.idx = &subjectSets{
+		deny:  newSet(r.DenyUsers),
+		users: newSet(r.AllowUsers),
+		roles: newSet(r.AllowRoles),
+	}
+	return r
 }
 
 // DialScheme 返回七层代理拨后端用的协议，空值收敛到 http。
@@ -97,7 +147,8 @@ func (r *Registry) Replace(list []Resource) {
 	m := make(map[string]Resource, len(list))
 	for _, res := range list {
 		if res.ID != "" && res.Backend != "" {
-			m[res.ID] = res
+			// 主体清单在这里预计算一次（每轮策略下发一次），热路径不再线性扫。
+			m[res.ID] = res.withIndex()
 		}
 	}
 	r.mu.Lock()
@@ -138,6 +189,27 @@ func (r *Registry) List() []Resource {
 // ★否决必须排在最前。控制面下发时会把有效期内的 JIT 授予并进 AllowUsers，
 // 若先判允许，一张审批单就能让被降权的终端照样打开高敏资源——而那恰恰是最该收缩的时刻。
 func (r *Registry) Authorize(user, role string, res Resource) bool {
+	// 走 Replace 进来的资源带预计算查找表；直接构造的（测试等）回落线性扫，
+	// 两条路径的判定顺序与结果必须完全一致——有对照用例钉住。
+	if ix := res.idx; ix != nil {
+		u := strings.ToLower(user)
+		if len(ix.deny) > 0 {
+			if _, hit := ix.deny[u]; hit {
+				return false
+			}
+		}
+		if len(ix.users) > 0 {
+			if _, hit := ix.users[u]; hit {
+				return true
+			}
+		}
+		if len(ix.roles) > 0 {
+			if _, hit := ix.roles[strings.ToLower(role)]; hit {
+				return true
+			}
+		}
+		return len(ix.users) == 0 && len(ix.roles) == 0
+	}
 	if len(res.DenyUsers) > 0 && contains(res.DenyUsers, user) {
 		return false
 	}

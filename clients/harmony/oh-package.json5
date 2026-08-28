@@ -1,0 +1,8 @@
+{
+  modelVersion: '5.0.0',
+  name: 'baidi-harmony',
+  version: '0.1.0',
+  description: '白帝零信任访问控制 · 鸿蒙桌面客户端',
+  dependencies: {},
+  devDependencies: {}
+}

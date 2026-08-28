@@ -1,0 +1,8 @@
+# hvigor 构建缓存与产物
+.hvigor/
+build/
+oh_modules/
+local.properties
+# 前端构建产物（由 build.sh 从 clients/mobile 拷入，不入库）
+entry/src/main/resources/rawfile/
+signing-local.json5

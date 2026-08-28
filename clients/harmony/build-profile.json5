@@ -1,0 +1,26 @@
+{
+  app: {
+    // ★签名材料（调试）。profile(.p7b) 与 bundleName 是绑定的：换包名就必须换 profile。
+    // 这里复用本机 DevEco 已生成的调试材料，它绑的是 com.example.myapplication
+    // ——正式包名 dev.baidi.client 需要在 DevEco 里为它点一次「自动签名」重新生成
+    // （需 GUI + 华为账号，命令行做不到），届时把下面四个路径与 AppScope 的 bundleName
+    // 一起换掉即可。详见 README。
+    // ★签名材料**不入库**。本机的那份在 signing-local.json5（.gitignore），
+    // build.sh 构建时自动合并进来。没有它只能产出 unsigned.hap，装不到真机。
+    // 生成方式见 README「签名」一节。
+    signingConfigs: [],
+    products: [
+      {
+        name: 'default',
+        signingConfig: 'default',
+        compatibleSdkVersion: '6.0.0(20)',
+        targetSdkVersion: '6.0.0(20)',
+        runtimeOS: 'HarmonyOS',
+      }
+    ],
+    buildModeSet: [{ name: 'debug' }, { name: 'release' }]
+  },
+  modules: [
+    { name: 'entry', srcPath: './entry', targets: [{ name: 'default', applyToProducts: ['default'] }] }
+  ]
+}

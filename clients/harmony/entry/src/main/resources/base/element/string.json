@@ -1,0 +1,7 @@
+{
+  "string": [
+    { "name": "module_desc", "value": "白帝零信任访问控制客户端" },
+    { "name": "EntryAbility_desc", "value": "白帝客户端" },
+    { "name": "EntryAbility_label", "value": "白帝" }
+  ]
+}

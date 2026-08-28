@@ -167,15 +167,28 @@ func (s *Server) auditGrayObserved(r *http.Request) {
 	gap := int64(grayObserveInterval.Seconds())
 	for _, acc := range accounts {
 		key := normUser(acc)
+		// ★节流先判、查询后做（wave9）。此前 PostureVerdict 排在节流之前，于是
+		// 节流拦下的只是**审计写**，而每个 gray 账号每轮仍真查一次库——这条 N+1
+		// 的库成本完全不受节流约束，还随网关台数相乘（每台网关每 15s 各跑一遍）。
+		s.mu.Lock()
+		last, seen := s.grayObserved[key]
+		s.mu.Unlock()
+		if seen && now-last < gap {
+			continue
+		}
+
 		// 「任一设备 gray」不等于「这个人此刻处于 gray 档」：另一台设备判 degrade/block 时
 		// 他真正被执行的是那一档。按最差判定过滤，免得审计里写着"正在观察"、
 		// 而这个人其实已经被降权甚至阻断了——审计只记已发生的事实。
 		worst, ok, verr := s.store.PostureVerdict(r.Context(), key)
 		if verr != nil || !ok || worst.Verdict != store.DisposalGray {
+			// 不更新时间戳：这一档不属于他，下一轮该重新判（与改造前逐字一致）。
 			continue
 		}
+		// 双重检查：上面那次读锁与这里之间可能有另一台网关的轮询挤进来。
+		// 判定与更新必须在同一次持锁内完成，否则两台网关同时到期会各记一条。
 		s.mu.Lock()
-		last, seen := s.grayObserved[key]
+		last, seen = s.grayObserved[key]
 		due := !seen || now-last >= gap
 		if due {
 			s.grayObserved[key] = now

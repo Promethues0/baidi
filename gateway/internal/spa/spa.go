@@ -23,7 +23,7 @@ func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
 // Allowlist 源 IP → 放行到期时间 的并发安全表。
 type Allowlist struct {
-	mu   sync.Mutex
+	mu   sync.RWMutex
 	m    map[string]entry
 	deny map[string]time.Time // 账号 → 封禁截止（强制下线：封禁期内拒绝敲门）
 	// OnAllow 在放行某 IP 时回调（如向防火墙 pf 表写入 pass 规则）。可空。
@@ -165,8 +165,17 @@ func (a *Allowlist) Reap() []string {
 
 // Allowed 返回该源 IP 是否在有效放行窗口内（及对应身份 user/role）。
 func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	// ★读锁：本方法判过期但**不删**（回收统一由 Reap 做），是纯读。
+	// proxy.handle 每条隧道连接要摸这把锁三次（Allowed 两次 + Touch 一次）。
+	//
+	// 实测（BenchmarkAllowedParallel_*，8 核）：独占锁 204ns → 读锁 175ns，
+	// **只快了 14%**，且都远高于单线程的 53ns。别把这条读成"锁竞争解决了"——
+	// RWMutex 的读锁自身也要原子操作，多核仍在抢同一条 cache line。
+	// 保留它的主要理由是语义：读操作就该用读锁，将来谁在这里加了写操作，
+	// race 检测会当场指出来。真要消掉这层竞争得换数据结构（分片或无锁快照），
+	// 那是另一件事，眼下的量级不值得。
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	e, found := a.m[ip]
 	if !found || time.Now().After(e.until) {
 		return "", "", false
@@ -176,8 +185,8 @@ func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
 
 // Sessions 返回当前仍在放行窗口内的活跃会话（供网关向控制面上报真实在线用户）。
 func (a *Allowlist) Sessions() []Session {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	now := time.Now()
 	out := make([]Session, 0, len(a.m))
 	for ip, e := range a.m {
@@ -190,8 +199,8 @@ func (a *Allowlist) Sessions() []Session {
 
 // ActiveCount 返回当前仍在放行窗口内的源 IP 数（已授权客户端数，供网关向控制面上报）。
 func (a *Allowlist) ActiveCount() int {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	now := time.Now()
 	n := 0
 	for _, e := range a.m {

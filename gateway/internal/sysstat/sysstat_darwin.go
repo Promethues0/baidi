@@ -43,6 +43,11 @@ func readLoad1() (float64, bool) {
 // ★darwin 的 IfData 计数器是 32 位的，4 GiB 就回绕一次；回绕由 Collector 的
 // 「计数器回退 → 本轮不可判定」统一兜住，不会变成一个假尖峰。
 func readNetCounters() (netCounters, bool) {
+	if raceEnabled {
+		// checkptr 会在 ParseRoutingMessage 内部因未对齐指针转换 fatal，
+		// 整个测试进程崩掉。理由与替代方案的排除过程见 race_on.go。
+		return netCounters{}, false
+	}
 	buf, err := syscall.RouteRIB(syscall.NET_RT_IFLIST, 0)
 	if err != nil {
 		return netCounters{}, false

@@ -94,6 +94,16 @@ type oidcConfigDTO struct {
 	ClientID    string   `json:"clientId"`
 	RedirectURI string   `json:"redirectUri"`
 	Scopes      []string `json:"scopes"`
+	// UseUserInfo 是否调 UserInfo 端点补全属性。
+	//
+	// ★这一项此前不存在，于是 oidcsrc 的 UseUserInfo 恒 false、整套 userInfo()
+	// 代码在生产路径上不可达——而它正是为「有些 IdP（精简配置的 Keycloak 等）
+	// 不把 groups/email 放进 ID Token，只在 UserInfo 里给」写的。后果不是少几个
+	// 展示字段：外部身份准入闸的域白名单判 Email、组白名单判 Groups，两者拿不到
+	// 就 fail-closed（store.AdmitFilter.Allow 的「认证源未返回邮箱」分支），
+	// **该源的所有用户永远进不来**，而管理员那边配置齐全、白名单看着完全正确。
+	// 默认 false：多打一次 UserInfo 是真出网，不该对所有存量部署无声生效。
+	UseUserInfo bool `json:"useUserInfo"`
 	admitConfigDTO
 }
 
@@ -162,6 +172,7 @@ func (s *Server) buildProvider(ctx context.Context, rec store.AuthSourceRec) (an
 		return oidcsrc.New(oidcsrc.Config{
 			Issuer: c.Issuer, ClientID: c.ClientID, ClientSecret: credential,
 			RedirectURI: c.RedirectURI, Scopes: c.Scopes,
+			UseUserInfo: c.UseUserInfo,
 		})
 	}
 	return nil, fmt.Errorf("认证源类型 %q 无法构造", rec.Kind)

@@ -644,6 +644,9 @@ export interface OidcConfig {
   clientId: string;
   redirectUri: string;
   scopes?: string[];
+  /** 是否调 UserInfo 端点补全属性。★关系到准入闸能不能判：域白名单看 email、
+   *  组白名单看 groups，而有些 IdP 不把它们放进 ID Token，只在 UserInfo 里给。 */
+  useUserInfo?: boolean;
 }
 
 /** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC 共用；wave8 行动 10）。

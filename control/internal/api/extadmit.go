@@ -61,7 +61,12 @@ func (s *Server) admitExternal(ctx context.Context, rec store.AuthSourceRec,
 	// 目录侧把人移出允许组之后，下一次登录就该被拒。只在首次判的话，
 	// 「从组里移除」这个动作对已建号的人永远不生效。
 	if ok, why := cfg.filter().Allow(id.Email, id.Groups); !ok {
-		return admitVerdict{Reason: why}
+		// ★「判不了」与「判定不通过」都会走到这里，但管理员的下一步动作完全不同：
+		// 前者要去补属性来源，后者要去改白名单。OIDC 上「拿不到 email/groups」
+		// 最常见的成因是 IdP 不把它们放进 ID Token（精简配置的 Keycloak 等），
+		// 而白帝这边默认不调 UserInfo——不点出这一条的话，管理员会反复核对
+		// 一份本来就正确的白名单，而该源的所有人一个都进不来。
+		return admitVerdict{Reason: why + admitAttrHint(rec, id)}
 	}
 
 	// ── 闸二：审批，**只在首次建号时判** ──
@@ -249,4 +254,22 @@ func (s *Server) handleDecideExtAdmission(w http.ResponseWriter, r *http.Request
 		map[bool]string{true: "该身份下次登录时才会建号", false: "该身份此后登录一律被拒"}[adm.Status == store.AdmitApproved],
 	), verdict)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "admission": adm})
+}
+
+// admitAttrHint 当拒绝原因是「拿不到属性」时，按源类型补一句下一步动作。
+// 判定不通过（属性拿到了、不在白名单里）不加提示——那时管理员该改的是白名单。
+func admitAttrHint(rec store.AuthSourceRec, id authsrc.Identity) string {
+	missingEmail := strings.TrimSpace(id.Email) == ""
+	missingGroups := len(id.Groups) == 0
+	if !missingEmail && !missingGroups {
+		return ""
+	}
+	switch authsrc.Kind(rec.Kind) {
+	case authsrc.KindOIDC:
+		return "；若 IdP 不把这些属性放进 ID Token（精简配置的 Keycloak 等常见），" +
+			"请在该认证源上开启「调用 UserInfo 端点补全属性」"
+	case authsrc.KindLDAP, authsrc.KindAD:
+		return "；请检查该认证源的邮箱/组属性名是否与目录实际一致"
+	}
+	return ""
 }

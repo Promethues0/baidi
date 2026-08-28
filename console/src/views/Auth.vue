@@ -577,8 +577,17 @@
             <a-input v-model="oidc.clientId" allow-clear /></div>
           <div class="bd-srcform__row"><label>回调地址</label>
             <a-input v-model="oidc.redirectUri" placeholder="https://vpn.example.com/api/v1/authsrc/oidc/callback" allow-clear /></div>
+          <div class="bd-srcform__row bd-srcform__row--inline">
+            <a-switch v-model="oidc.useUserInfo" size="small" /><span>登录时调 UserInfo 端点补全属性</span>
+          </div>
           <div class="bd-srcform__hint">
             仅接受 RS256/ES256 这类非对称签名；alg=none 与 HS256 会被拒绝（算法混淆攻击面）
+          </div>
+          <div class="bd-srcform__hint">
+            ★配了下方「允许的邮箱域 / 用户组」就要留意这个开关：白名单判的是 email 与 groups，
+            而有些 IdP（精简配置的 Keycloak 等）不把它们放进 ID Token，只在 UserInfo 里给。
+            拿不到属性时准入闸一律拒绝（fail-closed），表现为该源的用户全都进不来、
+            而白名单看着完全正确。默认关：多打一次 UserInfo 是一次真出网。
           </div>
         </template>
 
@@ -778,7 +787,7 @@ const srcForm = reactive<{
   hasSecret: boolean; secretFingerprint?: string;
 }>({ id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false });
 const ldap = reactive<LdapConfig>({ host: '', port: 0, tlsMode: 'ldaps', baseDn: '' });
-const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '' });
+const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '', useUserInfo: false });
 /* 准入设置（两类源共用）。默认 auto = 与改造前行为一致，升级不把人挡在门外。 */
 const admit = reactive<AdmitConfig>({ admitPolicy: 'auto' });
 const statusDisabledValues = ref<string[]>([]);
@@ -804,7 +813,7 @@ const admitGroups = ref<string[]>([]);
 function resetSrcForm() {
   Object.assign(srcForm, { id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false, secretFingerprint: undefined });
   Object.assign(ldap, { host: '', port: 0, tlsMode: 'ldaps', caCert: '', insecureSkipVerify: false, bindDn: '', baseDn: '', userFilter: '', usernameAttr: '' });
-  Object.assign(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined });
+  Object.assign(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined, useUserInfo: false });
   Object.assign(admit, { admitPolicy: 'auto' });
   statusDisabledValues.value = [];
   admitDomains.value = [];

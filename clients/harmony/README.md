@@ -14,13 +14,33 @@
 
 | | 状态 |
 |---|---|
-| ArkWeb 壳 + 登录 / 应用清单 / 门户 UI | ✅ 已构建进包（`clients/mobile` 那套 Vue，1.6 MB 打进 rawfile） |
+| ArkWeb 壳 + 桌面布局 UI | ✅ 已构建进包（**直接用 `clients/desktop` 那套 Vue 源码**，1.6 MB 打进 rawfile） |
 | 原生桥 `window.__BAIDI_NATIVE__` | ✅ 已注入（`platform` / `startTunnel` / `stopTunnel`，契约同安卓/iOS 壳） |
 | 与控制面通信（登录、拉剖面、看应用） | ✅ 走 ArkWeb 的 fetch，控制中心地址在 UI 的「我的」页配 |
 | **数据面（隧道 / 真流量接管）** | ❌ **未实现** |
 
 ★`startTunnel` 如实返回失败并说明原因，**不返回 `{ok:true}` 骗 UI 画出「已接入」**。
 「显示已接入而实际没引流」是本项目反复消灭的形态（见 docs/ARCHITECTURE.md 第七节）。
+同理 `tunnel_status` 回 `running:false`、诊断页那几个探测命令**如实抛「本端未实现」**
+——画一份编造的诊断报告比功能缺失更坏。
+
+## UI 为什么是「共用 desktop 的源码」而不是拷一份
+
+`clients/desktop/vite.harmony.config.ts` 把 desktop 的 Vue 源码原样编译，只用 alias
+把三个 Tauri API 模块换成 `webui/shim/` 下的实现：
+
+| Tauri 模块 | 鸿蒙侧 |
+|---|---|
+| `@tauri-apps/api/core` 的 `invoke` | 按命令分发：`tunnel_*` → 原生桥；`open_app_url`/`force_quit` → 鸿蒙 API；**其余如实抛未实现** |
+| `@tauri-apps/api/event` 的 `listen` | 空实现（desktop 只监听托盘的 `quit-request`，鸿蒙没有托盘） |
+| `@tauri-apps/api/window` | 三个窗控留空（鸿蒙 PC 由系统装饰栏管理；**刻意不把 close 接成退出应用**，那会让一个看起来是最小化的按钮真的杀掉进程） |
+
+★拷贝源码会立刻分叉——桌面端修了缺陷鸿蒙这份不会跟着变，而两者是同一个产品的
+同一套界面。alias 让它们共用一份源码，差异收敛在 shim 那三个文件里。
+
+★壳里还注入了 `__TAURI_INTERNALS__`：desktop 的 UI 用它判断「是否在原生壳内」
+（`tauriRuntime()`）。不注入的话 UI 会走浏览器 dev 的退化路径，那条路依赖本机的
+`baidi-knock-agent` 代理，鸿蒙上根本没有，表现为点接入毫无反应。
 
 ## 数据面为什么还没有
 

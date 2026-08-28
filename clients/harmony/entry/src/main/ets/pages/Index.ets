@@ -9,6 +9,7 @@
  * 「当前能做什么 / 不能做什么」。
  */
 import { webview } from '@kit.ArkWeb';
+import { common, Want } from '@kit.AbilityKit';
 import { hilog } from '@kit.PerformanceAnalysisKit';
 import { BusinessError } from '@kit.BasicServicesKit';
 
@@ -39,6 +40,29 @@ class BaidiHost {
   stopTunnel(): string {
     return JSON.stringify({ ok: true });
   }
+
+  /** 隧道运行态。数据面还不存在，如实回 running=false —— 不编造一个"在跑"。 */
+  tunnelStatus(): string {
+    return JSON.stringify({ running: false, pid: '', log: '' });
+  }
+
+  /** 用系统浏览器打开应用地址。只放行 http/https，同桌面端 Rust 侧的白名单。 */
+  openUrl(url: string): string {
+    const u: string = url.trim();
+    if (!u.startsWith('http://') && !u.startsWith('https://')) {
+      hilog.warn(DOMAIN, TAG, '拒绝打开非 http(s) 地址');
+      return JSON.stringify({ ok: false, detail: '只允许 http/https' });
+    }
+    try {
+      const ctx = getContext(this) as common.UIAbilityContext;
+      const want: Want = { action: 'ohos.want.action.viewData', uri: u };
+      ctx.startAbility(want);
+      return JSON.stringify({ ok: true });
+    } catch (err) {
+      hilog.error(DOMAIN, TAG, '打开外部地址失败: %{public}s', JSON.stringify(err));
+      return JSON.stringify({ ok: false, detail: '打开失败' });
+    }
+  }
 }
 
 /** 在页面脚本跑起来之前注入桥。把同步的宿主方法包成 UI 期望的 Promise 形状。 */
@@ -46,8 +70,24 @@ const BRIDGE_JS: string = `
 (function () {
   if (window.__BAIDI_NATIVE__) return;
   var h = window.__BAIDI_HOST__;
+  // ★注入 __TAURI_INTERNALS__：desktop 那套 UI 用它判断"是否在原生壳里"
+  // （tauriRuntime()）。不注入的话 UI 会走浏览器 dev 的退化路径——那条路依赖本机的
+  // baidi-knock-agent 代理，鸿蒙上根本没有，表现为点接入毫无反应。
+  if (!window.__TAURI_INTERNALS__) window.__TAURI_INTERNALS__ = { harmony: true };
   window.__BAIDI_NATIVE__ = {
     platform: h ? h.platform() : 'harmony',
+    tunnelStatus: function () {
+      if (!h) return Promise.resolve({ running: false, pid: '', log: '' });
+      try { return Promise.resolve(JSON.parse(h.tunnelStatus())); }
+      catch (e) { return Promise.resolve({ running: false, pid: '', log: '' }); }
+    },
+    openUrl: function (url) {
+      if (!h) return Promise.reject(new Error('原生桥未注入'));
+      var r = {};
+      try { r = JSON.parse(h.openUrl(url || '')); } catch (e) { r = { ok: false, detail: String(e) }; }
+      return r.ok ? Promise.resolve() : Promise.reject(new Error(r.detail || '打开失败'));
+    },
+    quit: function () { return Promise.resolve(); },
     startTunnel: function (token, cfg) {
       if (!h) return Promise.resolve({ ok: false, detail: '原生桥未注入' });
       try { return Promise.resolve(JSON.parse(h.startTunnel(token || '', JSON.stringify(cfg || {})))); }
@@ -77,7 +117,7 @@ struct Index {
         .javaScriptProxy({
           object: this.host,
           name: '__BAIDI_HOST__',
-          methodList: ['platform', 'startTunnel', 'stopTunnel'],
+          methodList: ['platform', 'startTunnel', 'stopTunnel', 'tunnelStatus', 'openUrl'],
           controller: this.controller
         })
         .onControllerAttached(() => {

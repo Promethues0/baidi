@@ -1,6 +1,6 @@
 {
   app: {
-    bundleName: 'com.example.myapplication',
+    bundleName: 'dev.baidi.client',
     vendor: 'baidi',
     versionCode: 1,
     versionName: '0.1.0',

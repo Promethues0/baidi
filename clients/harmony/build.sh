@@ -33,21 +33,37 @@ if [ -f signing-local.json5 ]; then
 fi
 
 # ── 前端：clients/mobile 那套 Vue 构建进 rawfile ──
-# base=./ 是必需的：ArkWeb 从 resource://rawfile/ 加载，绝对路径会 404。
-echo "▸ 构建前端 UI"
-( cd ../mobile && npx vite build --base=./ >/dev/null )
+# base=./ 在 vite.harmony.config.ts 里设了：ArkWeb 从 resource://rawfile/ 加载，
+# 绝对路径会 404。
+echo "▸ 构建前端 UI（clients/desktop 那套 Vue，桌面布局；Tauri API 经 webui/shim 替换）"
+( cd ../desktop && npx vite build -c vite.harmony.config.ts >/dev/null )
 RAW=entry/src/main/resources/rawfile
 rm -rf "${RAW:?}"/* 2>/dev/null || true
 mkdir -p "$RAW"
-cp -R ../mobile/dist/* "$RAW/"
+cp -R webui/dist/* "$RAW/"
 echo "  UI 已就位：$(find "$RAW" -type f | wc -l | tr -d ' ') 个文件，$(du -sh "$RAW" | cut -f1)"
 
 echo "▸ 构建 HAP（$MODE）"
-hvigorw assembleHap -p product=default -p "buildMode=$MODE" --no-daemon
+# ★不让 set -e 直接吞掉：签名失败是最常见的一种失败，而它的补救动作很具体
+# （去 DevEco 点一次自动签名），值得单独给提示而不是丢一堆 hvigor 栈。
+BUILD_RC=0
+hvigorw assembleHap -p product=default -p "buildMode=$MODE" --no-daemon || BUILD_RC=$?
 
-HAP=$(find entry/build -name "*-signed.hap" | head -1)
+HAP=$(find entry/build -name "*-signed.hap" 2>/dev/null | head -1)
+UNSIGNED=$(find entry/build -name "*-unsigned.hap" 2>/dev/null | head -1)
+if [ "$BUILD_RC" -ne 0 ] && [ -z "$UNSIGNED" ]; then
+  echo "✗ 构建失败（非签名问题），见上方 hvigor 输出" >&2
+  exit "$BUILD_RC"
+fi
 if [ -z "$HAP" ]; then
-  echo "✗ 只产出了未签名的 HAP —— 装不到真机上。见 README「签名」" >&2
+  echo "" >&2
+  echo "✗ 只产出了未签名的 HAP —— 装不到真机上。" >&2
+  BN=$(python3 -c "import re;s=open('AppScope/app.json5',encoding='utf-8').read();print(re.search(r\"bundleName:\s*'([^']+)'\",s).group(1))" 2>/dev/null || echo "?")
+  echo "  当前 bundleName：$BN" >&2
+  echo "  鸿蒙真机只装签过名的 HAP，而 profile 由华为签发、同时绑 bundleName 与设备 UDID。" >&2
+  echo "  在 DevEco Studio 里为本工程点一次自动签名即可（一次性，之后全命令行）：" >&2
+  echo "    File → Project Structure → Signing Configs → 勾 Automatically generate signature" >&2
+  echo "  生成后把 signingConfigs 段落存进 signing-local.json5（不入库），详见 README。" >&2
   find entry/build -name "*.hap" >&2
   exit 1
 fi

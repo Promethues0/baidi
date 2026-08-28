@@ -210,9 +210,13 @@ func (p *Provider) now() time.Time {
 //	nonce        —— 原样传给 Exchange，由本包比对。不比对 = ID Token 可重放。
 //	codeVerifier —— 原样传给 Exchange。挑战值在这里推导。
 //
-// 需要发现文档（拿授权端点），故可能触发一次网络请求；契约签名里没有 ctx，
-// 这里用带超时的 Background——AuthURL 由 HTTP handler 同步调用，超时必须有界。
-func (p *Provider) AuthURL(state, nonce, codeVerifier string) (string, error) {
+// 需要发现文档（拿授权端点），故可能触发一次网络请求。
+//
+// ★ctx 由调用方给（wave9）。此前签名里没有 ctx，实现只能 context.WithTimeout(
+// context.Background(), 10s) 自造一个——调用方的预算对它完全无效，而同一个接口里的
+// Exchange 是吃 ctx 的。ctx 无 deadline 时仍兜一个默认超时：这个方法在 HTTP handler
+// 上同步调用，无界等待会挂死 handler goroutine。
+func (p *Provider) AuthURL(ctx context.Context, state, nonce, codeVerifier string) (string, error) {
 	if strings.TrimSpace(state) == "" {
 		return "", errNotConfigured("state 为空：登录 CSRF 防护依赖它，拒绝构造无 state 的授权地址")
 	}
@@ -223,8 +227,11 @@ func (p *Provider) AuthURL(state, nonce, codeVerifier string) (string, error) {
 		return "", errNotConfigured("code_verifier 不符合 RFC 7636（需 43~128 位 unreserved 字符），请用 NewCodeVerifier 生成")
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), defaultTimeout)
-	defer cancel()
+	if _, ok := ctx.Deadline(); !ok {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, defaultTimeout)
+		defer cancel()
+	}
 	doc, err := p.discover(ctx)
 	if err != nil {
 		return "", err

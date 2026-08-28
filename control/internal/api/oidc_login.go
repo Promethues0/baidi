@@ -198,8 +198,8 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	ra, err := s.oidcRedirectAuth(r.Context(), rec)
 	if err != nil {
-		slog.Warn("OIDC 授权入口不可用", "源", rec.Name, "err", err.Error())
-		s.oidcFail(w, r, rec.Name, "认证源暂不可用，请稍后重试或联系管理员")
+		s.auditOIDCFailure(r, rec.Name, "OIDC 授权入口", err, time.Time{})
+		s.oidcFail(w, r, rec.Name, oidcUserMessage(err, "认证源构造失败"))
 		return
 	}
 	state, err1 := oidcsrc.NewState()
@@ -209,10 +209,19 @@ func (s *Server) handleOIDCAuthorize(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "随机数生成失败")
 		return
 	}
-	u, err := ra.AuthURL(state, nonce, verifier)
+	// ★出网预算与口令登录同一个旋钮（BAIDI_EXTAUTH_TIMEOUT）：AuthURL 要拉发现文档。
+	// OIDC 这一侧比 LDAP 简单——net/http 原生吃 ctx，一个 deadline 就封得住，
+	// 不需要像 go-ldap 那样把 ctx 折算进自有超时字段。
+	actx, cancel := s.authCtx(r.Context())
+	start := time.Now()
+	u, err := ra.AuthURL(actx, state, nonce, verifier)
+	cancel()
 	if err != nil {
-		slog.Warn("OIDC 授权地址构造失败", "源", rec.Name, "err", err.Error())
-		s.oidcFail(w, r, rec.Name, "认证源暂不可用（授权地址构造失败），请联系管理员")
+		// ★此前这里**一条审计都不落**（只有 slog）：IdP 连不上、issuer 不符、
+		// 不支持 PKCE S256 —— 用户在登录页反复点「用 XX 登录」没反应，而审计里
+		// 什么都没有。登录入口的失败必须留痕，且要按三类分开说（下同 callback）。
+		s.auditOIDCFailure(r, rec.Name, "OIDC 授权入口", err, start)
+		s.oidcFail(w, r, rec.Name, oidcUserMessage(err, "授权地址构造失败"))
 		return
 	}
 	if !s.oidcFlow.put(state, oidcPending{srcID: rec.ID, nonce: nonce, verifier: verifier}) {
@@ -251,16 +260,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 	ra, err := s.oidcRedirectAuth(r.Context(), rec)
 	if err != nil {
-		s.oidcFail(w, r, rec.Name, "认证源暂不可用，请稍后重试")
+		// 此前这一处连 slog 都没有：认证源构造失败在回调阶段完全无痕。
+		s.auditOIDCFailure(r, rec.Name, "OIDC 回调", err, time.Time{})
+		s.oidcFail(w, r, rec.Name, oidcUserMessage(err, "认证源构造失败"))
 		return
 	}
-	ident, err := ra.Exchange(r.Context(), code, pend.verifier, pend.nonce)
+	// 预算包住整条 Exchange（发现文档 + 令牌端点 + JWKS 三次出网共享一个 deadline）。
+	actx, cancel := s.authCtx(r.Context())
+	start := time.Now()
+	ident, err := ra.Exchange(actx, code, pend.verifier, pend.nonce)
+	cancel()
 	if err != nil {
-		// 细节进日志（运维要看），给浏览器的只有结论——令牌校验失败的具体原因
-		// （alg/aud/nonce…）对用户无用，对攻击者是调试信息。
-		slog.Warn("OIDC 换码/验令牌失败", "源", rec.Name, "err", err.Error())
-		s.auditAs(r, "-", "auth", "OIDC 令牌校验失败（源 "+rec.Name+"）", "deny")
-		s.oidcFail(w, r, rec.Name, "登录校验失败，请重新发起登录")
+		// ★此前这里把**任何**错误都落成 deny +「登录校验失败」——IdP 连不上、
+		// JWKS 拉不到、令牌端点 5xx、超时，全被说成"你的凭据有问题"。而 oidcsrc
+		// 内部早就把错误分成了三类（errUnavailable / errNotConfigured /
+		// errInvalidToken，注释明写「这个映射就是契约里三类错误必须区分的落点」），
+		// 只是 api 侧一次 errors.Is 都没调，判据齐全而没有消费方。
+		// 后果与口令路径要消灭的完全一样：运维照着 deny 去查用户，而问题在 IdP。
+		s.auditOIDCFailure(r, rec.Name, "OIDC 令牌校验", err, start)
+		s.oidcFail(w, r, rec.Name, oidcUserMessage(err, "登录校验失败，请重新发起登录"))
 		return
 	}
 	as := s.authSrcStore()
@@ -381,4 +399,52 @@ func (s *Server) oidcFail(w http.ResponseWriter, r *http.Request, srcName, msg s
 
 func (s *Server) oidcRedirect(w http.ResponseWriter, r *http.Request, q url.Values) {
 	http.Redirect(w, r, portalLoginPath+"?"+q.Encode(), http.StatusFound)
+}
+
+// oidcErrKind 把 oidcsrc 返回的错误归成三类之一，用于审计措辞与用户文案。
+//
+// ★oidcsrc 内部一直在**认真区分**这三类（errUnavailable / errNotConfigured /
+// errInvalidToken 三个构造器，oidc.go 的注释明写「这个映射就是契约里"三类错误必须
+// 区分"的落点，映射错了会直接误导排障方向」），而 api 侧此前一次 errors.Is 都没调，
+// 把它们全部塌缩成一句「登录校验失败」+ verdict=deny。判据齐全、没有消费方——
+// 与本项目反复消灭的那一族同源，只是方向相反（那些是有消费方没生产者）。
+func oidcErrKind(err error) (zh, verdict string) {
+	switch {
+	case errors.Is(err, authsrc.ErrSourceUnavailable):
+		// 与口令路径的「终端用户登录失败（认证源不可用）」同口径：这是运维故障，
+		// 不是拒绝。落 deny 会让运维照着「被拒绝」去查用户，而问题在 IdP。
+		return "身份提供方不可用", "fail"
+	case errors.Is(err, authsrc.ErrNotConfigured):
+		return "认证源配置有误", "fail"
+	case errors.Is(err, authsrc.ErrInvalidCredentials):
+		// 真·凭据/令牌问题：授权码失效、nonce 不匹配（重放）、验签不过、
+		// UserInfo 的 sub 与 ID Token 不一致（疑似令牌替换）。这些确实是拒绝，
+		// 其中几种还是攻击信号——与 IdP 抖动分开，正是这次改动的意义。
+		return "令牌校验失败", "deny"
+	}
+	return "登录失败", "deny" // 未分类：保守按拒绝记，但措辞不编造原因
+}
+
+// oidcUserMessage 给浏览器的文案。细节只进日志与审计（对用户无用，对攻击者是调试信息），
+// 但**类别**要如实告诉他：「稍后重试」与「联系管理员」是两个不同的下一步动作。
+func oidcUserMessage(err error, fallback string) string {
+	switch {
+	case errors.Is(err, authsrc.ErrSourceUnavailable):
+		return "身份提供方暂时不可用，请稍后重试"
+	case errors.Is(err, authsrc.ErrNotConfigured):
+		return "认证源配置有误，请联系管理员"
+	}
+	return fallback
+}
+
+// auditOIDCFailure 落一条 OIDC 链路的失败审计。stage 说明是哪一段（授权入口/回调/令牌校验），
+// start 非零时附上出网耗时（NFR-PERF-03 的埋点，与口令路径同款）。
+func (s *Server) auditOIDCFailure(r *http.Request, srcName, stage string, err error, start time.Time) {
+	zh, verdict := oidcErrKind(err)
+	msg := stage + "失败（源 " + srcName + "：" + zh + "）"
+	if !start.IsZero() {
+		msg += "（" + extAuthTookZh(time.Since(start)) + "）"
+	}
+	slog.Warn("OIDC 链路失败", "阶段", stage, "源", srcName, "归类", zh, "err", err.Error())
+	s.auditAs(r, "-", "auth", msg, verdict)
 }

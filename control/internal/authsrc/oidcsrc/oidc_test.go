@@ -42,7 +42,7 @@ func runLogin(t *testing.T, p *Provider, m *mockIDP) (authsrc.Identity, error) {
 	if err != nil {
 		t.Fatalf("NewCodeVerifier：%v", err)
 	}
-	authURL, err := p.AuthURL(state, nonce, verifier)
+	authURL, err := p.AuthURL(context.Background(), state, nonce, verifier)
 	if err != nil {
 		return authsrc.Identity{}, err
 	}
@@ -182,7 +182,7 @@ func TestExchange_拒绝错误的nonce(t *testing.T) {
 	state, _ := NewState()
 	nonce, _ := NewNonce()
 	verifier, _ := NewCodeVerifier()
-	authURL, err := p.AuthURL(state, nonce, verifier)
+	authURL, err := p.AuthURL(context.Background(), state, nonce, verifier)
 	if err != nil {
 		t.Fatalf("AuthURL：%v", err)
 	}
@@ -317,7 +317,7 @@ func TestExchange_PKCE_verifier不匹配则失败(t *testing.T) {
 	state, _ := NewState()
 	nonce, _ := NewNonce()
 	verifier, _ := NewCodeVerifier()
-	authURL, err := p.AuthURL(state, nonce, verifier)
+	authURL, err := p.AuthURL(context.Background(), state, nonce, verifier)
 	if err != nil {
 		t.Fatalf("AuthURL：%v", err)
 	}
@@ -352,13 +352,13 @@ func TestAuthURL_缺少state或nonce时拒绝构造(t *testing.T) {
 	p := newProvider(t, m, nil)
 	v, _ := NewCodeVerifier()
 
-	if _, err := p.AuthURL("", "n", v); !errors.Is(err, authsrc.ErrNotConfigured) {
+	if _, err := p.AuthURL(context.Background(), "", "n", v); !errors.Is(err, authsrc.ErrNotConfigured) {
 		t.Errorf("缺 state 应拒绝：%v", err)
 	}
-	if _, err := p.AuthURL("s", "", v); !errors.Is(err, authsrc.ErrNotConfigured) {
+	if _, err := p.AuthURL(context.Background(), "s", "", v); !errors.Is(err, authsrc.ErrNotConfigured) {
 		t.Errorf("缺 nonce 应拒绝：%v", err)
 	}
-	if _, err := p.AuthURL("s", "n", "太短"); !errors.Is(err, authsrc.ErrNotConfigured) {
+	if _, err := p.AuthURL(context.Background(), "s", "n", "太短"); !errors.Is(err, authsrc.ErrNotConfigured) {
 		t.Errorf("非法 verifier 应拒绝：%v", err)
 	}
 }
@@ -372,7 +372,7 @@ func TestAuthURL_IdP不支持S256时拒绝(t *testing.T) {
 	nonce, _ := NewNonce()
 	v, _ := NewCodeVerifier()
 	// 这类 IdP 会静默忽略 code_challenge：流程照样跑通，PKCE 却一点作用没有。
-	if _, err := p.AuthURL(state, nonce, v); !errors.Is(err, authsrc.ErrNotConfigured) {
+	if _, err := p.AuthURL(context.Background(), state, nonce, v); !errors.Is(err, authsrc.ErrNotConfigured) {
 		t.Fatalf("IdP 明示不支持 S256 时应拒绝，实际：%v", err)
 	}
 }
@@ -499,7 +499,7 @@ func TestExchange_授权码复用被拒(t *testing.T) {
 	state, _ := NewState()
 	nonce, _ := NewNonce()
 	v, _ := NewCodeVerifier()
-	authURL, err := p.AuthURL(state, nonce, v)
+	authURL, err := p.AuthURL(context.Background(), state, nonce, v)
 	if err != nil {
 		t.Fatalf("AuthURL：%v", err)
 	}

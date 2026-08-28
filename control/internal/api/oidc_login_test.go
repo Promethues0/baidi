@@ -26,7 +26,7 @@ type stubOIDC struct {
 	state, nonce, verifier string
 }
 
-func (f *stubOIDC) AuthURL(state, nonce, codeVerifier string) (string, error) {
+func (f *stubOIDC) AuthURL(_ context.Context, state, nonce, codeVerifier string) (string, error) {
 	f.state, f.nonce, f.verifier = state, nonce, codeVerifier
 	return "https://idp.example/authorize?state=" + url.QueryEscape(state), nil
 }

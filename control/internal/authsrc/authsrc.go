@@ -66,7 +66,11 @@ type PasswordAuthenticator interface {
 type RedirectAuthenticator interface {
 	// AuthURL 构造授权端点跳转地址。state 防 CSRF、nonce 防 ID Token 重放、
 	// codeVerifier 用于 PKCE——三者都必须由调用方随机生成并与会话绑定。
-	AuthURL(state, nonce, codeVerifier string) (string, error)
+	//
+	// ★ctx 是 wave9 补的：这个方法要拉发现文档，是一次真出网。签名里原本没有 ctx，
+	// 于是实现只能用 context.Background() 自造超时，调用方给的任何预算对它完全无效
+	// ——而它与 Exchange 在同一个接口里、后者是有 ctx 的。这种不对称本身就是缺陷的根源。
+	AuthURL(ctx context.Context, state, nonce, codeVerifier string) (string, error)
 	// Exchange 用授权码换令牌并校验 ID Token，返回身份。
 	// nonce 必须与 AuthURL 时用的一致：不比对就等于没有防重放。
 	Exchange(ctx context.Context, code, codeVerifier, nonce string) (Identity, error)

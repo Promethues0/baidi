@@ -253,6 +253,17 @@ func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, stri
 		}
 		ip := hostOf(src.String())
 		token, protected, err := knock.Open(buf[:n], skew, cache)
+		if errors.Is(err, knock.ErrCacheFull) {
+			// ★表满不是「对方在重放」，是我方记不下了：只可能由洪泛造成，而被它挡下的
+			// 这个包很可能来自**正常用户**。类别单列，并归在攻击源统计之外
+			// （store.AttackExemptCats）——把正常用户的 IP 列进「攻击源 TOP」，
+			// 管理员会去封他，而真正该做的是查洪泛来源。同 proxy-capacity 的处置。
+			entries, rejected := cache.Stats()
+			slog.Error("SPA 敲门拒绝（去重表已满，正被洪泛）", "src", ip,
+				"表内条目", entries, "累计被拒", rejected)
+			rep.Report("knock-cache-full", ip, "SPA 敲门拒绝（去重表已满，正被洪泛；本次被拒的来源未必是洪泛者）")
+			continue
+		}
 		if err != nil {
 			slog.Warn("SPA 敲门拒绝（重放/信封无效）", "src", ip, "err", err.Error())
 			rep.Report("knock-envelope", ip, "SPA 敲门拒绝（重放/信封无效）")

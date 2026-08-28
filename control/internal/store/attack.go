@@ -36,6 +36,7 @@ var AttackCatZh = map[string]string{
 	"web-banned":        "Web 会话封禁期拒绝",
 	"web-authz":         "Web 逐请求鉴权拒绝",
 	"proxy-capacity":    "网关并发已达上限（我方容量，非攻击）",
+	"knock-cache-full":  "敲门去重表已满（正被洪泛，本次来源未必是洪泛者）",
 }
 
 // AttackExemptCats 落审计（verdict=deny）但**不计入攻击源统计**的拒绝类别。
@@ -47,6 +48,9 @@ var AttackCatZh = map[string]string{
 // 拒绝本身照旧落审计（用户确实没连上，这件事必须查得到）。
 var AttackExemptCats = map[string]bool{
 	"proxy-capacity": true,
+	// 表满时被拒的那个包很可能来自**正常用户**——洪泛者把去重表填满，
+	// 正常敲门跟着遭殃。把他的 IP 列进「攻击源 TOP」，管理员会去封一个受害者。
+	"knock-cache-full": true,
 }
 
 // attackCatLabel 类别中文名（未知类别原样回 key，不编造）。

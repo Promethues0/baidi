@@ -103,31 +103,102 @@ func Seal(token string) ([]byte, error) {
 	return json.Marshal(packet{T: token, Ts: time.Now().Unix(), N: base64.RawStdEncoding.EncodeToString(nb)})
 }
 
-// Cache 记录已用 nonce（带过期清理），防同一敲门包重放。并发安全。
+const (
+	// sweepEvery 两次全表清理之间的最小间隔。
+	//
+	// ★这条常量是修一个算法复杂度攻击面（wave9）。此前 Seen **每次调用都遍历整个
+	// map** 做惰性清理，而 map 无上界。SPA 是免认证的公网 UDP 口，且 knock.Open 里的
+	// nonce 去重排在**验签之前**——攻击者不需要任何有效令牌，只要发合法 JSON 信封
+	// （正确时间戳 + 随机 nonce）就能同时撑大 map 和触发全表扫描：
+	// 发 N 包/秒 → 表里约 60N 条 → 每包扫两遍（nonce 一次、jti 一次）→ 成本 O(N²)。
+	// 而 spa.Serve 是**单 goroutine**，CPU 一打满整个敲门面就失效——
+	// 也就是「五道门」的第一道被一个不需要凭据的洪泛关掉。
+	//
+	// 同一个包里 secevent 的节流器早就写着「SPA 是 UDP，源地址可伪造，
+	// 一次伪造源洪泛能造出无限多的键，表大小必须钉死」——那条纪律只覆盖了一半。
+	sweepEvery = 5 * time.Second
+
+	// maxEntries 表上界。nonce 窗口是 2×skew=60s、jti 不超过 knockMaxTTL+skew，
+	// 正常部署的活跃条目数远达不到它；能填满的一定是洪泛。
+	// 内存上界约十几 MB，与「无上界」相比是确定性的。
+	maxEntries = 1 << 16
+)
+
+// Cache 记录已用 nonce/jti（带过期清理），防同一敲门包重放。并发安全。
 type Cache struct {
-	mu   sync.Mutex
-	seen map[string]time.Time
+	mu        sync.Mutex
+	seen      map[string]time.Time
+	lastSweep time.Time
+	// rejected 因表满而被拒的次数（可观测：这个数非零就说明正在被洪泛）。
+	rejected uint64
 }
 
 func NewCache() *Cache { return &Cache{seen: map[string]time.Time{}} }
 
 // Seen 报告 key 是否已在窗口内出现过（出现过返回 true）；否则记下并在 ttl 后过期。
 // 调用方用命名空间前缀区分用途（如 "n:"+nonce、"j:"+jti），避免跨用途碰撞。
+//
+// 表满时返回 true（即"当作重放拒绝"）。这是刻意的 fail-closed：宁可在洪泛期间
+// 拒掉新敲门，也不能因为记不下而放过一次真重放——放过重放等于一次性令牌失效。
 func (c *Cache) Seen(key string, ttl time.Duration) bool {
+	seen, _ := c.SeenOrFull(key, ttl)
+	return seen
+}
+
+// SeenOrFull 同 Seen，另外报出「这次拒绝是因为表满」——调用方据此区分两种事实：
+// 真重放（对方在重放）与表满（我方记不下了）。两者的归因方向相反，
+// 而被表满挡下的那个包很可能来自**正常用户**（洪泛者把表填满，正常敲门跟着遭殃），
+// 把他的源 IP 记进攻击源统计就是记反了。参照 proxy-capacity 的同款处置。
+func (c *Cache) SeenOrFull(key string, ttl time.Duration) (seen, full bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := time.Now()
-	for k, exp := range c.seen { // 惰性清理过期项
+
+	// 摊销清理：不再每次调用全扫。间隔到了、或表已到顶，才扫一次。
+	if now.Sub(c.lastSweep) >= sweepEvery || len(c.seen) >= maxEntries {
+		c.sweep(now)
+	}
+
+	if exp, ok := c.seen[key]; ok {
+		// ★必须在这里判过期。改造前靠"每次先全扫"保证表里没有过期项，
+		// 现在扫是摊销的，表里会残留已过期但还没被扫掉的条目——
+		// 不判的话，一个早该失效的 key 会被当成重放，把正常敲门挡在门外。
+		if now.After(exp) {
+			c.seen[key] = now.Add(ttl)
+			return false, false
+		}
+		return true, false
+	}
+
+	if len(c.seen) >= maxEntries {
+		c.rejected++
+		return true, true // 清理后仍满 = 正在被洪泛，fail-closed
+	}
+	c.seen[key] = now.Add(ttl)
+	return false, false
+}
+
+// sweep 删除已过期项。调用方须持锁。
+func (c *Cache) sweep(now time.Time) {
+	for k, exp := range c.seen {
 		if now.After(exp) {
 			delete(c.seen, k)
 		}
 	}
-	if _, ok := c.seen[key]; ok {
-		return true
-	}
-	c.seen[key] = now.Add(ttl)
-	return false
+	c.lastSweep = now
 }
+
+// Stats 当前条目数与因表满被拒的累计次数（供网关侧观测洪泛）。
+func (c *Cache) Stats() (entries int, rejected uint64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return len(c.seen), c.rejected
+}
+
+// ErrCacheFull 去重表已满而拒绝。**不是对方在重放**，是我方记不下了——
+// 表满只可能由洪泛造成，而被它挡下的包很可能来自正常用户。
+// 调用方据此把归因说对，并且**不要**把这个源 IP 计进攻击源统计。
+var ErrCacheFull = errors.New("敲门去重表已满（正被洪泛，本次敲门被拒）")
 
 // Open 解析敲门包并做被动重放防护。返回待校验的 JWT 与是否启用了重放保护。
 // JSON 信封：校 ts 新鲜度 + nonce 去重；非 JSON：当旧式裸 JWT（protected=false）。
@@ -140,8 +211,14 @@ func Open(data []byte, skew time.Duration, c *Cache) (token string, protected bo
 	if d := now - p.Ts; d > int64(skew/time.Second) || d < -int64(skew/time.Second) {
 		return "", false, errors.New("敲门包时间戳超出允许偏移（疑似重放）")
 	}
-	if p.N == "" || c.Seen("n:"+p.N, 2*skew) {
-		return "", false, errors.New("敲门 nonce 缺失或重复（重放被拒）")
+	if p.N == "" {
+		return "", false, errors.New("敲门 nonce 缺失（重放被拒）")
+	}
+	if seen, full := c.SeenOrFull("n:"+p.N, 2*skew); seen {
+		if full {
+			return "", false, ErrCacheFull
+		}
+		return "", false, errors.New("敲门 nonce 重复（重放被拒）")
 	}
 	return p.T, true, nil
 }

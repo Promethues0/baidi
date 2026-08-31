@@ -16,6 +16,25 @@ import { BusinessError } from '@kit.BasicServicesKit';
 const DOMAIN = 0x0001;
 const TAG = 'baidi';
 
+/**
+ * 控制中心默认地址（调试期）。
+ *
+ * desktop 那套 UI 的默认值是 http://127.0.0.1:8090——在鸿蒙壳里 127.0.0.1 是**设备本机**，
+ * 控制面不在那儿。这里预置成在线演示站，只在用户从未配置过时写入；
+ * 「设置」页改过之后以用户配置为准。
+ */
+const DEFAULT_CONTROL: string = 'https://101.43.125.131';
+
+/**
+ * 是否接受演示站的自签 TLS 证书。
+ *
+ * ★演示站的证书是自签的（CN=baidi 自签自），ArkWeb 默认会拒。这与桌面端连它要带
+ * `-insecure` 是同一件事，也同样是**调试期逃生舱**：放开之后这条 HTTPS 只加密不认证，
+ * 中间人可以无声接管。正式部署必须换成可信证书并把这里置 false。
+ * 每次放行都打 ERROR 级日志——不让它悄悄生效。
+ */
+const ALLOW_INSECURE_TLS: boolean = true;
+
 /** 注入到 webview 的原生宿主对象（同步方法；JS 侧再包一层 Promise）。 */
 class BaidiHost {
   /** 本端平台标识：UI 的「我的」页据此显示端类型，控制面灰度也按它分桶。 */
@@ -74,6 +93,13 @@ const BRIDGE_JS: string = `
   // （tauriRuntime()）。不注入的话 UI 会走浏览器 dev 的退化路径——那条路依赖本机的
   // baidi-knock-agent 代理，鸿蒙上根本没有，表现为点接入毫无反应。
   if (!window.__TAURI_INTERNALS__) window.__TAURI_INTERNALS__ = { harmony: true };
+  // 首次启动预置控制中心地址。desktop 的默认值是 127.0.0.1:8090，在鸿蒙壳里指向设备本机。
+  // 只在从未配置过时写入——用户在「设置」页改过就不再覆盖。
+  try {
+    if (!localStorage.getItem('baidi_cfg_control')) {
+      localStorage.setItem('baidi_cfg_control', '__DEFAULT_CONTROL__');
+    }
+  } catch (e) { /* 隐私模式等取不到 localStorage：UI 会退回自己的默认值 */ }
   window.__BAIDI_NATIVE__ = {
     platform: h ? h.platform() : 'harmony',
     tunnelStatus: function () {
@@ -101,6 +127,35 @@ const BRIDGE_JS: string = `
 })();
 `;
 
+/**
+ * 启动自检：页面就绪后打一次控制面的免认证端点，结果经 console.log 进 hilog。
+ *
+ * ★为什么值得常驻：这条链路上会静默失败的环节不少——控制面地址配错、设备到控制面
+ * 网络不通、自签证书被 ArkWeb 拒。三者在 UI 上的表现**完全一样**（登录转圈然后报
+ * 一句"网络错误"），而它们的处置完全不同。启动就把真实结果写进日志，
+ * `hdc shell hilog | grep 白帝自检` 一眼能分辨。
+ *
+ * 只读一个免认证端点（GET /api/v1/auth/domains，返回已配置的认证域清单），
+ * 不带任何凭据、不改变任何状态。
+ */
+const SELFTEST_JS: string = `
+(function () {
+  try {
+    var base = localStorage.getItem('baidi_cfg_control') || '(未配置)';
+    console.log('[白帝自检] 控制面地址 = ' + base);
+    fetch(base + '/api/v1/auth/domains')
+      .then(function (r) {
+        console.log('[白帝自检] HTTP ' + r.status + ' ' + r.statusText);
+        return r.text();
+      })
+      .then(function (t) { console.log('[白帝自检] 响应体 ' + t.slice(0, 200)); })
+      .catch(function (e) { console.log('[白帝自检] 失败：' + (e && e.message ? e.message : e)); });
+  } catch (e) {
+    console.log('[白帝自检] 脚本异常：' + e);
+  }
+})();
+`;
+
 @Entry
 @Component
 struct Index {
@@ -122,16 +177,38 @@ struct Index {
         })
         .onControllerAttached(() => {
           try {
-            this.controller.runJavaScript(BRIDGE_JS);
+            this.controller.runJavaScript(BRIDGE_JS.replace('__DEFAULT_CONTROL__', DEFAULT_CONTROL));
           } catch (err) {
             const e = err as BusinessError;
             hilog.error(DOMAIN, TAG, '注入原生桥失败: %{public}s', e.message);
           }
         })
+        .onSslErrorEvent((event: SslErrorEvent) => {
+          // ★必须用 onSslErrorEvent 而不是 onSslErrorEventReceive：
+          // 后者只覆盖**主框架导航**，而 UI 的每一次 fetch 都是子资源请求——
+          // 于是页面本身能加载，登录/拉剖面全部 `Failed to fetch`，
+          // 且**一条 SSL 日志都不打**（回调根本没被调用）。两者的事件类型不同，
+          // 新的那个带 isMainFrame，正说明它管子资源。
+          if (ALLOW_INSECURE_TLS) {
+            hilog.error(DOMAIN, TAG,
+              '⚠ 接受了无效的 TLS 证书（调试期逃生舱）：本条 HTTPS 只加密不认证，中间人可无声接管。' +
+              'mainFrame=%{public}d fatal=%{public}d err=%{public}d url=%{public}s',
+              event.isMainFrame ? 1 : 0, event.isFatalError ? 1 : 0, event.error, event.url);
+            event.handler.handleConfirm();
+          } else {
+            hilog.error(DOMAIN, TAG, 'TLS 证书校验失败，已拒绝连接。url=%{public}s', event.url);
+            event.handler.handleCancel();
+          }
+        })
+        .onPageEnd(() => {
+          try {
+            this.controller.runJavaScript(SELFTEST_JS);
+          } catch (_err) { /* 页面未就绪，跳过本次自检 */ }
+        })
         .onPageBegin(() => {
           // 每次导航后重注入：单页应用内部跳转不会走这里，但整页刷新会。
           try {
-            this.controller.runJavaScript(BRIDGE_JS);
+            this.controller.runJavaScript(BRIDGE_JS.replace('__DEFAULT_CONTROL__', DEFAULT_CONTROL));
           } catch (_err) { /* 组件尚未 attach，onControllerAttached 会补上 */ }
         })
         .width('100%')

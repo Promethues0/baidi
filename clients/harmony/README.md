@@ -16,7 +16,7 @@
 |---|---|
 | ArkWeb 壳 + 桌面布局 UI | ✅ **已在真机跑通**（直接用 `clients/desktop` 那套 Vue 源码，内联成 1.6 MB 单文件进 rawfile） |
 | 原生桥 `window.__BAIDI_NATIVE__` | ✅ 已注入（`platform` / `startTunnel` / `stopTunnel`，契约同安卓/iOS 壳） |
-| 与控制面通信（登录、拉剖面、看应用） | ✅ 走 ArkWeb 的 fetch，控制中心地址在 UI 的「我的」页配 |
+| 与控制面通信 | ✅ **已在真机验通**：启动自检打到演示站 `https://101.43.125.131/api/v1/auth/domains` 拿到 `HTTP 200 {"domains":[]}` |
 | **数据面（隧道 / 真流量接管）** | ❌ **未实现** |
 
 ★`startTunnel` 如实返回失败并说明原因，**不返回 `{ok:true}` 骗 UI 画出「已接入」**。
@@ -95,3 +95,12 @@
 
   内联之后没有子资源请求，整条 CORS 路径不再涉及。另两条路都更重：自定义 scheme
   handler（要在 ArkTS 侧实现 rawfile 伺服）、或起本地 HTTP server（多一个常驻端口）。
+- **自签证书要用 `onSslErrorEvent`，不能用 `onSslErrorEventReceive`**。后者只覆盖
+  **主框架导航**，而 UI 的每一次 fetch 都是**子资源请求**——于是页面本身能打开、
+  登录和拉剖面全部 `Failed to fetch`，而且**一条 SSL 日志都不打**（回调根本没被调用），
+  看起来像纯网络问题。两者的事件类型不同，新的那个带 `isMainFrame`，正说明它管子资源；
+  实测放行时打出的就是 `mainFrame=0`。
+- **启动自检**（`SELFTEST_JS`）常驻：页面就绪后打一次控制面的免认证端点，结果经
+  `console.log` 进 hilog。这条链路上会静默失败的环节不少——地址配错、网络不通、
+  证书被拒——三者在 UI 上表现**完全一样**（转圈后一句"网络错误"），而处置完全不同。
+  `hdc shell hilog | grep 白帝自检` 一眼分辨。

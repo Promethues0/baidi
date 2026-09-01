@@ -442,8 +442,7 @@ import { Message } from '@arco-design/web-vue';
 import {
   api,
   type IpsecSite, type IpsecSA, type IpsecState, type IpsecPhase, type IpsecResp, type IpsecPskResp,
-  type AddrObject, type ObjectBundle
-} from '@/lib/api';
+  type AddrObject, type ObjectBundle, failReason, failStatus } from '@/lib/api';
 
 const tab = ref<'topo' | 'list'>('topo');
 const live = ref(false);
@@ -870,7 +869,12 @@ async function save() {
     Message.success(`站点「${form.name}」已落库，网关下一跳（≤${HEARTBEAT_SEC}s）生效`);
     formOpen.value = false;
     await load();
-  } catch { Message.error('保存失败，请检查管理员权限或后端连接'); } finally { saving.value = false; }
+  } catch (e) {
+    // ★后端对站点 peer 的拒绝是**说得出原因**的（"peer 不能填域名，IKEv2 守护进程
+    //   刻意不解析 DNS…"）。整句丢掉换成"请检查权限"，管理员会反复换写法去试，
+    //   而那条站点会安静地永远 down——wave8 行动 17 专门为此改过后端文案。
+    Message.error(`站点保存失败：${failReason(e)}`);
+  } finally { saving.value = false; }
 }
 
 async function del(s: IpsecSite) {
@@ -880,7 +884,7 @@ async function del(s: IpsecSite) {
     clearBusy(s.id);
     Message.success(`站点「${s.name}」已删除`);
     await load();
-  } catch { Message.error('删除失败，请检查权限或后端连接'); }
+  } catch (e) { Message.error(`站点删除失败：${failReason(e)}`); }
 }
 
 /* ── 启停：异步语义 ──
@@ -912,9 +916,9 @@ async function toggle(r: Row) {
       ? `已下发启用意图，网关下一跳（≤${HEARTBEAT_SEC}s）开始 IKE 协商，结果看「实际状态」列`
       : '已下发停用意图，网关将拆除该站点的 SA');
     await load();
-  } catch {
+  } catch (e) {
     clearBusy(s.id);
-    Message.error('启停失败，请检查权限或后端连接');
+    Message.error(`启停失败：${failReason(e)}`);
   }
 }
 
@@ -952,9 +956,8 @@ async function savePsk() {
     pskOpen.value = false;
     await load();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('404')) Message.error('控制面没有 PSK 端点：该版本 baidi-control 尚未支持 IPSec 密钥下发');
-    else if (msg.startsWith('403')) Message.error('需要管理员权限');
+    if (failStatus(e) === 404) Message.error('控制面没有 PSK 端点：该版本 baidi-control 尚未支持 IPSec 密钥下发');
+    else if (failStatus(e) === 403) Message.error(failReason(e));
     else Message.error('写入失败，请检查后端连接');
   } finally { pskSaving.value = false; }
 }

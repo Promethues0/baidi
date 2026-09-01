@@ -196,7 +196,7 @@ func TestAuditExportFilters(t *testing.T) {
 
 	collect := func(category, from, to string) []AuditEntry {
 		var out []AuditEntry
-		if err := st.ExportAudit(ctx, category, from, to, func(e AuditEntry) error {
+		if err := st.ExportAudit(ctx, AuditQuery{Category: category, From: from, To: to}, func(e AuditEntry) error {
 			out = append(out, e)
 			return nil
 		}); err != nil {
@@ -213,5 +213,139 @@ func TestAuditExportFilters(t *testing.T) {
 	all := collect("", "", "")
 	if len(all) < 3 || all[len(all)-1].User != "u2" {
 		t.Fatalf("无条件应含全部（含种子）且以最后落库行收尾: %d 条", len(all))
+	}
+}
+
+// 检索与导出必须**同构**：同一组条件，两边选出的行必须一模一样。
+//
+// ★这条钉的是一个已经发生过的形态：ExportAudit 自己拼了一份 WHERE，只认
+// category/from/to 三维，账号与源 IP 两维压根传不进来——而页面上刚筛过的正是那两维。
+// 症状是「屏幕上筛出 12 条、导出的 CSV 里是 8 万条」，两侧都不报错，
+// 而管理员会以为这份 CSV 就是他刚看到的那些行，拿去交差。
+// 现在两者共用 auditWhere；这条测试保证它们不会再分家。
+func TestAuditExportMatchesSearch(t *testing.T) {
+	st := openAuditStore(t)
+	ctx := context.Background()
+	mustRecord(t, st, "2026-08-01 10:00:00", "auth", "u1", "10.1.1.1", "登录成功", "ok")
+	mustRecord(t, st, "2026-08-01 11:00:00", "auth", "u1", "10.1.1.1", "登录失败", "fail")
+	mustRecord(t, st, "2026-08-02 10:00:00", "admin", "adm", "10.0.0.9", "改配置", "ok")
+	mustRecord(t, st, "2026-08-03 10:00:00", "auth", "u2", "10.1.1.2", "再登录", "fail")
+	mustRecord(t, st, "2026-08-04 10:00:00", "security", "u1", "203.0.113.7", "拒绝越权", "deny")
+
+	cases := []struct {
+		name string
+		q    AuditQuery
+	}{
+		{"不限", AuditQuery{}},
+		{"按类别", AuditQuery{Category: "auth"}},
+		{"按账号", AuditQuery{Actor: "u1"}},
+		{"按源 IP 前缀", AuditQuery{SrcIP: "10.1."}},
+		{"按关键词", AuditQuery{Keyword: "登录"}},
+		{"按日期区间", AuditQuery{From: "2026-08-02", To: "2026-08-03"}},
+		{"账号 + 类别 + 区间", AuditQuery{Actor: "u1", Category: "auth", From: "2026-08-01", To: "2026-08-01"}},
+		{"空结果", AuditQuery{Actor: "no-such-user"}},
+	}
+	for _, c := range cases {
+		// 检索侧：Limit 给足，避免分页上限干扰比对。
+		sq := c.q
+		sq.Limit = 500
+		found, total, err := st.SearchAudit(ctx, sq)
+		if err != nil {
+			t.Fatalf("%s：SearchAudit: %v", c.name, err)
+		}
+		var exported []AuditEntry
+		if err := st.ExportAudit(ctx, c.q, func(e AuditEntry) error {
+			exported = append(exported, e)
+			return nil
+		}); err != nil {
+			t.Fatalf("%s：ExportAudit: %v", c.name, err)
+		}
+		if len(exported) != total {
+			t.Fatalf("%s：导出 %d 行，检索说共 %d 行——两侧 WHERE 已经分家",
+				c.name, len(exported), total)
+		}
+		// 逐条比对（顺序不同：检索是新→旧，导出是落库序），按 seq 归一。
+		seqOf := func(rows []AuditEntry) map[int64]bool {
+			m := map[int64]bool{}
+			for _, e := range rows {
+				m[e.Seq] = true
+			}
+			return m
+		}
+		gotS, gotE := seqOf(found), seqOf(exported)
+		if len(gotS) != len(gotE) {
+			t.Fatalf("%s：两侧行数不一致 %d vs %d", c.name, len(gotS), len(gotE))
+		}
+		for seq := range gotS {
+			if !gotE[seq] {
+				t.Fatalf("%s：检索选中的第 %d 条不在导出结果里", c.name, seq)
+			}
+		}
+	}
+}
+
+// 时间边界：`From`/`To` 既可能是「YYYY-MM-DD」（列表页），也可能是补好时分秒的
+// 完整时间戳（导出 handler 先过 normDayBound）。两种都要**按原意**生效。
+//
+// ★两边都补的话会拼出 "2026-08-01 10:00:00 00:00:00"——它在字符串序上**大于**
+// "2026-08-01 10:00:00"，于是「从这一刻起」会把恰好落在这一秒的行排除掉。
+// 差一条记录，没有任何报错，而审计导出的用途正是"把某一时刻起的全部记录交出去"。
+func TestAuditWhereHandlesBothTimeForms(t *testing.T) {
+	st := openAuditStore(t)
+	ctx := context.Background()
+	mustRecord(t, st, "2026-08-01 09:59:59", "auth", "u0", "10.1.1.1", "早一秒", "ok")
+	mustRecord(t, st, "2026-08-01 10:00:00", "auth", "u1", "10.1.1.1", "正好这一秒", "ok")
+	mustRecord(t, st, "2026-08-01 10:00:01", "auth", "u2", "10.1.1.2", "晚一秒", "ok")
+
+	count := func(q AuditQuery) []string {
+		var evs []string
+		if err := st.ExportAudit(ctx, q, func(e AuditEntry) error {
+			evs = append(evs, e.Event)
+			return nil
+		}); err != nil {
+			t.Fatal(err)
+		}
+		return evs
+	}
+
+	// 库里有种子审计行，所以断言按**成员归属**判而不是数总数。
+	has := func(evs []string, want string) bool {
+		for _, e := range evs {
+			if e == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	// ① 完整时间戳的下界是**闭区间**：恰好落在这一秒的那行必须在内，早一秒的必须在外。
+	got := count(AuditQuery{From: "2026-08-01 10:00:00", Keyword: "秒"})
+	if !has(got, "正好这一秒") {
+		t.Fatalf("From 为完整时间戳时必须含边界那一秒——两边都补时分秒会把它排除掉，实得 %v", got)
+	}
+	if has(got, "早一秒") {
+		t.Fatalf("下界之前的行不该在内，实得 %v", got)
+	}
+	// ② 完整时间戳的上界同样是闭区间。
+	got = count(AuditQuery{To: "2026-08-01 10:00:00", Keyword: "秒"})
+	if !has(got, "正好这一秒") {
+		t.Fatalf("To 为完整时间戳时必须含边界那一秒，实得 %v", got)
+	}
+	if has(got, "晚一秒") {
+		t.Fatalf("上界之后的行不该在内，实得 %v", got)
+	}
+	// ③ 只给日期时按整日展开（与列表页同口径）：三条都在。
+	got = count(AuditQuery{From: "2026-08-01", To: "2026-08-01", Keyword: "秒"})
+	for _, want := range []string{"早一秒", "正好这一秒", "晚一秒"} {
+		if !has(got, want) {
+			t.Fatalf("只给日期应覆盖整日，缺 %q，实得 %v", want, got)
+		}
+	}
+	// ④ 反向：前一天不该有这三条中的任何一条（否则上面三条恒真也说明不了什么）。
+	got = count(AuditQuery{To: "2026-07-31", Keyword: "秒"})
+	for _, no := range []string{"早一秒", "正好这一秒", "晚一秒"} {
+		if has(got, no) {
+			t.Fatalf("7 月 31 日之前不该出现 %q，实得 %v", no, got)
+		}
 	}
 }

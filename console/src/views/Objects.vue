@@ -3,7 +3,11 @@
     <div class="bd-page__head">
       <div>
         <div class="bd-page__title">对象库</div>
-        <div class="bd-page__sub">可被策略 / 资源 / IPSec 复用的地址 · 服务 · 时间对象</div>
+        <!-- ★副标题此前把三类对象一并说成"可被策略/资源/IPSec 复用"，
+             而**时间对象一个消费方都没有**（后端 objects_usage.go 里写得很直白：
+             `case "time": n = 0 // 时间对象暂无落库消费者`）。地址与服务是真被
+             resources.addr_ref / svc_ref 与 ipsec_sites 引用的，时间对象不是。 -->
+        <div class="bd-page__sub">地址 / 服务对象可被资源与 IPSec 站点复用；时间对象目前只是台账登记（见下）</div>
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
@@ -105,6 +109,21 @@
     </div>
 
     <!-- ============ 时间对象 ============ -->
+    <!-- ★时间对象**没有任何执行方**：后端引用复核对 time 恒返回 0（"暂无落库消费者"），
+         它的「被引用」列结构性恒为"未被引用"，删除守卫恒放行。管理员照着旧副标题建一条
+         「周一~周五 09:00-18:00」，以为能拿去卡访问时段，实际上只是一行谁也不读的记录。
+         按时段限制访问的**真**执行方在认证策略的「非工作时间」规则里（offHours），
+         那是另一套配置，名字还对不上。这条告警不能删——它是这一屏唯一说真话的地方。 -->
+    <div v-show="tab === 'time'" class="bd-timewarn">
+      <icon-exclamation-circle-fill />
+      <div>
+        <b>时间对象目前没有执行方，仅作台账登记。</b>
+        这里建的时间段不会被任何策略、资源或 IPSec 站点读取（后端的引用复核对时间对象恒返回
+        「未被引用」），因此它<b>不会限制任何人的访问时段</b>。
+        要按时段收紧访问，请用「认证源接入 → 认证策略」里的<b>非工作时间</b>规则：
+        那条规则由服务器时间 + 策略里配置的工作日/时段判定，真的接在登录链路上。
+      </div>
+    </div>
     <div v-show="tab === 'time'" class="bd-tablecard">
       <div class="bd-toolbar">
         <span class="bd-toolbar__c">时间对象 · {{ shownTimes.length }} 项</span>
@@ -213,7 +232,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp } from '@/lib/api';
+import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp, failReason } from '@/lib/api';
 
 type Kind = 'addr' | 'service' | 'time';
 
@@ -354,7 +373,7 @@ async function save() {
     Message.success(`${kindLabel[form.kind]}「${form.name}」已落库`);
     formOpen.value = false;
     await load();
-  } catch { Message.error('保存失败，请检查管理员权限或后端连接'); } finally { saving.value = false; }
+  } catch (e) { Message.error(`对象保存失败：${failReason(e)}`); } finally { saving.value = false; }
 }
 
 async function del(k: Kind, id: string) {
@@ -386,6 +405,13 @@ onMounted(load);
 </script>
 
 <style scoped>
+.bd-timewarn {
+  display: flex; gap: 10px; align-items: flex-start; padding: 12px 16px; margin-bottom: 12px;
+  background: var(--bd-tag-gold-bg); border: 1px solid #FFCF8B; border-radius: var(--bd-radius);
+  font-size: 12.5px; color: var(--bd-t2); line-height: 1.85;
+}
+.bd-timewarn > :first-child { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
+
 /* tabs（对齐 Gateway.vue） */
 .bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
 .bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }

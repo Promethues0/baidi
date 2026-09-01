@@ -185,11 +185,18 @@ type AdminAccount struct {
 	RoleKey  string `json:"roleKey"`
 	RoleName string `json:"roleName"`
 	Power    string `json:"power"`
-	// Auth / TwoFA 按**已注册 passkey 凭据数**实算，不是配置里写的认证方式。
-	Auth      string `json:"auth"`
-	TwoFA     bool   `json:"twoFa"`
-	LastLogin string `json:"lastLogin"`
-	Status    string `json:"status"` // active | disabled | locked | idle
+	// Auth / TwoFA / Factors 按**真实注册过的认证器**实算，不是配置里写的认证方式。
+	//
+	// ★三者同源但用途不同（照 AdminRole 的 Perms/Scope 那条分工）：
+	//   Factors 是**机读**的因子清单，页面据它渲染；Auth 是它的中文摘要；
+	//   TwoFA 是"有没有第二因子"的布尔。页面拿摘要去猜因子就会出现
+	//   「只绑了 TOTP 的管理员被显示成已注册 passkey」——那正是改造前的形态。
+	Auth  string `json:"auth"`
+	TwoFA bool   `json:"twoFa"`
+	// Factors 已注册的第二因子（"passkey" / "totp"），机读，空 = 没有第二因子。
+	Factors   []string `json:"factors"`
+	LastLogin string   `json:"lastLogin"`
+	Status    string   `json:"status"` // active | disabled | locked | idle
 }
 
 // ★曾经这里有一对 ClusterInfo / ClusterNode 类型与一个恒回「未部署」的构造函数。

@@ -126,6 +126,20 @@ func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
 	}
 	// 叠加登录防爆破锁定（执行源即 Guard/login_lockouts）：目录状态之外的另一种「已锁定」。
 	s.overlayBruteLocks(r, &b)
+	// ★「在线」必须与「在线用户」页、「用户与角色」页**同一个判据**：网关上报的真实会话。
+	//
+	//   store 侧算的是 `hasRep && now-rep.TS <= 600`（monitor_sqlite.go）——
+	//   "这台终端十分钟内上报过环境"，那是**采集器还活着**，不是"这个人此刻连着隧道"。
+	//   两个意思在同一套控制台上并排出现过：一个人后台挂着客户端按 60s 上报 posture，
+	//   这一页给他画绿点「在线」，而「在线用户」页里查无此人。
+	//   这一页的定位是"就近处置"——要不要现在踢他，取决于他现在有没有连着。
+	//
+	//   store 层拿不到 gwSess（那是 api 层的内存登记），所以在这里覆盖，
+	//   与 handleUsers 的 enrichDirUsers 走同一个 onlineAccounts()。
+	online := s.onlineAccounts()
+	for i := range b.Items {
+		b.Items[i].Online = online[normUser(b.Items[i].Account)]
+	}
 	httpx.JSON(w, http.StatusOK, b)
 }
 

@@ -134,7 +134,9 @@ type Server struct {
 
 	mu       sync.Mutex
 	gateways map[string]GatewayInfo // 已注册（在线）网关，按 id
-	gwSess   map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	// autoBackup 主机侧定期自动备份的运行状态（未配置时 Enabled=false + Reason）。
+	autoBackup *autoBackupState
+	gwSess     map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
 	// gwTunnelFP 各网关隧道 TLS 证书的 SHA-256 指纹，按网关 id。网关证书是启动期自签的，
 	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
 	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
@@ -620,13 +622,17 @@ func (s *Server) Routes() http.Handler {
 	// （{node} 那对是已摘除的继承编辑器遗留，只剩落库不判定的 JSON blob）。
 	mux.HandleFunc("GET /api/v1/policies/access", s.handleAccessPolicy)
 	mux.HandleFunc("PUT /api/v1/policies/access", s.handleSaveAccessPolicy)
-	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                      // 新增用户
-	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)       // 禁用/启用/解锁
-	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword) // 管理员重置口令
-	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)      // 管理员清除 TOTP（丢认证器）
+	mux.HandleFunc("POST /api/v1/users", s.handleCreateUser)                         // 新增用户
+	mux.HandleFunc("POST /api/v1/users/{id}/status", s.handleSetUserStatus)          // 禁用/启用/解锁
+	mux.HandleFunc("POST /api/v1/users/{id}/password", s.handleResetUserPassword)    // 管理员重置口令
+	mux.HandleFunc("DELETE /api/v1/users/{id}/totp", s.handleAdminResetTotp)         // 管理员清除 TOTP（丢认证器）
+	mux.HandleFunc("DELETE /api/v1/users/{id}/passkeys", s.handleAdminResetPasskeys) // 管理员清除 passkey（同上，此前只有 TOTP 有出口）
 	// 闲置账号治理：识别（读=任意管理员）+ 批量锁定（写=PermSecurity，管理员目标逐个抬 PermAdmins）
 	mux.HandleFunc("GET /api/v1/users/idle", s.handleIdleAccounts)
 	mux.HandleFunc("POST /api/v1/users/idle/lock", s.handleIdleLock)
+	// 闲置治理策略（PRD FR-MON-19：阈值 + 是否自动锁定）。读=任意管理员，写=PermSecurity。
+	mux.HandleFunc("GET /api/v1/users/idle/policy", s.handleIdlePolicy)
+	mux.HandleFunc("PUT /api/v1/users/idle/policy", s.handleSaveIdlePolicy)
 	// 台账批量导出 / 导入（wave7 行动 14）。导出流式 CSV 附件、**每一个单元格**都过公式注入中和；
 	// 导入逐行回报成功与失败原因（部分失败不回滚），且**只建普通用户**——CSV 里出现角色列
 	// 一律整份拒收并落 security 审计，建管理员的唯一入口仍是 POST /api/v1/admins。
@@ -636,6 +642,13 @@ func (s *Server) Routes() http.Handler {
 	mux.HandleFunc("GET /api/v1/devices/export", s.handleDeviceExport)
 	mux.HandleFunc("POST /api/v1/devices/import", s.handleDeviceImport)
 	mux.HandleFunc("PUT /api/v1/users/{id}/membership", s.handleSetUserMembership) // 改组织归属 / 所属用户组
+	// 目录改删（FR-USER-02 / FR-USER-15）：改只收姓名与邮箱（账号名是令牌主体，显式拒改）；
+	// 删是 License 席位的**唯一**释放路径，带影响面回执。
+	// ★注册在 /users/idle、/users/export 等具体路径**之后**无妨：Go 1.22 的 mux 按
+	//   具体度择优，`/users/{id}` 不会把 `/users/idle` 抢走（有用例覆盖）。
+	mux.HandleFunc("PUT /api/v1/users/{id}", s.handleUpdateUser)
+	mux.HandleFunc("DELETE /api/v1/users/{id}", s.handleDeleteUser)
+	mux.HandleFunc("GET /api/v1/users/{id}/delete-preview", s.handleUserDeletePreview)
 
 	// 组织与用户组（业务管理 · 用户与角色页内维护；全部 admin）
 	mux.HandleFunc("GET /api/v1/orgs", s.handleOrgs)
@@ -729,9 +742,35 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case asAmbiguousDirectory(aerr) != nil:
 			// ★配了多个认证域又没说要用哪一个：拒绝并把候选带回去，让前端渲染下拉。
-			// **不挨个去问**——挨个问正是本行动要消灭的凭据外溢。
-			// 不计入爆破锁定：用户什么都没输错，是我们还不知道该问谁。
+			// **不挨个去问**——挨个问正是 wave8 行动 12 要消灭的凭据外溢。
 			amb := asAmbiguousDirectory(aerr)
+			// ★本地口令账号例外：对他，上面那次本地哈希校验**是结论性的**——
+			//   口令确实错了，与"我们还不知道该问谁"无关。
+			//
+			//   不例外的后果是一个干净的口令预言机 + 一段完全看不见的爆破：
+			//   部署一旦接了 ≥2 个外部源（PRD FR-USER-01 正要求多目录并存），
+			//   对 /portal/login 反复提交 {username: admin, password: 猜的} 且不带
+			//   directory，每次都从这里 return——账号维与 IP 维的计数一次不加、
+			//   审计一条不写；而口令一旦猜对，代码根本不进这个 if 块，直接登录成功。
+			//   于是「用户状态」「爆破锁定 IP」两张表对这类攻击恒为空，审计中心也查不到。
+			//
+			//   判据是「库里有这个账号、且它有本地口令哈希」：外部绑定账号的 pass_hash
+			//   恒空（BindExternalUser 写 ""），所以这个判据精确保住了原本要保的那个
+			//   豁免——合法外部用户忘了选域，仍然不计数。
+			//
+			//   不变式（有用例钉住）：**一次输错的本地口令算不算数，不该随部署接了
+			//   几个认证源而改变**。单源部署走的是下面 `!ext.Hit` 分支，那里是计数的。
+			if found && cred.PassHash != "" {
+				s.noteLoginFailure(r, b.Username)
+				s.auditAs(r, b.Username, "auth", "终端用户登录失败（本地口令错误；未指定认证域）", "fail")
+				// 回给他一句实话：候选下拉里**没有**"本地目录"这一项
+				// （externalDomains 显式跳过 KindLocal），让本地用户去选一个不存在的
+				// 选项，他会一直选不出来，也永远看不到"口令错了"这句话。
+				httpx.JSON(w, http.StatusOK, map[string]any{
+					"ok": false, "needDirectory": true, "domains": amb.Domains(),
+					"reason": "本地账号口令错误；若你用的是域账号，请在下方选择所属认证域后重试"})
+				return
+			}
 			httpx.JSON(w, http.StatusOK, map[string]any{
 				"ok": false, "reason": amb.Error(), "needDirectory": true, "domains": amb.Domains()})
 			return
@@ -1225,10 +1264,45 @@ func (s *Server) mustChangeLogin(w http.ResponseWriter, r *http.Request, cred st
 	})
 }
 
-// handleMe 返回当前令牌身份。
+// handleMe 返回当前令牌身份 + **现算的**管理员角色与权限键。
+//
+// 控制台此前完全没有调用方，于是顶栏把身份写死成「安全管理员 / security-admin」，
+// 侧栏 21 个页面对四种角色一视同仁——种子 admin 的显示名恰好就叫"安全管理员"，
+// 两者在页面上完全同形，而它实际是**超管**；换成审计管理员登录，顶栏一字不变。
+// 这是与写死角标 '10' / '2' 完全同族的假数据，只是它伪装成的是**身份**。
+//
+// 三条纪律：
+//
+//  1. **角色现算不读令牌**（currentAdminRoleQuiet → store.AdminRoleFor），与 requirePerm
+//     同一个取数口。降权/撤销后旧令牌下一次拉身份就必须看到新角色——把角色塞进令牌的话，
+//     它会在 8h 令牌里冻住，页面上那个"超级管理员"标签会比执行方晚 8 小时。
+//
+//  2. **只有完整会话令牌才下发角色与权限**（c.Use == ""）。GET /auth/me 在
+//     auth.pwResetAllowed 里对**受限改密令牌**是放行的（前端要靠它渲染改密页），
+//     那是一个连自己口令都还没换的半程态，不该拿到"你在这套系统里能做什么"的完整清单。
+//     mfa 半程票据不必单独判——它的 Role 是 mfa 不是 admin。
+//
+//  3. **读不到角色就让 adminRole 缺席，绝不回一个空权限的角色对象**。
+//     两者在前端是相反的意思：缺席 = 不可判定（前端照旧全量渲染，真闸在后端），
+//     而 perms:[] = 确定无权（前端会把写操作全灰掉）。把"我不知道"渲染成"你不能"，
+//     会让一次库读抖动表现为管理员整台机器突然什么都点不了。
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
 	c, _ := auth.FromContext(r.Context())
-	httpx.JSON(w, http.StatusOK, map[string]any{"sub": c.Sub, "role": c.Role, "name": c.Name, "exp": c.Exp})
+	out := map[string]any{"sub": c.Sub, "role": c.Role, "name": c.Name, "exp": c.Exp}
+	// 显示名：令牌里的 Name 是**账号**（数据面身份匹配用规范账号，见 handleAdminLogin），
+	// 页面要显示的"张三"只在 users 表里。取不到就不下发，前端回落显示账号。
+	if cred, found, err := s.store.Credential(r.Context(), c.Sub); err == nil && found && cred.Name != "" {
+		out["displayName"] = cred.Name
+	}
+	if c.Role == "admin" && c.Use == "" {
+		if role, ok := s.currentAdminRoleQuiet(r); ok {
+			out["adminRole"] = map[string]any{
+				"key": role.Key, "name": role.Name, "power": role.Power,
+				"perms": role.Perms, "scope": role.Scope, "builtin": role.Builtin,
+			}
+		}
+	}
+	httpx.JSON(w, http.StatusOK, out)
 }
 
 // handleKnockToken 为已登录会话签发短时效一次性敲门令牌（带随机 jti）。
@@ -2081,8 +2155,9 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 	searching := q.Category != "" || q.Actor != "" || q.SrcIP != "" || q.Keyword != "" || q.From != "" || q.To != "" ||
 		qs.Get("limit") != "" || qs.Get("offset") != ""
 	if searching {
-		if q.Category != "" && !map[string]bool{"access": true, "auth": true, "admin": true,
-			"security": true, "dataplane": true, "system": true}[q.Category] {
+		// 校验走唯一字典：手抄的那份漏了 policy，于是「保存接入策略」这类记录
+		// 写得进库、却按类别筛不出来（400 未知的审计类别）。
+		if q.Category != "" && !store.ValidAuditCategory(q.Category) {
 			httpx.Error(w, http.StatusBadRequest, "未知的审计类别："+q.Category)
 			return
 		}
@@ -2164,6 +2239,27 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 // 组织归属与在线态，而它同时也是"哪个账号是管理员"的枚举入口。加 requireAdmin
 // 之后它与 /online、/userstate 同门槛，并随 requireAdmin 一起吃「角色现算」——
 // 被撤销管理员身份的人拿旧令牌也读不到。
+// onlineAccounts 当前**真正在线**的账号集合（在线网关上报的会话，与 GET /online 同源）。
+//
+// ★"谁在线"这件事只有数据面知道：用户目录里那一列存的是建号那一刻写下的值。
+func (s *Server) onlineAccounts() map[string]bool {
+	now := time.Now().Unix()
+	window := int64(gatewayOnlineWindow / time.Second)
+	out := map[string]bool{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sess := range s.gwSess {
+		gw, ok := s.gateways[id]
+		if !ok || now-gw.LastSeen > window { // 离线网关的会话不算数（同 handleOnline）
+			continue
+		}
+		for _, se := range sess {
+			out[normUser(se.User)] = true
+		}
+	}
+	return out
+}
+
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -2173,7 +2269,89 @@ func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load users")
 		return
 	}
+	// ★在线态 / 接入 IP / 终端 / 风险四列按**真实信号**现算，不发库里那四列。
+	//
+	//   users.online 这一列只在 INSERT 时写过（种子 / 外部目录建号），全仓没有任何
+	//   一处 UPDATE 它——grep `SET online` 零命中。于是「用户与角色」页那一列
+	//   连同页头的「N 在线 / M 离线」统计，显示的是**建号那一刻**的值，永远不变：
+	//   种子里的张伟/李芳/王强 从库建好那天起就一直是"在线"，哪怕一次都没登录过；
+	//   而真正接入的人在这一页上永远是"离线"。同一套控制台的侧栏角标与「在线用户」页
+	//   读的是 /online（网关上报的真实会话），两处并排显示着互相矛盾的数。
+	//
+	//   零信任控制台上"谁在线"是处置判断的第一输入（要不要踢、要不要封），
+	//   这一列错得越安静越危险。
+	s.enrichDirUsers(r.Context(), b.Users)
 	httpx.JSON(w, http.StatusOK, b)
+}
+
+// enrichDirUsers 就地补齐目录行的 Online / IP / Device / Risk 四列。
+//
+// ★这四列在库里都**只在 INSERT 时写过一次**，全仓没有任何 UPDATE 碰它们
+// （`grep -E "UPDATE users SET (online|risk|device|ip)"` 零命中）。于是
+// 「用户与角色」页那四格显示的是**建号那一刻**的值，永远不变：
+// 种子里的张伟从库建好那天起就一直是「在线 · Windows 11 · 10.8.2.31 · 无风险」，
+// 哪怕他一次都没登录过；而真正接入的人在这一页上永远是离线、无终端、无风险。
+// 页面上四格都长得像事实，且与同一套控制台的「在线用户」「用户状态」两页互相矛盾。
+//
+// 四格各自的真实来源与 wave8 行动 5 给在线会话补三格时**同源**：
+//
+//	Online/IP → 在线网关上报的真实会话（与 GET /online 同一份 gwSess）
+//	Device    → 该账号最新一次 posture 上报的平台与系统版本
+//	Risk      → riskOfAccount（PostureVerdict 的跨设备最差判定，与在线页同一处实现）
+//
+// 取不到一律**降级成不可判定**（"—" / unknown），绝不保留库里那个陈年好值：
+// 一个从未上报过环境的账号显示「无风险」，是替一台完全未知的机器背书。
+func (s *Server) enrichDirUsers(ctx context.Context, users []store.DirUser) {
+	if len(users) == 0 {
+		return
+	}
+	online := s.onlineAccounts()
+	ips := s.sessionIPsByAccount()
+	for i := range users {
+		acc := normUser(users[i].Account)
+		users[i].Online = online[acc]
+		if ip := ips[acc]; ip != "" {
+			users[i].IP = ip
+		} else {
+			users[i].IP = "—" // 当前没有活跃会话：不发建号那天写下的地址
+		}
+		// 终端与风险都来自 posture 上报（账号级，跨设备取最差——与在线页同一处判定）。
+		rep, ok, err := s.store.PostureVerdict(ctx, acc)
+		switch {
+		case err != nil || !ok:
+			users[i].Device = "—"
+			users[i].Risk = store.SessionRiskUnknown
+		default:
+			users[i].Device = strings.TrimSpace(rep.Platform + " " + rep.OS)
+			if users[i].Device == "" {
+				users[i].Device = "—"
+			}
+			risk, _ := s.riskOfAccount(ctx, acc)
+			users[i].Risk = risk
+		}
+	}
+}
+
+// sessionIPsByAccount 账号 → 当前会话源 IP（多条会话取任意一条；同一人多机接入时
+// 这一列本来就表达不了"哪一台"，页面用它只为"此刻从哪来"）。与 onlineAccounts 同源。
+func (s *Server) sessionIPsByAccount() map[string]string {
+	now := time.Now().Unix()
+	window := int64(gatewayOnlineWindow / time.Second)
+	out := map[string]string{}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for id, sess := range s.gwSess {
+		gw, ok := s.gateways[id]
+		if !ok || now-gw.LastSeen > window {
+			continue
+		}
+		for _, se := range sess {
+			if se.IP != "" {
+				out[normUser(se.User)] = se.IP
+			}
+		}
+	}
+	return out
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {

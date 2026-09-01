@@ -126,7 +126,8 @@ func (s *SQLiteStore) System(ctx context.Context) (SystemBundle, error) {
 	}
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id, u.name, u.account, COALESCE(u.admin_role,''), COALESCE(u.last_login,''), COALESCE(u.status,''),
-       (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.account = lower(trim(u.account)))
+       (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.account = lower(trim(u.account))),
+       (SELECT COUNT(*) FROM totp_secrets t WHERE t.account = lower(trim(u.account)) AND t.confirmed = 1)
 FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 	if err != nil {
 		return SystemBundle{}, err
@@ -135,8 +136,8 @@ FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 	admins := []AdminAccount{}
 	for rows.Next() {
 		var a AdminAccount
-		var creds int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Account, &a.RoleKey, &a.LastLogin, &a.Status, &creds); err != nil {
+		var creds, totps int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Account, &a.RoleKey, &a.LastLogin, &a.Status, &creds, &totps); err != nil {
 			return SystemBundle{}, err
 		}
 		if r, ok := byKey[a.RoleKey]; ok {
@@ -148,10 +149,22 @@ FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 		}
 		// 认证方式按实算：注册过 passkey 才写"口令 + passkey"。此前这一列是种子里
 		// 编的"密码 + 商密证书 / UKey"——白帝根本没有这两种认证方式。
-		a.TwoFA = creds > 0
+		//
+		// ★TOTP 是后来补的第二种真二因子（裸 IP 部署下唯一能用的那一种），
+		// 这里此前只数 passkey：一名只绑了 TOTP 的管理员在系统管理页显示
+		// 「二次认证：否 / 本地口令」——而他每次登录都真的在输动态码。
+		// 判据要与 api.secondFactor 的强制顺序（passkey > TOTP）覆盖同一批事实。
+		a.Factors = []string{}
+		if creds > 0 {
+			a.Factors = append(a.Factors, "passkey")
+		}
+		if totps > 0 {
+			a.Factors = append(a.Factors, "totp")
+		}
+		a.TwoFA = len(a.Factors) > 0
 		a.Auth = "本地口令"
 		if a.TwoFA {
-			a.Auth = "本地口令 + passkey"
+			a.Auth += " + " + strings.Join(factorLabels(a.Factors), " / ")
 		}
 		admins = append(admins, a)
 	}
@@ -159,6 +172,22 @@ FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 		return SystemBundle{}, err
 	}
 	return SystemBundle{Roles: roles, Admins: admins}, nil
+}
+
+// factorLabels 因子键 → 展示名（中文摘要与机读清单同一处派生，不在页面上另抄一份）。
+func factorLabels(keys []string) []string {
+	out := make([]string, 0, len(keys))
+	for _, k := range keys {
+		switch k {
+		case "passkey":
+			out = append(out, "passkey")
+		case "totp":
+			out = append(out, "TOTP")
+		default:
+			out = append(out, k)
+		}
+	}
+	return out
 }
 
 // SaveAdminRole 新建/修改**自定义**角色（内置四角色一律拒绝）。

@@ -78,6 +78,14 @@ type Config struct {
 	LDAPConnectTimeout time.Duration
 	LDAPRequestTimeout time.Duration
 
+	// IdleLockInterval 闲置账号自动锁定循环的间隔；<=0 关闭（策略里开了也不会有动作，启动时告警）。
+	IdleLockInterval time.Duration
+	// 主机侧定期自动备份（NFR-AVL-04）。BackupDir 或 BackupPassphrase 为空即不启用，
+	// 启动时打一行告警并在 /diag 上如实显示「未启用」——绝不静默地什么都不做。
+	BackupDir        string
+	BackupInterval   time.Duration
+	BackupPassphrase string
+	BackupKeep       int
 	// AuditForwardInterval 审计外送投递循环的间隔；<=0 关闭投递（队列只增不减，启动时告警）。
 	// ★这条循环是外送功能唯一的执行方——没有它，配置齐全但 SIEM 永远收不到东西。
 	AuditForwardInterval time.Duration
@@ -163,6 +171,15 @@ func Load() Config {
 		// 审计外送：默认每 5s 投递一轮（够快到"刚发生的事很快就在 SIEM 里"，
 		// 又不至于把一个空队列查成热点）。上界的唯一定义在 store，别在这里另抄一份。
 		AuditForwardInterval: envDuration("BAIDI_AUDIT_FORWARD_INTERVAL", 5*time.Second),
+		// 闲置账号自动锁定：默认每小时跑一轮。★这个间隔只决定"多久检查一次"，
+		// 不决定"要不要锁"——那由落库策略的 AutoLock 决定，且默认是关的。
+		IdleLockInterval: envDuration("BAIDI_IDLE_LOCK_INTERVAL", time.Hour),
+		// 自动备份：默认**不启用**（没有目录与口令就不跑）。口令不给默认值——
+		// 备份里装着 CA 私钥与全部凭据，一个编译进二进制的默认口令等于没加密。
+		BackupDir:            os.Getenv("BAIDI_BACKUP_DIR"),
+		BackupInterval:       envDuration("BAIDI_BACKUP_INTERVAL", 24*time.Hour),
+		BackupPassphrase:     os.Getenv("BAIDI_BACKUP_PASSPHRASE"),
+		BackupKeep:           envInt("BAIDI_BACKUP_KEEP", 7),
 		ExtRecheckInterval:   envDuration("BAIDI_EXTAUTH_RECHECK", 5*time.Minute),
 		ExtAuthTimeout:       envDuration("BAIDI_EXTAUTH_TIMEOUT", 8*time.Second),
 		LDAPConnectTimeout:   envDuration("BAIDI_LDAP_CONNECT_TIMEOUT", 3*time.Second),

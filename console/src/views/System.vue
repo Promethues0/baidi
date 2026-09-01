@@ -54,13 +54,18 @@
             <span v-for="p in g.perms" :key="p" class="bd-perm bd-mono">{{ p }}</span>
           </div>
           <div class="bd-gcard__scope">{{ g.scope }}</div>
+          <!-- ★「编辑」此前不存在：后端 SaveAdminRole 一直是 upsert（handler 注释也写着
+               「新建/**修改**自定义角色」），控制台只用了它的一半。而角色有成员时删不掉，
+               于是「收缩某个角色的权限」在控制台上**无路可走**——只能先把成员全部改派走、
+               删掉、再建一个同名的、再把人改派回来。 -->
           <div v-if="!g.builtin" class="bd-gcard__ops">
-            <span class="bd-link bd-link--danger" @click="removeRole(g)">删除角色</span>
+            <span class="bd-link" @click="openRole(g)">编辑</span>
+            <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeRole(g)">删除角色</span>
           </div>
         </div>
       </div>
       <div class="bd-rolebar">
-        <button class="bd-btn bd-btn--ghost" @click="openRole"><icon-plus />新建自定义角色</button>
+        <button class="bd-btn bd-btn--ghost" @click="openRole()"><icon-plus />新建自定义角色</button>
         <span class="bd-hint">自定义角色只能在 system / security / audit 三权内收缩，不能自造超管。</span>
       </div>
 
@@ -107,7 +112,15 @@
               </td>
               <td>{{ a.auth }}</td>
               <td>
-                <span v-if="a.twoFa" class="bd-tg" :style="tagStyle('#00B42A')">已注册 passkey</span>
+                <!-- ★因子清单来自后端 factors（机读），不是从 twoFa 猜出来的：
+                     此前这里对 twoFa=true 一律写「已注册 passkey」，一个只绑了 TOTP
+                     的管理员在这一栏被显示成绑了 passkey，而两者的补救路径完全不同
+                     （TOTP 有管理员侧重置通道，passkey 没有）。 -->
+                <template v-if="a.factors?.length">
+                  <span v-for="f in a.factors" :key="f" class="bd-tg" :style="tagStyle('#00B42A')"
+                        style="margin-right: 5px">{{ factorZh(f) }}</span>
+                </template>
+                <span v-else-if="a.twoFa" class="bd-tg" :style="tagStyle('#00B42A')">已注册</span>
                 <span v-else class="bd-tg" :style="tagStyle('#86909C')">未注册</span>
               </td>
               <td>{{ statusText(a.status) }}</td>
@@ -663,11 +676,18 @@
     </a-modal>
 
     <!-- 新建自定义角色 -->
-    <a-modal v-model:visible="roleOpen" title="新建自定义角色" :confirm-loading="saving" @ok="submitRole" @cancel="roleOpen = false">
+    <a-modal v-model:visible="roleOpen" :title="roleForm.editing ? '编辑自定义角色' : '新建自定义角色'"
+             :ok-loading="saving" @ok="submitRole" @cancel="roleOpen = false">
       <a-form :model="roleForm" layout="vertical">
-        <a-form-item label="角色标识" help="小写字母/数字/短横，落库后不可改">
-          <a-input v-model="roleForm.key" placeholder="如 east-op" />
+        <a-form-item label="角色标识" help="小写字母/数字/短横，落库后不可改（users.admin_role 按值引用）">
+          <a-input v-model="roleForm.key" placeholder="如 east-op" :disabled="roleForm.editing" />
         </a-form-item>
+        <!-- 编辑态当面说清影响面：改权限对**已经在这个角色下的人**立刻生效
+             （requirePerm 现算角色，不看令牌）。 -->
+        <a-alert v-if="roleForm.editing && roleForm.members > 0" type="warning" style="margin-bottom: 14px">
+          该角色下有 <b>{{ roleForm.members }}</b> 名管理员。改动权限后**立即生效**——
+          控制面每次请求都现算角色，不等他们重新登录。
+        </a-alert>
         <a-form-item label="角色名称"><a-input v-model="roleForm.name" placeholder="如 华东运维组" /></a-form-item>
         <a-form-item label="权限键" help="只能在三权内收缩；* 与 admins 不可选（那等于自造超管）">
           <a-checkbox-group v-model="roleForm.perms">
@@ -1255,9 +1275,20 @@ function removeAdmin(a: AdminAccount) {
 }
 
 const roleOpen = ref(false);
-const roleForm = reactive<{ key: string; name: string; perms: string[] }>({ key: '', name: '', perms: [] });
-function openRole() {
-  roleForm.key = ''; roleForm.name = ''; roleForm.perms = [];
+/** 因子键的展示名。旧后端不下发 factors 时走 twoFa 的兜底分支（只说"已注册"，不猜是哪一种）。 */
+function factorZh(f: string) { return f === 'passkey' ? 'passkey' : f === 'totp' ? 'TOTP' : f; }
+
+const roleForm = reactive<{ key: string; name: string; perms: string[]; editing: boolean; members: number }>(
+  { key: '', name: '', perms: [], editing: false, members: 0 });
+
+/** 传 g = 编辑既有角色；不传 = 新建。后端 `POST /admin-roles` 本来就是 upsert。 */
+function openRole(g?: AdminRole) {
+  if (g) {
+    roleForm.key = g.key; roleForm.name = g.name;
+    roleForm.perms = [...g.perms]; roleForm.editing = true; roleForm.members = g.members;
+  } else {
+    roleForm.key = ''; roleForm.name = ''; roleForm.perms = []; roleForm.editing = false; roleForm.members = 0;
+  }
   roleOpen.value = true;
 }
 async function submitRole() {
@@ -1265,13 +1296,31 @@ async function submitRole() {
     Message.warning('标识、名称与至少一个权限键都必填');
     return;
   }
+  // ★新建态撞了已有 key：后端那个端点是 **upsert**，直接提交会把现有角色的权限
+  //   静默改掉（那些人的权限当场就变了，而页面上看起来只是"新建了一个角色"）。
+  //   当面问清楚，并报出它现在有几名成员。
+  if (!roleForm.editing) {
+    const dup = roles.value.find((r) => r.key === roleForm.key.trim());
+    if (dup) {
+      Modal.warning({
+        title: '这个标识已经存在',
+        content: `已有角色「${dup.name}」（${dup.key}），其下有 ${dup.members} 名管理员。` +
+          `继续提交会**改掉它的权限**并立即对这些人生效（不是新建一个角色）。` +
+          `要改它请点那张卡片上的「编辑」；要新建请换一个标识。`,
+        okText: '知道了'
+      });
+      return;
+    }
+  }
   saving.value = true;
   try {
     await api('/admin-roles', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ key: roleForm.key.trim(), name: roleForm.name.trim(), perms: roleForm.perms })
     });
-    Message.success('自定义角色已落库');
+    Message.success(roleForm.editing
+      ? `角色「${roleForm.name.trim()}」已更新，对其下 ${roleForm.members} 名管理员立即生效`
+      : '自定义角色已落库');
     roleOpen.value = false;
     await load();
   } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }

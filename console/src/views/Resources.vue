@@ -118,10 +118,18 @@
             </td>
             <td class="r">
               <span class="bd-link" @click="openEdit(r)">编辑</span>
-              <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="del(r)">删除</span>
+              <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="askDel(r)">删除</span>
             </td>
           </tr>
-          <tr v-if="!resources.length"><td colspan="9" class="bd-empty">暂无资源，点右上「新增资源」创建</td></tr>
+          <!-- ★空态判据必须用**过滤后**的行数。用 resources.length 的话，
+               库里有资源但关键字一个都没命中时，表体是**整片空白**：没有行，
+               也没有"无匹配"那句话——看起来像页面坏了或者数据丢了。 -->
+          <tr v-if="!shown.length">
+            <td colspan="9" class="bd-empty">
+              <template v-if="resources.length">没有匹配「{{ kw.trim() }}」的资源（共 {{ resources.length }} 条，按 id / 名称 / 后端检索）</template>
+              <template v-else>暂无资源，点右上「新增资源」创建</template>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -197,8 +205,8 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
-import { Message } from '@arco-design/web-vue';
-import { api, type Resource, type ResourcesResp, type SubjectOption, type GatewayReg, type GatewaysResp, type AddrObject, type ServiceObject, type ObjectBundle } from '@/lib/api';
+import { Message, Modal } from '@arco-design/web-vue';
+import { api, type Resource, type ResourcesResp, type SubjectOption, type GatewayReg, type GatewaysResp, type AddrObject, type ServiceObject, type ObjectBundle, failReason } from '@/lib/api';
 
 const live = ref(false);
 const resources = ref<Resource[]>([]);
@@ -372,15 +380,52 @@ async function save() {
     Message.success(`资源「${form.id}」已落库，网关下次轮询即生效`);
     formOpen.value = false;
     await load();
-  } catch { Message.error('保存失败，请检查管理员权限或后端连接'); } finally { saving.value = false; }
+  } catch (e) { Message.error(`资源保存失败：${failReason(e)}`); } finally { saving.value = false; }
+}
+
+/**
+ * 删除受控资源。
+ *
+ * ★改造前这里是**点中即删**：表格里一个常驻可见的「删除」链接，没有任何确认，
+ * 而删除是不可撤销的，且它的后果不止于这一行——
+ *   · 引用它的应用 → apps.resource_id 变成悬空引用，管理台把那个应用折叠成
+ *     「未关联资源」，**与从未关联过完全同形**，事后谁也看不出这是删资源造成的；
+ *   · 该资源上的 JIT 授予 → 仍留在台账里，显示的是一个已失真的授权状态。
+ *
+ * 后端**专门为此算了一份影响面回执**（handleDeleteResource 里的 blastRadius：
+ * apps / grants / note，注释写明"删之前先算清，删之后就查不到了"），
+ * 而前端此前连应答体都没接——那份专门算出来的话从来没有人看见过。
+ * 现在：删之前二次确认，删之后把后端那份回执原样呈现（用不会自动消失的 Modal，
+ * 不用 3 秒就飘走的 toast——影响面是要照着去补救的，不是通知）。
+ */
+function askDel(r: Resource) {
+  Modal.confirm({
+    title: '删除受控资源',
+    content: `确认删除受控资源「${r.name || r.id}」（${r.id} → ${r.backend}）？\n` +
+      '此操作不可撤销。引用它的应用与已发出的 JIT 授予**不会**被一并清理，' +
+      '删除后会当面列出受影响的清单。',
+    okText: '确认删除', cancelText: '取消',
+    okButtonProps: { status: 'danger' },
+    onOk: () => del(r)
+  });
 }
 
 async function del(r: Resource) {
   try {
-    await api(`/resources/${r.id}`, { method: 'DELETE' });
-    Message.success(`资源「${r.id}」已删除`);
+    const out = await api<{ ok: boolean; id: string; apps?: string[]; grants?: number; note?: string }>(
+      `/resources/${r.id}`, { method: 'DELETE' });
     await load();
-  } catch { Message.error('删除失败，请检查权限或后端连接'); }
+    // note 由后端生成——影响面是后端算的，前端再拼一份就会有两种说法。
+    if (out.note) {
+      Modal.info({
+        title: `资源「${r.id}」已删除`,
+        content: out.note,
+        okText: '知道了'
+      });
+    } else {
+      Message.success(`资源「${r.id}」已删除`);
+    }
+  } catch (e) { Message.error(`资源删除失败：${failReason(e)}`); }
 }
 
 /** 关键词检索。★这里原先是 `const _shown = computed(() => resources.value); void _shown;`

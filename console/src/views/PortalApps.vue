@@ -170,7 +170,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, clearToken, type PortalAppsResp, type PortalTile, type WebProxyStatus, type WebTicketResp } from '@/lib/api';
+import { api, clearToken, type PortalAppsResp, type PortalTile, type WebProxyStatus, type WebTicketResp, failReason, failStatus } from '@/lib/api';
 import PortalBar from '@/components/PortalBar.vue';
 
 const router = useRouter();
@@ -278,19 +278,13 @@ async function openApp(app: PortalTile) {
   } catch (e) {
     // 后端的拒绝理由（无授权 / 终端降级 / 网关没开七层）都写在 message 里，原样呈现——
     // 换成一句"打开失败"就等于把唯一的线索丢掉。
-    Message.error(reason(e, '打开失败，请稍后再试'));
+    Message.error(`打开失败：${failReason(e)}`);
   } finally {
     opening.value = '';
   }
 }
 
 /** 从 api() 抛出的错误里取后端那句中文说明（形如 "403 终端环境不合规：…"）。 */
-function reason(e: unknown, fallback: string) {
-  const msg = String((e as Error)?.message ?? '').trim();
-  const m = msg.match(/^\d{3}\s+(.+)$/s);
-  return m ? m[1] : (msg || fallback);
-}
-
 /** 剩余时长的人话（服务端下发的是 Unix 秒）。 */
 function remainText(exp: number): string {
   const s = Math.max(0, exp - Math.floor(Date.now() / 1000));
@@ -324,8 +318,7 @@ async function submitRequest() {
       : `「${app.name}」访问申请已提交，等待管理员审批`);
   } catch (e) {
     // 无后端 / 重复申请等：不白屏，提示即可（HTTP 409 = 已有待审批或有效授予）
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('409') ? '你已有待审批的申请或有效授予，请勿重复提交' : '申请提交失败，请稍后再试');
+    Message.error(failStatus(e) === 409 ? '你已有待审批的申请或有效授予，请勿重复提交' : `申请提交失败：${failReason(e)}`);
   } finally {
     submitting.value = false;
   }
@@ -338,8 +331,8 @@ async function load() {
     apps.value = resp.apps ?? [];
     // 旧后端不下发 webProxy：按"可用"处理，点开时若真不可用会拿到后端的 503 原文。
     if (resp.webProxy) webProxy.value = resp.webProxy;
-  } catch {
-    Message.error('应用列表加载失败');
+  } catch (e) {
+    Message.error(`应用列表加载失败：${failReason(e)}`);
   } finally {
     loading.value = false;
   }

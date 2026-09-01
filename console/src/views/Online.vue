@@ -147,7 +147,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type OnlineSession, type OnlineResp } from '@/lib/api';
+import { api, type OnlineSession, type OnlineResp, failReason } from '@/lib/api';
 
 type Filter = 'all' | 'high' | 'untrusted' | 'unknown';
 
@@ -269,8 +269,8 @@ async function kick(s: OnlineSession): Promise<void> {
     });
     Message.success('已强制下线：' + s.user);
     await load();
-  } catch {
-    Message.error('下线失败，请检查管理员权限');
+  } catch (e) {
+    Message.error(`强制下线失败：${failReason(e)}`);
   }
 }
 

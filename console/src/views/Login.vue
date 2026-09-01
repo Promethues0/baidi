@@ -18,7 +18,11 @@
           <icon-lock />
           <span>账号 {{ username }} 正在使用初始口令，须修改后才能进入管理台</span>
         </div>
-        <a-input-password v-model="newPw" size="large" placeholder="新口令（至少 8 位，不得与初始口令相同）" class="bd-login__inp" @keyup.enter="submitChangePw">
+        <!-- ★占位文案必须与后端判据一致。这里此前写「至少 8 位」，而后端
+             auth.PasswordWeakness 要求「≥10 位且含三类字符，或 ≥16 位长口令」——
+             而 BAIDI_SEED_MUST_CHANGE 默认是开的，也就是**每一次标准部署的第一个动作**
+             就走这条路：照提示输 8 位 → 前端放行 → 后端 400 → 页面说"受限令牌可能已过期"。 -->
+        <a-input-password v-model="newPw" size="large" :placeholder="`新口令（${PW_HINT}）`" class="bd-login__inp" @keyup.enter="submitChangePw">
           <template #prefix><icon-lock /></template>
         </a-input-password>
         <a-input-password v-model="newPw2" size="large" placeholder="再次输入新口令" class="bd-login__inp" @keyup.enter="submitChangePw">
@@ -78,7 +82,7 @@
 <script setup lang="ts">
 import { ref } from 'vue';
 import { useRouter } from 'vue-router';
-import { api, setToken, type PortalLoginResp } from '@/lib/api';
+import { api, setToken, type PortalLoginResp, failReason, failStatus } from '@/lib/api';
 import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
@@ -166,8 +170,7 @@ async function submitWebauthn() {
     }
     pkMsg.value = r.reason || 'passkey 验证失败，请重试';
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('401')) {
+    if (failStatus(e) === 401) {
       err.value = '认证超时，请重新登录';
       step.value = 'login'; ticket.value = '';
     } else {
@@ -194,8 +197,10 @@ async function submitTotp() {
     }
     pkMsg.value = r.reason || '验证码不正确，请重试';
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('401') && msg.includes('票据')) {
+    // 401 = mfaTicket 过期/失效（那张票只有短时效）；其余一律是这一轮验证码本身的问题。
+    // 判状态码而不是判 message 里有没有「票据」二字：后端换一句文案这条分支就静默失效，
+    // 表现为"认证超时"被说成"验证码不正确"，用户会一直重输一个永远不可能对的码。
+    if (failStatus(e) === 401) {
       err.value = '认证超时，请重新登录';
       step.value = 'login'; ticket.value = '';
     } else {
@@ -206,10 +211,25 @@ async function submitTotp() {
   }
 }
 
+/** 口令要求文案：与后端 auth.PasswordWeakness 的判据逐字对应，全页只此一份。 */
+const PW_HINT = '至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上的长口令';
+
+/** 前端预检只做后端判据的**真子集**（长度 + 字符种类）：弱口令表与"含账号名"
+ *  两条不在前端复刻，否则会变成第二份判据，一旦对不上就会拦下后端本来会放行的口令。 */
+function localPwProblem(pw: string): string {
+  const n = [...pw].length;
+  if (n < 10) return '新口令长度不足 10 位';
+  if (n >= 16) return '';
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(pw)).length;
+  if (classes < 3) return '字符种类不足（大写/小写/数字/符号 至少三类）';
+  return '';
+}
+
 /** 首登强制改密：受限令牌调 /auth/password，成功后用新口令自动重新登录。 */
 async function submitChangePw() {
   err.value = '';
-  if (newPw.value.length < 8) { err.value = '新口令至少 8 位'; return; }
+  const bad = localPwProblem(newPw.value);
+  if (bad) { err.value = `${bad}。要求：${PW_HINT}`; return; }
   if (newPw.value === password.value) { err.value = '新口令不得与初始口令相同'; return; }
   if (newPw.value !== newPw2.value) { err.value = '两次输入的新口令不一致'; return; }
   loading.value = true;
@@ -225,8 +245,11 @@ async function submitChangePw() {
     pwToken.value = '';
     step.value = 'login';
     await submit();
-  } catch {
-    err.value = '口令修改失败（受限令牌可能已过期，请刷新页面重新登录）';
+  } catch (e) {
+    // ★后端在这条路上会说得很具体（「新口令强度不足：命中常见弱口令表。要求：…」、
+    //   「口令中包含账号名」、「新口令不得与旧口令相同」）。整句换成"受限令牌可能已过期"
+    //   是一个方向完全相反的归因：用户会去刷新、去重登，而口令本身一次都没换成。
+    err.value = failReason(e);
   } finally {
     loading.value = false;
   }

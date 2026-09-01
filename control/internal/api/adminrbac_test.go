@@ -92,6 +92,19 @@ func TestAdminPowerSeparationMatrix(t *testing.T) {
 			body:    map[string]any{"roleKey": "audit"},
 			allowed: map[string]bool{"root": true},
 		},
+		{
+			// ★这一条钉的是一次**钥匙发错人**：防爆破配置改造前挂在 PermSystem 上，
+			//   于是系统管理员（职责是网关证书/组网/对象库/体检）能把 ipEnabled 与
+			//   accountEnabled 双双关掉，**静默关掉全站登录防爆破**；而安全管理员
+			//   能解锁被锁账号、却调不动锁的阈值。同一文件里的解锁、同一页面上的
+			//   接入策略、权限键自己的中文定义，三处都指向 security。
+			name: "保存防爆破配置（安全权）", method: "PUT", path: "/api/v1/security/lockout-config",
+			body: map[string]any{
+				"threshold": 5, "windowSec": 600, "durationSec": 900,
+				"ipEnabled": true, "accountEnabled": true,
+			},
+			allowed: map[string]bool{"root": true, "security": true},
+		},
 	}
 
 	toks := map[string]string{"root": rootTok, "system": sysTok, "security": secTok, "audit": audTok}

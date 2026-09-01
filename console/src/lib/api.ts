@@ -6,26 +6,91 @@ export function getToken(): string { return localStorage.getItem(TOKEN_KEY) || '
 export function setToken(t: string): void { localStorage.setItem(TOKEN_KEY, t); }
 export function clearToken(): void { localStorage.removeItem(TOKEN_KEY); }
 
+/**
+ * 后端**明确拒绝**（HTTP 4xx/5xx，带 httpx.Error 的中文原因）。
+ * ★与 NetworkError 分开是有意的：两者该说的话完全相反——
+ * 前者要原样转述后端那句话，后者才该让人去查连接。
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** 请求压根没到后端（fetch 抛 TypeError：后端没起 / 网络断 / 被 CORS 拦）。 */
+export class NetworkError extends Error {
+  constructor(readonly cause: unknown) {
+    super('连不上控制面');
+    this.name = 'NetworkError';
+  }
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const t = getToken();
   // headers 必须在 ...rest 之后合并：否则调用方传入 headers 会把 Authorization 整体顶掉（静默 401）
   const { headers: extra, ...rest } = init ?? {};
-  const res = await fetch(BASE + path, {
-    ...rest,
-    headers: {
-      Accept: 'application/json',
-      ...(t ? { Authorization: `Bearer ${t}` } : {}),
-      ...(extra ?? {})
-    }
-  });
+  let res: Response;
+  try {
+    res = await fetch(BASE + path, {
+      ...rest,
+      headers: {
+        Accept: 'application/json',
+        ...(t ? { Authorization: `Bearer ${t}` } : {}),
+        ...(extra ?? {})
+      }
+    });
+  } catch (e) {
+    // 只有这一条路径才真的是"检查后端连接"。
+    throw new NetworkError(e);
+  }
   if (res.status === 401) {
     clearToken();
     // 门户与管理台分别回各自登录页
     location.href = location.pathname.startsWith('/portal') ? '/portal/login' : '/login';
-    throw new Error('401 未认证');
+    throw new ApiError('401 未认证', 401);
   }
-  if (!res.ok) throw new Error(await errText(res));
+  if (!res.ok) throw new ApiError(await errText(res), res.status);
   return (await res.json()) as T;
+}
+
+/**
+ * failReason 把一次失败翻译成**该给管理员看的那句话**。
+ *
+ * ★这是本项目在控制台上重复得最多的一个缺陷的收口处：全仓有二十多处写操作长成
+ *
+ *     } catch { Message.error('删除失败，请检查权限或后端连接'); }
+ *
+ * ——后端明明回了「分类下仍有 3 个应用，请先改归属」「最后一名超级管理员不可禁用」
+ * 「角色「审计管理员」无权执行该操作（需要权限：security）」这类**唯一能指导下一步动作**
+ * 的话，errText 也已经把它取出来了，却在 catch 那一行被整句丢掉，换成一个**猜的归因**。
+ * 管理员照着提示去查网络、去重登、去找人要权限，而真正的原因就在被丢掉的那个字符串里。
+ * api.ts 自己在 errText 上方写下了这条纪律，然后二十多个调用点一个都没照做。
+ *
+ * 三种情况分开说：
+ *   - 后端明确拒绝 → **原样转述**，一个字不改；
+ *   - 请求没到后端 → 这时才该说"检查连接"；
+ *   - 其它（前端自身异常）→ 兜底。
+ */
+/**
+ * failStatus 取失败的 HTTP 状态码（不是 ApiError 就回 0）。
+ *
+ * ★全仓有十几处写成 `String(e.message).startsWith('403')` 来判状态码，而 api() 抛出的
+ * message 是**后端的中文原文**（errText 已经把 {"error":{"message":…}} 解出来了），
+ * 永远不以状态码开头——只有后端回了非 JSON（前置 nginx 的 502 之类）时才退回
+ * `${status} ${statusText}`。也就是说：正常路径上那些分支一次都不会命中，
+ * 每一次真实的 403/409 都掉进 else 里的"请检查后端连接"。
+ * 状态码现在在 ApiError 上，判它就好。
+ */
+export function failStatus(e: unknown): number {
+  return e instanceof ApiError ? e.status : 0;
+}
+
+export function failReason(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof NetworkError) return '连不上控制面（baidi-control 未运行或网络不通）';
+  if (e instanceof Error && e.message) return e.message;
+  return '未知错误';
 }
 
 /**
@@ -173,10 +238,20 @@ export interface DirUser {
   id: string; name: string; account: string; org: string; orgKey: string;
   /** 组织归属（org_units.id）。org/orgKey 是展示遗物，有 orgId 时由后端对齐到组织表。 */
   orgId: string;
+  /** 这个账号属于哪个**用户目录**：外部源 id，或 'local'。
+   *  ★身份源选项卡此前是纯装饰的——点哪个目录看到的都是同一张全量表，
+   *  顶部四个聚合数也永远是全库口径。判据与选项卡上的计数同源（绑定表）。 */
+  sourceId?: string;
   /** 所属用户组 id（含角色组的派生归属）。 */
   groups: string[];
   device: string; ip: string; auth: string; lastLogin: string;
-  online: boolean; status: 'active' | 'locked' | 'disabled' | 'idle'; risk: 'none' | 'low' | 'high';
+  online: boolean; status: 'active' | 'locked' | 'disabled' | 'idle';
+  /** 邮箱。外部源登录时由 refreshExternalProfile 带回；本地账号可在详情里编辑。 */
+  email?: string;
+  /** 风险档。★含 'unknown'：该账号从未上报过终端环境，控制面**不知道**它的风险，
+   *  与「无风险」是两回事——后者是一句正向的安全断言。判定与在线会话页同源
+   *  （PostureVerdict 跨设备取最差）。 */
+  risk: 'none' | 'low' | 'high' | 'unknown';
   roles: string[];
 }
 export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; groups: UserGroup[]; users: DirUser[] }
@@ -265,7 +340,10 @@ export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[];
 export interface DiskStat { usedPct: number; totalGB: number; retainDays: number; dbBytes: number; selfPct: number }
 /** 一条审计记录。★seq/mac 是防篡改链的序号与链式 MAC：列表、CSV 导出、
  *  syslog/SIEM 外送三个出口同源（后端就是同一个 store.AuditEntry）。 */
-export interface AuditEntry { time: string; category: 'access' | 'auth' | 'admin' | 'security' | 'dataplane'; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
+/** 审计类别。★与后端 store.AuditCategories 一一对应——此前这里少了 policy 与 system，
+ *  而那两类**真的会被写进库**（保存安全基线 / 接入策略 / 网关接入地址…）。 */
+export type AuditCategory = 'access' | 'auth' | 'admin' | 'policy' | 'security' | 'dataplane' | 'system';
+export interface AuditEntry { time: string; category: AuditCategory; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 /* AuditWriteHealth 控制面**自己**没能把审计写进库的读数（api.auditWriteHealth）。
    ★零失败时后端整段不下发（omitempty），所以 undefined = 一切正常，不是"取不到"。
    它挂在**读**响应上是有意的：审计写不进去的时候读路径通常还活着，
@@ -276,6 +354,35 @@ export interface AuditWriteHealth {
 export interface AuditBundle {
   categories: KV[]; todayTotal: number; disk: DiskStat; logs: AuditEntry[];
   writeHealth?: AuditWriteHealth;
+}
+
+/* ── 网关机器身份 · mTLS 客户端证书（GET/POST /api/v1/pki/gateway-certs）──
+ *
+ * ★这是网关身份的**唯一路径**：控制面内部 CA 签发，网关凭它调 /api/v1/gateways/*。
+ * 吊销即刻生效（指纹白名单是执行点），并把该网关从下发给终端的落点清单里摘掉。
+ * 三个端点后端一直都有，控制台此前**没有任何入口**——机器身份只能用 curl 管，
+ * 而"吊销"恰恰是一台网关失陷时唯一的即刻处置手段。 */
+export interface GatewayCert {
+  /** 证书 DER 的 SHA-256（主键，也是吊销的入参）。 */
+  fingerprint: string;
+  /** 证书 CN = 网关 id。★`ipsec-` 前缀是组网网关的分权判据；`standby-` 本端点拒收。 */
+  gatewayId: string;
+  issuedAt: string;
+  notAfter: string;
+  revoked: boolean;
+  revokedAt: string;
+  revokeReason: string;
+}
+export interface GatewayCertsResp {
+  certs: GatewayCert[];
+  /** false = 控制面未配 BAIDI_PKI_DIR，签发端点会 503。页面据此置灰并说明原因。 */
+  caEnabled: boolean;
+}
+/** 签发应答。★certPem/keyPem/caPem **只在这一次应答里出现**：私钥不落控制面的库，
+ *  关掉弹窗就再也取不回来，只能重新签一张。页面必须把这句话说在前面。 */
+export interface GatewayCertIssued {
+  gatewayId: string; fingerprint: string; notAfter: string;
+  certPem: string; keyPem: string; caPem: string;
 }
 
 /* ── License（GET/POST /api/v1/license）──
@@ -343,6 +450,12 @@ export interface GatewayBundle {
   stealth: StealthReceipt[];
   /** 内核态隐身**实测生效**的台数（只有 armed 计入；不可判定与未上报都不算）。 */
   stealthArmed: number;
+  /** 开着七层 Web 代理（`-web`）的**在线**网关台数。
+   *  ★「攻击面 = 0」那段断言的第二个前提：L7 监听口**不受 SPA 隐身保护**，
+   *  它是对全世界敞着的 TCP 端口。旧后端不下发 → undefined → 页面按"不可判定"处理。 */
+  webExposed?: number;
+  /** 那几台网关的 L7 监听地址（`网关id 监听地址`），页面据此点名。 */
+  webEndpoints?: string[];
   /** 要顶到页面上的隐身告警。文案由后端下发——这是安全结论，前端自己编就会与
    *  后端实际判定脱节（与 Nat.vue 的 warnings 同一条纪律）。 */
   stealthWarnings: string[];
@@ -382,7 +495,14 @@ export interface AdminRole {
 export interface AdminAccount {
   id: string; name: string; account: string;
   roleKey: string; roleName: string; power: string;
-  auth: string; twoFa: boolean; lastLogin: string; status: string;
+  /** 认证方式的**中文摘要**（由 factors 派生）。别拿它当判据。 */
+  auth: string;
+  twoFa: boolean;
+  /** 已注册的第二因子（机读）：'passkey' | 'totp'。★页面渲染用这一份。
+   *  改造前页面对 twoFa=true 一律写「已注册 passkey」，于是只绑了 TOTP 的管理员
+   *  被显示成绑了 passkey——而后端两者一直算得清清楚楚。 */
+  factors?: string[];
+  lastLogin: string; status: string;
 }
 /* ── 控制面温备（standby.ClusterView，PRD 15.5 / FR-ARCH-03）──
  *
@@ -1187,6 +1307,12 @@ export interface AlertsResp {
   /** 全局计数，**不受列表过滤影响**（角标与页头统计吃它） */
   counts: AlertCounts;
   categories: Record<string, string>;
+  /** 当前筛选条件下**库里的行数**（不是 alerts.length）。旧后端不下发 → undefined。 */
+  total?: number;
+  /** 列表读取上限（后端 store.AlertListLimit）。页面靠它说出"只显示最近 N 条"。 */
+  limit?: number;
+  /** 列表被截断了。★与 total 一起用：只看 alerts.length 永远算不出这件事。 */
+  truncated?: boolean;
 }
 export interface AlertRule {
   id: string; name: string; kind: string;
@@ -1297,6 +1423,12 @@ export interface GrayPlan {
   accounts: string[]; groups: string[]; stable: string; note?: string;
 }
 export interface UpgradeBundle {
+  /** 是否配了升级包发布公钥（BAIDI_UPGRADE_PUBKEY）。
+   *  ★false = 验签 fail-closed，校验**必然不通过**——页面据此预先置灰并说清怎么配，
+   *  而不是让管理员撞一次墙之后去怀疑自己的包。旧后端不下发 → undefined → 不置灰。 */
+  signKeysConfigured?: boolean;
+  /** 未配置时的说明（后端下发，页面不自己编）。 */
+  signKeyNote?: string;
   control: string;
   /** 网关 id → 上报版本；空串=旧网关不上报（判定层会标「无法校验」，不是「一致」）。 */
   gateways: Record<string, string>;

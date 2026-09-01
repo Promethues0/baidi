@@ -2,11 +2,11 @@ package api
 
 import (
 	"context"
-	"strings"
 	"encoding/json"
 	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
@@ -28,6 +28,18 @@ func orgStoreErr(w http.ResponseWriter, err error, fallback string) {
 	case errors.Is(err, store.ErrOrgNotFound), errors.Is(err, store.ErrGroupNotFound):
 		httpx.Error(w, http.StatusNotFound, err.Error())
 	default:
+		// ★账号唯一索引撞车必须说成「账号已存在」并回 409，而不是一句英文的 500。
+		//
+		//   CreateUser 不自己查重，靠 idx_users_account_norm 兜底；那条 UNIQUE 错误
+		//   此前一路落到这个 default 分支，于是管理员在「新增用户」里填一个已存在的
+		//   账号，页面上看到的是「新增失败：failed to create user」——一句服务端故障
+		//   措辞。他会去重试、去找运维，而真实原因（这个账号已经在目录里了）一个字
+		//   都没说。而同一套控制台的 **CSV 批量导入** 对同样的输入回的是「账号已存在」
+		//   （importStoreErrZh 早就把这条翻好了），两条路给出两种解释。
+		if strings.Contains(strings.ToUpper(err.Error()), "UNIQUE") {
+			httpx.Error(w, http.StatusConflict, "账号已存在（同一控制中心内账号不可重复）")
+			return
+		}
 		httpx.Error(w, http.StatusInternalServerError, fallback)
 	}
 }

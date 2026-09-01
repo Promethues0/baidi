@@ -79,6 +79,8 @@ type Store interface {
 	// StaleGrants 是「已过期未回收」这条规则的取数点：它要的是**库里那一份**状态，
 	// 与 JitGrants 的展示层到期纠正刻意不同源。
 	Alerts(ctx context.Context, q AlertQuery) ([]Alert, error)
+	// CountAlerts 同一组过滤条件下库里的总行数（列表被 defaultAlertLimit 截断时用它把截断说出来）。
+	CountAlerts(ctx context.Context, q AlertQuery) (int, error)
 	AlertRules(ctx context.Context) ([]AlertRule, error)
 	AlertCounts(ctx context.Context) (AlertCounts, error)
 	StaleGrants(ctx context.Context, before int64) ([]JitGrant, error)

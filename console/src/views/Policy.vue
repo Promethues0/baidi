@@ -242,7 +242,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AccessPolicy, type AccessPolicyResp, type DeviceSessionRow, type LockoutConfig } from '@/lib/api';
+import { api, type AccessPolicy, type AccessPolicyResp, type DeviceSessionRow, type LockoutConfig, failReason } from '@/lib/api';
 
 const tab = ref<'access' | 'global'>('access');
 const live = ref(false);
@@ -302,8 +302,8 @@ async function save() {
     });
     Message.success('接入策略已保存，最迟一个保活周期（约 15 秒）后生效');
     await loadAccess();
-  } catch {
-    Message.error('保存失败（需管理员登录 / 后端在线）');
+  } catch (e) {
+    Message.error(`接入策略保存失败：${failReason(e)}`);
     await loadAccess(); // 回读生效值，避免界面停在一个没保存上的状态
   } finally { saving = false; }
 }
@@ -352,8 +352,8 @@ async function saveLockoutCfg() {
       body: JSON.stringify(lockCfg)
     });
     Message.success('防爆破配置已保存并即时生效');
-  } catch {
-    Message.error('保存失败，请检查后端连接');
+  } catch (e) {
+    Message.error(`防爆破配置保存失败：${failReason(e)}`);
     await loadLockoutCfg(); // 回读生效值，避免界面停留在未生效的假状态
   }
 }

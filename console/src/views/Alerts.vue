@@ -63,7 +63,15 @@
             </a-select>
             <a-range-picker v-model="range" style="width: 250px" @change="loadAlerts" />
           </div>
-          <span class="bd-toolbar__c">当前列表 {{ alerts.length }} 条</span>
+          <!-- ★截断必须可见：列表被后端 AlertListLimit 硬截，而页头那三个计数是全局量。
+               不说的话，「未处理 350」会和一张 200 行的表并排显示，第 201 条之后的告警
+               在管理台上根本不存在，页面上也没有任何线索。 -->
+          <span class="bd-toolbar__c" :class="{ 'bd-toolbar__c--warn': listTruncated }">
+            <template v-if="listTotal !== undefined">
+              共 {{ listTotal }} 条<template v-if="listTruncated">，本页只显示最近 {{ alerts.length }} 条</template>
+            </template>
+            <template v-else>当前列表 {{ alerts.length }} 条</template>
+          </span>
         </div>
 
         <table class="bd-table">
@@ -132,11 +140,12 @@
               <th style="width: 230px">阈值</th>
               <th style="width: 120px">冷却期</th>
               <th style="width: 200px">数据源</th>
+              <th style="width: 210px">通知通道</th>
               <th class="r" style="width: 110px">启用</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!rules.length"><td colspan="6" class="bd-tcenter">未读取到告警规则</td></tr>
+            <tr v-if="!rules.length"><td colspan="7" class="bd-tcenter">未读取到告警规则</td></tr>
             <tr v-for="r in rules" :key="r.id">
               <td>
                 <div class="bd-al__t">{{ r.name }}</div>
@@ -169,6 +178,24 @@
                 </template>
                 <span v-else class="bd-al__o">—</span>
               </td>
+              <!-- ★通知通道此前**没有任何入口**：后端 handleSaveAlertRule 为 rule.Channels
+                   写了引用校验、notifyAlert 按它精确投递、GET /alerts/rules 也把候选清单
+                   下发下来了——而页面只拿这份清单数了个数（「可用通道 N 条」）。
+                   更糟的是后端下发的说明原话就写着「点名则只发这几条」，
+                   页面把这句话原样显示出来，却没有任何控件能点名。 -->
+              <td>
+                <a-select
+                  :model-value="r.channels ?? []" multiple allow-clear size="mini"
+                  placeholder="全部启用通道" :style="{ width: '196px' }"
+                  :disabled="!notify?.wired"
+                  @change="(v) => saveChannels(r, (v as string[]) ?? [])"
+                >
+                  <a-option v-for="c in notify?.channels ?? []" :key="c.id" :value="c.id" :disabled="!c.enabled">
+                    {{ c.name }}<template v-if="!c.enabled">（已停用）</template>
+                  </a-option>
+                </a-select>
+                <div class="bd-al__o">{{ (r.channels?.length ?? 0) ? `只发这 ${r.channels.length} 条` : '发给全部启用通道' }}</div>
+              </td>
               <td class="r">
                 <a-switch :model-value="r.enabled" size="small" @change="(v) => saveEnabled(r, v === true)" />
               </td>
@@ -186,8 +213,7 @@ import { Message } from '@arco-design/web-vue';
 import {
   api,
   type Alert, type AlertCounts, type AlertsResp, type AlertRule, type AlertRulesResp,
-  type AlertKindSpec, type AlertDataSource, type AlertNotifyOption
-} from '@/lib/api';
+  type AlertKindSpec, type AlertDataSource, type AlertNotifyOption, failReason, failStatus } from '@/lib/api';
 import { refreshBadges } from '@/lib/badges';
 
 const tab = ref<'list' | 'rules'>('list');
@@ -230,11 +256,19 @@ function query(): string {
   return s ? `?${s}` : '';
 }
 
+/** 当前筛选下库里的总行数与是否被截断（后端下发；旧后端缺席 → undefined）。 */
+const listTotal = ref<number | undefined>(undefined);
+const listTruncated = ref(false);
+
 async function loadAlerts() {
   try {
     const r = await api<AlertsResp>(`/alerts${query()}`);
     alerts.value = r.alerts ?? [];
     counts.value = r.counts ?? { pending: 0, ignored: 0, handled: 0 };
+    // 旧后端不下发这两格 → undefined → 页脚退回「当前列表 N 条」的老说法，
+    // 而不是画一个算不出来的 0（那会把"不知道有没有截断"说成"没有截断"）。
+    listTotal.value = r.total;
+    listTruncated.value = r.truncated === true;
     live.value = true;
     err.value = '';
   } catch (e) {
@@ -242,7 +276,9 @@ async function loadAlerts() {
     // 空着比编一页假告警诚实：这一页的存在意义就是"有没有异常"，编不得。
     alerts.value = [];
     counts.value = { pending: 0, ignored: 0, handled: 0 };
-    err.value = `读取告警失败（${String((e as Error)?.message ?? e)}）：本页不提供演示数据，未连接控制中心时一律显示为空。`;
+    listTotal.value = undefined;
+    listTruncated.value = false;
+    err.value = `读取告警失败（${failReason(e)}）：本页不提供演示数据，未连接控制中心时一律显示为空。`;
   }
 }
 
@@ -272,9 +308,8 @@ async function decide(a: Alert, action: 'handle' | 'ignore') {
     await loadAlerts();
     void refreshBadges(); // 侧栏未处理角标立刻跟上，不用等下次轮询
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('409')) Message.error('该告警已被处置，请刷新');
-    else if (msg.startsWith('403')) Message.error('当前角色无权处置告警（需要安全权限）');
+    if (failStatus(e) === 409) Message.error('该告警已被处置，请刷新');
+    else if (failStatus(e) === 403) Message.error(failReason(e));
     else Message.error('处置失败，请检查后端连接');
   } finally {
     busy.value = false;
@@ -290,13 +325,17 @@ async function saveRule(r: AlertRule, patch: Partial<AlertRule>) {
     Message.success(`规则「${body.name}」已保存`);
     await loadRules();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('403') ? '当前角色无权修改告警规则（需要安全权限）' : '保存失败，请检查后端连接');
+    // ★`msg.startsWith('403')` 是**死分支**：api() 抛的是后端中文原文（errText 已把
+    //   {"error":{"message":…}} 解出来），永远不以状态码开头。于是每一次失败都掉进
+    //   "请检查后端连接"那一支——包括「点名了不存在的通道」这种与连接无关的校验拒绝。
+    Message.error(`规则保存失败：${failReason(e)}`);
     await loadRules(); // 回读，避免界面上留着一个其实没保存成功的值
   }
 }
 function saveEnabled(r: AlertRule, enabled: boolean) { void saveRule(r, { enabled }); }
 function saveCooldown(r: AlertRule, sec: number) { void saveRule(r, { cooldownSec: sec }); }
+/** 点名通知通道。留空 = 发给全部启用中的通道（与后端 notifyAlert 的语义逐字一致）。 */
+function saveChannels(r: AlertRule, ids: string[]) { void saveRule(r, { channels: ids }); }
 function saveThreshold(r: AlertRule, key: string, v: number) {
   void saveRule(r, { threshold: { ...r.threshold, [key]: v } });
 }
@@ -311,8 +350,7 @@ async function evaluateNow() {
     await loadAll();
     void refreshBadges();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('403') ? '当前角色无权执行检测（需要安全权限）' : '检测失败，请检查后端连接');
+    Message.error(`立即检测失败：${failReason(e)}`);
   } finally {
     busy.value = false;
   }
@@ -341,6 +379,7 @@ onMounted(loadAll);
 .bd-stat--note:hover { background: transparent; }
 
 .bd-filters { display: flex; gap: 10px; align-items: center; }
+.bd-toolbar__c--warn { color: var(--bd-warning); font-weight: 500; }
 .bd-toolbar__c { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
 
 .bd-al__t { font-size: 13.5px; font-weight: 600; color: var(--bd-t1); }

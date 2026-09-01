@@ -232,9 +232,16 @@
         <div class="bd-ud__sec">接入信息</div>
         <div class="bd-kv"><span>终端</span><b>{{ sel.device }}</b></div>
         <div class="bd-kv"><span>接入 IP</span><b class="bd-mono">{{ sel.ip }}</b></div>
+        <div class="bd-kv"><span>邮箱</span><b>{{ sel.email || '—' }}</b></div>
         <div class="bd-kv"><span>认证方式</span><b>{{ sel.auth }}</b></div>
         <div class="bd-kv"><span>最后登录</span><b>{{ sel.lastLogin }}</b></div>
-        <div class="bd-kv"><span>风险评估</span><b><span class="bd-tg" :style="tagStyle(riskColor(sel.risk))">{{ riskLabel(sel.risk) }}</span></b></div>
+        <div class="bd-kv"><span>风险评估</span><b>
+          <span class="bd-tg" :style="tagStyle(riskColor(sel.risk))">{{ riskLabel(sel.risk) }}</span>
+          <!-- 结论必须带依据：这一格是**账号级**的（跨该账号名下全部终端取最差判定）。 -->
+          <span class="bd-riskwhy">{{ sel.risk === 'unknown'
+            ? '该账号从未上报过终端环境（observe 准入模式下仍可接入）'
+            : '来自终端合规判定，跨该账号名下全部终端取最差档' }}</span>
+        </b></div>
 
         <div class="bd-ud__sec">角色</div>
         <div class="bd-roles"><span v-for="r in sel.roles" :key="r" class="bd-tg" :style="tagStyle('#165DFF')">{{ r }}</span></div>
@@ -243,8 +250,18 @@
           <button v-if="sel.status === 'locked'" class="bd-btn" @click="setStatus('active', '已解锁账号')"><icon-unlock />解锁账号</button>
           <button v-if="sel.status === 'disabled'" class="bd-btn" @click="setStatus('active', '已启用账号')"><icon-check />启用账号</button>
           <button class="bd-btn bd-btn--ghost" @click="openReset"><icon-lock />重置密码</button>
-          <button class="bd-btn bd-btn--ghost" @click="resetTotp"><icon-mobile />重置 TOTP</button>
+          <button class="bd-btn bd-btn--ghost" @click="askResetMfa('totp')"><icon-mobile />重置 TOTP</button>
+          <!-- ★passkey 此前**没有任何管理员出口**，而它比 TOTP 更需要一个：
+               passkey 没有恢复码、本人删不掉最后一个（那道守卫是为"别把自己锁在门外"设的）、
+               而 secondFactor 又规定「已注册 passkey 即无条件强制断言」——
+               三条合起来的后果是认证器一丢账号就永久登不进来，唯一出路是运维删库。 -->
+          <button class="bd-btn bd-btn--ghost" @click="askResetMfa('passkey')"><icon-safe />重置 passkey</button>
+          <button class="bd-btn bd-btn--ghost" @click="openEditProfile"><icon-edit />编辑资料</button>
           <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
+          <!-- ★删除是 License 席位的**唯一**释放路径：席位满时后端 409 文案与闲置治理
+               弹窗都指向「删除闲置账号释放席位」，而在此之前这条路根本不存在。
+               点之前先问一次影响面（哪些资源还按账号名点着他）。 -->
+          <button class="bd-btn bd-btn--ghost bd-btn--danger" @click="openDeleteUser"><icon-delete />删除账号</button>
         </div>
       </div>
     </a-drawer>
@@ -318,11 +335,19 @@
             <a-option v-for="g in staticGroups" :key="g.id" :value="g.id">{{ g.name }}</a-option>
           </a-select>
         </div>
-        <div class="bd-uform__f"><label>认证方式</label>
-          <a-select v-model="form.auth">
-            <a-option value="密码">密码</a-option><a-option value="密码+短信">密码+短信</a-option>
-            <a-option value="密码+UKey">密码+UKey</a-option><a-option value="SAML SSO">SAML SSO</a-option>
-          </a-select>
+        <!-- ★这里此前是一个「认证方式」下拉（密码 / 密码+短信 / 密码+UKey / SAML SSO），
+             四项里有三项白帝从未实现（短信、UKey、SAML 一个都没有），而它落库的是一列
+             **零消费方**的自由文本：选什么都不影响这个账号真实怎么登录，却会在用户详情里
+             被当作事实展示。现在整项摘除——认证方式改为由后端**按实算**下发
+             （本地口令 / 外部目录，加上真正注册过的 passkey / TOTP）。
+             要改一个人的认证要求，去「认证源接入 → 认证策略」；要加第二因子，
+             由用户本人在门户「我的安全」注册。 -->
+        <div class="bd-uform__note">
+          <icon-info-circle />
+          <span>
+            新建的是**本地口令**账号。认证方式不在这里选：它由真实事实算出来
+            （口令来源 + 是否注册过 passkey / TOTP），建号后在列表里可见。
+          </span>
         </div>
         <div class="bd-uform__f"><label>初始登录口令</label>
           <a-input-password v-model="form.password" placeholder="留空则用默认 baidi@123（至少 6 位）" />
@@ -330,6 +355,54 @@
         <div class="bd-uform__foot">
           <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
           <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 编辑资料（FR-USER-02「本地新建与修改」）。★只有姓名与邮箱：
+         账号名是令牌主体，也是 JIT 授予 / 封禁名单 / 终端报告 / 用户组成员 /
+         认证源绑定的关联键，改它会让这些关系整段挂空且不报错，后端显式拒收。 -->
+    <a-modal v-model:visible="prof.open" title="编辑用户资料" :width="420" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-uform__f"><label>账号</label>
+          <a-input :model-value="prof.account" disabled />
+          <span class="bd-uform__d">账号名不可修改：它是令牌主体与多张表的关联键。需要换账号请新建并迁移授权。</span>
+        </div>
+        <div class="bd-uform__f"><label>姓名</label>
+          <a-input v-model="prof.name" placeholder="显示名" allow-clear @keyup.enter="saveProfile" />
+        </div>
+        <div class="bd-uform__f"><label>邮箱</label>
+          <a-input v-model="prof.email" placeholder="留空即清除" allow-clear @keyup.enter="saveProfile" />
+        </div>
+        <div v-if="prof.err" class="bd-uform__err"><icon-close-circle-fill />{{ prof.err }}</div>
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="prof.open = false">取消</button>
+          <button class="bd-btn" :disabled="prof.busy" @click="saveProfile">{{ prof.busy ? '保存中…' : '保存' }}</button>
+        </div>
+      </div>
+    </a-modal>
+
+    <!-- 删除账号：先给影响面，再让人点 -->
+    <a-modal v-model:visible="del.open" title="删除账号" :width="480" :footer="false">
+      <div class="bd-uform">
+        <div class="bd-delwarn">
+          <icon-exclamation-circle-fill />
+          <div>
+            将永久删除账号 <b>{{ del.name }}</b>（<span class="bd-mono">{{ del.account }}</span>）。
+            此操作<b>不可撤销</b>，并会释放一个 License 用户席位。
+          </div>
+        </div>
+        <div v-if="del.loading" class="bd-uform__d">正在核算影响面…</div>
+        <div v-else class="bd-delnote">{{ del.note || '（影响面未取到）' }}</div>
+        <div v-if="del.resources.length" class="bd-uform__d">
+          仍点名授权他的资源：<b class="bd-mono">{{ del.resources.join('、') }}</b>
+        </div>
+        <div v-if="del.err" class="bd-uform__err"><icon-close-circle-fill />{{ del.err }}</div>
+        <div class="bd-uform__foot">
+          <button class="bd-btn bd-btn--ghost" @click="del.open = false">取消</button>
+          <button class="bd-btn bd-btn--danger2" :disabled="del.busy" @click="doDeleteUser">
+            {{ del.busy ? '删除中…' : '确认删除' }}
+          </button>
         </div>
       </div>
     </a-modal>
@@ -342,13 +415,59 @@
           按最后登录时间识别闲置账号（仅 active 状态）。僵尸账号是最便宜的攻击面；
           锁定后可随时在用户详情里解锁，license 席位则需删除账号才释放。
         </div>
+        <!-- ★闲置治理**策略**（PRD FR-MON-19：阈值 + 是否自动锁定）。
+             此前这一页只有下面那个"超过 N 天"的输入框，而它只是一个 URL 查询参数：
+             管理员调过的值不落库，刷新一次就回到 90；`autoLockEnabled` 这一项
+             压根不存在，于是 PRD 那句「若开启自动锁定，Then 该账号被自动锁定」
+             没有任何执行方——治理必须有人记得点进这一页手工做，而页面上看不出来。 -->
+        <div class="bd-idlepol">
+          <div class="bd-idlepol__h"><icon-settings />闲置治理策略<span>（保存后长期生效）</span></div>
+          <div class="bd-idlepol__row">
+            <span>判定为闲置：超过</span>
+            <a-input-number v-model="idlePolicy.thresholdDays" :min="idleMinDays" :max="idleMaxDays"
+                            style="width: 110px" size="small" />
+            <span>天未登录</span>
+            <div style="flex:1" />
+            <span v-if="idleDirty" class="bd-idlepol__dirty">有未保存的改动</span>
+            <button class="bd-btn" :class="{ 'bd-btn--ghost': !idleDirty }" :disabled="idleSaving" @click="saveIdlePolicy">
+              {{ idleSaving ? '保存中…' : '保存策略' }}
+            </button>
+          </div>
+          <label class="bd-idlepol__row bd-idlepol__auto">
+            <a-switch v-model="idlePolicy.autoLock" size="small" />
+            <span>
+              <b>自动锁定闲置账号</b>
+              <i>后台每 {{ idleLoopHint }} 检查一轮；锁定与手工批量走同一条路径（含防自锁与数据面撤窗），
+                 并<b>永不处置管理员账号</b>——那条路径上没有调用方可以比对权限。</i>
+            </span>
+          </label>
+          <!-- 开着自动锁定就是一件会在没人看着的时候动别人账号的事，必须当面说清。
+               ★判据用**已落库**的那份：勾上开关还没保存时，后台并没有在锁人。 -->
+          <div v-if="idleSaved.autoLock" class="bd-idlepol__warn">
+            <icon-exclamation-circle-fill />
+            自动锁定<b>已在生效</b>：后台按 {{ idleSaved.thresholdDays }} 天的阈值<b>自行锁定</b>
+            符合条件的普通账号，并同步撤窗断隧道。每一次锁定都以 <code>system</code> 为行为人落审计。
+          </div>
+          <div v-if="!idleStoreReady" class="bd-idlepol__warn">
+            <icon-exclamation-circle-fill />
+            当前后端没有登录记录判据（内存种子模式），自动锁定不会有任何动作。
+          </div>
+        </div>
+
         <div class="bd-idle__bar">
-          <span>超过</span>
-          <a-input-number v-model="idleDays" :min="7" :max="3650" style="width: 110px" size="small" />
-          <span>天未登录</span>
+          <span>本次识别按</span>
+          <a-input-number v-model="idleDays" :min="idleMinDays" :max="idleMaxDays" style="width: 110px" size="small" />
+          <span>天预览</span>
           <button class="bd-btn" :disabled="idleLoading" @click="loadIdle">{{ idleLoading ? '识别中…' : '识别' }}</button>
           <div style="flex:1" />
           <span v-if="idleList.length" class="bd-idle__cnt">命中 {{ idleList.length }} 个，已选 {{ idleSel.length }} 个</span>
+        </div>
+        <!-- 预览天数与落库阈值不一致时必须说破：否则管理员会以为自己刚才配的就是这个数 -->
+        <div v-if="idleDays !== idleSaved.thresholdDays" class="bd-idle__preview">
+          当前预览的是 {{ idleDays }} 天，而<b>已落库的策略阈值是 {{ idleSaved.thresholdDays }} 天</b>——
+          <template v-if="idleSaved.autoLock">后台自动锁定按后者执行。</template>
+          <template v-else>下面这份名单只是按预览天数算的，不代表策略。</template>
+          要改策略请在上方修改并保存。
         </div>
         <div v-if="idleQueried && !idleList.length" class="bd-idle__empty">没有超过 {{ idleDays }} 天未登录的活跃账号。</div>
         <div v-else-if="idleList.length" class="bd-idle__list">
@@ -450,8 +569,9 @@
 
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
+import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, getToken, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers, type UserImportResp } from '@/lib/api';
+import { api, getToken, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers, type UserImportResp, failReason } from '@/lib/api';
 
 const live = ref(false);
 const directories = ref<Directory[]>([{ key: 'local', name: '本地目录', type: 'local', users: 0 }]);
@@ -501,9 +621,25 @@ const scopeTitle = computed(() => {
 });
 /** 关键词。★过滤字段必须与占位文案逐字对应（用户名 / 账号 / IP）：
  *  搜得比说的少 = 管理员以为「库里没有」；搜得比说的多 = 搜出一堆解释不了的命中。 */
-const kw = ref('');
+/** 关键词。从别的页面带条件跳进来时（如「用户状态 → 查看用户」的 ?q=账号）先接住，
+ *  否则那个入口落到的是一张未筛选的全量目录——它存在的意义正是省掉手抄账号名。 */
+const kw = ref(String(useRoute().query.q ?? '').trim());
+/**
+ * 当前身份源下的账号。
+ *
+ * ★选项卡此前只写了一个 `dir` 变量、没有任何消费方：卡上写着「总部 AD 域 3」，
+ * 点进去表头却是全量表，本地账号与各外部目录的账号混在一起——
+ * PRD FR-USER-01 的「目录间相互独立、以选项卡形式分目录管理」在界面上完全不成立。
+ * 而它的存在会让人相信自己正在看某一个目录。
+ *
+ * 旧后端不下发 `sourceId` → undefined → **不过滤**（宁可多显示，也不让升级那一刻
+ * 每个选项卡都变成空表）。
+ */
+const inDir = computed(() =>
+  users.value.filter((u) => u.sourceId === undefined || u.sourceId === dir.value));
+
 const shown = computed(() => {
-  let list = users.value;
+  let list = inDir.value;
   if (mode.value === 'group') {
     if (groupSel.value) list = list.filter((u) => u.groups.includes(groupSel.value));
   } else if (org.value) {
@@ -540,8 +676,9 @@ function editCurMembers() { if (curGroup.value?.kind === 'static') openMembers(c
 function editCurGroup() { if (curGroup.value) openGroup(curGroup.value); }
 function removeCurGroup() { if (curGroup.value) askRemoveGroup(curGroup.value); }
 
+// 顶部四个聚合数跟随当前身份源——此前恒为全库口径，与刚点中的那个目录无关。
 const agg = computed(() => {
-  const u = users.value;
+  const u = inDir.value;
   return [
     { label: '在线', n: u.filter((x) => x.online).length, color: 'var(--bd-success)' },
     { label: '离线', n: u.filter((x) => !x.online).length, color: 'var(--bd-t4)' },
@@ -560,8 +697,16 @@ function statusMeta(s: string) {
 const AV = ['#165DFF', '#722ED1', '#00B42A', '#FF7D00', '#0FC6C2'];
 function avBg(u: DirUser) { return AV[(u.account.charCodeAt(0) + u.account.length) % AV.length]; }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
-function riskColor(r: string) { return r === 'high' ? '#F53F3F' : r === 'low' ? '#FF7D00' : '#00B42A'; }
-function riskLabel(r: string) { return r === 'high' ? '高风险' : r === 'low' ? '低风险' : '正常'; }
+/** ★unknown 必须单列成灰色的「不可判定」，绝不落进 else 那一支。
+ *  改造前这两个函数的兜底是绿色的「正常」，于是一个**从未上报过终端环境**的账号
+ *  会显示成一句正向的安全断言——而 observe 准入模式下这种账号照样能接入，
+ *  它恰恰是管理员打开这一页最该找出来的那一类。灰色在本项目里专表"我们不知道"。 */
+function riskColor(r: string) {
+  return r === 'high' ? '#F53F3F' : r === 'low' ? '#FF7D00' : r === 'unknown' ? '#86909C' : '#00B42A';
+}
+function riskLabel(r: string) {
+  return r === 'high' ? '高风险' : r === 'low' ? '低风险' : r === 'unknown' ? '不可判定' : '正常';
+}
 
 // ── 用户详情 + 归属编辑 ──
 const memberForm = reactive<{ orgId: string; groups: string[]; roles: string[] }>({ orgId: '', groups: [], roles: [] });
@@ -591,7 +736,7 @@ async function saveMembership() {
     await load();
     const again = users.value.find((u) => u.id === sel.value?.id);
     if (again) open(again);
-  } catch { Message.error('保存失败，请检查权限或后端连接'); }
+  } catch (e) { Message.error(`归属保存失败：${failReason(e)}`); }
   finally { savingMember.value = false; }
 }
 
@@ -622,7 +767,7 @@ async function saveOrg() {
     Message.success(orgForm.id ? '组织已更新' : '组织已创建');
     orgOpen.value = false;
     await load();
-  } catch (e) { Message.error(reason(e, '保存组织失败')); }
+  } catch (e) { Message.error(`保存组织失败：${failReason(e)}`); }
   finally { orgSaving.value = false; }
 }
 // 删除入口现在常驻可见（不再要求先 hover），误触的代价比以前高，所以补一道确认。
@@ -643,7 +788,7 @@ async function removeOrg(key: string, title: string) {
   } catch (e) {
     // 后端守卫的原话（"该组织下还有用户，请先把用户移到其他组织"）是唯一能指导下一步动作的
     // 信息，用 Modal 留在屏幕上，别被 3 秒的 toast 带走。
-    Modal.warning({ title: '组织未删除', content: detail(e, '删除失败，请检查权限或后端连接') });
+    Modal.warning({ title: '组织未删除', content: failReason(e) });
   }
 }
 
@@ -674,7 +819,7 @@ async function saveGroup() {
     Message.success(groupForm.id ? '用户组已更新' : '用户组已创建');
     groupOpen.value = false;
     await load();
-  } catch (e) { Message.error(reason(e, '保存失败：组名可能与已有组重复')); }
+  } catch (e) { Message.error(`用户组保存失败：${failReason(e)}`); }
   finally { groupSaving.value = false; }
 }
 function askRemoveGroup(g: GroupWithMembers) {
@@ -692,7 +837,7 @@ async function removeGroup(g: GroupWithMembers) {
     if (groupSel.value === g.id) groupSel.value = '';
     await load();
   } catch (e) {
-    Modal.warning({ title: '用户组未删除', content: detail(e, '删除失败，请检查权限或后端连接') });
+    Modal.warning({ title: '用户组未删除', content: failReason(e) });
   }
 }
 
@@ -716,18 +861,8 @@ async function saveMembers() {
     Message.success('成员已更新');
     memberOpen.value = false;
     await load();
-  } catch (e) { Message.error(reason(e, '保存成员失败')); }
+  } catch (e) { Message.error(`保存成员失败：${failReason(e)}`); }
   finally { memberSaving.value = false; }
-}
-
-function reason(e: unknown, fallback: string) {
-  const msg = e instanceof Error ? e.message : '';
-  return msg ? `${fallback}（${msg}）` : fallback;
-}
-/** 只取后端原话（守卫消息本身已经是完整的一句话），拿不到才退回兜底文案。 */
-function detail(e: unknown, fallback: string) {
-  const msg = e instanceof Error ? e.message : '';
-  return msg || fallback;
 }
 
 async function load() {
@@ -755,14 +890,19 @@ async function setStatus(status: string, label: string) {
     Message.success(`${sel.value.name}：${label}`);
     drawer.value = false;
     await load();
-  } catch { Message.error('操作失败，请检查权限或后端连接'); }
+  } catch (e) {
+    // ★这里丢掉的是两道**防自锁 / 越权**守卫的原话：「最后一名可登录的超级管理员
+    //   不可禁用」「角色「安全管理员」无权处置其他管理员（需要权限：admins）」。
+    //   换成"请检查权限"之后，管理员既不知道自己撞的是哪一条，也不知道该找谁。
+    Message.error(`操作失败：${failReason(e)}`);
+  }
 }
 
 // 新增用户 → 落库
 const createOpen = ref(false);
 const creating = ref(false);
-const form = reactive<{ name: string; account: string; orgId: string; groups: string[]; auth: string; password: string }>(
-  { name: '', account: '', orgId: '', groups: [], auth: '密码+短信', password: '' });
+const form = reactive<{ name: string; account: string; orgId: string; groups: string[]; password: string }>(
+  { name: '', account: '', orgId: '', groups: [], password: '' });
 function openCreateUser() {
   form.orgId = mode.value === 'org' ? org.value : '';
   form.groups = mode.value === 'group' && groupSel.value && staticGroups.value.some((g) => g.id === groupSel.value)
@@ -783,7 +923,7 @@ async function createUser() {
     form.name = ''; form.account = ''; form.password = '';
     await load();
   } catch (e) {
-    Message.error(reason(e, '新增失败，请检查权限或后端连接'));
+    Message.error(`新增失败：${failReason(e)}`);
   } finally {
     creating.value = false;
   }
@@ -805,14 +945,103 @@ async function doReset() {
     });
     Message.success(`已重置「${sel.value.name}」的登录口令`);
     resetOpen.value = false;
-  } catch { Message.error('重置失败，请检查权限或后端连接'); }
+  } catch (e) { Message.error(`口令重置失败：${failReason(e)}`); }
   finally { resetting.value = false; }
+}
+
+/* ── 编辑资料 / 删除账号（FR-USER-02 / FR-USER-15）── */
+const prof = reactive({ open: false, busy: false, id: '', account: '', name: '', email: '', err: '' });
+
+function openEditProfile() {
+  if (!sel.value) return;
+  Object.assign(prof, {
+    open: true, busy: false, err: '',
+    id: sel.value.id, account: sel.value.account,
+    name: sel.value.name, email: sel.value.email ?? ''
+  });
+}
+
+async function saveProfile() {
+  if (!prof.name.trim()) { prof.err = '姓名不能为空'; return; }
+  prof.busy = true; prof.err = '';
+  try {
+    await api(`/users/${prof.id}`, {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ name: prof.name.trim(), email: prof.email.trim() })
+    });
+    Message.success(`已更新「${prof.name.trim()}」的资料`);
+    prof.open = false;
+    await load();
+    // 抽屉里那份是快照，刷新后要跟着换，否则页面上还是旧名字。
+    if (sel.value) sel.value = users.value.find((u) => u.id === prof.id) ?? sel.value;
+  } catch (e) {
+    prof.err = failReason(e);
+  } finally { prof.busy = false; }
+}
+
+const del = reactive({
+  open: false, busy: false, loading: false, id: '', account: '', name: '',
+  note: '', resources: [] as string[], err: ''
+});
+
+/** ★先问影响面再让人点：删账号**不会**把他从资源的 allow_users 里摘掉，
+ *  那是一串悬空的账号名，日后若有人建了同名账号会**直接继承**这些授权。
+ *  不说的话，管理员会以为删账号顺手把权限一起收了。 */
+async function openDeleteUser() {
+  if (!sel.value) return;
+  Object.assign(del, {
+    open: true, busy: false, loading: true, err: '',
+    id: sel.value.id, account: sel.value.account, name: sel.value.name,
+    note: '', resources: []
+  });
+  try {
+    const r = await api<{ note: string; resources: string[] }>(`/users/${del.id}/delete-preview`);
+    del.note = r.note;
+    del.resources = r.resources ?? [];
+  } catch (e) {
+    del.note = '';
+    del.err = `影响面读取失败：${failReason(e)}`;
+  } finally { del.loading = false; }
+}
+
+async function doDeleteUser() {
+  del.busy = true; del.err = '';
+  try {
+    const r = await api<{ note: string }>(`/users/${del.id}`, { method: 'DELETE' });
+    del.open = false;
+    drawer.value = false;
+    // 用不会自动消失的弹窗给影响面：那是要照着去补救的，不是通知。
+    Modal.info({ title: `账号「${del.name}」已删除`, content: r.note || '已释放 1 个 License 用户席位。', okText: '知道了' });
+    await load();
+  } catch (e) {
+    del.err = failReason(e);
+  } finally { del.busy = false; }
 }
 
 /* ── 闲置账号治理（wave7 行动 8②）── */
 interface IdleAccount { id: string; name: string; account: string; lastLogin: string; idleDays: number; neverRecorded: boolean; isAdmin: boolean }
 const idleOpen = ref(false);
 const idleDays = ref(90);
+/** 编辑中的闲置治理策略（PRD FR-MON-19）。与上面那个"预览天数"是两回事：
+ *  预览只影响这一次识别，策略才是后台自动锁定真正读的那份。 */
+const idlePolicy = reactive({ thresholdDays: 90, autoLock: false });
+/** **服务端上已落库**的那一份。
+ *
+ *  ★必须与编辑草稿分开存：只有一份的话，管理员刚在输入框里敲下 30、还没点保存，
+ *  页面就会说「落库的策略阈值是 30 天——自动锁定按后者执行」。那句话把一个
+ *  还没提交的数字说成了正在生效的事实，而它恰恰是这一屏最该说准的一句
+ *  （另一半是"后台会不会自己动手锁人"）。 */
+const idleSaved = reactive({ thresholdDays: 90, autoLock: false });
+/** 有未保存的改动（页面据此提示"改了还没保存"）。 */
+const idleDirty = computed(() =>
+  idlePolicy.thresholdDays !== idleSaved.thresholdDays || idlePolicy.autoLock !== idleSaved.autoLock);
+const idleSaving = ref(false);
+const idleStoreReady = ref(true);
+/** 阈值区间由后端下发，前端不另抄一份（抄一份就会出现"页面让填、后端拒收"）。 */
+const idleMinDays = ref(7);
+const idleMaxDays = ref(3650);
+/** 后台检查周期只是提示文案；真正的间隔在控制面 BAIDI_IDLE_LOCK_INTERVAL。 */
+const idleLoopHint = '一小时';
 const idleList = ref<IdleAccount[]>([]);
 const idleSel = ref<string[]>([]);
 const idleLoading = ref(false);
@@ -824,6 +1053,46 @@ function openIdle() {
   idleList.value = [];
   idleSel.value = [];
   idleQueried.value = false;
+  void loadIdlePolicy();
+}
+
+interface IdlePolicyResp {
+  policy: { thresholdDays: number; autoLock: boolean };
+  minDays: number; maxDays: number; storeReady: boolean;
+}
+
+async function loadIdlePolicy() {
+  try {
+    const r = await api<IdlePolicyResp>('/users/idle/policy');
+    idlePolicy.thresholdDays = r.policy.thresholdDays;
+    idlePolicy.autoLock = r.policy.autoLock;
+    idleSaved.thresholdDays = r.policy.thresholdDays;
+    idleSaved.autoLock = r.policy.autoLock;
+    idleMinDays.value = r.minDays;
+    idleMaxDays.value = r.maxDays;
+    idleStoreReady.value = r.storeReady;
+    // 预览天数默认跟随策略：一打开就看到"按当前策略会命中谁"。
+    idleDays.value = r.policy.thresholdDays;
+  } catch (e) {
+    Message.error(`闲置治理策略读取失败：${failReason(e)}`);
+  }
+}
+
+async function saveIdlePolicy() {
+  idleSaving.value = true;
+  try {
+    await api('/users/idle/policy', {
+      method: 'PUT', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ thresholdDays: idlePolicy.thresholdDays, autoLock: idlePolicy.autoLock })
+    });
+    Message.success(idlePolicy.autoLock
+      ? `策略已保存：超过 ${idlePolicy.thresholdDays} 天未登录即判闲置，后台将自动锁定（不含管理员账号）`
+      : `策略已保存：超过 ${idlePolicy.thresholdDays} 天未登录即判闲置，仅识别不自动锁定`);
+    await loadIdlePolicy();
+  } catch (e) {
+    Message.error(`闲置治理策略保存失败：${failReason(e)}`);
+    await loadIdlePolicy(); // 回读，避免界面上留着一个其实没保存成功的值
+  } finally { idleSaving.value = false; }
 }
 
 async function loadIdle() {
@@ -834,7 +1103,7 @@ async function loadIdle() {
     // 默认勾选非管理员（管理员目标需要更高权限且更该逐个斟酌，不进默认选集）
     idleSel.value = idleList.value.filter((a) => !a.isAdmin).map((a) => a.id);
     idleQueried.value = true;
-  } catch { Message.error('识别失败：请检查后端连接'); }
+  } catch (e) { Message.error(`闲置账号识别失败：${failReason(e)}`); }
   finally { idleLoading.value = false; }
 }
 
@@ -854,7 +1123,7 @@ async function lockIdle() {
     }
     await loadIdle();
     await load(); // 目录列表状态同步刷新
-  } catch { Message.error('批量锁定失败：请检查权限或后端连接'); }
+  } catch (e) { Message.error(`批量锁定失败：${failReason(e)}`); }
   finally { idleLocking.value = false; }
 }
 
@@ -949,21 +1218,44 @@ async function doImport() {
   } catch (e) {
     // 后端的拒收理由（含角色列 / 超上限 / 缺必填列）是唯一能指导下一步的信息，
     // 用 Modal 留在屏幕上，别被 3 秒的 toast 带走。
-    Modal.warning({ title: '导入未执行', content: detail(e, '导入失败，请检查权限或后端连接') });
+    Modal.warning({ title: '导入未执行', content: failReason(e) });
   } finally { importing.value = false; }
 }
 
-/** 管理员清除用户的 TOTP（丢认证器的 helpdesk 通道）：下次登录回到口令单因素，须本人重新注册。
- *  目标是管理员时后端把门槛抬到 admins 权（与重置口令同一道收口）。 */
-async function resetTotp() {
+/** 管理员清除用户的第二因子（丢认证器的 helpdesk 通道）：下次登录回到口令单因素，
+ *  须本人重新注册。目标是管理员时后端把门槛抬到 admins 权（与重置口令同一道收口）。 */
+const MFA_KINDS = {
+  totp: { label: 'TOTP', path: 'totp', note: '该用户的动态口令认证器绑定会被清除。' },
+  passkey: { label: 'passkey', path: 'passkeys', note: '该用户已注册的**全部** passkey 都会被清除。' }
+} as const;
+
+/** ★清二因子是**削弱**目标账号防护的方向，且不可撤销（认证器绑定没了就得重新注册）。
+ *  同一屏的「禁用账号」都要确认，这两个更该确认——而它们此前是点中即执行的裸按钮。 */
+function askResetMfa(kind: keyof typeof MFA_KINDS) {
   if (!sel.value) return;
+  const k = MFA_KINDS[kind];
+  const name = sel.value.name;
+  Modal.confirm({
+    title: `重置 ${k.label} 二次认证`,
+    content: `确认清除「${name}」的 ${k.label} 绑定？${k.note}` +
+      `该账号下次登录将回到**口令单因素**，直到本人重新注册。此操作不可撤销。`,
+    okText: '确认重置', cancelText: '取消', okButtonProps: { status: 'danger' },
+    onOk: () => resetMfa(kind)
+  });
+}
+
+async function resetMfa(kind: keyof typeof MFA_KINDS) {
+  if (!sel.value) return;
+  const k = MFA_KINDS[kind];
   try {
-    const r = await api<{ ok: boolean; removed: boolean }>(`/users/${sel.value.id}/totp`, { method: 'DELETE' });
-    if (r.removed) Message.success(`已清除「${sel.value.name}」的 TOTP，下次登录回到口令单因素`);
-    else Message.info(`「${sel.value.name}」未注册 TOTP，无需重置`);
+    // 两个端点的应答形状不同：TOTP 回 bool，passkey 回清掉的条数。
+    const r = await api<{ ok: boolean; removed: boolean | number }>(
+      `/users/${sel.value.id}/${k.path}`, { method: 'DELETE' });
+    const n = typeof r.removed === 'number' ? r.removed : (r.removed ? 1 : 0);
+    if (n > 0) Message.success(`已清除「${sel.value.name}」的 ${k.label}（${n} 项），下次登录回到口令单因素`);
+    else Message.info(`「${sel.value.name}」未注册 ${k.label}，无需重置`);
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('403') ? '权限不足：重置管理员的 TOTP 需要「管理员管理」权限' : '重置失败，请检查权限或后端连接');
+    Message.error(`${k.label} 重置失败：${failReason(e)}`);
   }
 }
 
@@ -971,6 +1263,22 @@ onMounted(load);
 </script>
 
 <style scoped>
+/* 闲置治理策略区 */
+.bd-idlepol { border: 1px solid var(--bd-border); border-radius: 9px; padding: 12px 14px; margin-bottom: 14px; background: var(--bd-fill-1); }
+.bd-idlepol__h { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
+.bd-idlepol__h span { font-weight: 400; font-size: 11.5px; color: var(--bd-t3); }
+.bd-idlepol__row { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--bd-t2); }
+.bd-idlepol__auto { align-items: flex-start; margin-top: 11px; cursor: pointer; }
+.bd-idlepol__auto b { display: block; color: var(--bd-t1); font-weight: 500; }
+.bd-idlepol__auto i { display: block; font-style: normal; font-size: 11.5px; color: var(--bd-t3); line-height: 1.75; margin-top: 3px; }
+.bd-idlepol__warn {
+  display: flex; gap: 7px; align-items: flex-start; margin-top: 10px; padding: 8px 10px;
+  background: var(--bd-tag-gold-bg); border-radius: 7px; font-size: 11.5px; color: var(--bd-t2); line-height: 1.75;
+}
+.bd-idlepol__warn > :first-child { color: var(--bd-warning); flex: none; margin-top: 2px; }
+.bd-idlepol__dirty { font-size: 11.5px; color: var(--bd-warning); }
+.bd-idle__preview { margin-top: 8px; font-size: 11.5px; color: var(--bd-warning); line-height: 1.7; }
+
 .bd-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
 .bd-tab { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
 .bd-tab:hover { background: var(--bd-fill-2); }
@@ -1039,6 +1347,7 @@ onMounted(load);
 .bd-ud__head { display: flex; align-items: center; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid var(--bd-fill-2); }
 .bd-ud__name { font-size: 17px; font-weight: 700; display: flex; align-items: center; }
 .bd-ud__acct { font-size: 12px; color: var(--bd-t3); margin-top: 3px; }
+.bd-riskwhy { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 4px; line-height: 1.6; font-weight: 400; }
 .bd-ud__sec { font-size: 13px; font-weight: 600; margin: 20px 0 12px; }
 .bd-life { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
 .bd-life__step { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-t4); }
@@ -1053,6 +1362,22 @@ onMounted(load);
 .bd-ud__acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
 
 .bd-uform__hint { font-size: 12.5px; color: var(--bd-t3); line-height: 1.6; margin-bottom: 16px; }
+.bd-uform__note {
+  display: flex; gap: 8px; align-items: flex-start; padding: 9px 11px; margin-bottom: 16px;
+  background: var(--bd-fill-1); border-radius: 7px; font-size: 12px; color: var(--bd-t2); line-height: 1.7;
+}
+.bd-uform__d { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 5px; line-height: 1.7; }
+.bd-uform__err {
+  display: flex; gap: 6px; align-items: flex-start; margin-top: 12px; padding: 8px 10px;
+  background: var(--bd-tag-red-bg); color: var(--bd-danger); border-radius: 7px; font-size: 12px; line-height: 1.65;
+}
+.bd-delwarn {
+  display: flex; gap: 9px; align-items: flex-start; padding: 11px 13px; margin-bottom: 12px;
+  background: var(--bd-tag-red-bg); border: 1px solid #FFCDC7; border-radius: 8px;
+  font-size: 12.5px; color: var(--bd-t1); line-height: 1.8;
+}
+.bd-delwarn > :first-child { color: var(--bd-danger); flex: none; margin-top: 2px; }
+.bd-delnote { font-size: 12.5px; color: var(--bd-t2); line-height: 1.85; }
 .bd-uform__f { margin-bottom: 16px; }
 .bd-uform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
 .bd-uform__f :deep(.arco-input-wrapper), .bd-uform__f :deep(.arco-select-view) { width: 100%; }

@@ -106,6 +106,15 @@ const (
 	// ★这条是本组里最该存在的一条：防篡改链没人定期查就等于没有——
 	// 篡改发生到被发现之间的窗口，取决于有没有人手动点那个「校验」按钮。
 	AlertKindAuditChain = "audit_chain"
+	// AlertKindAuditForwardFail 审计外送出口持续投递失败 / 队列积压。
+	//
+	// ★这条此前不存在，而外送失败的信号面**只有两处**：进程日志一行 slog.Warn，
+	// 与系统页里那一格 lastStatus。没有告警、没有 /diag 项、消息通道也不发。
+	// 后果是合规链路**静默断掉**：审计照常落本地库、页面一切正常，
+	// 而 SIEM 那边从某一刻起再也没收到过东西，直到有人主动去翻那一格才发现。
+	// 队列本身是可靠的（成功才出队、失败退避重试），但它有上界——
+	// 积压到顶就开始丢新的，那时才发现已经晚了。
+	AlertKindAuditForwardFail = "audit_forward_fail"
 )
 
 // 冷却期边界（秒）。默认 30 分钟。
@@ -163,6 +172,8 @@ const (
 	ThreshExpireDays   = "expireDays"
 	ThreshSeatPercent  = "seatPercent"
 	ThreshWithinMin    = "withinMinutes"
+	// ThreshBacklogPercent 队列积压占上界的比例（%）。
+	ThreshBacklogPercent = "backlogPercent"
 )
 
 // alertKindSpecs 全部规则种类。**新增一项前先回答：它读的那份数据现在真的存在吗？**
@@ -207,7 +218,7 @@ var alertKindSpecs = []AlertKindSpec{
 	},
 	{
 		Kind: AlertKindAppUnlinked, Name: "应用未关联受控资源", Category: AlertCategoryAuthz,
-		Severity:    AlertSevWarning,
+		Severity: AlertSevWarning,
 		Signal: "apps 中 status=running、mode≠global，且「未关联资源」或「关联的资源已不存在」的应用" +
 			"（与客户端接入剖面的 warnings 同一条判据；直连书签不经网关、本就不需要资源，故排除）",
 		Thresholds:  map[string]float64{},
@@ -261,6 +272,21 @@ var alertKindSpecs = []AlertKindSpec{
 			"那种情况看进程日志与 /diag 的「审计写入链路」",
 		Thresholds:  map[string]float64{ThreshWithinMin: 60},
 		ThresholdZh: map[string]string{ThreshWithinMin: "最近多少分钟内失败才报（分钟）"},
+	},
+	{
+		Kind: AlertKindAuditForwardFail, Name: "审计外送投递失败", Category: AlertCategorySecurity,
+		Severity: AlertSevCritical,
+		Signal: "audit_forward_targets 里**启用中**出口的 last_status / last_ok_at，" +
+			"以及现算的队列积压（audit_forward_queue 计数）与累计丢弃数 dropped。" +
+			"★没有启用中的出口时一条候选都不产生——别给没用这个功能的部署常年挂告警",
+		Thresholds: map[string]float64{
+			ThreshWithinMin:      30,
+			ThreshBacklogPercent: 50,
+		},
+		ThresholdZh: map[string]string{
+			ThreshWithinMin:      "多久没有成功投递过才报（分钟）",
+			ThreshBacklogPercent: "队列积压占上界多少比例才报（%）",
+		},
 	},
 	{
 		Kind: AlertKindAuditChain, Name: "审计防篡改链校验失败", Category: AlertCategorySecurity,
@@ -422,9 +448,10 @@ type GatewayMetricSample struct {
 // ★刻意不给种子：编造几条"未处理告警"会让这一页在没接后端时看起来正在工作，
 // 而告警恰恰是那种"看起来有=以为被监控着"的页面，假数据在这里的代价比别处大。
 
-func (m *Memory) Alerts(context.Context, AlertQuery) ([]Alert, error) { return []Alert{}, nil }
-func (m *Memory) AlertRules(context.Context) ([]AlertRule, error)     { return []AlertRule{}, nil }
-func (m *Memory) AlertCounts(context.Context) (AlertCounts, error)    { return AlertCounts{}, nil }
+func (m *Memory) Alerts(context.Context, AlertQuery) ([]Alert, error)  { return []Alert{}, nil }
+func (m *Memory) CountAlerts(context.Context, AlertQuery) (int, error) { return 0, nil }
+func (m *Memory) AlertRules(context.Context) ([]AlertRule, error)      { return []AlertRule{}, nil }
+func (m *Memory) AlertCounts(context.Context) (AlertCounts, error)     { return AlertCounts{}, nil }
 
 // StaleGrants Memory 空实现（JIT 授予只有 SQLite 承载真实数据）。
 func (m *Memory) StaleGrants(context.Context, int64) ([]JitGrant, error) { return []JitGrant{}, nil }

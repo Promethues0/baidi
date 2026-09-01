@@ -25,10 +25,32 @@ const alertRuleSeedMarker = "alert.rules.seed.v1"
 // 这同时承担既有库的"回填"职责：新表在旧库上是空的，不播种的话升级后
 // 告警页一条规则都没有、什么都不会触发，而页面上看不出缺了什么。
 func (s *SQLiteStore) seedAlertRules(ctx context.Context) error {
-	if _, done, err := s.Setting(ctx, alertRuleSeedMarker); err != nil || done {
+	// ★逐种类判断"这一类有没有规则"，而不是靠一个全局的一次性标记。
+	//
+	//   原来那个标记（alertRuleSeedMarker）一旦落下，**后来新增的规则种类就再也不会
+	//   被播种**：升级到带新规则的版本后，那一类在告警页上根本不存在，也永远不会触发，
+	//   而页面上看不出缺了什么——与「补列迁移必须配回填」是同一个坑，只是坑在规则表上。
+	//   本波新增 audit_forward_fail 时正好会踩到它。
+	//
+	//   改成按种类幂等之后，标记只用来区分"首次初始化"（那次要把全部种类播齐），
+	//   之后每次启动都会把**缺失的种类**补上。管理员**删掉**的规则不会被复活：
+	//   删除时会连同它的种类记进 alertRuleRemovedMarker（见 DeleteAlertRule）。
+	existing, err := s.AlertRules(ctx)
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for _, r := range existing {
+		have[r.Kind] = true
+	}
+	removed, err := s.removedAlertKinds(ctx)
+	if err != nil {
 		return err
 	}
 	for _, spec := range AlertKindSpecs() {
+		if have[spec.Kind] || removed[spec.Kind] {
+			continue
+		}
 		r := AlertRule{
 			ID: "ar-" + strings.ReplaceAll(spec.Kind, "_", "-"), Name: spec.Name, Kind: spec.Kind,
 			Threshold: spec.Thresholds, Enabled: true, Channels: []string{},
@@ -39,6 +61,44 @@ func (s *SQLiteStore) seedAlertRules(ctx context.Context) error {
 		}
 	}
 	return s.SetSetting(ctx, alertRuleSeedMarker, nowStr())
+}
+
+// alertRuleRemovedMarker 记下管理员**主动删过**的规则种类，避免下次启动把它播回来。
+const alertRuleRemovedMarker = "alert.rules.removed.v1"
+
+// removedAlertKinds 读那份"别再播了"的清单。
+func (s *SQLiteStore) removedAlertKinds(ctx context.Context) (map[string]bool, error) {
+	out := map[string]bool{}
+	raw, ok, err := s.Setting(ctx, alertRuleRemovedMarker)
+	if err != nil || !ok || raw == "" {
+		return out, err
+	}
+	for _, k := range jsonStrings(raw) {
+		out[k] = true
+	}
+	return out, nil
+}
+
+// noteRemovedAlertKind 把一个被删掉的种类记进清单（幂等）。
+func (s *SQLiteStore) noteRemovedAlertKind(ctx context.Context, kind string) error {
+	if kind == "" {
+		return nil
+	}
+	cur, err := s.removedAlertKinds(ctx)
+	if err != nil {
+		return err
+	}
+	if cur[kind] {
+		return nil
+	}
+	cur[kind] = true
+	keys := make([]string, 0, len(cur))
+	for k := range cur {
+		keys = append(keys, k)
+	}
+	sort.Strings(keys)
+	raw, _ := json.Marshal(keys)
+	return s.SetSetting(ctx, alertRuleRemovedMarker, string(raw))
 }
 
 // AlertRules 全部告警规则（按 kind 固定顺序，保证页面上下不跳）。
@@ -129,18 +189,33 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, kind=excluded.kind, threshold_
 // 删规则不该让历史消失。alerts.rule_id 因此可能指向一条已不存在的规则，
 // 读侧不 JOIN 规则表正是为此。
 func (s *SQLiteStore) DeleteAlertRule(ctx context.Context, id string) error {
-	_, err := s.db.ExecContext(ctx, `DELETE FROM alert_rules WHERE id=?`, id)
-	return err
+	// 先取种类：播种改成"按种类补齐"之后，删掉的规则会在下次启动被播回来，
+	// 而管理员会以为自己没删掉（或者删了又长出来）。记进"别再播"清单。
+	var kind string
+	_ = s.db.QueryRowContext(ctx, `SELECT COALESCE(kind,'') FROM alert_rules WHERE id=?`, id).Scan(&kind)
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM alert_rules WHERE id=?`, id); err != nil {
+		return err
+	}
+	// 同种类还剩别的规则时不记（管理员只是删了其中一条）。
+	var left int
+	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM alert_rules WHERE kind=?`, kind).Scan(&left)
+	if left > 0 {
+		return nil
+	}
+	return s.noteRemovedAlertKind(ctx, kind)
 }
 
-// defaultAlertLimit 列表默认上限：告警页一屏 + 翻页余量，避免一次拉走全表。
-const defaultAlertLimit = 200
+// AlertListLimit 列表读取上限：告警页一屏 + 余量，避免一次拉走全表。
+// 导出给前端是为了让页面能原样说出「本页只显示最近 N 条」，而不是自己猜一个数。
+const AlertListLimit = 200
 
-// Alerts 按条件查告警（新→旧）。
-func (s *SQLiteStore) Alerts(ctx context.Context, q AlertQuery) ([]Alert, error) {
+// defaultAlertLimit 保留原名供包内使用。
+const defaultAlertLimit = AlertListLimit
+
+// alertWhere 拼过滤条件——**列表与计数必须共用**：各写一份的话，
+// 「共 N 条」与列表里的行会按两套条件算，而那个差值看起来就像丢了记录。
+func alertWhere(q AlertQuery) (string, []any) {
 	sb := strings.Builder{}
-	sb.WriteString(`SELECT id,rule_id,COALESCE(kind,''),category,severity,title,COALESCE(detail,''),
-	  COALESCE(object_key,''),status,triggered_at,COALESCE(handled_at,0),COALESCE(handled_by,'') FROM alerts WHERE 1=1`)
 	var args []any
 	if q.Status != "" {
 		sb.WriteString(` AND status=?`)
@@ -158,6 +233,29 @@ func (s *SQLiteStore) Alerts(ctx context.Context, q AlertQuery) ([]Alert, error)
 		sb.WriteString(` AND triggered_at<=?`)
 		args = append(args, q.To)
 	}
+	return sb.String(), args
+}
+
+// CountAlerts 按同一组过滤条件数**库里的总行数**（不受 LIMIT 影响）。
+//
+// ★截断必须可见（同 store.ListLimit 那条纪律）：列表被 defaultAlertLimit=200 硬截，
+// 而页头那三个计数是**全局量**（不随筛选变）。两者并排时，未处理超过 200 条的部署
+// 会显示「未处理 350」+ 一张 200 行的表，第 201 条之后的告警在管理台上根本不存在，
+// 页面上也没有任何一句话提示被截断过。
+func (s *SQLiteStore) CountAlerts(ctx context.Context, q AlertQuery) (int, error) {
+	where, args := alertWhere(q)
+	var n int
+	err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM alerts WHERE 1=1`+where, args...).Scan(&n)
+	return n, err
+}
+
+// Alerts 按条件查告警（新→旧）。
+func (s *SQLiteStore) Alerts(ctx context.Context, q AlertQuery) ([]Alert, error) {
+	sb := strings.Builder{}
+	sb.WriteString(`SELECT id,rule_id,COALESCE(kind,''),category,severity,title,COALESCE(detail,''),
+	  COALESCE(object_key,''),status,triggered_at,COALESCE(handled_at,0),COALESCE(handled_by,'') FROM alerts WHERE 1=1`)
+	where, args := alertWhere(q)
+	sb.WriteString(where)
 	limit := q.Limit
 	if limit <= 0 || limit > defaultAlertLimit {
 		limit = defaultAlertLimit

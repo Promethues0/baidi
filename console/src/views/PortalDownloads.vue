@@ -111,7 +111,7 @@ import { computed, onMounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import QRCode from 'qrcode';
 import { Message } from '@arco-design/web-vue';
-import { api, getToken, type ClientDownload, type DownloadsResp } from '@/lib/api';
+import { api, getToken, type ClientDownload, type DownloadsResp, failReason } from '@/lib/api';
 import { IconDesktop, IconMobile } from '@arco-design/web-vue/es/icon';
 import PortalBar from '@/components/PortalBar.vue';
 
@@ -194,9 +194,9 @@ async function load() {
         qr.value = ''; // 降级显示纯 URL 文本
       }
     }
-  } catch {
+  } catch (e) {
     failed.value = true;
-    Message.error('下载清单获取失败，请稍后重试');
+    Message.error(`下载清单获取失败：${failReason(e)}`);
   } finally {
     loading.value = false;
   }

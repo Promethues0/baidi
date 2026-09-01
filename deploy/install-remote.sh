@@ -311,6 +311,20 @@ if [ "${BAIDI_SEED_MUST_CHANGE:-1}" = "1" ] && ! grep -q '^BAIDI_SEED_MUST_CHANG
   echo "==> 已开启首登强制改密（仅首次建库时对种子账号生效）"
 fi
 
+# 升级包发布公钥（FR-UPG-04）：只在调用方显式给了值时写入，幂等追加。
+#
+# ★不配是**合法且默认**的姿态：不用「上传升级包」这个功能时留空即可，
+# 控制面会 fail-closed 地拒绝一切未验签的包，升级页也会当面说明校验为何不可用。
+# 配了才有意义——私钥在发布方手里，这台机器上只有公钥。
+if [ -n "${BAIDI_UPGRADE_PUBKEY:-}" ] && ! grep -q '^BAIDI_UPGRADE_PUBKEY=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; then
+  echo "BAIDI_UPGRADE_PUBKEY=$BAIDI_UPGRADE_PUBKEY" >> "$BD_PREFIX/etc/baidi.env"
+  chmod 0600 "$BD_PREFIX/etc/baidi.env"
+  echo "==> 已写入升级包发布公钥（升级包校验可用）"
+else
+  echo "==> 未配置 BAIDI_UPGRADE_PUBKEY：升级包校验将 fail-closed 地拒绝所有包"
+  echo "    不使用「上传升级包」功能时这是正常的；需要时见 deploy/config.env.example"
+fi
+
 # 自签 TLS（仅首次；生产请换正式证书）。SAN 区分 IP/域名；私钥严格 0600（umask 兜底）。
 if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
   san="DNS:baidi"

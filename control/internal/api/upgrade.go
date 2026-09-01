@@ -55,6 +55,16 @@ type upgradeBundle struct {
 	Versions []store.ClientVersionStat `json:"versions"`
 	// Groups 用户组候选（灰度定向用，与资源授权/认证策略共用 subjectOptions）。
 	Groups []subjectOption `json:"groups"`
+	// SignKeysConfigured 是否配了升级包发布公钥（BAIDI_UPGRADE_PUBKEY）。
+	//
+	// ★没配时验签是 **fail-closed** 的（`upgrade.VerifySignature` 直接拒），
+	// 于是「上传包 → 校验」这条路在任何未配置的部署上**恒为「校验不通过」**，
+	// 而页面上此前不说原因——管理员会以为是自己的包有问题，反复换包重传。
+	// 现在页面据此**预先**置灰校验入口并说清怎么配（发布方 genkey → 填公钥），
+	// 而不是让人先撞一次墙。
+	SignKeysConfigured bool `json:"signKeysConfigured"`
+	// SignKeyNote 未配置时的一句人话（后端下发，页面不自己编）。
+	SignKeyNote string `json:"signKeyNote,omitempty"`
 	// Boundaries 如实告知本功能做到哪、没做哪——PRD 第 4 章有大量源产品专有内容，
 	// 不说清楚的话，管理员会以为界面上没有的就是「还没做完」而不是「刻意不做」。
 	Boundaries []string `json:"boundaries"`
@@ -90,6 +100,14 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) upgradeBundle(r *http.Request) (upgradeBundle, error) {
 	b := upgradeBundle{Control: Version, Gateways: s.gatewayVersions(), Boundaries: upgradeBoundaries()}
+	b.SignKeysConfigured = len(s.upgradeKeys) > 0
+	if !b.SignKeysConfigured {
+		b.SignKeyNote = "未配置升级包发布公钥（BAIDI_UPGRADE_PUBKEY），升级包校验不可用——" +
+			"这是 fail-closed 的默认姿态：不验签就等于任何人都能推一个包上来。" +
+			"需要用这个功能时：① 在**发布方**机器上跑 `baidi-upgrade -genkey`（私钥绝不放到控制面机器上）；" +
+			"② 把 upgrade-sign.pub 的内容填进部署的 BAIDI_UPGRADE_PUBKEY（轮换期可逗号分隔多把）；" +
+			"③ 发包时用 `baidi-upgrade -manifest/-sign` 产出 manifest 与签名，上传时一并提交。"
+	}
 	if s.upg == nil {
 		b.Rules = upgrade.DefaultRules()
 		b.Gray = []upgrade.GrayPlan{}

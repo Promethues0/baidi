@@ -294,7 +294,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type AppBundle, type App, type AppCategory, type AppCategoryDef, type AppCategoriesResp, type Resource, type ResourcesResp } from '@/lib/api';
+import { api, type AppBundle, type App, type AppCategory, type AppCategoryDef, type AppCategoriesResp, type Resource, type ResourcesResp, failReason } from '@/lib/api';
 
 const live = ref(false);
 const categories = ref<AppCategory[]>([{ key: 'all', label: '全部应用', count: 0 }]);
@@ -407,7 +407,7 @@ async function next() {
     cat.value = 'all';
     await load();
   } catch (e) {
-    Message.error(reason(e, '发布失败，请检查后端连接'));
+    Message.error(`发布失败：${failReason(e)}`);
   } finally {
     publishing.value = false;
   }
@@ -443,7 +443,7 @@ async function saveEdit() {
     Message.success(`应用「${ed.f.name}」已更新`);
     await load();
   } catch (e) {
-    Message.error(reason(e, '保存失败（需管理员登录 / 后端在线）'));
+    Message.error(`保存失败：${failReason(e)}`);
   } finally { ed.busy = false; }
 }
 function confirmDelete(a: App) {
@@ -461,7 +461,7 @@ function confirmDelete(a: App) {
         Message.success(`应用「${a.name}」已下架`);
         await load();
       } catch (e) {
-        Message.error(reason(e, '下架失败（需管理员登录 / 后端在线）'));
+        Message.error(`下架失败：${failReason(e)}`);
       }
     }
   });
@@ -482,7 +482,7 @@ async function loadCats() {
     mgr.list = (await api<AppCategoriesResp>('/app-categories')).categories ?? [];
   } catch (e) {
     mgr.list = [];
-    mgr.err = reason(e, '读取分类字典失败');
+    mgr.err = `读取分类字典失败：${failReason(e)}`;
   } finally {
     mgr.loaded = true;
   }
@@ -502,7 +502,7 @@ async function catOp(run: () => Promise<unknown>, okMsg: string, failMsg: string
     return true;
   } catch (e) {
     // 后端守卫的原话就是下一步该做什么（"分类下仍有 N 个应用…"），原样呈现。
-    const msg = reason(e, failMsg);
+    const msg = `${failMsg}：${failReason(e)}`;
     Message.error(msg);
     // ★先刷新再写 err：loadCats 成功时不动 err，但它是异步的，
     // 顺序反过来的话弹窗里的红条会被这次刷新的时序吃掉，只剩一条转瞬即逝的 toast。
@@ -570,11 +570,6 @@ async function remove(c: AppCategoryDef) {
 /** prevLabel 记住每行改动前的名称：用于「没变就不提交」与失败回滚显示。 */
 const prevLabel = new Map<string, string>();
 watch(() => mgr.list, (l) => { prevLabel.clear(); l.forEach((c) => prevLabel.set(c.key, c.label)); }, { deep: false });
-
-function reason(e: unknown, fallback: string) {
-  const msg = e instanceof Error ? e.message : '';
-  return msg ? `${fallback}（${msg}）` : fallback;
-}
 
 onMounted(load);
 </script>

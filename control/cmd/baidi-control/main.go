@@ -185,6 +185,15 @@ func main() {
 	// 清理段末的链锚点由 store 侧共用实现落 audit_meta，防篡改链不因轮转断裂。
 	srv.StartAuditPurgeLoop(alertCtx, cfg.AuditRetentionDays, cfg.AuditMaxDiskPercent)
 	srv.StartExternalRecheckLoop(alertCtx, cfg.ExtRecheckInterval)
+	// 闲置账号自动锁定（PRD FR-MON-19 后半）：默认每小时一轮，**是否真锁由落库策略决定**
+	// （出厂关闭）。锁定复用手工批量的同一条路径，且永不处置管理员账号。
+	srv.StartIdleLockLoop(alertCtx, cfg.IdleLockInterval)
+	// 主机侧定期自动备份（NFR-AVL-04）：未配置目录/口令时**不启用**，
+	// 但会打告警并在 /diag 上如实显示「未启用」——不静默地什么都不做。
+	srv.StartAutoBackupLoop(alertCtx, api.AutoBackupConfig{
+		Dir: cfg.BackupDir, Interval: cfg.BackupInterval,
+		Passphrase: cfg.BackupPassphrase, Keep: cfg.BackupKeep,
+	})
 
 	// ★CORS 默认 "*"：任意网页都能对本控制面发跨源请求。API 认证走 Bearer 而非
 	// Cookie，跨站页面读不到已认证响应，真实暴露面只有免认证端点——但其中包含登录，

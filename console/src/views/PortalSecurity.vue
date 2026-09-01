@@ -151,7 +151,7 @@ import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import QRCode from 'qrcode';
-import { api, type WebauthnCredentialsResp, type WebauthnCredential, type TotpStatus, type TotpEnrollResp } from '@/lib/api';
+import { api, type WebauthnCredentialsResp, type WebauthnCredential, type TotpStatus, type TotpEnrollResp, failReason, failStatus } from '@/lib/api';
 import { createCredential, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 import PortalBar from '@/components/PortalBar.vue';
 
@@ -210,9 +210,8 @@ async function register() {
     Message.success(`passkey「${name}」注册成功，下次登录将用它完成二次认证`);
     await load();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('409')) Message.error('该认证器已注册过');
-    else if (msg.startsWith('503')) Message.error('服务端未配置 WebAuthn');
+    if (failStatus(e) === 409) Message.error('该认证器已注册过');
+    else if (failStatus(e) === 503) Message.error(failReason(e));
     else Message.error(webauthnErrMsg(e));
   } finally {
     registering.value = false;
@@ -255,8 +254,8 @@ async function startTotp() {
     confirmCode.value = '';
     qrData.value = await QRCode.toDataURL(r.uri, { width: 168, margin: 1 });
     await loadTotp();
-  } catch {
-    Message.error('生成密钥失败');
+  } catch (e) {
+    Message.error(`生成密钥失败：${failReason(e)}`);
   }
 }
 
@@ -275,8 +274,11 @@ async function confirmTotp() {
     setup.value = null;
     qrData.value = '';
     await loadTotp();
-  } catch {
-    Message.error('验证码不正确，请确认扫码 / 录入无误后重试');
+  } catch (e) {
+    // ★不能一律断言"验证码不正确"：同一个失败也可能是**同一 30s 步长的码已被用过**
+    //   （store.ConsumeTotpCounter 的防重放）、或者进门锁把这次尝试挡了。
+    //   把三种原因说成同一种，用户会一遍遍重输一个其实没错的码。
+    Message.error(`验证失败：${failReason(e)}`);
   } finally {
     confirming.value = false;
   }
@@ -298,8 +300,8 @@ async function disableTotp() {
     disarming.value = false;
     disableCode.value = '';
     await loadTotp();
-  } catch {
-    Message.error('解绑失败：请输入认证器 App 当前显示的验证码');
+  } catch (e) {
+    Message.error(`解绑失败：${failReason(e)}`);
   }
 }
 
@@ -309,8 +311,7 @@ async function remove(c: WebauthnCredential) {
     Message.success(`已删除「${c.name || 'passkey'}」`);
     await load();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('409') ? '不能删除最后一个 passkey' : '删除失败');
+    Message.error(`删除失败：${failReason(e)}`);
   }
 }
 

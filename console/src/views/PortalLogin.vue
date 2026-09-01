@@ -313,7 +313,7 @@
 import { onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, setToken, type PortalLoginResp, type AuthDomainOption } from '@/lib/api';
+import { api, setToken, type PortalLoginResp, type AuthDomainOption, failStatus } from '@/lib/api';
 import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
@@ -532,9 +532,8 @@ async function submitWebauthn() {
     }
     mfaReason.value = resp.reason || 'passkey 验证失败，请重试。';
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
     // 票据过期（3min）→ 退回口令步骤重来
-    if (msg.startsWith('401')) {
+    if (failStatus(e) === 401) {
       errMsg.value = '认证超时，请重新登录。';
       backToLogin();
     } else {
@@ -569,8 +568,10 @@ async function submitTotp() {
     }
     mfaReason.value = resp.reason || '验证码不正确，请重试。';
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('401') && msg.includes('票据')) {
+    // 401 = mfaTicket 过期/失效（那张票只有短时效）；其余一律是这一轮验证码本身的问题。
+    // 判状态码而不是判 message 里有没有「票据」二字：后端换一句文案这条分支就静默失效，
+    // 表现为"认证超时"被说成"验证码不正确"，用户会一直重输一个永远不可能对的码。
+    if (failStatus(e) === 401) {
       // 票据过期（3min）→ 退回口令步骤重来
       errMsg.value = '认证超时，请重新登录。';
       backToLogin();

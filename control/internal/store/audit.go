@@ -67,6 +67,57 @@ type AuditVerifyResult struct {
 	BrokenAt int64 `json:"brokenAt"`
 }
 
+// AuditCategory 一个审计类别的机读键与中文名。
+type AuditCategory struct{ Key, Label string }
+
+// AuditCategories 审计类别字典——**全系统唯一一份**。
+//
+// ★这份清单此前散在四个地方，四份内容互不相同，于是出现了一个能写进去、
+// 却在任何一处都数不到、也筛不到的类别：
+//
+//	写入方（api 包 4 处）：s.audit(r, "policy", "保存接入策略：…")   ← 真的落库了
+//	列表聚合（audit_sqlite 的 labels）：只列 access/auth/admin/security/dataplane
+//	                                   → 类别卡加起来比库里的总行数少
+//	检索校验（handleAudit）：accepts access|auth|admin|security|dataplane|system
+//	                       → 按 policy 筛直接 400「未知的审计类别：policy」
+//	态势总览（overview_sqlite）：把 policy+admin 并成一格「策略变更」，
+//	                          且完全不含 dataplane/system
+//
+// 后果是「保存安全基线」「保存接入策略」「设置网关对外接入地址」这几条
+// **安全相关的管理动作**，在审计中心既不在任何一张类别卡里、也没有任何办法筛出来；
+// 而两个页面对「策略变更」这个词的含义还不一样。
+//
+// 现在四处都从这里取。新增类别只改这一处，漏改会被 TestAuditCategoriesCoverWrites 抓住。
+var AuditCategories = []AuditCategory{
+	{"access", "访问决策"},
+	{"auth", "登录认证"},
+	{"admin", "管理操作"},
+	{"policy", "策略变更"},
+	{"security", "安全事件"},
+	{"dataplane", "数据面回执"},
+	{"system", "系统运维"},
+}
+
+// ValidAuditCategory 报告该类别键是否在字典里（检索/导出的入参校验共用）。
+func ValidAuditCategory(key string) bool {
+	for _, c := range AuditCategories {
+		if c.Key == key {
+			return true
+		}
+	}
+	return false
+}
+
+// AuditCategoryZh 取类别的中文名；不在字典里时原样返回键（页面稳定降级）。
+func AuditCategoryZh(key string) string {
+	for _, c := range AuditCategories {
+		if c.Key == key {
+			return c.Label
+		}
+	}
+	return key
+}
+
 // AuditEntry 一条审计记录。
 //
 // ★这个结构体是**三个出口的唯一口径**：`GET /api/v1/audit` 列表、CSV 导出、
@@ -75,7 +126,7 @@ type AuditVerifyResult struct {
 // 同一条审计在三个地方长得不一样，而"哪个是准的"没人说得清。
 type AuditEntry struct {
 	Time     string `json:"time"`
-	Category string `json:"category"` // access | auth | admin | security | dataplane
+	Category string `json:"category"` // 取值见 AuditCategories（唯一字典）
 	User     string `json:"user"`
 	SrcIP    string `json:"srcIp"`
 	Event    string `json:"event"`

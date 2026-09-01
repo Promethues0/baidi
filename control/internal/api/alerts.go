@@ -219,6 +219,24 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 	if withChain {
 		snap.AuditChain = s.verifyChainForAlert(ctx)
 	}
+	// 安全 ⑥：审计外送出口的投递健康与队列积压。
+	//
+	// ★这条信号此前不存在，而外送失败的全部信号面只有进程日志一行 slog.Warn
+	// 与系统页里那一格 lastStatus——合规链路可以**静默断掉**：审计照常落本地库、
+	// 页面一切正常，而 SIEM 那边从某一刻起再也没收到过东西。
+	// 只取**启用中**的出口：关掉的出口本来就不该发，给它报警是噪声。
+	if fs, ok := s.store.(store.AuditForwardStore); ok {
+		if targets, err := fs.AuditForwardTargets(ctx); err == nil {
+			for _, t := range targets {
+				if t.Enabled {
+					snap.ForwardTargets = append(snap.ForwardTargets, t)
+				}
+			}
+			snap.ForwardQueueMax = fs.AuditForwardQueueMax()
+		} else {
+			slog.Warn("告警评估：读审计外送出口失败，本轮跳过该规则", "err", err.Error())
+		}
+	}
 	return snap
 }
 
@@ -445,8 +463,17 @@ func (s *Server) handleAlerts(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to count alerts")
 		return
 	}
+	// ★截断必须可见：total 是**当前筛选条件下库里的行数**，不是 len(list)——
+	//   后者恒等于上限，truncated 永远算出 false，那句提示等于白加（wave8 行动 17
+	//   在 /jit/grants 与 /posture 上踩过同一个坑）。
+	total, err := s.store.CountAlerts(r.Context(), query)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to count alerts")
+		return
+	}
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"alerts": list, "counts": counts, "categories": store.AlertCategoryZh,
+		"total": total, "limit": store.AlertListLimit, "truncated": total > len(list),
 	})
 }
 

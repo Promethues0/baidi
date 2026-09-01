@@ -54,6 +54,12 @@ type Snapshot struct {
 	// AuditWrite 控制面自身的审计写入健康；nil = 调用方没注入（不产生候选）。
 	// ★与其余信号不同，它不是查库得来的——见 store.AlertKindAuditWriteFail 的注释。
 	AuditWrite *AuditWriteStat
+	// ForwardTargets **启用中**的审计外送出口（含 last_status/last_ok_at/队列积压）。
+	// nil / 空 = 没有启用中的出口：这条规则一条候选都不产生，别给没用这功能的部署挂告警。
+	ForwardTargets []store.AuditForwardTarget
+	// ForwardQueueMax 每出口的队列上界（store.DefaultForwardQueueMax 或部署配置）。
+	// 积压比例按它算；<=0 时略过积压这一维，不编一个分母。
+	ForwardQueueMax int
 	// AuditChain 审计链自检结论；nil = 本轮没查（存储不支持，或还没到自检周期）。
 	// ★nil 与「查了、没问题」必须区分：把没查当成没问题，正是"防篡改链没人查等于没有"。
 	AuditChain *ChainStatus
@@ -353,6 +359,46 @@ func evalRule(rule store.AlertRule, spec store.AlertKindSpec, snap Snapshot) []C
 				"最近一次错误：%s。最近一条丢失的记录：%s。"+
 				"完整内容只在进程日志的「审计写入失败」行里，请立即取回并排查磁盘余量与库文件可写性。",
 				st.Failures, tsOf(st.FirstAt), tsOf(st.LastAt), st.LastErr, st.LastEvent)))
+
+	case store.AlertKindAuditForwardFail:
+		// ★两种失败形态分开报，处置动作不同：
+		//   · 持续投不出去 → 去查 SIEM 侧的可达性 / 证书 / 凭据；
+		//   · 队列积压逼近上界 → 再不处理就开始**丢新的**（丢新保旧），那是不可逆的。
+		within := int64(thresh(rule, spec, store.ThreshWithinMin) * 60)
+		pct := thresh(rule, spec, store.ThreshBacklogPercent)
+		for _, t := range snap.ForwardTargets {
+			if !t.Enabled {
+				continue
+			}
+			// 从未成功过 **且** 从未尝试过 = 刚配好还没轮到，不报。
+			if t.LastStatus == "" && t.LastAt == 0 {
+				continue
+			}
+			if t.LastStatus == store.AuditForwardFail && within > 0 {
+				// 判据是「多久没**成功**过」而不是「上一次失败了」：
+				// 一次瞬时失败会被退避重试自动救回来，报它只是噪声。
+				since := t.LastOKAt
+				if since == 0 {
+					since = t.LastAt // 从未成功过：以最近一次尝试为起点
+				}
+				if snap.Now-since >= within {
+					out = append(out, mk("forward:"+t.ID,
+						fmt.Sprintf("审计外送出口「%s」持续投递失败", t.Name),
+						fmt.Sprintf("已 %d 分钟没有成功投递过（最近一次成功 %s）。队列里积压 %d 条，"+
+							"审计仍在本地库里一条不丢，但 SIEM 侧从那时起就没再收到过东西。"+
+							"最近一次错误：%s。",
+							(snap.Now-since)/60, tsOf(t.LastOKAt), t.Queued, t.LastDetail)))
+				}
+			}
+			if pct > 0 && snap.ForwardQueueMax > 0 &&
+				float64(t.Queued) >= float64(snap.ForwardQueueMax)*pct/100 {
+				out = append(out, mk("forward-backlog:"+t.ID,
+					fmt.Sprintf("审计外送出口「%s」队列积压 %d 条", t.Name, t.Queued),
+					fmt.Sprintf("已占队列上界（%d）的 %.0f%%。到顶之后会开始**丢弃新记录**（丢新保旧，"+
+						"保住连续的最早一段），那部分审计不会再出现在 SIEM 里。累计已丢弃 %d 条。",
+						snap.ForwardQueueMax, float64(t.Queued)/float64(snap.ForwardQueueMax)*100, t.Dropped)))
+			}
+		}
 
 	case store.AlertKindAuditChain:
 		st := snap.AuditChain

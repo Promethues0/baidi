@@ -9,6 +9,11 @@
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '未连' }}</a-tag>
+        <!-- ★这一页最要紧的两列（网关回执、命中计数）是**运行态**：网关每个心跳周期上报一次。
+             此前没有任何刷新入口，也不显示数据时间——页面上那份回执定格在打开那一刻，
+             管理员改完规则盯着看，会以为网关一直没装上。 -->
+        <span v-if="fetchedAt" class="bd-natts">数据时间 {{ fetchedAt }}</span>
+        <button class="bd-btn bd-btn--ghost" :disabled="busy" @click="load()"><icon-refresh />刷新</button>
         <button class="bd-btn" :disabled="!ifaceReady" :style="{ opacity: ifaceReady ? 1 : .5 }" @click="openWizard()">
           <icon-plus />新增策略
         </button>
@@ -226,6 +231,8 @@ import { api, type NATBundle, type NATPolicy, type NATReceipt, type NATHit, type
 
 const live = ref(false);
 const busy = ref(false);
+/** 本页数据的取回时刻（运行态列的口径）。 */
+const fetchedAt = ref('');
 const err = ref('');
 const policies = ref<NATPolicy[]>([]);
 const ifaces = ref<GatewayIface[]>([]);
@@ -385,6 +392,7 @@ async function load() {
     ifaces.value = b.ifaces ?? [];
     warnings.value = b.warnings ?? [];
     receipts.value = b.receipts ?? {};
+    fetchedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false });
     hits.value = b.hits ?? {};
     // ★缺字段一律按「不可判定」，不是按 0：旧控制面不下发 hitsKnown 时，
     // 显示「0 包」等于替一份我们根本没有的读数背书。

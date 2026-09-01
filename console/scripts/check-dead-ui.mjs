@@ -16,6 +16,16 @@
  *   ——把一个只声明未使用的 computed 交给 void 堵住编译器——是在承认「这段没接线」
  *   并让守卫闭嘴。Resources.vue 里那句 `const _shown = computed(() => resources.value);
  *   // 预留搜索过滤位` 就这么活了很久。
+ *
+ * 规则三：`} catch {` 之后不得直接给出一个**编造的失败归因**。
+ *   全仓曾有二十多处写成
+ *       } catch { Message.error('删除失败，请检查权限或后端连接'); }
+ *   而后端回的是「分类下仍有 3 个应用，请先改归属」「最后一名超级管理员不可禁用」
+ *   「角色「审计管理员」无权执行该操作（需要权限：security）」——**唯一能指导下一步动作**
+ *   的那句话，被 catch 那一行整句丢掉，换成一个猜的原因。管理员照着提示去查网络、
+ *   去重登，而真正的原因就在被丢掉的字符串里。api.ts 在 errText 上方写下过这条纪律，
+ *   然后每一个调用点都没照做——这正是本项目里出现频率最高的「纪律只做了一半」。
+ *   收口在 api.ts 的 failReason(e)：接住 e，把后端原话原样转述。
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
@@ -96,6 +106,28 @@ for (const file of walk(SRC)) {
         `接上它，或者连同声明一起删——留着会让人以为功能存在。`
     );
   }
+
+  // ── 规则三：bare catch + 编造的失败归因 ──
+  //
+  // 只拦**同时满足**两条的写法，避免误伤：
+  //   ① `catch` 没有接住异常（`} catch {`）——接住了才有可能转述后端原话；
+  //   ② 紧随其后 3 行内向用户报了一句带「猜测性归因」的话。
+  // 归因词表故意只收那几个真正误导人的说法（连接/网络/权限/登录/后端在线），
+  // 「复制失败，请手动复制」这类**与后端无关**的本地失败不在其中。
+  const catchRe = /\}\s*catch\s*\{/g;
+  const lines = text.split('\n');
+  while ((m = catchRe.exec(text))) {
+    const line = text.slice(0, m.index).split('\n').length;
+    const block = lines.slice(line - 1, line + 3).join('\n');
+    const said = /(?:Message\.(?:error|warning)|Modal\.(?:warning|error))\(\s*['\`]([^'\`]*)['\`]/.exec(block);
+    if (!said) continue;
+    if (!/(后端连接|后端在线|网络|检查权限|管理员权限|重新登录|需已连)/.test(said[1])) continue;
+    errors.push(
+      `${rel}:${line} bare catch 编造了失败归因「${said[1]}」：` +
+        `后端的拒绝原因（403 缺哪个权限、409 撞了哪道守卫）在这里被整句丢掉了。` +
+        `改成 \`catch (e)\` + api.ts 的 failReason(e) 原样转述。`
+    );
+  }
 }
 
 if (errors.length) {
@@ -104,4 +136,4 @@ if (errors.length) {
   console.error(`\n共 ${errors.length} 处。`);
   process.exit(1);
 }
-console.log('✓ 无装饰性搜索框、无死占位');
+console.log('✓ 无装饰性搜索框、无死占位、无编造的失败归因');

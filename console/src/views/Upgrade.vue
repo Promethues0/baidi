@@ -50,9 +50,17 @@
           <a-textarea v-model="chk.manifest" :auto-size="{ minRows: 4, maxRows: 8 }"
             placeholder='{"product":"baidi","component":"control","version":"0.4.0","sha256":"…"}' class="bd-mono" />
           <a-input v-model="chk.sig" placeholder="签名（base64）" class="bd-mono" style="margin-top: 8px" />
+          <!-- ★没配发布公钥时**先说清楚再置灰**，而不是让人撞一次「校验不通过」。
+               验签是 fail-closed 的（不验签等于任何人都能推包上来，方向是对的），
+               但在此之前页面完全不提这件事：管理员会以为是自己的包有问题，反复换包重传。 -->
+          <div v-if="bundle && bundle.signKeysConfigured === false" class="bd-signwarn">
+            <icon-exclamation-circle-fill />
+            <span>{{ bundle.signKeyNote }}</span>
+          </div>
           <div style="margin-top: 10px">
-            <button class="bd-btn" :disabled="chk.busy || !chk.manifest.trim()"
-              :style="{ opacity: chk.busy || !chk.manifest.trim() ? .5 : 1 }" @click="doCheck">校验</button>
+            <button class="bd-btn" :disabled="signBlocked || chk.busy || !chk.manifest.trim()"
+              :title="signBlocked ? '未配置发布公钥，校验必然不通过' : ''"
+              :style="{ opacity: signBlocked || chk.busy || !chk.manifest.trim() ? .5 : 1 }" @click="doCheck">校验</button>
           </div>
           <div v-if="chk.result" class="bd-chk" :class="chk.result.blocked ? 'bd-chk--bad' : 'bd-chk--ok'">
             <b>{{ chk.result.blocked ? '校验不通过 · 不可升级' : '校验通过' }}</b>
@@ -249,6 +257,10 @@ function tagStyle(color: string) { return { color, background: color + '14' }; }
 const live = ref(false);
 const err = ref('');
 const bundle = ref<UpgradeBundle>({ control: '', gateways: {}, rules: { allowDowngrade: false, requireComponentMatch: true, hops: [] }, gray: [], boundaries: [] });
+
+/** 未配置发布公钥时禁用校验按钮。★只在**明确**为 false 时禁用：
+ *  旧后端不下发这一格 → undefined → 照旧可点（宁可让人撞一次，也不误禁一个可用的功能）。 */
+const signBlocked = computed(() => bundle.value.signKeysConfigured === false);
 const rules = reactive<UpgradeRules>({ allowDowngrade: false, requireComponentMatch: true, hops: [] });
 
 const gwList = computed(() => Object.entries(bundle.value.gateways ?? {})
@@ -430,6 +442,13 @@ onMounted(load);
 </script>
 
 <style scoped>
+.bd-signwarn {
+  display: flex; gap: 8px; align-items: flex-start; margin-top: 10px; padding: 10px 12px;
+  background: var(--bd-tag-gold-bg); border: 1px solid #FFCF8B; border-radius: 8px;
+  font-size: 12px; color: var(--bd-t2); line-height: 1.85;
+}
+.bd-signwarn > :first-child { color: var(--bd-warning); flex: none; margin-top: 2px; }
+
 .bd-bound {
   display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; padding: 10px 12px;
   border-radius: 8px; font-size: 12.5px; line-height: 1.7;

@@ -659,3 +659,82 @@ func (s *Server) reportForwardDrops(ctx context.Context, fs store.AuditForwardSt
 		"审计外送队列溢出：出口「%s」累计已丢弃 %d 条待外送记录（队列上界 %d），这些审计已落库但不会送达 SIEM",
 		t.Name, t.Dropped, fs.AuditForwardQueueMax()), "fail")
 }
+
+// checkAuditForward /diag 的「审计外送投递」检查项（wave9）。
+//
+// 它回答的是系统页那一格回答不了的问题：**出口现在到底通不通、积压了多少**。
+// 没有启用中的出口时 skip——为一个没人用的功能常年挂 warn 是噪声（同 checkNAT）。
+func (s *Server) checkAuditForward(ctx context.Context) DiagCheck {
+	c := DiagCheck{Key: "audit-forward", Category: "audit", Name: "审计外送投递"}
+	fs, ok := s.store.(store.AuditForwardStore)
+	if !ok {
+		c.Status = "skip"
+		c.Summary = "当前后端不支持审计外送（纯内存演示栈）"
+		return c
+	}
+	targets, err := fs.AuditForwardTargets(ctx)
+	if err != nil {
+		c.Status = "warn"
+		c.Summary = "读审计外送出口失败：" + err.Error()
+		return c
+	}
+	live := make([]store.AuditForwardTarget, 0, len(targets))
+	for _, t := range targets {
+		if t.Enabled {
+			live = append(live, t)
+		}
+	}
+	if len(live) == 0 {
+		c.Status = "skip"
+		c.Summary = "没有启用中的审计外送出口"
+		c.Metric = fmt.Sprintf("已配 %d 个（全部停用）", len(targets))
+		return c
+	}
+	max := fs.AuditForwardQueueMax()
+	failing, backlogged, never := 0, 0, 0
+	items := make([]DiagItem, 0, len(live))
+	for _, t := range live {
+		var v string
+		switch {
+		case t.LastStatus == "" && t.LastAt == 0:
+			never++
+			v = "尚未投递过（刚配好，等下一轮）"
+		case t.LastStatus == store.AuditForwardFail:
+			failing++
+			v = "最近一次失败：" + t.LastDetail
+		default:
+			v = "最近一次成功 " + tsText(t.LastOKAt)
+		}
+		if max > 0 && t.Queued*2 >= max {
+			backlogged++
+			v += fmt.Sprintf("；队列积压 %d/%d", t.Queued, max)
+		} else if t.Queued > 0 {
+			v += fmt.Sprintf("；积压 %d 条", t.Queued)
+		}
+		if t.Dropped > 0 {
+			v += fmt.Sprintf("；累计已丢弃 %d 条", t.Dropped)
+		}
+		items = append(items, DiagItem{Label: t.Name + "（" + t.Kind + "）", Value: v})
+	}
+	c.Items = items
+	c.Metric = fmt.Sprintf("启用 %d 个 · 失败 %d · 积压告警 %d", len(live), failing, backlogged)
+	switch {
+	case failing > 0:
+		c.Status = "fail"
+		c.Summary = fmt.Sprintf("%d 个出口投递失败：审计仍在本地库里一条不丢，但 SIEM 侧已经收不到了", failing)
+		c.Hint = "查 SIEM 侧可达性 / 证书 / 凭据；队列成功才出队，恢复后会自动补发（不补历史）"
+	case backlogged > 0:
+		c.Status = "warn"
+		c.Summary = fmt.Sprintf("%d 个出口队列积压过半：到顶后会开始丢弃新记录", backlogged)
+		c.Hint = "提高投递频率（BAIDI_AUDIT_FORWARD_INTERVAL）或排查出口侧吞吐"
+	case never > 0:
+		// ★不判 pass：一个从没投递过的出口不构成"外送正常"的证据。
+		c.Status = "warn"
+		c.Summary = fmt.Sprintf("%d 个出口尚未投递过，外送是否真的通还没有证据", never)
+		c.Hint = "在系统管理页点一次「测试」，或等下一轮投递循环"
+	default:
+		c.Status = "pass"
+		c.Summary = fmt.Sprintf("%d 个出口最近一次投递均成功", len(live))
+	}
+	return c
+}

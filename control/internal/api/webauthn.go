@@ -8,6 +8,7 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -525,4 +526,49 @@ func methodLabels(keys []string) []string {
 		out = append(out, k)
 	}
 	return out
+}
+
+// handleAdminResetPasskeys DELETE /api/v1/users/{id}/passkeys——管理员清空某账号的全部 passkey。
+//
+// ★与 handleAdminResetTotp **逐字对称**，而在此之前它不存在，于是 passkey 这一路
+// 结构性地没有出口：
+//
+//	passkey 没有恢复码；`store.DeleteWebauthnCredential` 拒绝删最后一个
+//	（那道守卫是为"别把自己锁在门外"设的，前提是本人还能登录）；
+//	而 `api.secondFactor` 规定「已注册 passkey 即无条件强制断言，策略豁免碰不到它」。
+//	三条合起来的后果是：认证器一丢，这个账号**永久登不进来**——本人删不掉，
+//	管理员也没有任何端点可调，唯一出路是运维直接删库改行。
+//	TOTP 那边早就把这条路判过死刑（"等于逼着每次事故都做一次 DB 手术"），
+//	passkey 这半边只是没有一起做。
+//
+// 权限与重置口令、重置 TOTP 同一档：PermSecurity + 目标是管理员时须 admins 权。
+// 清二因子是**削弱**目标账号防护的方向——能清 root 的 passkey 再重置其口令即全权接管。
+func (s *Server) handleAdminResetPasskeys(w http.ResponseWriter, r *http.Request) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
+		return
+	}
+	id := r.PathValue("id")
+	u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	if !found {
+		httpx.Error(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	if !s.guardAdminTarget(w, r, u, "重置 passkey 二次认证") {
+		return
+	}
+	removed, err := s.writer.ResetWebauthnCredentials(r.Context(), u.Account)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "重置落库失败")
+		return
+	}
+	if removed > 0 {
+		s.audit(r, "security",
+			"重置用户「"+u.Account+"」的 passkey 二次认证（清除 "+strconv.Itoa(removed)+
+				" 个认证器，下次登录回到口令单因素，须本人重新注册）", "ok")
+	}
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "removed": removed})
 }

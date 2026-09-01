@@ -82,6 +82,31 @@ func (s *SQLiteStore) SaveWebauthnCredential(ctx context.Context, c WebauthnCred
 	return c, nil
 }
 
+// ResetWebauthnCredentials 清空某账号的**全部** passkey（管理员 helpdesk 路径），
+// 返回清掉了几条。
+//
+// ★与 DeleteWebauthnCredential（本人自助删一条）是两条语义不同的路径，
+// 刻意不共用那道「最后一个不许删」的守卫：
+//
+//	那道守卫保的是"别把自己锁在门外"，前提是**本人还能登录**。而这里正是
+//	本人已经登不进来的场景——认证器丢了、手机丢了、人离职了。passkey 没有
+//	恢复码，`api.secondFactor` 又规定「已注册 passkey 即无条件强制断言」，
+//	于是那道守卫在这条路上把结论反转成了「永久锁死」：本人删不掉最后一个，
+//	而管理员侧此前**连一个端点都没有**（TOTP 早就有 handleAdminResetTotp）。
+//	唯一出路是运维直接删库——同一条被 TOTP 那边的注释判过死刑的路。
+//
+// 清空之后该账号退回口令单因素，须本人重新注册；这是**削弱防护**的方向，
+// 所以入口那侧的权限与「重置口令」同档（PermSecurity + guardAdminTarget）。
+func (s *SQLiteStore) ResetWebauthnCredentials(ctx context.Context, account string) (int, error) {
+	key := strings.ToLower(strings.TrimSpace(account))
+	res, err := s.db.ExecContext(ctx, `DELETE FROM webauthn_credentials WHERE account=?`, key)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return int(n), nil
+}
+
 // DeleteWebauthnCredential 删除本人一条凭据（account 规范化匹配，杜绝跨账号删）。
 // 守卫：账号最后一个 passkey 不许删——否则强制 2FA 下用户会把自己锁在门外。
 func (s *SQLiteStore) DeleteWebauthnCredential(ctx context.Context, account, id string) error {

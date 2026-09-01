@@ -284,30 +284,21 @@ func (s *SQLiteStore) purgeAuditBefore(ctx context.Context, cutoff string) (int6
 }
 
 // ExportAudit 按条件流式遍历审计行（id 升序 = 落库序），逐行回调，不整表进内存。
-// category 空 = 全部；from/to 为与 ts 同构的可比字符串（"2006-01-02 15:04:05"），空 = 不限。
-func (s *SQLiteStore) ExportAudit(ctx context.Context, category, from, to string, fn func(AuditEntry) error) error {
+//
+// ★条件与 SearchAudit **共用 auditWhere**：此前这里自己拼了一份，只认
+// category/from/to 三维，账号与源 IP 两维压根传不进来——而页面上刚筛过的正是那两维。
+// 症状是「屏幕上筛出 12 条、导出的 CSV 里是 8 万条」，而管理员会以为这份 CSV
+// 就是他刚才看到的那些行，拿去交差。
+//
+// AuditQuery 的 Limit/Offset 在这里刻意忽略：导出的定位就是**不受页面上限约束**
+// 的全量出口（列表那半边有 500 上限并会当面说明被截断）。
+func (s *SQLiteStore) ExportAudit(ctx context.Context, aq AuditQuery, fn func(AuditEntry) error) error {
 	// seq/mac 与列表、外送同源：导出的 CSV 也要能被拿去独立验链，
 	// 否则"导出一份给审计方"交出去的只是一堆无法自证的文本。
+	cond, args := auditWhere(aq)
 	q := `SELECT COALESCE(ts,''), COALESCE(category,''), COALESCE(actor,''), COALESCE(src_ip,''),
-		COALESCE(event,''), COALESCE(verdict,''), COALESCE(seq,0), COALESCE(mac,'') FROM audit_log`
-	var conds []string
-	var args []any
-	if category != "" {
-		conds = append(conds, "category=?")
-		args = append(args, category)
-	}
-	if from != "" {
-		conds = append(conds, "ts>=?")
-		args = append(args, from)
-	}
-	if to != "" {
-		conds = append(conds, "ts<=?")
-		args = append(args, to)
-	}
-	if len(conds) > 0 {
-		q += " WHERE " + strings.Join(conds, " AND ")
-	}
-	q += " ORDER BY id"
+		COALESCE(event,''), COALESCE(verdict,''), COALESCE(seq,0), COALESCE(mac,'') FROM audit_log WHERE ` +
+		cond + ` ORDER BY id`
 	rows, err := s.db.QueryContext(ctx, q, args...)
 	if err != nil {
 		return err
@@ -395,12 +386,11 @@ COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY id DESC LIMIT 200`)
 	if err := crows.Err(); err != nil {
 		return out, err
 	}
-	labels := []struct{ key, label string }{
-		{"access", "访问决策"}, {"auth", "登录认证"}, {"admin", "管理操作"}, {"security", "安全事件"},
-		{"dataplane", "数据面回执"},
-	}
-	for _, l := range labels {
-		out.Categories = append(out.Categories, KV{Name: l.label, Value: counts[l.key]})
+	// 类别卡走唯一字典（见 AuditCategories）：此前这里手抄了一份，漏掉 policy/system，
+	// 于是「保存安全基线」这类记录写进了库、却不在任何一张卡的计数里——
+	// 卡片加起来比库里的总行数少，而少的那几条恰好是安全管理动作。
+	for _, c := range AuditCategories {
+		out.Categories = append(out.Categories, KV{Name: c.Label, Value: counts[c.Key]})
 	}
 
 	today := time.Now().Format("2006-01-02")

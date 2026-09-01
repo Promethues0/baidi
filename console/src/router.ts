@@ -67,11 +67,38 @@ const router = createRouter({ history: createWebHistory(), routes });
 // 都是需要身份的页面，整段豁免会让它们裸奔。
 const PUBLIC_PATHS = new Set(['/login', '/portal/login', '/portal/downloads']);
 
+/**
+ * 令牌里的角色（**只用于路由分流，不是安全判定**）。
+ *
+ * ★这里不做签名校验，也不该做：前端没有公钥，也永远不该成为判定方。
+ * 真正的闸是后端 auth.Middleware + requireAdmin/requirePerm——把这段删掉，
+ * 系统的安全性一点不变。它解决的是另一个问题：门户终端用户（role=user）
+ * 登录后直接访问 /monitor/overview 时，此前守卫只看"有没有 token"就放行，
+ * 于是他会看到一整套**管理台外壳**（21 个菜单、侧栏角标、系统管理入口），
+ * 每一页再逐个报 403。既像是权限漏了，也让人以为自己该有这些菜单。
+ */
+function tokenRole(): string {
+  const t = getToken();
+  if (!t) return '';
+  try {
+    const seg = t.split('.')[1];
+    if (!seg) return '';
+    const json = atob(seg.replace(/-/g, '+').replace(/_/g, '/'));
+    return String((JSON.parse(json) as { role?: string }).role ?? '');
+  } catch {
+    return ''; // 解不出来就当不可判定：不拦（真闸在后端）
+  }
+}
+
 // 登录守卫：非白名单路由需已登录；门户页未登录回门户登录页，管理台回管理台登录页。
 router.beforeEach((to) => {
   if (PUBLIC_PATHS.has(to.path)) return true;
-  if (getToken()) return true;
-  return to.path.startsWith('/portal') ? '/portal/login' : '/login';
+  if (!getToken()) return to.path.startsWith('/portal') ? '/portal/login' : '/login';
+  // 终端用户不进管理台外壳（含大屏与运维诊断）——把他送回门户，而不是让他
+  // 在一套点不动的管理菜单里逐页碰 403。★只在**确定**是 user 时分流：
+  // 解不出角色（旧令牌 / 格式变化）一律放行，宁可多显示也不误伤管理员。
+  if (!to.path.startsWith('/portal') && tokenRole() === 'user') return '/portal/apps';
+  return true;
 });
 
 export default router;

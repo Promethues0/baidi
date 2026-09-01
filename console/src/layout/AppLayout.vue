@@ -21,33 +21,67 @@
         <span class="bd-mode" @click="router.push('/diag')">运维诊断</span>
       </nav>
       <div class="bd-top__spacer" />
-      <div class="bd-search"><icon-search /><span>搜索用户、应用、策略…</span></div>
-      <button class="bd-bell"><icon-notification /><span class="bd-bell__dot">6</span></button>
+      <GlobalSearch />
+      <NotifyBell />
       <a-dropdown trigger="click" @select="onAcctSelect">
         <div class="bd-acct">
-          <span class="bd-acct__av">管</span>
-          <span class="bd-acct__txt"><b>安全管理员</b><i>security-admin</i></span>
+          <span class="bd-acct__av">{{ avatarChar }}</span>
+          <!-- ★这两行此前是写死的「安全管理员 / security-admin」。种子 admin 的
+               显示名恰好就叫"安全管理员"，于是演示环境里它看起来完全正确——
+               而那个账号的角色是**超管**；换审计管理员登录也一字不改。
+               现在唯一来源是 GET /auth/me（角色现算，见 lib/me.ts）。 -->
+          <span class="bd-acct__txt"><b>{{ meTitle }}</b><i>{{ meSubtitle }}</i></span>
           <icon-down class="bd-acct__out" />
         </div>
         <template #content>
-          <a-doption value="password"><icon-lock /> 修改密码</a-doption>
+          <!-- 权限键是**执行方真正读的那份**（后端 admin_roles.scope_json），
+               不是页面文案。判不出来时如实说不可判定，不写死成任何一个角色。 -->
+          <div class="bd-acctcard">
+            <div class="bd-acctcard__n">{{ meTitle }}<span>{{ me.sub }}</span></div>
+            <template v-if="me.permKnown">
+              <div class="bd-acctcard__r">{{ me.roleName }}</div>
+              <div class="bd-acctcard__p">
+                <span v-for="p in me.perms" :key="p" class="bd-perm">{{ PERM_ZH[p] || p }}</span>
+              </div>
+              <div v-if="me.scope" class="bd-acctcard__s">{{ me.scope }}</div>
+            </template>
+            <div v-else class="bd-acctcard__u">
+              角色与权限不可判定（未拉到 /auth/me 或后端未升级）——本页不据此收敛任何操作，
+              真正的权限闸在服务端。
+            </div>
+          </div>
+          <a-doption value="password"><icon-lock /> 修改口令</a-doption>
+          <!-- ★管理台此前**没有任何二次认证入口**：系统管理页专门列了一栏「二次认证」，
+               而管理员在整个控制台里找不到地方注册 passkey 或 TOTP——注册页确实存在
+               （/portal/security），只是从管理台一个链接都到不了。
+               管理台是权限最高面，且它的登录链路本来就过 secondFactor。 -->
+          <a-doption value="mfa"><icon-safe /> 二次认证（passkey / TOTP）</a-doption>
           <a-doption value="logout"><icon-export /> 退出登录</a-doption>
         </template>
       </a-dropdown>
     </header>
 
-    <!-- 自助修改密码（校验旧口令，落库改哈希） -->
-    <a-modal v-model:visible="pwOpen" title="修改登录口令" :width="420" :footer="false">
+    <!-- 自助修改口令（校验旧口令，落库改哈希） -->
+    <a-modal v-model:visible="pwOpen" title="修改登录口令" :width="440" :footer="false" @close="resetPwForm">
       <div class="bd-pwform">
         <div class="bd-pwform__f"><label>当前口令</label>
           <a-input-password v-model="oldPw" placeholder="请输入当前登录口令" />
         </div>
         <div class="bd-pwform__f"><label>新口令</label>
-          <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doChangePw" />
+          <a-input-password v-model="newPw" :placeholder="PW_HINT" />
         </div>
+        <div class="bd-pwform__f"><label>确认新口令</label>
+          <a-input-password v-model="newPw2" placeholder="再输入一次" @keyup.enter="doChangePw" />
+        </div>
+        <!-- ★口令要求必须与后端逐字一致。此前这里写「至少 6 位」，而后端
+             auth.PasswordWeakness 要求「≥10 位且含三类字符，或 ≥16 位长口令」：
+             管理员按提示输 6 位 → 前端放行 → 后端 400 → 页面弹「请检查网络或重新登录」。
+             首登强制改密默认是开的，也就是**每一次标准部署的第一个动作**踩的就是这条。 -->
+        <div class="bd-pwform__rule">{{ PW_HINT }}；口令中不得包含账号名，也不得是常见弱口令</div>
+        <div v-if="pwErr" class="bd-pwform__err"><icon-exclamation-circle-fill />{{ pwErr }}</div>
         <div class="bd-pwform__foot">
-          <button class="bd-mbtn bd-mbtn--ghost" @click="pwOpen = false">取消</button>
-          <button class="bd-mbtn" :disabled="changing" @click="doChangePw">确认修改</button>
+          <button class="bd-mbtn bd-mbtn--ghost" :disabled="changing" @click="pwOpen = false">取消</button>
+          <button class="bd-mbtn" :disabled="changing" @click="doChangePw">{{ changing ? '提交中…' : '确认修改' }}</button>
         </div>
       </div>
     </a-modal>
@@ -98,44 +132,87 @@ import { Message } from '@arco-design/web-vue';
 import { NAV } from '@/nav';
 import { api, clearToken } from '@/lib/api';
 import { badgeCounts, refreshBadges } from '@/lib/badges';
+import { PERM_ZH, avatarChar, me, meSubtitle, meTitle, refreshMe, resetMe } from '@/lib/me';
+import GlobalSearch from '@/components/GlobalSearch.vue';
+import NotifyBell from '@/components/NotifyBell.vue';
 
 const route = useRoute();
 const router = useRouter();
+
+/**
+ * 口令要求文案。**唯一来源就是这一句**，弹窗的提示行与输入框占位共用它——
+ * 两处各写一遍的话，改了一处忘了另一处，页面就会同时给出两种要求。
+ * 内容与后端 auth.PasswordWeakness 的判据逐字对应（≥10 位且三类，或 ≥16 位长口令）。
+ */
+const PW_HINT = '至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上的长口令';
 
 // 侧栏角标：进入控制台拉一次，之后每 60s 刷一次，换页时也刷
 // （处理完一条告警回到列表，角标要跟着降下来）。
 let badgeTimer: number | undefined;
 onMounted(() => {
   void refreshBadges();
-  badgeTimer = window.setInterval(() => void refreshBadges(), 60_000);
+  // 身份也在这里拉。★角色是**现算**的（后端 currentAdminRoleQuiet），所以它和角标
+  // 一样需要周期性刷新：超管把某人降权之后，那个人页面上的角色标签不该一直停在旧值。
+  void refreshMe();
+  badgeTimer = window.setInterval(() => { void refreshBadges(); void refreshMe(); }, 60_000);
 });
 onUnmounted(() => { if (badgeTimer) window.clearInterval(badgeTimer); });
 watch(() => route.path, () => void refreshBadges());
 function go(path: string) { if (path !== route.path) router.push(path); }
-function logout() { clearToken(); router.push('/login'); }
+function logout() { clearToken(); resetMe(); router.push('/login'); }
 
 // 账户菜单 + 自助改密
 const pwOpen = ref(false);
 const changing = ref(false);
 const oldPw = ref('');
 const newPw = ref('');
+const newPw2 = ref('');
+const pwErr = ref('');
+
+function resetPwForm() { oldPw.value = ''; newPw.value = ''; newPw2.value = ''; pwErr.value = ''; }
+
 function onAcctSelect(v: string | number | Record<string, unknown> | undefined) {
   if (v === 'logout') logout();
-  else if (v === 'password') { oldPw.value = ''; newPw.value = ''; pwOpen.value = true; }
+  else if (v === 'password') { resetPwForm(); pwOpen.value = true; }
+  // 注册/解绑二次认证的页面在门户侧（同一套账号体系，管理员登录同样过 secondFactor）。
+  else if (v === 'mfa') router.push('/portal/security');
 }
+
+/** 前端预检：**只做后端判据的一个真子集**（长度 + 字符种类这两条客观项）。
+ *  弱口令表与"含账号名"两条刻意不在前端复刻——那会变成第二份判据，
+ *  与后端一旦对不上，就会出现"前端拦下了后端本来会放行的口令"，
+ *  而这种失败在界面上完全看不出是前端多拦的。 */
+function localPwProblem(pw: string): string {
+  const n = [...pw].length;
+  if (n < 10) return '新口令长度不足 10 位';
+  if (n >= 16) return '';
+  const classes = [/[a-z]/, /[A-Z]/, /[0-9]/, /[^a-zA-Z0-9]/].filter((re) => re.test(pw)).length;
+  if (classes < 3) return '字符种类不足（大写/小写/数字/符号 至少三类）';
+  return '';
+}
+
 async function doChangePw() {
-  if (!oldPw.value) { Message.warning('请输入当前口令'); return; }
-  if (newPw.value.length < 6) { Message.warning('新口令至少 6 位'); return; }
+  pwErr.value = '';
+  if (!oldPw.value) { pwErr.value = '请输入当前口令'; return; }
+  const bad = localPwProblem(newPw.value);
+  if (bad) { pwErr.value = `${bad}。要求：${PW_HINT}`; return; }
+  if (newPw.value !== newPw2.value) { pwErr.value = '两次输入的新口令不一致'; return; }
+  if (newPw.value === oldPw.value) { pwErr.value = '新口令不得与当前口令相同'; return; }
   changing.value = true;
   try {
     const r = await api<{ ok: boolean; reason?: string }>('/auth/password', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ old: oldPw.value, new: newPw.value })
     });
-    if (r.ok) { Message.success('登录口令已修改'); pwOpen.value = false; }
-    else Message.error(r.reason || '修改失败');
-  } catch { Message.error('修改失败，请检查网络或重新登录'); }
-  finally { changing.value = false; }
+    if (r.ok) { Message.success('登录口令已修改'); pwOpen.value = false; resetPwForm(); }
+    else pwErr.value = r.reason || '修改失败';
+  } catch (e) {
+    // ★后端把失败原因写得很具体（「新口令强度不足：命中常见弱口令表。要求：…」、
+    //   「旧口令不正确」、「尝试过于频繁，请稍后再试」），api() 的 errText 也已经
+    //   把它取出来了。此前这里 catch 掉之后一律换成「请检查网络或重新登录」——
+    //   一句**错误的归因**：管理员会去查网络、去重登，而真正的原因就在被丢掉的那个字符串里。
+    pwErr.value = e instanceof Error ? e.message : '修改失败';
+  } finally { changing.value = false; }
 }
 </script>
 
@@ -146,6 +223,12 @@ async function doChangePw() {
 .bd-pwform__f { margin-bottom: 16px; }
 .bd-pwform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
 .bd-pwform__f :deep(.arco-input-wrapper) { width: 100%; }
+.bd-pwform__rule { font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; margin-top: -6px; }
+.bd-pwform__err {
+  display: flex; align-items: flex-start; gap: 6px; margin-top: 12px; padding: 8px 10px;
+  background: var(--bd-tag-red-bg); color: var(--bd-danger); border-radius: 7px;
+  font-size: 12px; line-height: 1.65;
+}
 .bd-pwform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
 .bd-mbtn { height: 34px; padding: 0 18px; border-radius: 8px; border: none; background: var(--bd-primary); color: #fff; font-size: 13px; cursor: pointer; }
 .bd-mbtn--ghost { background: var(--bd-fill-2); color: var(--bd-t1); }
@@ -171,20 +254,7 @@ async function doChangePw() {
 .bd-mode:hover { background: var(--bd-fill-2); }
 .bd-mode.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
 .bd-top__spacer { flex: 1; }
-.bd-search {
-  display: flex; align-items: center; height: 32px; background: var(--bd-fill-2); border-radius: 6px;
-  padding: 0 10px; gap: 8px; width: 220px; color: var(--bd-t3); font-size: 13px; cursor: text;
-}
-.bd-bell {
-  position: relative; width: 34px; height: 34px; border: none; background: transparent; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--bd-t2); font-size: 18px;
-}
-.bd-bell:hover { background: var(--bd-fill-2); }
-.bd-bell__dot {
-  position: absolute; top: 4px; right: 5px; min-width: 15px; height: 15px; padding: 0 4px;
-  background: var(--bd-danger); color: #fff; border-radius: 8px; font-size: 10px; font-weight: 600;
-  display: flex; align-items: center; justify-content: center; border: 1.5px solid #fff;
-}
+/* 搜索框与通知铃铛的样式随组件走：components/GlobalSearch.vue、components/NotifyBell.vue */
 .bd-acct { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 3px 6px; border-radius: 8px; }
 .bd-acct:hover { background: var(--bd-fill-2); }
 .bd-acct__av {
@@ -193,8 +263,21 @@ async function doChangePw() {
   display: flex; align-items: center; justify-content: center;
 }
 .bd-acct__txt { display: flex; flex-direction: column; line-height: 1.2; }
-.bd-acct__txt b { font-size: 13px; font-weight: 600; }
-.bd-acct__txt i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
+.bd-acct__txt b { font-size: 13px; font-weight: 600; max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-acct__txt i { font-style: normal; font-size: 11px; color: var(--bd-t3); max-width: 130px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+/* 账户下拉里的身份卡：谁 / 什么角色 / 持有哪些权限键 */
+.bd-acctcard { padding: 11px 12px 10px; border-bottom: 1px solid var(--bd-border); min-width: 232px; max-width: 300px; }
+.bd-acctcard__n { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
+.bd-acctcard__n span { font-weight: 400; font-size: 11px; color: var(--bd-t3); margin-left: 6px; }
+.bd-acctcard__r { font-size: 12px; color: var(--bd-primary); margin-top: 5px; font-weight: 500; }
+.bd-acctcard__p { display: flex; flex-wrap: wrap; gap: 5px; margin-top: 7px; }
+.bd-perm {
+  font-size: 11px; padding: 1px 7px; border-radius: 4px;
+  background: var(--bd-primary-1); color: var(--bd-primary);
+}
+.bd-acctcard__s { font-size: 11px; color: var(--bd-t3); margin-top: 7px; line-height: 1.6; }
+.bd-acctcard__u { font-size: 11px; color: var(--bd-t3); margin-top: 6px; line-height: 1.7; }
 
 /* 主体 */
 .bd-body { display: flex; flex: 1; overflow: hidden; }

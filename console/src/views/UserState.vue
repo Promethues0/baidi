@@ -46,7 +46,21 @@
       <icon-check-circle-fill />当前没有被防爆破锁定的来源 IP
     </div>
     <a-card v-else class="bd-card" :bordered="false">
+      <!-- ★批量解锁（PRD FR-MON-18 逐字写着「或选中单个/多个后批量解锁」，P0）：
+           一次内网扫描或一台 NAT 出口后面的误锁会一次性产生几十条 IP 锁，
+           而在此之前只能一条一条点。 -->
+      <div class="bd-ipbar">
+        <label class="bd-ipbar__all">
+          <input type="checkbox" :checked="allIPSelected" @change="toggleAllIP" />
+          全选（{{ ipSel.length }} / {{ ipLocks.length }}）
+        </label>
+        <div style="flex: 1" />
+        <button class="bd-btn bd-btn--ghost" :disabled="!ipSel.length || ipBusy" @click="unlockSelectedIPs">
+          {{ ipBusy ? '解锁中…' : `批量解锁（${ipSel.length}）` }}
+        </button>
+      </div>
       <div v-for="lk in ipLocks" :key="lk.key" class="bd-iplock">
+        <input type="checkbox" :value="lk.key" v-model="ipSel" class="bd-iplock__ck" />
         <span class="bd-mono bd-iplock__ip">{{ lk.key }}</span>
         <span class="bd-iplock__reason">{{ lk.reason }}</span>
         <span class="bd-iplock__until">锁定至 {{ fmtUntil(lk.until) }}</span>
@@ -55,7 +69,17 @@
     </a-card>
 
     <!-- 受关注用户清单 -->
-    <div class="bd-section-title">受关注用户 <em>{{ shown.length }}</em></div>
+    <div class="bd-usbar">
+      <div class="bd-section-title" style="margin: 0">受关注用户 <em>{{ shown.length }}</em></div>
+      <div style="flex: 1" />
+      <!-- ★检索（PRD FR-MON-15）：几百个账号里挑出几十个被降权/锁定的，
+           此前只能靠肉眼在长列表里找——而这一页的定位就是「就近处置」。
+           过滤字段与占位文案逐字对应。 -->
+      <div class="bd-searchbox" style="width: 250px">
+        <icon-search />
+        <input v-model="kw" class="bd-searchbox__in" placeholder="按姓名 / 账号 / 组织搜索" />
+      </div>
+    </div>
 
     <div v-if="!shown.length" class="bd-card bd-empty bd-empty--lg">
       <icon-check-circle-fill />当前筛选条件下没有受关注用户
@@ -79,7 +103,7 @@
         <div class="bd-row__tags">
           <span class="bd-tg" :style="tagStyle(stateMeta(u.state).color)">{{ stateMeta(u.state).label }}</span>
           <!-- 风险标签仅在比档位标签多给信息时出现，不重复一枚同名标签 -->
-          <span v-if="u.risk !== 'none' && riskLabel(u.risk) !== stateMeta(u.state).label" class="bd-tg" :style="tagStyle(riskHex(u.risk))">{{ riskLabel(u.risk) }}</span>
+          <span v-if="riskLabel(u.risk) && riskLabel(u.risk) !== stateMeta(u.state).label" class="bd-tg" :style="tagStyle(riskHex(u.risk))">{{ riskLabel(u.risk) }}</span>
         </div>
         <div v-if="u.reasons.length" class="bd-row__reasons">
           <span v-for="(r, i) in u.reasons" :key="i" class="bd-tg bd-tg--grey">{{ r }}</span>
@@ -93,8 +117,8 @@
         <div class="bd-row__acts">
           <!-- 就地解锁：按锁的种类选路——爆破锁走 /security/lockouts/unlock，目录锁走 /users/{id}/status -->
           <span v-if="u.state === 'locked' || u.bruteLocked" class="bd-link" @click="unlockUser(u)"><icon-unlock />就地解锁</span>
-          <span class="bd-link" @click="goUsers"><icon-user />查看用户</span>
-          <span class="bd-link bd-link--grey" @click="goAudit"><icon-file />查审计</span>
+          <span class="bd-link" @click="goUsers(u)"><icon-user />查看用户</span>
+          <span class="bd-link bd-link--grey" @click="goAudit(u)"><icon-file />查审计</span>
         </div>
       </div>
     </a-card>
@@ -105,7 +129,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type UserStateBundle, type UserStateItem, type LoginLockout, type LockoutsResp } from '@/lib/api';
+import { api, type UserStateBundle, type UserStateItem, type LoginLockout, type LockoutsResp, failReason } from '@/lib/api';
 
 const router = useRouter();
 
@@ -140,14 +164,65 @@ const live = ref(false);
 const loading = ref(false);
 const filter = ref<string>('');
 
+/** 关键词。★过滤字段必须与占位文案逐字对应（姓名 / 账号 / 组织）——
+ *  说能搜组织却只搜账号，是这个项目在别处已经修过一轮的形态。 */
+const kw = ref('');
+
 const shown = computed<UserStateItem[]>(() => {
-  if (!filter.value) return bundle.value.items;
-  // locked 桶与后端计数口径一致：目录锁定 ∪ 爆破锁定
-  if (filter.value === 'locked') return bundle.value.items.filter((i) => i.state === 'locked' || i.bruteLocked);
-  return bundle.value.items.filter((i) => i.state === filter.value);
+  let list = bundle.value.items;
+  if (filter.value === 'locked') {
+    // locked 桶与后端计数口径一致：目录锁定 ∪ 爆破锁定
+    list = list.filter((i) => i.state === 'locked' || i.bruteLocked);
+  } else if (filter.value) {
+    list = list.filter((i) => i.state === filter.value);
+  }
+  const k = kw.value.trim().toLowerCase();
+  if (!k) return list;
+  // 分桶筛选与关键词是**与**关系：先按档位收，再按关键词收。
+  return list.filter((i) => `${i.user} ${i.account} ${i.org}`.toLowerCase().includes(k));
 });
 
 const ipLocks = computed(() => lockouts.value.filter((l) => l.kind === 'ip'));
+
+/* ── 爆破锁定 IP 的批量解锁（FR-MON-18，P0）── */
+const ipSel = ref<string[]>([]);
+const ipBusy = ref(false);
+const allIPSelected = computed(() => ipLocks.value.length > 0 && ipSel.value.length === ipLocks.value.length);
+
+function toggleAllIP() {
+  ipSel.value = allIPSelected.value ? [] : ipLocks.value.map((l) => l.key);
+}
+
+/**
+ * 批量解锁。逐条调既有端点、**逐条回报**——部分失败不该让整批悄悄算成功，
+ * 管理员要的是"哪些没解开、为什么"（同闲置批量锁定那条的形状）。
+ */
+async function unlockSelectedIPs() {
+  const keys = [...ipSel.value];
+  if (!keys.length) return;
+  ipBusy.value = true;
+  const failed: string[] = [];
+  try {
+    for (const key of keys) {
+      try {
+        await api('/security/lockouts/unlock', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind: 'ip', key })
+        });
+      } catch (e) {
+        failed.push(`${key}（${failReason(e)}）`);
+      }
+    }
+    const ok = keys.length - failed.length;
+    if (failed.length) {
+      Message.warning(`已解锁 ${ok} 个；${failed.length} 个失败：${failed.join('、')}`);
+    } else {
+      Message.success(`已解锁 ${ok} 个来源 IP`);
+    }
+    ipSel.value = [];
+    await load();
+  } finally { ipBusy.value = false; }
+}
 
 function fmtUntil(ts: number) {
   const d = new Date(ts * 1000);
@@ -171,8 +246,8 @@ async function unlockUser(u: UserStateItem) {
     }
     Message.success(`已解锁 ${u.account}`);
     await load();
-  } catch {
-    Message.error('解锁失败，请检查后端连接');
+  } catch (e) {
+    Message.error(`解锁失败：${failReason(e)}`);
   }
 }
 
@@ -184,8 +259,8 @@ async function unlockIP(lk: LoginLockout) {
     });
     Message.success(`已解锁 IP ${lk.key}`);
     await load();
-  } catch {
-    Message.error('解锁失败，请检查后端连接');
+  } catch (e) {
+    Message.error(`IP 解锁失败：${failReason(e)}`);
   }
 }
 
@@ -195,7 +270,12 @@ function toneHex(t: string) {
   return t === 'danger' ? '#F53F3F' : t === 'warning' ? '#FF7D00' : t === 'info' ? '#165DFF' : '#86909C';
 }
 function riskHex(r: string) { return r === 'high' ? '#F53F3F' : r === 'low' ? '#FF7D00' : '#86909C'; }
-function riskLabel(r: string) { return r === 'high' ? '高风险' : r === 'low' ? '关注' : ''; }
+/** ★unknown 要有名字：回空串的话，模板那句 `riskLabel(u.risk) !== stateMeta(...)` 判真，
+ *  于是渲染出一个**没有文字的灰色空标签**——看起来像样式坏了。
+ *  空串只留给 'none'（确实没有风险档要额外标注）。 */
+function riskLabel(r: string) {
+  return r === 'high' ? '高风险' : r === 'low' ? '关注' : r === 'unknown' ? '不可判定' : '';
+}
 /**
  * 档位标签。★与风险处置四档同名同义：这里显示的就是网关此刻正在执行的那一档，
  * 不是另起一套"高风险/关注"的模糊说法。文案直接写清各档到底做了什么，
@@ -219,8 +299,16 @@ function avatarBg(name: string) {
   return palette[h];
 }
 
-function goUsers() { router.push('/business/users'); }
-function goAudit() { router.push('/security/audit'); }
+/* ★这两个入口此前**丢掉了当前选中的那一行**：从「用户状态」里点某个被阻断的账号的
+   「查审计」，落到的是一张未筛选的全量审计表，管理员得再手动输一遍账号名。
+   两个页面都已经支持从 URL 带条件进来（Users 有关键词检索，Audit 有 actor 精确检索），
+   缺的只是把上下文传过去。 */
+function goUsers(u: { account: string }) {
+  router.push({ path: '/business/users', query: u.account ? { q: u.account } : {} });
+}
+function goAudit(u: { account: string }) {
+  router.push({ path: '/security/audit', query: u.account ? { actor: u.account } : {} });
+}
 
 async function load() {
   loading.value = true;
@@ -245,6 +333,14 @@ onMounted(load);
 </script>
 
 <style scoped>
+.bd-usbar { display: flex; align-items: center; gap: 12px; margin: 26px 0 10px; }
+.bd-ipbar { display: flex; align-items: center; gap: 10px; padding-bottom: 10px; margin-bottom: 4px; border-bottom: 1px solid var(--bd-fill-2); }
+.bd-ipbar__all { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--bd-t2); cursor: pointer; }
+.bd-iplock__ck { margin-right: 4px; }
+.bd-searchbox { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; background: var(--bd-fill-2); border-radius: 6px; color: var(--bd-t3); }
+.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
+.bd-searchbox__in::placeholder { color: var(--bd-t3); }
+
 /* 提示条 */
 .bd-tip {
   display: flex; align-items: center; gap: 8px; margin-bottom: 16px;

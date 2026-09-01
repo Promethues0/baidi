@@ -94,8 +94,14 @@
              在这一页上根本不存在，而访问审查恰恰是要看「有没有我不知道的授予」。 -->
         <span class="bd-toolbar__c">
           共 {{ grantTotal }} 条授予 · 有效 {{ activeCount }}
+          <!-- ★这句话此前写的是「请用 API 或收窄时间范围查看」，而两条路都不存在：
+               GET /jit/grants **不接任何参数**（没有 offset，也没有时间范围），
+               页面上同样没有时间筛选器。照着提示去做的人会找很久。
+               现在如实说清"够不着"，并指向真的能查到的地方：授予与撤销逐条落审计。 -->
           <b v-if="grantTruncated" class="bd-trunc">（本页只显示最近 {{ grants.length }} 条，
-            其余 {{ grantTotal - grants.length }} 条未加载——请用 API 或收窄时间范围查看）</b>
+            其余 {{ grantTotal - grants.length }} 条更早的授予当前**无法从控制台或 API 取到**——
+            接口不接 offset 与时间范围。要查更早的授予，去「审计中心」按关键词「JIT」检索：
+            每一次授予与撤销都逐条留痕。判定不受这条上限影响（到期告警走的是另一条全量查询）。）</b>
         </span>
       </div>
       <table class="bd-table">
@@ -114,7 +120,7 @@
             </td>
             <td><span class="bd-pill" :class="'s-' + effStatus(g)">{{ statusZh[effStatus(g)] }}</span></td>
             <td class="r">
-              <span v-if="effStatus(g) === 'active'" class="bd-link bd-link--danger" @click="revoke(g)">撤销</span>
+              <span v-if="effStatus(g) === 'active'" class="bd-link bd-link--danger" @click="askRevoke(g)">撤销</span>
               <span v-else class="bd-link bd-link--grey">—</span>
             </td>
           </tr>
@@ -130,18 +136,33 @@
       </div>
       <a-textarea v-model="rejectReason" placeholder="例如：该资源本季度冻结访问，请走线下审批" :max-length="200" allow-clear :auto-size="{ minRows: 3, maxRows: 5 }" />
     </a-modal>
+
+    <!-- 撤销确认。★与「驳回」对称：那一条要求填理由，而撤销（后果更直接——
+         立刻切断已经在用的访问）此前是表格里点一下就执行的裸链接。 -->
+    <a-modal v-model:visible="revoking.open" title="撤销即时访问授予" :width="460"
+             :ok-loading="revoking.busy" ok-text="确认撤销" cancel-text="取消"
+             :ok-button-props="{ status: 'danger' }" @ok="doRevoke">
+      <div class="bd-reject">
+        <icon-exclamation-circle-fill class="bd-reject__ic" />
+        <div>将撤销 <b>{{ revoking.label }}</b> 的授予。撤销后该用户对此资源的访问会在网关下一轮策略轮询（约 15 秒）内断开，已建立的隧道连接同批切断。</div>
+      </div>
+      <a-textarea v-model="revoking.reason" placeholder="撤销理由（会写进审计；留空则记为「未填理由」）"
+                  :max-length="200" allow-clear :auto-size="{ minRows: 3, maxRows: 5 }" />
+    </a-modal>
   </div>
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted, onUnmounted } from 'vue';
+import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AccessRequestsResp, type JitGrantsResp, type AccessRequest, type JitGrant } from '@/lib/api';
+import { api, failReason, type AccessRequestsResp, type JitGrantsResp, type AccessRequest, type JitGrant, failStatus } from '@/lib/api';
 
 const tab = ref<'approval' | 'grants'>('approval');
 const live = ref(false);
 const busy = ref(false);
 const rejectOpen = ref(false);
+/** 撤销确认弹窗状态（理由由管理员填，不再写死）。 */
+const revoking = reactive({ open: false, busy: false, id: '', label: '', reason: '' });
 const rejectReason = ref('');
 const grantTtl = ref(60);
 const nowSec = ref(Math.floor(Date.now() / 1000));
@@ -226,9 +247,8 @@ async function decide(decision: 'approved' | 'rejected', reason: string) {
     else Message.warning(`已驳回 ${a.user} 的访问申请${reason ? `：${reason}` : ''}（已落库）`);
     await load();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('409')) Message.error('该申请已被处置，请刷新');
-    else if (msg.startsWith('403')) Message.error('不能审批自己提交的申请');
+    if (failStatus(e) === 409) Message.error('该申请已被处置，请刷新');
+    else if (failStatus(e) === 403) Message.error(failReason(e));
     else Message.error('处置失败，请检查后端连接');
   } finally {
     busy.value = false;
@@ -242,23 +262,46 @@ function reject() {
   decide('rejected', r);
 }
 
-async function revoke(g: JitGrant) {
+/**
+ * 撤销一条 JIT 授予。
+ *
+ * 改了三处：
+ *  ① **点中即撤 → 先确认**。这是表格里一个常驻可见的裸链接，点下去立刻切断该用户
+ *     对该资源的访问（网关下一轮轮询即生效）；同一页的「驳回申请」反而要求填理由。
+ *  ② **撤销理由由管理员填**，不再写死成「管理员在授予台账主动撤销」。理由会进审计，
+ *     一句对每条授予都一样的话，等于这一栏在审计里没有信息量。
+ *  ③ `msg.startsWith('409')` 是**死分支**：api() 抛的是后端中文原文（errText），
+ *     永远不以状态码开头，于是每一次失败都走进"请检查后端连接"那一支——
+ *     包括「该授予已过期」这种与连接毫无关系的情况。
+ */
+function askRevoke(g: JitGrant) {
+  revoking.id = g.id;
+  revoking.label = `${g.user} 对「${g.resourceName}」`;
+  revoking.reason = '';
+  revoking.open = true;
+}
+
+async function doRevoke() {
+  const g = grants.value.find((x) => x.id === revoking.id);
+  if (!g) { revoking.open = false; return; }
   if (!live.value) {
     grants.value = grants.value.map(x => x.id === g.id ? { ...x, status: 'revoked' as const } : x);
     Message.warning('演示态：已撤销（未连后端，不落库）');
+    revoking.open = false;
     return;
   }
+  revoking.busy = true;
   try {
     await api(`/jit/grants/${g.id}/revoke`, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reason: '管理员在授予台账主动撤销' })
+      body: JSON.stringify({ reason: revoking.reason.trim() || '管理员在授予台账主动撤销（未填理由）' })
     });
     Message.success(`已撤销 ${g.user} 对「${g.resourceName}」的授予`);
+    revoking.open = false;
     await load();
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg.startsWith('409') ? '授予不存在或已失效' : '撤销失败，请检查后端连接');
-  }
+    Message.error(`撤销失败：${failReason(e)}`);
+  } finally { revoking.busy = false; }
 }
 
 /** 库里的授予总数与「本页是否被截断」（后端 /jit/grants 下发）。 */

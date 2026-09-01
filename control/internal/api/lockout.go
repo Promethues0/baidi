@@ -111,11 +111,27 @@ func (s *Server) handleLockoutConfig(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, s.lockout.Config())
 }
 
-// handleSaveLockoutConfig 保存防爆破配置（admin）：settings 落库 + 即时生效。
+// handleSaveLockoutConfig 保存防爆破配置：settings 落库 + 即时生效。
 // 这是策略页「同 IP / 同用户名连续登录错误锁定」开关与阈值的真实后端——
 // 消费方是登录链路的 Guard，本配置不是摆设。
+//
+// ★权限是 PermSecurity 而不是 PermSystem（改造前是后者），三处对齐：
+//
+//	· 同一文件里的**解锁**（handleUnlockLockout）本来就是 PermSecurity；
+//	· 同一个页面（Policy.vue）上的接入策略 PUT /policies/access 也是 PermSecurity；
+//	· 权限键的中文定义 store.PermSecurity = "安全策略（认证源 / 策略 / 资源应用 / 用户组织 / 审批）"。
+//
+// 改造前的失衡是**双向**的，且方向是削弱认证防线：
+//
+//	① 安全管理员（职责里写着"策略"）能解锁被锁的账号，却调不动锁的阈值——
+//	   点下去一句 403，开关弹回原位；
+//	② 系统管理员（职责是网关证书 / 组网 / 对象库 / 运维体检）可以把
+//	   ipEnabled/accountEnabled 双双置 false，**静默关掉全站登录防爆破**。
+//
+// 而内置四角色里除 root 外没有任何一个同时持 system 与 security（PowerPerms），
+// 所以这不是"多一把钥匙"，是钥匙发错了人。
 func (s *Server) handleSaveLockoutConfig(w http.ResponseWriter, r *http.Request) {
-	if !s.requirePerm(w, r, store.PermSystem) {
+	if !s.requirePerm(w, r, store.PermSecurity) {
 		return
 	}
 	var c lockout.Config

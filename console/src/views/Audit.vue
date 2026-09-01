@@ -6,8 +6,11 @@
         <div class="bd-page__sub">全链路留痕 · HMAC-SM3 防篡改链 · CSV 合规出口</div>
       </div>
       <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn" @click="openExport"><icon-download />导出 CSV</button>
+        <!-- 「降级演示」这个说法已经删掉：这一页现在没有演示数据可降级，
+             拉不到就是拉不到，原因写在下面那条红条里。 -->
+        <a-tag :color="live ? 'green' : 'red'" bordered>{{ live ? '已连 baidi-control' : '数据未读取' }}</a-tag>
+        <button class="bd-btn" :disabled="!!loadErr" :title="loadErr ? '审计数据未读取，导出走的是同一道权限闸' : ''"
+                :style="{ opacity: loadErr ? 0.5 : 1 }" @click="openExport"><icon-download />导出 CSV</button>
         <!-- 这里原先是一个「日志配置」弹窗：四个类别留痕开关 + 保留天数 + 「合规出口（Syslog 转发）」，
              全部是**显示层假配置**——后端既没有按类别开关留痕的能力，保留天数由
              BAIDI_AUDIT_RETENTION_DAYS 决定，Syslog 那一格更是压根没有实现。
@@ -17,17 +20,38 @@
       </div>
     </div>
 
+    <!-- ★拉不到审计就**什么都不画**。
+         这一页此前的初值是一整块 mock（18.4 万条访问决策 + 十条署名到人的流水），
+         `/audit` 一失败就原样保留，右上角挂个「降级演示」——而 /audit 归 PermAudit，
+         安全/系统管理员打开它拿到的是 403，页面却把权限拒绝说成"后端没起"，
+         再配一屏看起来完全正常的审计。同仓「设备状态」「业务告警」两页已立这条例外，
+         审计中心比那两页更该守它：编造的审计记录与真实留痕在页面上无法区分。 -->
+    <div v-if="loadErr" class="bd-auditerr">
+      <icon-exclamation-circle-fill class="bd-auditerr__ic" />
+      <div>
+        <div class="bd-auditerr__t">无法读取审计数据</div>
+        <div class="bd-auditerr__m">{{ loadErr }}</div>
+        <div class="bd-auditerr__n">
+          本页不提供演示数据——编造的审计记录无法与真实留痕区分。
+          审计读取归「审计」权限（PermAudit）：若上面写的是无权执行，请用具备审计权的管理员账号登录。
+        </div>
+      </div>
+    </div>
+
+    <template v-else>
+
+
     <!-- 审计写入失败（wave8 行动 6）：控制面没能把审计写进库。
          ★这条红条只在真出事时出现（后端零失败即整段不下发），常态零噪声。
          文案里必须说清"链校验查不出它们"——否则管理员看到防篡改链全绿会以为没事，
          而链重算的是**已存在行**的连续性，压根没写进去的行不在链上。 -->
-    <div v-if="bundle.writeHealth" class="bd-auditwarn">
+    <div v-if="bundle?.writeHealth" class="bd-auditwarn">
       <icon-close-circle-fill />
       <span>
-        控制面已有 <b>{{ bundle.writeHealth.failures }}</b> 条审计<b>未能写入数据库</b>（首次
+        控制面已有 <b>{{ bundle!.writeHealth!.failures }}</b> 条审计<b>未能写入数据库</b>（首次
         {{ tsText(bundle.writeHealth.firstAt) }}，最近 {{ tsText(bundle.writeHealth.lastAt) }}）。
         这些记录不在库里，防篡改链校验查不出它们的缺失——链重算的是已存在行的连续性。
-        错误：{{ bundle.writeHealth.lastErr }}；最近一条丢失的记录：{{ bundle.writeHealth.lastEvent }}。
+        错误：{{ bundle!.writeHealth!.lastErr }}；最近一条丢失的记录：{{ bundle!.writeHealth!.lastEvent }}。
         完整内容只在控制面进程日志的「审计写入失败」行里，请立即取回并排查磁盘余量与库文件可写性。
       </span>
     </div>
@@ -50,7 +74,7 @@
           <icon-clock-circle class="bd-mcard__ic" />
           <span class="bd-mcard__label">今日总量</span>
         </div>
-        <div class="bd-mcard__num">{{ fmtNum(bundle.todayTotal) }}</div>
+        <div class="bd-mcard__num">{{ fmtNum(bundle?.todayTotal ?? 0) }}</div>
         <div class="bd-mcard__sub">条 · 今日累计</div>
       </div>
 
@@ -66,11 +90,11 @@
         </div>
         <div class="bd-disk__main">
           <b>{{ dbSize }}</b>
-          <span class="bd-disk__cap">占文件系统 {{ bundle.disk.selfPct }}%</span>
+          <span class="bd-disk__cap">占文件系统 {{ bundle?.disk.selfPct ?? 0 }}%</span>
         </div>
-        <div class="bd-disk__track"><span class="bd-disk__fill" :style="{ width: bundle.disk.usedPct + '%', background: diskColor }" /></div>
+        <div class="bd-disk__track"><span class="bd-disk__fill" :style="{ width: (bundle?.disk.usedPct ?? 0) + '%', background: diskColor }" /></div>
         <div class="bd-mcard__sub">
-          所在磁盘已用 {{ bundle.disk.usedPct }}% / {{ bundle.disk.totalGB }} GB · 保留 {{ bundle.disk.retainDays }} 天
+          所在磁盘已用 {{ bundle?.disk.usedPct ?? 0 }}% / {{ bundle?.disk.totalGB ?? 0 }} GB · 保留 {{ bundle?.disk.retainDays ?? 0 }} 天
         </div>
       </div>
     </div>
@@ -86,6 +110,12 @@
         <div style="flex: 1" />
         <!-- 检索：账号精确（查证据链要精确，模糊会把 li 匹配到 alice）+ 事件关键词 -->
         <a-input v-model="q.actor" size="small" style="width: 140px" placeholder="账号（精确）"
+          allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
+        <!-- ★源 IP 维度：后端 SearchAudit 一直支持 srcIp，页面却没有入口。
+             而 wave8 行动 8 专门修过一处「数据面事件的 src_ip 此前一律记成网关自己的地址，
+             按 src_ip 检索审计永远找不到攻击者」——修好了那一半，检索这一半没接上，
+             于是"按攻击源查"这件事在控制台上依然做不到。 -->
+        <a-input v-model="q.srcIp" size="small" style="width: 150px" placeholder="源 IP（精确）"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <a-input v-model="q.kw" size="small" style="width: 170px" placeholder="事件关键词 / 回车检索"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
@@ -136,16 +166,39 @@
             <a-option value="auth">登录认证</a-option>
             <a-option value="admin">管理操作</a-option>
             <a-option value="security">安全事件</a-option>
+            <a-option value="policy">策略变更</a-option>
             <a-option value="dataplane">数据面回执</a-option>
+            <a-option value="system">系统运维</a-option>
           </a-select>
         </div>
+        <!-- ★账号 / 源 IP / 关键词三维此前**导不出来**（后端只认类别+时间），
+             而页面上刚筛过的正是这几维：筛出 12 条、导出 8 万条，管理员却以为
+             这份 CSV 就是屏幕上那些行。现在两侧同一份 store.AuditQuery。 -->
         <div class="bd-field">
-          <label>时间范围（留空 = 不限）</label>
-          <a-range-picker v-model="exp.range" show-time style="width: 100%" />
+          <label>行为人账号（精确，留空 = 不限）</label>
+          <a-input v-model="exp.actor" placeholder="如 li.fang" allow-clear />
+        </div>
+        <div class="bd-field">
+          <label>源 IP（前缀匹配，留空 = 不限）</label>
+          <a-input v-model="exp.srcIp" placeholder="如 10.8. 可查整段" allow-clear />
+        </div>
+        <div class="bd-field">
+          <label>事件关键词（留空 = 不限）</label>
+          <a-input v-model="exp.kw" placeholder="如 拒绝越权" allow-clear />
+        </div>
+        <div class="bd-field">
+          <label>时间范围（留空 = 不限；可选到具体日期，不受页面上三个快选档约束）</label>
+          <a-range-picker v-model="exp.range" style="width: 100%" />
         </div>
         <div class="bd-recap">
           <icon-info-circle />
-          导出「<b>{{ expCatLabel }}</b>」{{ exp.range?.length === 2 ? ` · ${exp.range[0]} 至 ${exp.range[1]}` : ' · 全部时间' }}
+          <span>
+            导出「<b>{{ expCatLabel }}</b>」<template v-if="exp.actor.trim()"> · 账号 <b>{{ exp.actor.trim() }}</b></template
+            ><template v-if="exp.srcIp.trim()"> · 源 IP <b>{{ exp.srcIp.trim() }}</b></template
+            ><template v-if="exp.kw.trim()"> · 关键词 <b>{{ exp.kw.trim() }}</b></template
+            >{{ exp.range?.length === 2 ? ` · ${exp.range[0]} 至 ${exp.range[1]}` : ' · 全部时间' }}
+            <i class="bd-recap__hint">条件已按屏幕上当前的筛选带入，可在此调整。</i>
+          </span>
         </div>
       </div>
       <div class="bd-wfoot">
@@ -156,47 +209,48 @@
         </button>
       </div>
     </a-modal>
+    </template>
 
   </div>
 </template>
 
 <script setup lang="ts">
 import { ref, computed, reactive, onMounted } from 'vue';
-import { useRouter } from 'vue-router';
+import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, getToken, type AuditBundle, type AuditEntry, type KV } from '@/lib/api';
+import { api, getToken, type AuditBundle, type AuditEntry, type KV, failReason } from '@/lib/api';
 
 const live = ref(false);
 const router = useRouter();
+const route = useRoute();
 
 /** 「日志外送」指到系统管理页的真配置区（syslog / SIEM 出口 + 队列积压 + 丢弃计数）。
  *  这一页上不再放任何外送开关：本地一个假开关、真配置在另一页，是最容易骗到人的形态。 */
 function gotoForward() { void router.push({ path: '/system/manage', query: { tab: 'forward' } }); }
 
-/* ── mock fallback（结构同 store.AuditBundle）── */
-const MOCK: AuditBundle = {
-  categories: [
-    { name: '访问决策', value: 184320 },
-    { name: '登录认证', value: 96240 },
-    { name: '管理操作', value: 12880 },
-    { name: '安全事件', value: 2360 }
-  ],
-  todayTotal: 8642,
-  disk: { usedPct: 72, totalGB: 512, retainDays: 90, dbBytes: 1.4 * 1024 ** 3, selfPct: 0 },
-  logs: [
-    { time: '2026-06-22 14:32:08', category: 'access', user: '张伟', srcIp: '192.168.10.24', event: '访问内部应用「OA 协同」', verdict: 'allow' },
-    { time: '2026-06-22 14:31:55', category: 'auth', user: '李娜', srcIp: '10.1.2.33', event: '客户端登录 · 设备指纹校验', verdict: 'mfa' },
-    { time: '2026-06-22 14:30:42', category: 'access', user: '王强', srcIp: '203.0.113.8', event: '访问「财务系统」未授权资源', verdict: 'deny' },
-    { time: '2026-06-22 14:29:17', category: 'security', user: '系统', srcIp: '192.168.10.99', event: '检测到异常端口扫描行为', verdict: 'fail' },
-    { time: '2026-06-22 14:28:03', category: 'admin', user: 'admin', srcIp: '10.0.0.2', event: '修改全局策略「禁止浏览器登录」', verdict: 'ok' },
-    { time: '2026-06-22 14:26:41', category: 'auth', user: '赵敏', srcIp: '172.16.4.18', event: '短信验证码二次认证', verdict: 'ok' },
-    { time: '2026-06-22 14:25:12', category: 'access', user: '刘洋', srcIp: '192.168.20.7', event: '访问隧道应用「研发 Git」', verdict: 'allow' },
-    { time: '2026-06-22 14:23:58', category: 'security', user: '陈静', srcIp: '198.51.100.5', event: '连续密码错误触发 IP 锁定', verdict: 'deny' },
-    { time: '2026-06-22 14:22:30', category: 'admin', user: 'admin', srcIp: '10.0.0.2', event: '新增访问者「外包-周磊」', verdict: 'ok' },
-    { time: '2026-06-22 14:20:11', category: 'auth', user: '孙浩', srcIp: '10.1.5.66', event: '浏览器登录被客户端强管控拦截', verdict: 'fail' }
-  ]
-};
-const bundle = ref<AuditBundle>(MOCK);
+/**
+ * ★这里原先是一整块 MOCK：18.4 万条「访问决策」、9.6 万条「登录认证」、
+ * 十条署着真人姓名与内网 IP 的审计流水（「访问内部应用「OA 协同」」「检测到异常端口扫描行为」…），
+ * 而 bundle 的初值就是它——`/audit` 一失败就整页保留这份编造数据，
+ * 右上角挂一个「降级演示」的橙色标签了事。
+ *
+ * 两个理由让这块 mock 必须消失，而不是换个说法：
+ *
+ *  ① **审计页编造记录是所有假数据里最坏的一种**。它编的正是"谁在什么时候做了什么"——
+ *     这一页存在的全部意义。同一个仓库里「设备状态」与「业务告警」两页已经立了这条例外
+ *     （见 CLAUDE.md：连不上就说连不上，不画假曲线、不编假告警），审计中心却漏在外面，
+ *     而它比那两页更该守这条。
+ *
+ *  ② 「降级演示」这个标签**说错了原因**。/audit 归 PermAudit，安全管理员与系统管理员
+ *     打开这一页拿到的是 403；页面把一次**权限拒绝**说成"后端没起"，还配上一屏
+ *     看起来完全正常的审计流水。管理员据此得出的结论会是"审计功能是好的"。
+ *
+ * 现在：拉不到就 bundle=null，整页只显示一条如实的错误（后端原话由 failReason 转述），
+ * 一行编造的记录都不画。
+ */
+const bundle = ref<AuditBundle | null>(null);
+const loadErr = ref('');
+
 
 /* tsText Unix 秒 → 本地时刻；缺席回破折号（0/undefined 都是"没有这个时刻"）。 */
 function tsText(sec?: number) {
@@ -207,15 +261,21 @@ function tsText(sec?: number) {
 }
 
 /* ── P10 分类卡 ── */
-const CAT_COLOR: Record<string, string> = { '访问决策': '#165DFF', '登录认证': '#722ED1', '管理操作': '#00B42A', '安全事件': '#FF7D00' };
+/** 类别卡配色。★键是后端下发的中文名（bundle.categories 只有 name/value），
+ *  必须覆盖 store.AuditCategories 的全部七项——漏一项那张卡就退回默认蓝，
+ *  与「访问决策」同色而分不出来。 */
+const CAT_COLOR: Record<string, string> = {
+  '访问决策': '#165DFF', '登录认证': '#722ED1', '管理操作': '#00B42A', '策略变更': '#F7BA1E',
+  '安全事件': '#FF7D00', '数据面回执': '#0FC6C2', '系统运维': '#86909C'
+};
 const catCards = computed(() =>
-  bundle.value.categories.map((c: KV) => ({ key: c.name, label: c.name, value: c.value, color: CAT_COLOR[c.name] ?? '#165DFF' }))
+  (bundle.value?.categories ?? []).map((c: KV) => ({ key: c.name, label: c.name, value: c.value, color: CAT_COLOR[c.name] ?? '#165DFF' }))
 );
 function fmtNum(n: number) { return n.toLocaleString('en-US'); }
 
 /* dbSize 审计库文件大小（人话）。 */
 const dbSize = computed(() => {
-  const b = bundle.value.disk.dbBytes ?? 0;
+  const b = bundle.value?.disk.dbBytes ?? 0;
   if (b <= 0) return '—';
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
   let i = 0, v = b;
@@ -225,18 +285,23 @@ const dbSize = computed(() => {
 
 /* ── 所在磁盘水位上色（进度条与标签说的都是**文件系统**，不是审计库）── */
 const diskColor = computed(() => {
-  const p = bundle.value.disk.usedPct;
+  const p = bundle.value?.disk.usedPct ?? 0;
   return p >= 80 ? 'var(--bd-danger)' : p >= 60 ? 'var(--bd-warning)' : 'var(--bd-success)';
 });
 const diskLabel = computed(() => {
-  const p = bundle.value.disk.usedPct;
+  const p = bundle.value?.disk.usedPct ?? 0;
   return p >= 80 ? '偏高' : p >= 60 ? '关注' : '健康';
 });
 
 /* ── 日志表筛选 ── */
+/** 类别筛选条。★必须与**后端支持的类别**逐项对齐：dataplane（数据面回执）此前漏了，
+ *  后端 SearchAudit 支持它、本页的导出下拉里也列着它，唯独列表筛不到——
+ *  于是网关报上来的隧道放行/拒绝在这一页的筛选条上等于不存在，
+ *  而 FR-AUDIT-05 要查的正是这一类。 */
 const catFilters = [
   { key: 'all', label: '全部' }, { key: 'access', label: '访问' }, { key: 'auth', label: '认证' },
-  { key: 'admin', label: '管理' }, { key: 'security', label: '安全' }
+  { key: 'admin', label: '管理' }, { key: 'policy', label: '策略' }, { key: 'security', label: '安全' },
+  { key: 'dataplane', label: '数据面' }, { key: 'system', label: '系统' }
 ];
 const timeFilters = [{ key: 'today', label: '今天' }, { key: '7d', label: '7 天' }, { key: '30d', label: '30 天' }];
 const catSel = ref('all');
@@ -244,20 +309,35 @@ const timeSel = ref('today');
 /* 服务端检索态：results 非 null 时表格显示它（全表 WHERE 的结果），
  * 否则回落到首屏快照（最近 200 条）的前端过滤。未连控制面时永远走后者——
  * mock 数据上装一个"全表检索"是在演示假能力。 */
-const q = reactive({ actor: '', kw: '' });
+const q = reactive({ actor: '', srcIp: '', kw: '' });
 const searchResults = ref<AuditEntry[] | null>(null);
 const searchTotal = ref(-1);
 const shownLogs = computed<AuditEntry[]>(() => {
   if (searchResults.value) return searchResults.value;
-  return catSel.value === 'all' ? bundle.value.logs : bundle.value.logs.filter((l) => l.category === catSel.value);
+  const logs = bundle.value?.logs ?? [];
+  return catSel.value === 'all' ? logs : logs.filter((l) => l.category === catSel.value);
 });
 
+/**
+ * 时间快选的起始日（YYYY-MM-DD）。
+ *
+ * ★这里原来是 `d.toISOString().slice(0, 10)`——toISOString 先转 **UTC** 再取日期，
+ * 而后端 parseAuditTime 走的是 `time.ParseInLocation(..., time.Local)`，按**服务器本地时间**解释。
+ * 在 UTC+8 上，每天 00:00–07:59 这八个小时里 ISO 日期还停在前一天：
+ * 选「今天」实际查的是**昨天到现在**，选「近 7 天」窗口整体前移一天。
+ * 页面不会有任何异常表现——多出来的那些行看起来就是正常的审计记录。
+ *
+ * 改成按本地日期拼字符串。注意这里的"本地"是**浏览器所在时区**，而后端按服务器时区解释；
+ * 两者不同区时窗口会差几小时——这是跨时区部署固有的，不是这个函数能消掉的，
+ * 页面上的时间范围文案说的也是"按服务器时间"。
+ */
 function sinceOf(key: string): string {
   const d = new Date();
   if (key === '7d') d.setDate(d.getDate() - 6);
   else if (key === '30d') d.setDate(d.getDate() - 29);
   // today：就是今天
-  return d.toISOString().slice(0, 10);
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /** 每页条数。★后端 SearchAudit 一直支持 limit/offset 并回 total，页面却写死
@@ -273,11 +353,12 @@ async function runSearch(reset = false) {
   if (reset) page.value = 0;
   if (!live.value) { searchResults.value = null; searchTotal.value = -1; page.value = 0; return; }
   // 全默认（全部类别 + 今天 + 无关键词）退回首屏快照：别让"什么都没筛"看起来像检索过
-  const idle = catSel.value === 'all' && timeSel.value === 'today' && !q.actor.trim() && !q.kw.trim();
+  const idle = catSel.value === 'all' && timeSel.value === 'today' && !q.actor.trim() && !q.srcIp.trim() && !q.kw.trim();
   if (idle) { searchResults.value = null; searchTotal.value = -1; page.value = 0; return; }
   const qs = new URLSearchParams();
   if (catSel.value !== 'all') qs.set('category', catSel.value);
   if (q.actor.trim()) qs.set('actor', q.actor.trim());
+  if (q.srcIp.trim()) qs.set('srcIp', q.srcIp.trim());
   if (q.kw.trim()) qs.set('q', q.kw.trim());
   qs.set('from', sinceOf(timeSel.value));
   qs.set('limit', String(PAGE_SIZE));
@@ -286,8 +367,10 @@ async function runSearch(reset = false) {
     const r = await api<{ logs: AuditEntry[]; total: number }>(`/audit?${qs.toString()}`);
     searchResults.value = r.logs;
     searchTotal.value = r.total;
-  } catch {
-    Message.error('审计检索失败（需已连 baidi-control）');
+  } catch (e) {
+    // 审计读端点归 PermAudit：安全/系统管理员在这里拿到的是一句
+    // 「角色「系统管理员」无权执行该操作（需要权限：audit）」——那正是他要看到的话。
+    Message.error(`审计检索失败：${failReason(e)}`);
   }
 }
 
@@ -301,7 +384,9 @@ function catMeta(c: AuditEntry['category']) {
     auth: { label: '登录认证', color: '#722ED1' },
     admin: { label: '管理操作', color: '#00B42A' },
     security: { label: '安全事件', color: '#FF7D00' },
-    dataplane: { label: '数据面回执', color: '#0FC6C2' }
+    policy: { label: '策略变更', color: '#F7BA1E' },
+    dataplane: { label: '数据面回执', color: '#0FC6C2' },
+    system: { label: '系统运维', color: '#86909C' }
   }[c] ?? { label: c, color: '#86909C' };
 }
 function verdictColor(v: AuditEntry['verdict']) {
@@ -317,19 +402,45 @@ function tagStyle(color: string) { return { color, background: color + '14' }; }
 /* ── CSV 导出（GET /api/v1/audit/export，admin） ── */
 const exp = reactive({
   open: false,
-  category: 'all' as 'all' | 'access' | 'auth' | 'admin' | 'security',
+  // 类别集合必须与筛选条同源（catFilters）——各写一份就会出现「列表能筛、导出没这一类」。
+  category: 'all' as string,
+  actor: '',
+  srcIp: '',
+  kw: '',
   range: [] as string[],
   busy: false
 });
-const expCatLabel = computed(
-  () => ({ all: '全部类别', access: '访问决策', auth: '登录认证', admin: '管理操作', security: '安全事件' }[exp.category])
-);
+/** ★类别中文名走 catMeta（与列表、类别卡同一份），不再手抄一张表——
+ *  手抄那份漏了 dataplane/policy/system，选中它们时确认行的类别是空白的。 */
+const expCatLabel = computed(() => exp.category === 'all' ? '全部类别' : catMeta(exp.category as AuditEntry['category']).label);
 
+/**
+ * 打开导出弹窗。
+ *
+ * ★**继承屏幕上刚筛好的条件**，而不是清空重来。改造前这里把三项一律复位，
+ * 于是管理员筛到某个账号的十几条记录、点「导出 CSV」，拿到的是**全表八万条**——
+ * 而他会以为这份 CSV 就是刚才屏幕上那些行，直接拿去交差。
+ * （后端那一半同批修好：导出此前只认 category/from/to，账号与源 IP 两维
+ *   压根传不进去，见 store.auditWhere 的注释。）
+ */
 function openExport() {
   exp.open = true;
-  exp.category = 'all';
-  exp.range = [];
   exp.busy = false;
+  exp.category = catSel.value;
+  exp.actor = q.actor.trim();
+  exp.srcIp = q.srcIp.trim();
+  exp.kw = q.kw.trim();
+  // 时间：把当前那个快选档换算成起始日；未筛时留空 = 全部时间。
+  exp.range = timeSel.value === 'today' && !exp.actor && !exp.srcIp && !exp.kw
+    ? []
+    : [sinceOf(timeSel.value), todayStr()];
+}
+
+/** 今天（本地日期，与 sinceOf 同一口径）。 */
+function todayStr(): string {
+  const d = new Date();
+  const pad = (n: number) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
 /* 后端回 CSV 附件（非 JSON），api() 封装只吃 JSON，这里直接 fetch blob 触发下载。 */
@@ -338,6 +449,10 @@ async function doExport() {
   try {
     const qs = new URLSearchParams();
     if (exp.category !== 'all') qs.set('category', exp.category);
+    // 账号 / 源 IP / 关键词三维与列表检索同名同义（后端 store.AuditQuery 同一份 WHERE）。
+    if (exp.actor.trim()) qs.set('actor', exp.actor.trim());
+    if (exp.srcIp.trim()) qs.set('srcIp', exp.srcIp.trim());
+    if (exp.kw.trim()) qs.set('q', exp.kw.trim());
     if (exp.range?.[0]) qs.set('from', exp.range[0]);
     if (exp.range?.[1]) qs.set('to', exp.range[1]);
     const res = await fetch(`/api/v1/audit/export?${qs.toString()}`, {
@@ -356,8 +471,8 @@ async function doExport() {
     URL.revokeObjectURL(url);
     exp.open = false;
     Message.success(`已导出 ${name}`);
-  } catch {
-    Message.error('导出失败：需已连 baidi-control 且以管理员登录');
+  } catch (e) {
+    Message.error(`导出失败：${failReason(e)}`);
   } finally {
     exp.busy = false;
   }
@@ -365,14 +480,43 @@ async function doExport() {
 
 /* ── 拉取 ── */
 onMounted(async () => {
+  // 从别的页面带条件跳进来（如「用户状态 → 查审计」）：接住 query 并立刻检索。
+  // ★不接的话，那个入口就是一条**看起来能用**的死链——落到一张未筛选的全量表，
+  //   管理员还得手抄一遍账号名，而他点这个链接的全部目的就是省掉这一步。
+  const qActor = String(route.query.actor ?? '').trim();
+  const qSrcIp = String(route.query.srcIp ?? '').trim();
+  const qKw = String(route.query.q ?? '').trim();
+  if (qActor) q.actor = qActor;
+  if (qSrcIp) q.srcIp = qSrcIp;
+  if (qKw) q.kw = qKw;
   try {
-    const b = await api<AuditBundle>('/audit');
-    bundle.value = b; live.value = true;
-  } catch { live.value = false; }
+    bundle.value = await api<AuditBundle>('/audit');
+    live.value = true;
+    loadErr.value = '';
+    if (qActor || qSrcIp || qKw) await runSearch(true);
+  } catch (e) {
+    // 不回退演示数据：拉不到就说拉不到，并把后端原话原样带出来
+    // （403 时那句话正是「角色「系统管理员」无权执行该操作（需要权限：audit）」）。
+    bundle.value = null;
+    live.value = false;
+    loadErr.value = failReason(e);
+  }
 });
 </script>
 
 <style scoped>
+.bd-recap__hint { display: block; font-style: normal; font-size: 11px; color: var(--bd-t3); margin-top: 4px; }
+
+/* 审计读取失败：整页只留这一条，不画任何编造数据 */
+.bd-auditerr {
+  display: flex; gap: 12px; align-items: flex-start; padding: 18px 20px; margin-bottom: 16px;
+  background: var(--bd-tag-red-bg); border: 1px solid #FFCDC7; border-radius: var(--bd-radius);
+}
+.bd-auditerr__ic { color: var(--bd-danger); font-size: 18px; flex: none; margin-top: 1px; }
+.bd-auditerr__t { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-auditerr__m { font-size: 13px; color: var(--bd-danger); margin-top: 5px; line-height: 1.7; }
+.bd-auditerr__n { font-size: 12px; color: var(--bd-t2); margin-top: 8px; line-height: 1.8; }
+
 /* ── P10 聚合头 ── */
 .bd-aggrow { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
 .bd-mcard { flex: 1; min-width: 168px; padding: 16px 18px; }

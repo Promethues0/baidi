@@ -20,11 +20,17 @@
       <h1 class="scr-title"><span>零信任安全态势感知中心</span></h1>
       <div class="scr-top__r">
         <div class="scr-clock"><b>{{ clock }}</b><i>{{ today }}</i></div>
-        <span class="scr-live" :class="{ off: !live }"><span class="scr-live__dot" />{{ live ? '实时' : '降级' }}</span>
+        <span class="scr-live" :class="{ off: !live }" :title="degradedNote"><span class="scr-live__dot" />{{ live ? '实时' : '降级' }}</span>
         <button class="scr-act" title="全屏" @click="toggleFs"><icon-fullscreen /></button>
         <button class="scr-act" title="返回控制台" @click="back"><icon-export /></button>
       </div>
     </header>
+
+    <!-- ★降级必须写在屏上，不能只挂在 title 里：大屏是挂在墙上看的，没人会去 hover。
+         空面板到底是"没有事件"还是"这一路没读到"，两者的处置完全相反。 -->
+    <div v-if="degradedNote" class="scr-degrade">
+      <icon-exclamation-circle-fill />{{ degradedNote }}
+    </div>
 
     <div class="scr-grid">
       <!-- 左列 -->
@@ -46,7 +52,10 @@
             </div>
             <div class="kpi kpi--danger">
               <div class="kpi__v">{{ nThreat }}</div>
-              <div class="kpi__l">今日威胁事件</div>
+              <!-- ★后端 Overview 的 threats/verdicts 是**按时间窗滚动聚合**的
+                   （默认 24 小时，windowHours 可变），不是自然日。写「今日」会让
+                   凌晨看屏的人以为数字被清零过，也解释不了跨零点为什么不归零。 -->
+              <div class="kpi__l">威胁事件（近 {{ windowLabel }}）</div>
             </div>
           </div>
         </div>
@@ -63,7 +72,7 @@
                 :stroke-dashoffset="-s.offset"
               />
             </svg>
-            <div class="donut__c"><b>{{ nVerdict }}</b><i>今日判定</i></div>
+            <div class="donut__c"><b>{{ nVerdict }}</b><i>近 {{ windowLabel }}判定</i></div>
             <ul class="donut__legend">
               <li v-for="b in ov.verdicts" :key="b.name">
                 <span class="dot" :style="{ background: verdictColor(b.name) }" />
@@ -231,6 +240,20 @@ const ov = ref<Overview>(MOCK_OV);
 const sessions = ref<OnlineSession[]>(MOCK_SESS);
 const audit = ref<AuditEntry[]>(MOCK_AUDIT);
 const live = ref(false);
+/** 降级原因：**点名缺了哪一路**。只写「降级」的话，看屏的人无从判断空面板是
+ *  "真的没事" 还是 "这一路没读到"，而这两件事在大屏上的处置完全相反。 */
+const degradedNote = ref('');
+/** 聚合窗口的人话（后端 Overview.windowHours；缺席按默认 24 小时说）。 */
+const windowLabel = computed(() => {
+  const h = ov.value.windowHours ?? 24;
+  return h % 24 === 0 && h >= 24 ? `${h / 24} 天` : `${h} 小时`;
+});
+/** /overview 取不到时的零值总览：绝不留 MOCK_OV 与另外两路的真数据同屏。 */
+const EMPTY_OV: Overview = {
+  generatedAt: '', devices: { total: 0, trusted: 0, pending: 0, revoked: 0, rate: 0 },
+  users: { total: 0, disabled: 0, locked: 0 }, threats: { rejected: 0, failed: 0, secondary: 0 },
+  sessions: 0, auditByKind: [], verdicts: [], defense: []
+};
 
 /* ── 时钟 ── */
 const clock = ref('');
@@ -355,26 +378,40 @@ const topRegions = computed(() => {
 const regionMax = computed(() => Math.max(...topRegions.value.map((r) => r.count), 1));
 
 /* ── 取数 ── */
+/**
+ * 三路取数各自独立成败。
+ *
+ * ★上一轮已经修掉了「接口回空数组时被演示常量顶替」，但漏掉了**接口失败**那一半：
+ * 三路里只要 /overview 成功，`live` 就置真，而 /online 或 /audit 失败时
+ * MOCK_SESS / MOCK_AUDIT **原样留在屏上**——右上角亮着「实时」，滚动播报里跑着
+ * 四条编造的安全事件。这在 NOC 大屏上是最坏的形态：它正是给人「现在有没有事」
+ * 这个判断用的，而 /audit 归 PermAudit，安全/系统管理员打开大屏拿到的就是 403。
+ *
+ * 现在的判据：**只要有任何一路拿到了真数据，就绝不让另一路的演示数据同屏**。
+ * 三路全挂才保留整屏演示态（那是无后端时的离线演示，本就没有真数据可混淆）。
+ * `live` 要求三路全成，缺哪一路在徽标上点名。
+ */
 async function load() {
-  try {
-    const [o, on, au] = await Promise.all([
-      api<Overview>('/overview'),
-      api<OnlineResp>('/online').catch(() => null),
-      api<AuditBundle>('/audit').catch(() => null)
-    ]);
-    ov.value = o;
-    // ★接口成功返回空数组时也必须覆盖演示常量。
-    // 用 `?.length` 当赋值条件会让「后端说没有」与「后端没答上来」走同一条分支：
-    // 前者是真实读数（无网关上报＝确实没有在线会话），却被留在页面上的 MOCK_SESS
-    // 顶替成三条编造的高风险会话，还继续喂给威胁面板与热力图，而右上角徽标同时
-    // 显示「实时」——正是本项目最忌讳的「假数据冒充真数据」。判据改为「这一路请求
-    // 是否成功」（on/au 非 null，失败时已被 .catch 转成 null）。
-    if (on) sessions.value = on.sessions?.filter((s) => s.status === 'online') ?? [];
-    if (au) audit.value = au.logs ?? [];
-    live.value = true;
-  } catch {
+  const [o, on, au] = await Promise.all([
+    api<Overview>('/overview').catch(() => null),
+    api<OnlineResp>('/online').catch(() => null),
+    api<AuditBundle>('/audit').catch(() => null)
+  ]);
+  const anyReal = !!(o || on || au);
+  if (!anyReal) {
+    // 一路都没通：保持整屏演示常量（离线演示），徽标写「降级」。
     live.value = false;
+    degradedNote.value = '控制面不可达，整屏为离线演示数据';
+    return;
   }
+  if (o) ov.value = o;
+  else ov.value = EMPTY_OV;
+  // 失败的那一路清空而不是留演示值——真假同屏比整屏假更难识别。
+  sessions.value = on ? (on.sessions?.filter((s) => s.status === 'online') ?? []) : [];
+  audit.value = au ? (au.logs ?? []) : [];
+  const missing = [!o && '态势总览', !on && '在线会话', !au && '安全事件（需审计权限）'].filter(Boolean);
+  live.value = missing.length === 0;
+  degradedNote.value = missing.length ? `未读取：${missing.join('、')}——相关面板为空，不是"没有事件"` : '';
 }
 
 /* ── 操作 ── */
@@ -463,6 +500,11 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .scr-clock { text-align: right; line-height: 1.15; }
 .scr-clock b { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
 .scr-clock i { display: block; font-style: normal; font-size: 11px; color: var(--c-t3); }
+.scr-degrade {
+  margin: 0 22px 10px; padding: 9px 16px; border-radius: 8px;
+  background: rgba(255, 169, 64, .12); border: 1px solid rgba(255, 169, 64, .35);
+  color: #ffc069; font-size: 13px; display: flex; align-items: center; gap: 9px;
+}
 .scr-live {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #36e29b; font-weight: 600;
   padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(54, 226, 155, .4); background: rgba(54, 226, 155, .08);

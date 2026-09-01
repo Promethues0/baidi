@@ -129,7 +129,7 @@
 import { ref, computed, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, type DiagBundle, type DiagCheck, type DiagCategory, type DiagStatus, type GatewaysResp, type GatewayReg } from '@/lib/api';
+import { api, type DiagBundle, type DiagCheck, type DiagCategory, type DiagStatus, type GatewaysResp, type GatewayReg, failStatus } from '@/lib/api';
 import { FIRST_PATH } from '@/nav';
 
 const router = useRouter();
@@ -230,7 +230,7 @@ async function load() {
   } catch (e) {
     gateways.value = [];
     // 403=已登录但非 admin：如实提示需管理员权限，不伪装成"健康"演示数据
-    if (String((e as Error)?.message ?? e).startsWith('403')) {
+    if (failStatus(e) === 403) {
       denied.value = true;
       live.value = false;
     } else {
@@ -243,11 +243,31 @@ async function load() {
   }
 }
 
+/**
+ * 导出体检报告（Markdown）。
+ *
+ * ★降级演示态（后端没起 / 拉取失败 → bundle 退回 MOCK）导出的报告此前
+ * **不带任何标注**，还盖上一个刚生成的本地时间戳：一份编造的"9 项全绿、健康分 xx"
+ * 与真实体检报告逐字同形。这种文件会被存档、会被转发、会被当成上线前的验收依据，
+ * 而收到它的人没有任何办法看出它没做过实测。
+ */
 function exportReport() {
   const b = bundle.value;
+  const degraded = !live.value;
   const lines = [
     '# 白帝运维诊断报告',
-    '',
+    ''];
+  if (degraded) {
+    lines.push(
+      '> ⚠️ **本报告不是实测结果。**',
+      '>',
+      '> 导出时控制台没有从 baidi-control 取到体检数据' +
+        (denied.value ? '（当前账号无权读取 /diag，需管理员权限）' : '（控制面不可达）') +
+        '，下面的检查项是页面的**离线演示占位**，不代表这套部署的真实状态。',
+      '> 请在控制面可达、且以管理员身份登录后重新导出。',
+      '');
+  }
+  lines.push(
     `- 组件：${b.component}`,
     `- 版本：v${b.version}（${envLabel.value}）`,
     `- 运行时长：${b.uptime}`,
@@ -256,7 +276,7 @@ function exportReport() {
     '',
     '## 检查项',
     ''
-  ];
+  );
   for (const c of sortedChecks.value) {
     lines.push(`### [${statusLabel(c.status)}] ${c.name}（${catLabel(c.category)}）`);
     lines.push(`- 结论：${c.summary}`);
@@ -271,10 +291,12 @@ function exportReport() {
   const digits = (b.generatedAt || '').replace(/\D/g, '');
   const ts = digits.length === 14 ? digits : nowStamp(); // 后端 generatedAt=YYYY-MM-DD HH:MM:SS → 14 位；降级路径回退本地时戳
   a.href = url;
-  a.download = `白帝运维诊断-${ts}.md`;
+  // 文件名也要带上标记：报告常常只以文件名的形式出现在邮件列表或工单里。
+  a.download = degraded ? `白帝运维诊断-演示占位-非实测-${ts}.md` : `白帝运维诊断-${ts}.md`;
   a.click();
   URL.revokeObjectURL(url);
-  Message.success('诊断报告已导出');
+  if (degraded) Message.warning('已导出，但本次是**降级演示占位**（未取到实测数据），报告开头已标注');
+  else Message.success('诊断报告已导出');
 }
 
 function back() { router.push(FIRST_PATH); }

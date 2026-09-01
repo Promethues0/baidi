@@ -75,6 +75,8 @@ type Writer interface {
 	// WebAuthn：凭据落库/删除、签名计数器更新、challenge 生成与单次消费
 	SaveWebauthnCredential(ctx context.Context, c WebauthnCredential) (WebauthnCredential, error)
 	DeleteWebauthnCredential(ctx context.Context, account, id string) error
+	// ResetWebauthnCredentials 管理员清空某账号全部 passkey（helpdesk：认证器丢失）。
+	ResetWebauthnCredentials(ctx context.Context, account string) (int, error)
 	UpdateSignCount(ctx context.Context, credentialID string, newCount uint32) error
 	CreateWebauthnChallenge(ctx context.Context, ch WebauthnChallenge) (WebauthnChallenge, error)
 	ConsumeWebauthnChallenge(ctx context.Context, challenge, typ string) (WebauthnChallenge, error)
@@ -1420,9 +1422,20 @@ func (s *SQLiteStore) Users(ctx context.Context) (UserDirBundle, error) {
 	// ★u.role（权威鉴权角色 admin|user）必须选出来：DirUser.Role 此前恒为空串，
 	// 而"目标账号是不是管理员"正是 api.guardAdminTarget 的判据——读不到就等于
 	// 把所有管理员都当成普通用户，那道闸会静默失效（不报错、不留痕）。
+	// ★passkey / TOTP 两个子查询是 DirUser.Auth 的**真实判据**（见下方赋值处）；
+	//   最后那个子查询是 DirUser.SourceID（这个账号属于哪个用户目录）。
+	//   用子查询而不是 LEFT JOIN：一个账号理论上可能在多个源里有绑定行，
+	//   JOIN 会把这一行**复制成多行**，用户目录里凭空多出几个同名账号。
+	//   取最早那条（created_at 升序）：那是他第一次被哪个目录认出来的。
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id,u.name,u.account,u.org,u.org_key,u.device,u.ip,u.auth,u.last_login,u.online,u.status,u.risk,u.roles,
-       COALESCE(u.org_id,''), COALESCE(o.name,''), COALESCE(u.role,'user'), COALESCE(u.email,'')
+       COALESCE(u.org_id,''), COALESCE(o.name,''), COALESCE(u.role,'user'), COALESCE(u.email,''),
+       (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.account = lower(trim(u.account))),
+       (SELECT COUNT(*) FROM totp_secrets t WHERE t.account = lower(trim(u.account)) AND t.confirmed = 1),
+       CASE WHEN COALESCE(u.pass_hash,'') = '' THEN 1 ELSE 0 END,
+       COALESCE((SELECT b.source_id FROM auth_source_bindings b
+                 WHERE b.user_id = u.id AND COALESCE(b.user_id,'') <> ''
+                 ORDER BY b.created_at LIMIT 1), '')
 FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 	if err != nil {
 		return UserDirBundle{}, err
@@ -1431,13 +1444,45 @@ FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 	us := []DirUser{}
 	for rows.Next() {
 		var u DirUser
-		var online int
+		var online, passkeys, totps, external int
 		var roles, orgName string
 		if err := rows.Scan(&u.ID, &u.Name, &u.Account, &u.Org, &u.OrgKey, &u.Device, &u.IP, &u.Auth, &u.LastLogin,
-			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName, &u.Role, &u.Email); err != nil {
+			&online, &u.Status, &u.Risk, &roles, &u.OrgID, &orgName, &u.Role, &u.Email,
+			&passkeys, &totps, &external, &u.SourceID); err != nil {
 			return UserDirBundle{}, err
 		}
+		// 没有绑定行 = 本地口令目录。判据与 authSourceAccountCounts 的本地计数逐字一致
+		// （那边是 `id NOT IN (SELECT user_id FROM auth_source_bindings WHERE user_id<>'')`）。
+		if u.SourceID == "" {
+			u.SourceID = DirectoryLocal
+		}
 		u.Online = online == 1
+		// 认证方式**按实算**，不发库里那一列。
+		//
+		// ★users.auth 是一列自由文本，全仓零消费方（判定不看它），而种子给它填的是
+		// 「SAML SSO」「密码+UKey」「密码+短信」——白帝一种都没实现（SAML 压根没有，
+		// UKey 没有，短信也只在通知通道里当 webhook 用）。它却被「用户与角色」页
+		// 当作**事实**展示在用户详情里，新建用户的表单还让人从这几项里挑一个。
+		// 同一条纪律在**管理员**那张表上已经做过了（admins_sqlite.System：
+		// "认证方式按实算：注册过 passkey 才写…此前这一列是种子里编的…白帝根本没有
+		// 这两种认证方式"）——只是没有一起做到用户目录这半边。
+		//
+		// 真实判据只有三样：口令来源（本地哈希 / 外部目录）、是否注册过 passkey、
+		// 是否启用过 TOTP。三者都是查得出来的事实。
+		u.Auth = "本地口令"
+		if external == 1 {
+			u.Auth = "外部目录" // pass_hash 恒空 = 认证外包给认证源（见 BindExternalUser）
+		}
+		var mfa []string
+		if passkeys > 0 {
+			mfa = append(mfa, "passkey")
+		}
+		if totps > 0 {
+			mfa = append(mfa, "TOTP")
+		}
+		if len(mfa) > 0 {
+			u.Auth += " + " + strings.Join(mfa, " / ")
+		}
 		_ = json.Unmarshal([]byte(roles), &u.Roles)
 		if u.OrgID != "" && orgName != "" {
 			u.Org, u.OrgKey = orgName, u.OrgID

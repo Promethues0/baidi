@@ -24,7 +24,12 @@ type AuditQuery struct {
 
 // SearchAudit 按条件检索，返回（本页行，总命中数）。
 // 总数与行数同一组 WHERE——两处条件不同构的话，分页控件会说"共 3 页"而第 2 页是空的。
-func (s *SQLiteStore) SearchAudit(ctx context.Context, q AuditQuery) ([]AuditEntry, int, error) {
+// auditWhere 拼审计检索条件——**检索与导出必须共用这一份**。
+//
+// ★各写一份的后果不是报错，是「屏幕上筛出 12 条、导出的 CSV 里是 8 万条」：
+// 导出此前只认 category/from/to 三维，账号与源 IP 两维压根传不进去，
+// 而页面上刚刚筛过的正是这两维。管理员拿这份 CSV 去交差，以为它就是屏幕上那些行。
+func auditWhere(q AuditQuery) (string, []any) {
 	where, args := []string{"1=1"}, []any{}
 	if q.Category != "" {
 		where, args = append(where, "category=?"), append(args, q.Category)
@@ -39,13 +44,29 @@ func (s *SQLiteStore) SearchAudit(ctx context.Context, q AuditQuery) ([]AuditEnt
 	if kw := strings.TrimSpace(q.Keyword); kw != "" {
 		where, args = append(where, `event LIKE ? ESCAPE '\'`), append(args, "%"+escapeLike(kw)+"%")
 	}
+	// ★两种入参都要吃：列表页传的是「YYYY-MM-DD」（由这里补时分秒），
+	//   导出页历史上传的是补好的完整时间戳。补两次会拼出
+	//   "2026-01-02 15:04:05 00:00:00"——一个永远比不过任何一行的字符串，
+	//   于是导出静默变成 0 条（接口 200、文件下下来只有表头）。
 	if q.From != "" {
-		where, args = append(where, "ts>=?"), append(args, q.From+" 00:00:00")
+		where, args = append(where, "ts>=?"), append(args, dayBound(q.From, "00:00:00"))
 	}
 	if q.To != "" {
-		where, args = append(where, "ts<=?"), append(args, q.To+" 23:59:59")
+		where, args = append(where, "ts<=?"), append(args, dayBound(q.To, "23:59:59"))
 	}
-	cond := strings.Join(where, " AND ")
+	return strings.Join(where, " AND "), args
+}
+
+// dayBound 只有日期时补上时分秒；已经是完整时间戳就原样用。
+func dayBound(v, bound string) string {
+	if len(v) == len("2006-01-02") {
+		return v + " " + bound
+	}
+	return v
+}
+
+func (s *SQLiteStore) SearchAudit(ctx context.Context, q AuditQuery) ([]AuditEntry, int, error) {
+	cond, args := auditWhere(q)
 
 	var total int
 	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log WHERE `+cond, args...).Scan(&total); err != nil {

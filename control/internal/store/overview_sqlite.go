@@ -63,11 +63,14 @@ func (s *SQLiteStore) Overview(ctx context.Context, windowHours int) (Overview, 
 	if err != nil {
 		return Overview{}, err
 	}
-	ov.AuditByKind = []KV{
-		{Name: "访问决策", Value: byCat["access"]},
-		{Name: "登录认证", Value: byCat["auth"]},
-		{Name: "策略变更", Value: byCat["policy"] + byCat["admin"]},
-		{Name: "安全事件", Value: byCat["security"]},
+	// ★与审计中心同一份字典（AuditCategories）。
+	//   此前这里把 policy+admin 并成一格「策略变更」，并且完全不含 dataplane/system：
+	//   于是同一个词在两个页面上指的不是同一批记录（总览的「策略变更」含管理操作，
+	//   审计中心的「管理操作」又是另一格），而数据面回执在总览上根本不存在。
+	//   两处同源之后，两个页面的类别分布可以逐格对得上。
+	ov.AuditByKind = make([]KV, 0, len(AuditCategories))
+	for _, c := range AuditCategories {
+		ov.AuditByKind = append(ov.AuditByKind, KV{Name: c.Label, Value: byCat[c.Key]})
 	}
 	ov.Verdicts = []KV{
 		{Name: "允许", Value: byVerdict["allow"] + byVerdict["ok"]},

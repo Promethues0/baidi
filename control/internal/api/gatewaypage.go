@@ -21,6 +21,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sort"
 	"strings"
@@ -55,6 +56,18 @@ type GatewayPageBundle struct {
 	StealthArmed int `json:"stealthArmed"`
 	// StealthWarnings 要顶到页面上的隐身告警（文案由后端下发，前端不自己编）。
 	StealthWarnings []string `json:"stealthWarnings"`
+	// WebExposed 有几台**在线**网关开着七层 Web 代理（`-web`）。
+	//
+	// ★这一格是「攻击面 = 0」那段断言的第二个前提，而它此前根本不存在。
+	// L7 监听口**不受 SPA 隐身保护**（CLAUDE.md 端口表逐字写着，发布向导与网关
+	// 启动日志也都告警过），它就是一个对全世界敞着的 TCP 端口——内核态隐身
+	// 只护住敲门口与隧道口。于是一台开了 `-web` 且 nft 规则装好的网关，
+	// 隐身页会同时显示「端口扫描全程超时，无任何端口可探测」与「攻击面 = 0」，
+	// 而 nmap 对着 18444 一扫一个准。
+	// 这是这一页上唯一一句**正向安全断言**，它必须把已知敞着的口算进去。
+	WebExposed int `json:"webExposed"`
+	// WebEndpoints 那几台网关的 L7 监听地址（页面据此点名说清哪台、哪个口）。
+	WebEndpoints []string `json:"webEndpoints"`
 }
 
 // GatewayNodeView 一台已注册网关的页面投影。字段与注册心跳一一对应。
@@ -133,6 +146,26 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	out.StealthWarnings = stealthWarnings(out.Stealth)
 	if out.StealthWarnings == nil {
 		out.StealthWarnings = []string{}
+	}
+	// 七层 Web 代理的敞口（只看在线网关：离线那台的上报是陈旧读数）。
+	out.WebEndpoints = []string{}
+	s.mu.Lock()
+	for id, g := range s.gateways {
+		if !gatewayFresh(g.LastSeen, now) || strings.TrimSpace(g.Web) == "" {
+			continue
+		}
+		out.WebExposed++
+		out.WebEndpoints = append(out.WebEndpoints, id+" "+g.Web)
+	}
+	s.mu.Unlock()
+	sort.Strings(out.WebEndpoints)
+	if out.WebExposed > 0 {
+		out.StealthWarnings = append(out.StealthWarnings, fmt.Sprintf(
+			"有 %d 台在线网关开着七层 Web 代理（%s）。**该监听口不受 SPA 隐身保护**："+
+				"内核态隐身只护住敲门口与隧道口，L7 口是对全世界敞着的 TCP 端口，"+
+				"扫描器能直接看到它。因此本页的「攻击面 = 0」不适用于这套部署——"+
+				"B/S 免客户端接入与端口隐身是一组取舍，不能同时成立。",
+			out.WebExposed, strings.Join(out.WebEndpoints, "、")))
 	}
 	// 确定性排序（在线优先、其次 id 字典序）：map 遍历顺序随机，
 	// 每次刷新节点跳位会让人以为拓扑真的在变。

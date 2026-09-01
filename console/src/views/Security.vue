@@ -59,7 +59,15 @@
                 @change="(v: string | number | boolean) => cur && (cur.status = v ? 'enabled' : 'disabled')"
               />
               <a-button type="primary" size="small" :loading="saving" @click="saveBaseline">保存</a-button>
-              <a-button size="small" status="danger" @click="removeBaseline">删除</a-button>
+              <!-- ★同一页的「终端退役」有 popconfirm，删基线却是点中即删——
+                   而基线是**风险引擎的判据**：删掉一条 block 基线，一批本该被拦的
+                   终端下一轮就直接放行了，且页面上不会有任何提示。 -->
+              <a-popconfirm
+                :content="`删除基线「${cur?.name ?? ''}」？风险引擎下一次评估起即不再应用这条规则——原本被它判为「${cur ? disposalText(cur.disposal) : '—'}」的终端会按剩余基线重新判定。此操作不可撤销。`"
+                type="warning" ok-text="确认删除" cancel-text="取消" @ok="removeBaseline"
+              >
+                <a-button size="small" status="danger">删除</a-button>
+              </a-popconfirm>
             </div>
           </div>
           <!-- ★适用范围是**真判据**：上报 posture 的账号不在范围内，这条基线就不参与他的判定。
@@ -254,7 +262,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp, type SubjectOption } from '@/lib/api';
+import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp, type SubjectOption, failReason } from '@/lib/api';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
@@ -356,7 +364,11 @@ async function saveBaseline() {
   try {
     await api('/security/baselines', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur.value) });
     Message.success('基线已保存，风险引擎即时生效');
-  } catch { Message.error('保存失败（需管理员登录 / 后端在线）'); } finally { saving.value = false; }
+  } catch (e) {
+    // 后端对基线有八类具体校验（引用了不存在的组织/用户组、检查项 key 不认识…），
+    // 每一条都点名了该改哪里；笼统的"需管理员登录"把它们全盖掉了。
+    Message.error(`基线保存失败：${failReason(e)}`);
+  } finally { saving.value = false; }
 }
 async function addBaseline() {
   const nb: BaselinePolicy = {
@@ -369,7 +381,7 @@ async function addBaseline() {
     baselines.value.push(r.baseline);
     selected.value = r.baseline.id;
     Message.success('已创建，可继续编辑后保存');
-  } catch { Message.error('创建失败（需管理员登录 / 后端在线）'); }
+  } catch (e) { Message.error(`基线创建失败：${failReason(e)}`); }
 }
 async function removeBaseline() {
   if (!cur.value) return;
@@ -379,7 +391,7 @@ async function removeBaseline() {
     baselines.value = baselines.value.filter((b) => b.id !== id);
     if (baselines.value.length) selected.value = baselines.value[0].id;
     Message.success('基线已删除');
-  } catch { Message.error('删除失败'); }
+  } catch (e) { Message.error(`基线删除失败：${failReason(e)}`); }
 }
 /**
  * 可添加的检测项 = 采集器目录 − 本基线已配的 key。
@@ -440,7 +452,7 @@ async function removePosture(p: PostureRow) {
     await api(`/posture/${encodeURIComponent(p.user)}/${encodeURIComponent(p.device)}`, { method: 'DELETE' });
     postureRows.value = postureRows.value.filter((r) => !(r.user === p.user && r.device === p.device));
     Message.success('终端报告已删除（设备退役）');
-  } catch { Message.error('删除失败（需管理员登录 / 后端在线）'); }
+  } catch (e) { Message.error(`终端报告删除失败：${failReason(e)}`); }
 }
 
 onMounted(async () => {

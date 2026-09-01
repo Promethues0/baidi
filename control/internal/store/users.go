@@ -58,7 +58,7 @@ type DirUser struct {
 	LastLogin string   `json:"lastLogin"`
 	Online    bool     `json:"online"`
 	Status    string   `json:"status"` // active | locked | disabled | idle
-	Risk      string   `json:"risk"`   // none | low | high
+	Risk      string   `json:"risk"`   // none | low | high | unknown（不可判定，见 api.enrichDirUsers）
 	Roles     []string `json:"roles"`
 	Role      string   `json:"role,omitempty"` // 权威鉴权角色 admin | user（≠展示用 Roles）
 	PassHash  string   `json:"-"`              // bcrypt 口令哈希；绝不序列化进 API 响应
@@ -78,7 +78,26 @@ type DirUser struct {
 	// 持 security 权的管理员就能凭"新建用户"给自己造一个超管——提权只需一次请求。
 	// 分派管理员角色的唯一入口是 /api/v1/admins（需 admins 权限）。
 	AdminRole string `json:"-"`
+	// SourceID 这个账号属于哪个**用户目录**：外部源 id，或 DirectoryLocal（本地口令目录）。
+	//
+	// ★这一维此前整个不存在，于是「用户与角色」页那排身份源选项卡是纯装饰的：
+	// 选项卡上写着「总部 AD 域 3」，点进去表头却是全量表，本地账号与各外部目录的
+	// 账号混在同一张表里，顶部四个聚合数也永远是全库口径。
+	// PRD FR-USER-01 的「目录间相互独立、以选项卡形式分目录管理」在界面上完全不成立。
+	//
+	// 判据与目录计数（authSourceAccountCounts）**同源**：绑定表里有行 = 属于该源，
+	// 没有 = 本地。两处各写一套的话，选项卡上的数与点进去的行数会对不上。
+	SourceID string `json:"sourceId"`
 }
+
+// DirectoryLocal 本地口令目录的 id（DirUser.SourceID 的取值之一）。
+//
+// ★必须与 authsrc.KindLocal 以及 authsrc_sqlite 里那几处 "local" 字面量一致：
+// 选项卡的 key 来自 userDirectories（那边用的就是 "local"），列表的过滤键来自
+// DirUser.SourceID——两边对不上的话，点「本地用户目录」会筛出**零行**，
+// 而选项卡徽标上明明写着 9 人。store 不能 import authsrc（那边反向依赖 store），
+// 所以这里留一份常量而不是继续散落字面量。
+const DirectoryLocal = "local"
 
 // Credential 登录校验所需的账号凭据（含口令哈希，仅内部使用）。
 type Credential struct {

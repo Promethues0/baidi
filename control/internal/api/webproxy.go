@@ -310,6 +310,7 @@ func validateWebEntry(v string) error {
 // 字段）。写成裸地址 "10.91.0.1" 落库后，接口回 200、资源列表看起来完全正常，而：
 //   - 客户端剖面会静默丢弃它（appAccessState 里那条 SplitHostPort 分支）；
 //   - 网关拿到也拨不出去。
+//
 // 管理员配了一条"存在但对谁都不生效"的资源，全程零报错——正是本项目反复消灭的静默失效。
 // 控制台在「选了地址对象、没选服务对象」时就会写出这种裸地址。
 //
@@ -330,9 +331,67 @@ func validateBackend(v string) error {
 	if strings.TrimSpace(host) == "" {
 		return fmt.Errorf("后端地址 %q 缺主机名", v)
 	}
+	if err := validateBackendHost(host); err != nil {
+		return fmt.Errorf("后端地址 %q 的主机部分不合法：%w", v, err)
+	}
 	n, err := strconv.Atoi(port)
 	if err != nil || n < 1 || n > 65535 {
 		return fmt.Errorf("后端地址 %q 的端口不合法（须为 1~65535 的数字）", v)
+	}
+	return nil
+}
+
+// validateBackendHost 主机部分必须是**单个**可拨号的目标：一个 IP，或一个具体主机名。
+//
+// ★这一半此前是缺的：`net.SplitHostPort` 只负责把最后一个冒号后面的东西切出来，
+// 它对主机部分**什么都不检查**。于是这些全都 200 OK 落库过（实测）：
+//
+//	10.0.0.0/24:443          ← 网段
+//	10.1.1.1-10.1.1.99:80    ← 地址范围
+//	*.corp.internal:443      ← 泛域名
+//
+// 而对象库把 CIDR / 地址范围 / 通配域名都当**一等对象**提供并做成了种子，资源编辑器
+// 还会拿选中的对象自动回填 backend——照着页面上给的选项点两下，就能存出一条网关
+// 永远拨不出去的资源。三种形态的失败方式完全一样：接口回 200、列表正常、
+// 剖面里有它、客户端点开就是连不上，两侧日志都不报错。
+// 这正是 wave8 记的「入口比实现宽」：校验层放行执行层必然拒绝的值，
+// 而拒绝发生在很久以后、很远的地方。
+//
+// 拒绝要**说得出正确形态**（同 IPSec peer 拒收 FQDN 那条的教训）：
+// 笼统的"格式不对"会让管理员反复换写法试，而三种写法一种都不会成。
+func validateBackendHost(host string) error {
+	if ip := net.ParseIP(host); ip != nil {
+		return nil // 字面 IP（IPv6 已由 SplitHostPort 去掉方括号）
+	}
+	switch {
+	case strings.Contains(host, "/"):
+		return errors.New("看起来是一个网段（CIDR）。受控资源的后端必须是**单台**主机的拨号目标，" +
+			"网关按它 net.Dial，拨不了网段。对象库里的网段对象用于地址匹配，不能直接当发布目标——" +
+			"请填具体主机，如 10.20.1.10:8080")
+	case strings.Contains(host, "*") || strings.Contains(host, "?"):
+		return errors.New("看起来是一个泛域名。白帝**不做泛域名代理**（见 docs/ARCHITECTURE.md 第七节），" +
+			"请为每个具体主机名各发布一条资源，如 oa.corp.internal:443")
+	case strings.Contains(host, "-") && strings.Count(host, ".") >= 6:
+		// 形如 10.1.1.1-10.1.1.99：两个点分四段被连字符连起来
+		return errors.New("看起来是一个地址范围。受控资源的后端必须是单台主机，" +
+			"请填其中一个具体地址，如 10.1.1.1:80")
+	}
+	// 其余按主机名校验：标签由字母/数字/连字符组成，不以连字符开头或结尾。
+	if len(host) > 253 {
+		return errors.New("主机名过长（超过 253 字符）")
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(host, "."), ".") {
+		if label == "" || len(label) > 63 {
+			return fmt.Errorf("主机名的分段 %q 为空或超过 63 字符", label)
+		}
+		if label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("主机名的分段 %q 不能以连字符开头或结尾", label)
+		}
+		for _, c := range label {
+			if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' || c == '-' || c == '_') {
+				return fmt.Errorf("主机名含非法字符 %q——只允许字母、数字、连字符与下划线", string(c))
+			}
+		}
 	}
 	return nil
 }

@@ -241,6 +241,9 @@ func (s *Server) handleCreateAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if found {
+		if !s.guardLocalCredentialForAdmin(w, r, existing) {
+			return
+		}
 		if err := s.writer.SetAdminRole(r.Context(), existing.Account, body.RoleKey); err != nil {
 			adminStoreErr(w, err, "failed to assign admin role")
 			return
@@ -318,6 +321,13 @@ func (s *Server) handleSetAdminRole(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "roleKey 不能为空")
 		return
 	}
+	if target, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool {
+		return normUser(du.Account) == normUser(account)
+	}); err == nil && found {
+		if !s.guardLocalCredentialForAdmin(w, r, target) {
+			return
+		}
+	}
 	if err := s.writer.SetAdminRole(r.Context(), account, body.RoleKey); err != nil {
 		s.audit(r, "admin", "改派管理员「"+account+"」角色为 "+body.RoleKey+" 被拒："+err.Error(), "fail")
 		adminStoreErr(w, err, "failed to set admin role")
@@ -342,4 +352,43 @@ func (s *Server) handleRemoveAdmin(w http.ResponseWriter, r *http.Request) {
 	}
 	s.audit(r, "admin", "撤销「"+account+"」的管理员身份（降为普通用户，角色已清空）", "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "account": account})
+}
+
+// guardLocalCredentialForAdmin 拦住「把一个外部目录账号提升为管理员」。
+//
+// ★这是一条**入口比实现宽**的典型（wave8 记的那条判据），且失败发生在很久以后、
+// 很远的地方：
+//
+//	提权入口对任何已存在账号一律放行、不看它的口令来源，于是管理员在
+//	「系统管理 → 新建管理员」里填一个 AD/OIDC 账号名（页面 help 明写「账号已存在时
+//	只改其角色」），拿到 200 + 「已落库」，那个人随后出现在管理员表里，角色 / 状态 /
+//	认证方式一应俱全——**但他在管理台登录页永远登不进去**。
+//
+//	原因是外部目录账号的 pass_hash 恒空（BindExternalUser 的设计：认证外包给认证源），
+//	而管理台登录 handleAdminLogin **没有**门户那条认证域路由，它只查本地 bcrypt 哈希，
+//	`auth.VerifyPassword("", …)` 恒假 → 走进「用户名或密码错误」。
+//	更坏的是这条路径**计入防爆破**：他多试几次就把自己的账号锁掉（连门户也进不去），
+//	同 NAT 出口的同事跟着被 IP 维度锁。而这与本项目已成文的纪律
+//	「认证源故障不能回『密码错误』也不计入锁定」是同一条，只是漏在管理台这一侧。
+//
+// 选**收敛**而不是打通（后者要把 routeDirectory 搬进管理台登录，并保住
+// 「一次登录只把口令交给一台服务器」那条不变式，是另一个量级的改动），
+// 与 PRD FR-ADMIN-16「管理员认证默认本地密码认证」一致。
+// 拒绝要说得出下一步动作——笼统的「操作失败」会让人反复重试。
+func (s *Server) guardLocalCredentialForAdmin(w http.ResponseWriter, r *http.Request, target store.DirUser) bool {
+	cred, found, err := s.store.Credential(r.Context(), target.Account)
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
+		return false
+	}
+	if found && cred.PassHash != "" {
+		return true // 本地口令账号：登得进管理台
+	}
+	s.audit(r, "admin", "拒绝把外部目录账号「"+target.Account+"」提升为管理员（无本地口令，提权后无法登录管理台）", "deny")
+	httpx.Error(w, http.StatusBadRequest,
+		"账号「"+target.Account+"」的口令在外部认证源里，没有本地口令。"+
+			"管理台登录只验本地口令（不走认证域路由），提升为管理员后他将**无法登录管理台**，"+
+			"而且每试一次都会被记成口令错误并计入防爆破锁定。"+
+			"如需让他管理系统，请先在「用户与角色」里为他重置一个本地口令，再来提权。")
+	return false
 }

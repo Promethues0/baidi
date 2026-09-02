@@ -879,8 +879,9 @@ wave10 刻意保留**——旧 TS 就靠它判 `ready`，让隧道类失败在�
 `tunneler.knockErr/tunnelErr`，`markKnock` 只清前者、`markTunnel` 只清后者；`err=` 逐字保持旧语义供旧 TS 判 `ready`，
 `terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉），TS 消费待接。** ② 健康行反映的是**本机数据面**的观感，网关侧的
 `resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
-`parseHealth` / `nextDataplaneNotice`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
-那句已不成立，以本节为准。
+`parseHealth` / `nextDataplaneNotice`，诊断页的 `judgeTunnel` / `judgeKnock`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
+那句已不成立，以本节为准；⑤ 鸿蒙壳（`clients/harmony/webui/shim/core.ts`）的 `tunnel_status` 桥尚未回传 `health`，该端接入态
+仍按旧判据（两行启动日志）显示，待鸿蒙数据面接上后同步补字段。
 
 ### ⚠️ Windows 桌面数据面（源码完整、组件齐了；ARM64 一台真机阶段 A/B 已过、阶段 C 未完，x64 未实机）
 

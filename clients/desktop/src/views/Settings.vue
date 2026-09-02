@@ -50,7 +50,7 @@
       <div class="st__kv"><span>客户端</span><b>白帝安全接入客户端 v0.1.0（Tauri · 真 utun 数据面）</b></div>
       <div class="st__kv"><span>架构</span><b>控制中心 baidi-control + 安全代理网关 baidi-gateway + 终端数据面 baidi-tun</b></div>
       <div class="st__kv"><span>能力</span><b>一键接入 · SPA 单包授权 · 国密/通用隧道 · utun 真引流接管 · 敲门保活</b></div>
-      <div class="st__note">「接入」以管理员权限拉起 <span class="dk-mono">baidi-tun</span>：创建 utun 虚拟网卡，把<b>受保护网段</b>流量接管进隧道——逐流 SPA 敲门 + 加密隧道送达网关。不启客户端时该网段不可达（路由不存在），即"先认证后连接 + 真引流"。</div>
+      <div class="st__note">「接入」以管理员权限拉起 <span class="dk-mono">baidi-tun</span>：创建 utun 虚拟网卡，把<b>受保护网段</b>流量接管进隧道——SPA 敲门开窗（15s 保活续窗）+ 加密隧道送达网关。不启客户端时该网段不可达（路由不存在），即"先认证后连接 + 真引流"。</div>
     </div>
   </div>
 </template>

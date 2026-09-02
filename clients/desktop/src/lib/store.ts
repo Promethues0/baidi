@@ -52,7 +52,7 @@ export function setDeviceID(id: string): void {
 export const session = reactive({
   token: ls.getItem('baidi_client_token') || '',
   user: ls.getItem('baidi_client_user') || '',
-  connected: false              // 是否已接入（utun 数据面就绪）
+  connected: false              // 已接入 = 数据面 running ∧ ready（敲门真成功且最近事件非失败），由 App 级心跳按 tunnelStatus 维护
   // ★不放 autostart：曾有一个「开机自动启动」开关只 setItem 到这里、全仓无消费方
   //   （没有 LaunchAgent / 注册表 Run 键 / .desktop autostart 写入），已摘除。
   //   接真需要 tauri-plugin-autostart（三平台实测），届时应由 Rust 侧维护真实状态。

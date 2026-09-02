@@ -26,6 +26,13 @@
  *   去重登，而真正的原因就在被丢掉的字符串里。api.ts 在 errText 上方写下过这条纪律，
  *   然后每一个调用点都没照做——这正是本项目里出现频率最高的「纪律只做了一半」。
  *   收口在 api.ts 的 failReason(e)：接住 e，把后端原话原样转述。
+ *
+ * 规则四：nav.ts 里每个 `done: true` 的叶子 path 必须在 router.ts 的 BUILT 里。
+ *   路由是生成式的：nav.ts 定义 IA，router.ts 按 BUILT[path] 映射到真实组件，
+ *   **映射不到就静默落到 ComingSoon**——侧栏照常有这一项、点进去是占位页、
+ *   type-check 与 build 都不报。CLAUDE.md 写着「21 页全部真实组件」，这句话此前没有
+ *   任何执行方：新加一个 done 叶子却忘了在 BUILT 里登记，或改了 path 只改一边，
+ *   页面上看起来就是"这个功能还没做"。这条守卫让那句话有人守。
  */
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
@@ -130,10 +137,44 @@ for (const file of walk(SRC)) {
   }
 }
 
+// ── 规则四：done 叶子必须在 BUILT 里 ──
+//
+// 两边都按源码正则取，不去 import 那两个 TS 模块（脚本跑在 node 里，router.ts 顶层就 createRouter）。
+// nav.ts 的叶子形如 `{ title: '…', path: '/monitor/overview', …, done: true }`（单行一项）；
+// router.ts 的 BUILT 形如 `'/monitor/overview': () => import('@/views/Overview.vue'),`。
+// 正则取不到任何一项也算失败：那是格式变了让守卫失明，不是"没有叶子"。
+{
+  const navText = stripComments(readFileSync(join(SRC, 'nav.ts'), 'utf8'));
+  const routerText = stripComments(readFileSync(join(SRC, 'router.ts'), 'utf8'));
+  const doneLeaves = [];
+  const leafRe = /\{[^{}\n]*\bpath:\s*'([^']+)'[^{}\n]*\bdone:\s*true[^{}\n]*\}/g;
+  let m;
+  while ((m = leafRe.exec(navText))) doneLeaves.push(m[1]);
+  const builtBlock = /const BUILT\b[^=]*=\s*\{([\s\S]*?)\n\};/.exec(routerText)?.[1] ?? '';
+  const built = new Set();
+  const builtRe = /^\s*'([^']+)'\s*:/gm;
+  while ((m = builtRe.exec(builtBlock))) built.add(m[1]);
+  if (!doneLeaves.length || !built.size) {
+    errors.push(
+      `src/nav.ts / src/router.ts 规则四取数为空（done 叶子 ${doneLeaves.length} 个、BUILT ${built.size} 项）：` +
+        `两处写法变了，守卫读不到——改守卫的正则，别让它静默通过。`
+    );
+  }
+  for (const p of doneLeaves) {
+    if (!built.has(p)) {
+      errors.push(
+        `src/nav.ts 的 done 叶子 ${p} 不在 src/router.ts 的 BUILT 里：` +
+          `侧栏会有这一项，点进去是 ComingSoon 占位页，而 build 与 type-check 都不会报。` +
+          `在 BUILT 里登记它对应的真实组件，或把 nav.ts 里的 done 去掉。`
+      );
+    }
+  }
+}
+
 if (errors.length) {
   console.error('✗ 装饰性控件 / 死占位守卫未通过：\n');
   for (const e of errors) console.error('  • ' + e);
   console.error(`\n共 ${errors.length} 处。`);
   process.exit(1);
 }
-console.log('✓ 无装饰性搜索框、无死占位、无编造的失败归因');
+console.log('✓ 无装饰性搜索框、无死占位、无编造的失败归因、done 叶子全部映射到真实组件');

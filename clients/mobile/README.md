@@ -32,8 +32,11 @@ UI 通过 `src/lib/vpn.ts` 的 `__BAIDI_NATIVE__` 桥调用原生 VPN；**无桥
 
 ```ts
 apiBase?: string
-startTunnel(token: string, cfg?: {              // cfg 由「我的」页配置下传，驱动原生 TUN/隧道
-  control, gateway, spaPort, proxyPort, route, ip, gm
+startTunnel(token: string, cfg?: {              // cfg = src/lib/vpn.ts 的 TunnelConfig：剖面优先、「我的」页手填兜底，驱动原生 TUN/隧道
+  control, gateway, spaPort, proxyPort, route, ip, gm,
+  pin,             // 网关隧道证书 SHA-256 指纹（hex），缺席 = 隧道对网关身份零校验
+  resmap,          // {"host:port":"资源id"} 的 JSON 串（gomobile 不能传 map），缺席 = 发不出 CONNECT 前导 → 网关 fail-closed
+  defaultResource  // resmap 未命中时的兜底资源 id，通常为空
 }): Promise<{ ok: boolean; detail?: string }>
 stopTunnel(): Promise<void>
 ```
@@ -70,10 +73,11 @@ webview 页面必须**平铺**进 `app/src/main/assets/`（漏了会开机白屏
 **「始终开启」（Always-on VPN）暂不支持**：manifest 已声明 `SUPPORTS_ALWAYS_ON=false`——系统从设置里
 拉起服务时 Intent 不带令牌与配置（令牌只活在 webview 会话里），服务必然起不来；与其留一个永远起不来的
 开关，不如让它不出现在系统设置里。多网段 `route`（逗号分隔，与桌面 `baidi-tun -route` 同契约）在安卓 /
-iOS 壳里逐条解析、任一条非法即整体拒绝并点名（`RouteSpec.kt` / `RouteSpec.swift`），不再静默回落 /24。
+iOS 壳里逐条解析、任一条非法即整体拒绝并点名（`RouteSpec.kt` / `RouteSpec.swift`），不再静默回落 /24（源码级 + JVM/swiftc 断言，未实机）。
 接入后 webview 每 2s 读一次桥的 `tunnelStatus`（`src/lib/vpn.ts startTunnelWatch`）：被其它 VPN 抢占 / 被系统
 回收 / 引擎因下线或合规阻断停机时，UI 翻回未接入并当面显示原因——**只有安卓桥实现了 `tunnelStatus`**，iOS /
 鸿蒙壳接入后的中断目前仍不可见（读不到状态不判中断，见 `tunnelwatch.ts`）。`npm test` 跑判定与接线的单测。
+鸿蒙 `VpnExtAbility.ets` 仍是单切回落 /24，本轮未改（无 DevEco，连语法都验不到），见 docs/ARCHITECTURE.md 第七节。
 
 **iOS 与鸿蒙不在 CI 上，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +
 Network Extension 授权，鸿蒙的 DevEco 工具链根本不在 runner 镜像里；而且这两端目前

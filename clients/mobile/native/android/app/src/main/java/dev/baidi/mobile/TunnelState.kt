@@ -66,6 +66,32 @@ object TunnelState {
             stage = "failed"
             reason = if (r.isNullOrBlank()) "隧道已中断（原因未知）" else r
         }
-        return """{"stage":"$stage","reason":"${reason.replace("\"", "\\\"")}"}"""
+        return """{"stage":${jsonString(stage)},"reason":${jsonString(reason)}}"""
     }
+}
+
+/**
+ * 把任意字符串编成 JSON 字符串字面量（含两侧引号）。纯 Kotlin，不依赖 org.json——
+ * JVM 单测里 android.jar 是打桩的，`JSONObject` 一调就抛「Method … not mocked」。
+ *
+ * ★改造前 snapshot() 只转义双引号。reason 里的自由文本是会带别的字符的：
+ *   「受保护网段配置无效：…（下发原文：$route）」把剖面下发的原文整段拼进来，原文含反斜杠、
+ *   换行或控制字符时产出的就不是合法 JSON，桥里 `JSON.parse` 抛错 → 兜底成
+ *   「读取隧道状态失败」——点名了是哪一条网段不合法的那句话，恰好在最需要它的时候被吞掉。
+ * 规则按 RFC 8259 §7：`\` `"` 必转，\n \r \t 用短转义，其余 <0x20 控制字符一律 \uXXXX。
+ */
+internal fun jsonString(s: String): String {
+    val sb = StringBuilder(s.length + 2).append('"')
+    for (ch in s) {
+        when {
+            ch == '\\' -> sb.append("\\\\")
+            ch == '"' -> sb.append("\\\"")
+            ch == '\n' -> sb.append("\\n")
+            ch == '\r' -> sb.append("\\r")
+            ch == '\t' -> sb.append("\\t")
+            ch < ' ' -> sb.append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+            else -> sb.append(ch)
+        }
+    }
+    return sb.append('"').toString()
 }

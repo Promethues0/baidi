@@ -40,6 +40,18 @@ class RoutesTest {
         }
     }
 
+    @Test fun prefixRejectionNamesTheRuleInOneSentence() {
+        // 越界与非整数合并成一句「不是 0..32 内的整数」：管理员一次就能改对，不必先改成整数再撞一次「越界」
+        for (spec in listOf("10.99.1.0/33", "10.99.1.0/-1", "10.99.1.0/abc", "10.99.1.0/")) {
+            try {
+                Routes.parse(spec)
+                fail("应拒绝：$spec")
+            } catch (e: IllegalArgumentException) {
+                assertTrue("$spec → ${e.message}", e.message!!.contains("前缀长度不是 0..32 内的整数"))
+            }
+        }
+    }
+
     @Test fun emptySpecRejected() {
         try {
             Routes.parse(" , ")

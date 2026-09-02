@@ -28,9 +28,10 @@ object Routes {
         return entries.map { entry ->
             val parts = entry.split('/')
             if (parts.size != 2) throw IllegalArgumentException("网段「$entry」不是 地址/前缀 形式")
-            val prefix = parts[1].toIntOrNull()
-                ?: throw IllegalArgumentException("网段「$entry」的前缀长度不是整数")
-            if (prefix < 0 || prefix > 32) throw IllegalArgumentException("网段「$entry」的前缀长度越界（须在 0..32）")
+            // 越界与非整数合并成一句：管理员照着「0..32 内的整数」一次就能改对，
+            // 分两句的话「不是整数」会让人先改成整数再撞一次「越界」。
+            val prefix = parts[1].toIntOrNull()?.takeIf { it in 0..32 }
+                ?: throw IllegalArgumentException("网段「$entry」的前缀长度不是 0..32 内的整数")
             if (!isIPv4(parts[0])) throw IllegalArgumentException("网段「$entry」的地址不是点分十进制 IPv4")
             RouteSpec(parts[0], prefix)
         }

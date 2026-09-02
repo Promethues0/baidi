@@ -1,7 +1,9 @@
 package dataplane
 
 import (
+	"strconv"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -65,6 +67,45 @@ func TestHealthLineDedup(t *testing.T) {
 		t.Error("状态变了必须打新行，否则界面停在旧结论上")
 	}
 	// 行内必须带上客户端解析所需的三个字段（契约见 tunnel.ts 的 parseHealth）
+	for _, want := range []string{"knock=", "tunnel=", "err="} {
+		if !strings.Contains(tn.lastHealth, want) {
+			t.Errorf("健康行缺字段 %q：%s", want, tn.lastHealth)
+		}
+	}
+}
+
+// 健康行的三个状态字段被多个 goroutine 并发改写：`knock()` 对每个落点各起一个 goroutine，
+// 各自在成功/失败时调 markKnock/markFail。
+//
+// ★此用例只在 `-race` 下才会红（CI 正是这么跑的）：改造前 logHealth 在**解锁之后**才读
+// `knockOK/tunnelOK/lastErr` 去打日志，与另一个 goroutine 锁内的写构成 data race——
+// 表现为 TestKnock_ReachesEveryEndpointWithItsOwnToken 约 2/5 间歇红。这里不依赖真实
+// UDP 落点，直接并发调三个 mark 函数把那条路径打满，让竞态检测器稳定抓到而不是靠运气。
+func TestHealthMarksConcurrentlyRaceFree(t *testing.T) {
+	tn := &tunneler{}
+	var wg sync.WaitGroup
+	// 几个 goroutine 各自用**不重样**的失败原因反复调 markFail：每一次都会绕过去重、
+	// 走到"解锁后打日志"那一步，正是撕裂读所在；掺进 markKnock/markTunnel 覆盖另两个字段。
+	for g := 0; g < 4; g++ {
+		wg.Add(1)
+		go func(g int) {
+			defer wg.Done()
+			for i := 0; i < 500; i++ {
+				switch i % 8 {
+				case 3:
+					tn.markKnock()
+				case 6:
+					tn.markTunnel()
+				default:
+					tn.markFail("拨号失败 g" + strconv.Itoa(g) + " #" + strconv.Itoa(i))
+				}
+			}
+		}(g)
+	}
+	wg.Wait()
+	if !tn.knockOK || !tn.tunnelOK {
+		t.Fatal("并发标记之后成功事件必须都被记下")
+	}
 	for _, want := range []string{"knock=", "tunnel=", "err="} {
 		if !strings.Contains(tn.lastHealth, want) {
 			t.Errorf("健康行缺字段 %q：%s", want, tn.lastHealth)

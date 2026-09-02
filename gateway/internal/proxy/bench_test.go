@@ -13,7 +13,7 @@ package proxy
 //      客户端 tlsClientConfig 没配 ClientSessionCache → 每流都是**完整**握手（无会话复用）。
 //      一个网页几十条并发流就是几十次握手，这是传输模型的固有代价，此前从未量过。
 //   ③ 证书形态照生产：网关启动期自签 **RSA-2048**（cmd/baidi-gateway mustSelfSigned），
-//      握手成本里服务端 RSA 签名占大头；ECDSA P-256 那组只是对照，**生产没有这个选项**。
+//      握手成本里服务端 RSA 签名占一半以上（RSA 与 ECDSA 对照之差）；ECDSA P-256 那组只是对照，**生产没有这个选项**。
 //   ④ slog 输出丢弃（handle 每流打两行 Info）：生产上这两行走 journald，是这里没算的成本。
 //      secevent 上报器接的是空 sink（节流表照常走，网络上报不在口径内）。
 //   ⑤ 钉扎回调（dataplane.PinVerifier）不在口径内——它只是一次 SHA-256 与常量比较。
@@ -22,6 +22,9 @@ package proxy
 //
 // 本机样本与解读写在 docs/ARCHITECTURE.md 第七节「不能声称」的 PERF 段；
 // 数字随机器变化，比较**同一台机器上改动前后的差**才有意义。
+// ★取样前先看 `uptime`、确认没有别的 go test/构建在跑，用 -count=3 取中位数：握手组是单流串行、
+// 对 CPU 抢占极敏感——机器带着并行负载时量出的握手时间会偏慢 2~3× 而 B/op、allocs/op 一字不变，
+// 那不是回归；吞吐与并发两组本就吃满多核，对抢占不敏感。
 
 import (
 	"crypto/ecdsa"

@@ -35,7 +35,8 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args as Record<string, unknown>);
 }
 
-interface TunStatusRaw {
+/** Rust 侧 tunnel_status 回传的原始状态（serde 字段名一一对应 main.rs 的 TunStatus）。导出只为单测。 */
+export interface TunStatusRaw {
   running: boolean;
   pid: string;
   log: string;
@@ -49,6 +50,19 @@ interface TunStatusRaw {
    * 此时退回从尾巴里找（能找到多少算多少）。
    */
   endpoint?: string;
+  /**
+   * 最近一条「数据面健康」行（契约见 gateway/internal/dataplane/dataplane.go 的 logHealth）：
+   *   `... msg=数据面健康 knock=true tunnel=false err="网关证书指纹不匹配（疑似中间人）…"`
+   * 同样由 Rust 侧（main.rs `last_health_line`，serde 字段名就是 `health`）从**整份日志**里捞出来。
+   *
+   * ★它才是接入态的真判据。knock / tunnel 记的是**真实事件**（敲门包真的发出去了 /
+   * 隧道真的拨通过），err 是最近一次失败的原因（任何一次成功即清空）。此前 ready/keepalive
+   * 判的是「数据面就绪」「敲门保活」两行**启动日志**——它们打印于任何一次 knock 与拨号之前，
+   * 于是全部落点拨不通 / gm 开关与网关不一致 / 指纹钉扎失败（疑似中间人）三类故障，
+   * 界面一律绿色「已接入」。老壳（无此字段）或数据面尚未产生任何事件时为空 / 缺席，
+   * 那时才退回旧判据（见 parseTunStatus）。
+   */
+  health?: string | null;
 }
 
 /** 从 baidi-tun 真实日志解析出的接入态。 */
@@ -62,6 +76,13 @@ export interface TunView {
   cipher: string;       // 隧道密码学
   keepalive: boolean;   // 敲门保活已起
   error: string;        // 最近的失败原因（若有）
+  /** 隧道是否**曾**拨通过（健康行 tunnel 位）。null = 不可判定（老壳 / 老数据面没有健康行）。
+   *
+   *  ★只用于展示，**不是** ready 的判据：Go 侧 `markTunnel()` 只在第一条业务流拨通时才置位，
+   *  `Run()` 启动期只敲门、不预拨。一次完全正常的接入，在用户打开第一个应用之前健康行恒为
+   *  `knock=true tunnel=false err=-`——拿它当必要条件，界面会停在「接入中」直到 25s 超时报一句
+   *  猜的归因，而应用页「访问」闸因 session.connected 为 false 拒绝放行，用户永远产生不出那第一条流。 */
+  tunnelUsed: boolean | null;
   denied: boolean;      // 被控制面定性拒绝（强制下线 / 账号禁用锁定）——不可自愈，别重试
   deniedReason: string; // 拒绝原因（人话，供 UI 显著呈现）
   /** stale：运行中隧道用的路由/资源映射与**当前剖面**已经不一致，需重连才生效。
@@ -229,19 +250,50 @@ export async function forceQuit(): Promise<void> {
 
 export async function tunnelStatus(): Promise<TunView> {
   const s = await invoke<TunStatusRaw>('tunnel_status');
-  return parse(s);
+  return parseTunStatus(s);
 }
 
-function parse(s: TunStatusRaw): TunView {
+/**
+ * 把 Rust 侧回传的原始状态解析成接入态。导出只为单测（src/lib/tunnel.test.ts），
+ * 生产路径只经 tunnelStatus 调它。
+ *
+ * ready / keepalive / error 三项的判据**优先取数据面健康行**（TunStatusRaw.health）：
+ *   - keepalive：敲门包真的发出去过（knock=true）；
+ *   - ready：敲门真成功过，且最近一次事件不是失败（err 为空）。**tunnel 位不参与**——
+ *     它只在第一条业务流拨通时才置位（见 TunView.tunnelUsed 的说明），健康的空闲态就是
+ *     `knock=true tunnel=false err=-`，把它判成未就绪会让接入停在「接入中」并把应用页锁死；
+ *     隧道拨通过一次之后每次都因指纹不匹配拨不通，err 会一直挂着（直到下一次保活敲门），那不是「已接入」；
+ *   - error：运行中如实显示 err（改造前 `!s.running && …` 让运行中的失败恒为空串，
+ *     指纹钉扎失败 / 敲门被拒 / 隧道拨不通三类故障因此到不了界面）。
+ * 健康行缺席（老壳、老数据面、尚无任何事件）时才退回旧判据，且旧判据**逐字不变**。
+ */
+export function parseTunStatus(s: TunStatusRaw): TunView {
   const log = s.log || '';
   const lines = log.split('\n').map((l) => l.trim()).filter(Boolean);
   const dev = (log.match(/dev=(utun\d+)/) || [])[1] || '';
-  // ready/keepalive 仅在进程存活时才认（进程已退出=旧日志残留，不据此误判）
-  const ready = s.running && /数据面就绪/.test(log);
-  const keepalive = s.running && /敲门保活/.test(log);
-  // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示
+  // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示（旧判据 / 进程已退出时的兜底）
   const fails = lines.filter((l) => /失败|未敲门成功|panic|fatal|退出/i.test(l));
-  const error = !s.running && fails.length ? stripTs(fails[fails.length - 1]) : '';
+  const lastFail = fails.length ? stripTs(fails[fails.length - 1]) : '';
+  const h = parseHealth(s.health ?? '');
+  let ready: boolean;
+  let keepalive: boolean;
+  let error: string;
+  let tunnelUsed: boolean | null;
+  if (h) {
+    // ready/keepalive 仅在进程存活时才认（进程已退出=旧日志残留，不据此误判）
+    keepalive = s.running && h.knock;
+    // ★不要求 h.tunnel：那是「曾拨通」的粘性位，空闲的健康接入它恒为 false（Go 侧只在业务流拨通时置位）。
+    ready = s.running && h.knock && !h.err;
+    // 运行中：健康行里的 err 就是数据面此刻的结论；已退出：优先它，没有再退回日志尾巴。
+    error = s.running ? h.err : (h.err || lastFail);
+    tunnelUsed = h.tunnel;
+  } else {
+    // ★旧判据（健康行拿不到时的回落），逐字保留：两行启动日志 + 只在退出后报错。
+    ready = s.running && /数据面就绪/.test(log);
+    keepalive = s.running && /敲门保活/.test(log);
+    error = !s.running && fails.length ? lastFail : '';
+    tunnelUsed = null; // 没有健康行就是不可判定，不猜
+  }
   // 控制面定性拒绝：dataplane 的 knock.ErrDenied 原文含「接入被拒」，Run 停机前会 warn「接入被控制面拒绝」。
   // 与瞬时失败区别对待——被强制下线/账号禁用不可自愈，UI 应显著提示且不诱导重试。
   const denyLine = lines.filter((l) => /接入被拒|接入被控制面拒绝/.test(l)).pop() || '';
@@ -270,6 +322,7 @@ function parse(s: TunStatusRaw): TunView {
         : '通用 TLS 1.3（未钉扎：加密但不认证网关）',
     keepalive,
     error,
+    tunnelUsed,
     denied,
     deniedReason,
     stale,
@@ -375,15 +428,78 @@ function staleAgainstProfile(running: boolean): { stale: boolean; staleReason: s
   };
 }
 
-/** 解析「数据面健康」行。拿不到（旧壳 / 尚无事件）返回 null，调用方退回旧判据。 */
-function parseHealth(line: string): { knock: boolean; tunnel: boolean; err: string } | null {
+/** 健康行解析结果：knock / tunnel 是「真成功过」，err 是最近一次失败（空 = 最近一次事件是成功）。 */
+export interface TunHealth { knock: boolean; tunnel: boolean; err: string }
+
+/**
+ * 解析「数据面健康」行。拿不到（旧壳 / 尚无事件 / 缺 knock 或 tunnel 字段）返回 null，
+ * 调用方退回旧判据——**返回 null 而不是猜一个值**，猜错的两个方向都在界面上看不出来。
+ *
+ * 行是 slog TextHandler 打的：`time=… level=INFO msg=数据面健康 knock=true tunnel=false err=…`。
+ * 容错：键之间多余空白、字段顺序、未知键一律不影响；`err=` 缺席按无错误处理；
+ * err 值含空格时 slog 会用 Go 字面量引号包起来（内部 `"` 转成 `\"`），这里还原成人话。
+ * `-` 是数据面对「无错误」的占位（见 dataplane.orNone）。
+ */
+export function parseHealth(line: string | null | undefined): TunHealth | null {
   if (!line) return null;
-  const k = /knock=(true|false)/.exec(line);
-  const t = /tunnel=(true|false)/.exec(line);
+  const k = /(?:^|\s)knock=(true|false)(?=\s|$)/.exec(line);
+  const t = /(?:^|\s)tunnel=(true|false)(?=\s|$)/.exec(line);
   if (!k || !t) return null;
-  // err 是行尾自由文本（可能含空格与中文标点），取 `err=` 之后的全部；`-` 表示无错误。
-  const e = /err=(.*)$/.exec(line)?.[1]?.trim() ?? '';
+  // err 是行尾自由文本（可能含空格与中文标点），取 `err=` 之后的全部。
+  const raw = /(?:^|\s)err=(.*)$/.exec(line)?.[1]?.trim() ?? '';
+  const e = unquoteGo(raw);
   return { knock: k[1] === 'true', tunnel: t[1] === 'true', err: e === '-' ? '' : e };
+}
+
+/** 还原 slog TextHandler 用 strconv.Quote 包起来的值；未加引号的原样返回。 */
+function unquoteGo(v: string): string {
+  if (v.length < 2 || !v.startsWith('"') || !v.endsWith('"')) return v;
+  return v.slice(1, -1).replace(/\\(["\\nt])/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
+}
+
+/**
+ * 数据面失败的类别。判据是 Go 侧 `dataplane.knockOne` 给 markFail 的两个固定前缀
+ * （`取敲门令牌失败：` / `SPA 拨号失败：`，见 gateway/internal/dataplane/dataplane.go）；
+ * 其余一律算 tunnel 类（`dialTunnel` 的原文：拨号超时 / 握手失败 / 指纹不匹配…）。
+ * 认不出的前缀**落向 tunnel 类**：那一侧是粘住不清，认错的代价是多显示一会儿，而不是把一条中间人告警擦掉。
+ */
+export type FailClass = 'knock' | 'tunnel';
+export function classifyFail(err: string): FailClass {
+  return /^(取敲门令牌失败|SPA 拨号失败)[：:]/.test(err) ? 'knock' : 'tunnel';
+}
+
+/** 接入页「数据面报告」提示条的状态（纯数据，由 nextDataplaneNotice 推进）。 */
+export interface DataplaneNotice {
+  text: string;                     // 失败原文（健康行 err）
+  at: number;                       // 最近一次观察到该失败的时刻（ms）
+  cls: FailClass;
+  tunnelUsedAtFail: boolean | null; // 失败当时的 tunnel 位，用于识别「之后真的拨通了」
+}
+
+/**
+ * 推进「数据面报告」提示条：决定一条运行中的失败要不要继续显示。
+ *
+ * ★为什么不能简单地「err 空了就清」：Go 侧 `markKnock()` 与 `markTunnel()` 都无差别地把 lastErr 清空，
+ * 而保活敲门每 15s 成功一次。于是「网关证书指纹不匹配（疑似中间人）」这类**隧道拨号失败**在健康行里
+ * 最多挂 15s 就被一次与它无关的敲门成功擦掉——按 err 直接渲染，一个持续性的中间人告警在界面上
+ * 是一闪而过的红条，用户再点一次应用又闪一次。TS 侧从同一行 `knock=true tunnel=x err=-` 分不出
+ * 「被敲门清掉」与「被拨通清掉」，所以按失败类别区分处置：
+ *   - knock 类（取令牌 / SPA 拨号）：err 清空意味着一次成功敲门（或拨通），那就是真恢复 → 清；
+ *   - tunnel 类：粘住。只有观察到 tunnel 位 false→true（失败时还没拨通过、之后拨通了）才算真恢复；
+ *     失败时 tunnel 已是 true 的情形本机无法判定，由用户手动关掉。根治要 Go 侧把 lastErr 按类别拆开
+ *     （健康行多带一个键），本轮未改 Go，边界见 docs/ARCHITECTURE.md 第七节。
+ * 进程未运行返回 null：退出后的原因走「数据面退出：…」那条独立路径，不归这里。
+ */
+export function nextDataplaneNotice(prev: DataplaneNotice | null, v: TunView, now: number): DataplaneNotice | null {
+  if (!v.running) return null;
+  if (v.error) {
+    // 新失败，或同一失败再次出现：刷新时间戳（提示条写的是「最近一次」）。
+    return { text: v.error, at: now, cls: classifyFail(v.error), tunnelUsedAtFail: v.tunnelUsed };
+  }
+  if (!prev) return null;
+  if (prev.cls === 'knock') return null;
+  if (prev.tunnelUsedAtFail === false && v.tunnelUsed === true) return null;
+  return prev;
 }
 
 function stripTs(l: string): string {

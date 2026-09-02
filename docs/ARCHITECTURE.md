@@ -249,9 +249,13 @@ src-tauri/src/main.rs    Tauri 壳：osascript 提权拉起 root baidi-tun、
                          终端环境采集、托盘常驻、open_app_url 白名单
 src/lib/api.ts           HTTP 封装 + 接入剖面类型
 src/lib/store.ts         会话 / 配置 / ★接入剖面（profile）
-src/lib/tunnel.ts        ★resolveTunOpts：剖面优先、config 兜底
+src/lib/tunnel.ts        ★resolveTunOpts：剖面优先、config 兜底；
+                         ★parseTunStatus：接入态判据 = 数据面「健康行」（ready = knock ∧ err 空；tunnel 位只展示，
+                         空闲健康态它恒 false），健康行缺席才回落两行启动日志；
+                         ★nextDataplaneNotice：运行中失败的提示条去留（隧道类失败被保活敲门擦掉不算恢复）；
+                         单测 tunnel.test.ts（npm test）
 src/lib/knock.ts         敲门抽象（Tauri sidecar / dev 代理两条路径）
-src/views/Connect.vue    接入状态机（从 baidi-tun 真实日志解析状态）
+src/views/Connect.vue    接入状态机（吃 parseTunStatus 的结论；运行中的失败原因也上屏）
 src/views/Apps.vue       ★应用中心：真实打开 VIP 地址
 ```
 
@@ -815,6 +819,44 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 - **Windows / Linux 分支从未在真机上跑过**。本机只装了 apple 目标（无 clippy、无交叉目标），验证方式是：解析逻辑在 macOS 上 `cargo test` 全绿，两条平台分发臂用临时改写 cfg 谓词的方式各做过一次 `cargo check`。命令输出样本是**按文档构造**的，不是抓来的真实输出。
 - ~~桌面客户端整体目前还不能在 Windows 上构建~~ **（已过时，改了）**：`tunnel_start` 曾经是 macOS 专属（写死 `osascript` + `std::os::unix::fs::PermissionsExt`），现在提权分平台收在 `elevate.rs`（macOS `osascript` / Linux `pkexec` / Windows UAC），unix 专属代码全部 `#[cfg(unix)]` 门控，Windows 的 `wintun.dll` 也随包分发了。**但"能构建"离"能用"还差一次实机验证** —— 见下一节。
 - 判据里有取舍：Windows 的 `sys_integrity` 是 Secure Boot（次选 Defender 篡改防护），Linux 的 `sys_integrity` 是 SELinux/AppArmor enforcing、`os_version` 比的是**内核** ≥ 5.10（发行版号各家规则不同，拿来比大小只会误判）。这些都不是行业统一定义，换环境需要重新校准。
+
+### ✅ 桌面端接入态判据 = 数据面健康行（真实事件；启动日志只是回落）
+
+**判据来源只有一条**：`baidi-tun` 在敲门包真发出 / 隧道真拨通 / 最近一次失败三种**事件**发生时打一行
+`数据面健康 knock= tunnel= err=`（`dataplane.logHealth`，只在状态变化时打），Rust 壳从**整份日志**里捞最后
+一条回传（`main.rs last_health_line` → `TunStatus.health`），TS 侧 `tunnel.ts parseTunStatus` 按它判：
+`keepalive = knock`；**`ready = knock ∧ err 为空`——`tunnel` 位刻意不参与**：Go 侧 `markTunnel()` 全仓只有
+`tunneler.tunnel()` 里拨通业务流那一个调用点，`Run()` 启动期只敲门不预拨，一次完全正常的接入在用户打开第一个
+应用之前健康行恒为 `knock=true tunnel=false err=-`。复核时抓到过把它当必要条件的版本：接入停在「接入中」、
+25s 后报一句猜的归因、`session.connected` 恒 false → 应用页拒绝「访问」→ 永远产生不出第一条流，死锁。
+`tunnel` 位现在只做展示（`TunView.tunnelUsed` 三态，接入信息角标「已就绪 · 尚无业务流量 / 隧道活动」，
+老壳无健康行时为 null 不猜）。运行中 `error = err` 原样上屏，接入超时那句也优先用它而不是猜「网关没起」；
+`App.vue` 的 `session.connected` 与应用页「访问」闸都吃这个 `ready`。健康行**缺席**（老壳、老数据面、尚无任何事件）
+才回落到判「数据面就绪」「敲门保活」两行启动日志，且回落路径逐字保留改造前的行为。
+
+**运行中的失败怎么到界面**（Connect.vue「数据面报告」提示条，状态由纯函数 `tunnel.ts nextDataplaneNotice` 推进）：
+Go 侧 `markKnock()` 与 `markTunnel()` 都不分类别地清空 `lastErr`，而保活敲门每 15s 成功一次——于是「网关证书指纹
+不匹配（疑似中间人）」这类**隧道拨号失败**在健康行里最多挂 15s 就被一次与它无关的敲门成功擦掉，TS 从同一行
+`knock=true tunnel=x err=-` 分不出「被敲门清掉」与「被拨通清掉」。按 err 直接渲染的话，一个持续性的中间人告警在界面上
+只是闪一下。所以提示条**不跟 ready 一起清**，按失败类别处置：knock 类（Go 侧固定前缀 `取敲门令牌失败：` /
+`SPA 拨号失败：`）err 清空即真恢复 → 收起；tunnel 类（其余一切，认不出的前缀也算）**粘住**，只有观察到 `tunnel` 位
+false→true（失败时还没拨通过、之后拨通了）才自动收起，否则等用户手动关掉。它只是提示，不改 `ready`/`stage`。
+
+**为什么要单独记一条**：提交 796ac0f 的说明写着「运行中的失败现在也能显示」「拿不到健康行（旧壳）时退回旧判据」，
+但它只做了 Go/Rust 半边——`TunStatusRaw` 没有 `health` 字段、`parseHealth` 定义后零调用、`ready` 仍判
+`/数据面就绪/`、`error` 仍是 `!running && …`。于是那两句在 TS 侧**都不成立**：指纹钉扎失败（数据面自判"疑似中间人"）、
+敲门被拒、隧道拨不通三类故障在接入页一律绿色「已接入」，应用页照常放行。这是「纪律只做了一半」的又一例，
+现在由 `clients/desktop/src/lib/tunnel.test.ts` 钉住（把 `parseTunStatus` 改回只用旧正则，5 条用例变红）。
+
+**边界**：① `knock`/`tunnel` 是"**曾**成功过"的粘性位，`err` 是最近一次失败——判「此刻通不通」靠的是 `err`，
+而任何一次成功（含每 15s 的保活敲门）都会清掉它，隧道持续拨不通而敲门正常时 `ready` 会随之抖动（**Go 侧语义，
+本轮未改**）；TS 侧的粘性提示条是对这件事的**兜底而非根治**——失败时 `tunnel` 位已是 true 的情形本机分不出
+「之后恢复了」与「之后没人再访问」，只能等用户关；持续性告警要能自己稳定在界面上，得 Go 侧把 `lastErr` 按 knock/tunnel
+拆成两个字段、健康行多带一个键（`parseHealth` 已容忍未知键，届时 TS 兼容缺席即可）。别把「这三类故障现在能到界面」
+读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。② 健康行反映的是**本机数据面**的观感，网关侧的
+`resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
+`parseHealth` / `nextDataplaneNotice`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
+那句已不成立，以本节为准。
 
 ### ⚠️ Windows 桌面数据面（源码完整、组件齐了，但**从未在真 Windows 上跑过**）
 

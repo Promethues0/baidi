@@ -514,6 +514,13 @@ jobs:
         working-directory: clients/desktop
         run: npm ci
 
+      - name: 前端单测（接入态解析等纯函数，vitest · node 环境，不依赖 DOM）
+        # 只在 Linux 上跑一份，理由同下面的 Rust 单测：纯函数三平台结果相同。
+        # 放在打包**之前**：几百毫秒，且它守的是「界面一律绿色」那类会随包发到用户手里的判据错。
+        if: runner.os == 'Linux'
+        working-directory: clients/desktop
+        run: npm test
+
       - name: 打包（macOS · universal dmg）
         if: runner.os == 'macOS'
         working-directory: clients/desktop

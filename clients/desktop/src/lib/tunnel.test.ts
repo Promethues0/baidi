@@ -19,7 +19,7 @@ vi.mock('./store', () => ({
   device: { id: '' }
 }));
 
-import { parseHealth, parseTunStatus, type TunStatusRaw } from './tunnel';
+import { classifyFail, nextDataplaneNotice, parseHealth, parseTunStatus, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
 
 /** 数据面启动期那两行 + 一条引流日志：改造前光凭它们就会被判成「已接入 · 保活中」。 */
 const BOOT_LOG = [
@@ -56,11 +56,24 @@ describe('parseTunStatus · 健康行是真判据', () => {
     expect(v.error).toContain('隧道拨号失败');
   });
 
-  it('knock=true tunnel=true err=- → ready，error 为空', () => {
+  it('knock=true tunnel=true err=- → ready，error 为空，tunnelUsed=true', () => {
     const v = parseTunStatus(raw({ health: SLOG + 'knock=true tunnel=true err=-' }));
     expect(v.ready).toBe(true);
     expect(v.keepalive).toBe(true);
     expect(v.error).toBe('');
+    expect(v.tunnelUsed).toBe(true);
+  });
+
+  it('★空闲健康态 knock=true tunnel=false err=- 且运行中 → ready、error 空（tunnel 位不是必要条件）', () => {
+    // Go 侧 markTunnel() 只在第一条业务流拨通时才置位，Run() 启动期只敲门不预拨：
+    // 用户打开第一个应用之前，一次完全正常的接入健康行恒为这一行。
+    // 复核发现：把 tunnel 当必要条件 → 接入停在「接入中」25s 后报猜的归因，
+    // session.connected 恒 false → 应用页拒绝「访问」→ 永远产生不出第一条流 → 死锁。
+    const v = parseTunStatus(raw({ health: SLOG + 'knock=true tunnel=false err=-' }));
+    expect(v.ready).toBe(true);
+    expect(v.keepalive).toBe(true);
+    expect(v.error).toBe('');
+    expect(v.tunnelUsed).toBe(false);   // 展示用：「已就绪 · 尚无业务流量」
   });
 
   it('健康行说一切正常、但启动日志早被业务流量挤出尾巴 → 仍是 ready（判据不再依赖尾巴）', () => {
@@ -85,11 +98,12 @@ describe('parseTunStatus · 健康行是真判据', () => {
 });
 
 describe('parseTunStatus · 无健康行时回落旧判据（逐字不变）', () => {
-  it.each([undefined, null, ''])('health=%s：两行启动日志在 → ready + keepalive；运行中 error 恒空', (health) => {
+  it.each([undefined, null, ''])('health=%s：两行启动日志在 → ready + keepalive；运行中 error 恒空；tunnelUsed 不可判定', (health) => {
     const v = parseTunStatus(raw({ health: health as TunStatusRaw['health'] }));
     expect(v.ready).toBe(true);
     expect(v.keepalive).toBe(true);
     expect(v.error).toBe('');
+    expect(v.tunnelUsed).toBeNull();
   });
 
   it('旧判据：启动日志缺席 → 不 ready', () => {
@@ -151,5 +165,72 @@ describe('parseHealth · 格式容错', () => {
     expect(parseHealth('')).toBeNull();
     expect(parseHealth(null)).toBeNull();
     expect(parseHealth(undefined)).toBeNull();
+  });
+});
+
+/** 一份运行中的 TunView，只关心 running / error / tunnelUsed 三项。 */
+function view(over: Partial<TunView>): TunView {
+  return {
+    ...parseTunStatus(raw({ health: SLOG + 'knock=true tunnel=false err=-' })),
+    ...over
+  };
+}
+
+const PIN_ERR = '网关证书指纹不匹配（疑似中间人）：期望 abc 实得 def';
+
+describe('nextDataplaneNotice · 隧道类失败不被保活敲门擦掉', () => {
+  it('classifyFail：Go 侧两个固定前缀是 knock 类，其余（含认不出的）一律 tunnel 类', () => {
+    expect(classifyFail('取敲门令牌失败：dial tcp: refused')).toBe('knock');
+    expect(classifyFail('SPA 拨号失败：network is unreachable')).toBe('knock');
+    expect(classifyFail(PIN_ERR)).toBe('tunnel');
+    expect(classifyFail('隧道拨号失败（未敲门成功/网关隐身?）')).toBe('tunnel');
+    expect(classifyFail('完全不认识的一句话')).toBe('tunnel');
+  });
+
+  it('运行中出现失败 → 生成提示，带类别、时刻与失败当时的 tunnel 位', () => {
+    const n = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false }), 1000);
+    expect(n).toEqual({ text: PIN_ERR, at: 1000, cls: 'tunnel', tunnelUsedAtFail: false });
+  });
+
+  it('★隧道类失败：15s 后保活敲门把 err 擦成空 → 提示**粘住**（同一行分不出被谁清掉）', () => {
+    // 复核发现：Go 侧 markKnock 不分类别清 lastErr，按 err 直接渲染时中间人告警只闪 ≤15s。
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false }), 1000);
+    const n1 = nextDataplaneNotice(n0, view({ error: '', tunnelUsed: false }), 16000);
+    expect(n1).toBe(n0);
+    // 之后每一轮轮询都保持
+    expect(nextDataplaneNotice(n1, view({ error: '', tunnelUsed: false }), 60000)).toBe(n0);
+  });
+
+  it('隧道类失败后观察到 tunnel 位 false→true = 真拨通了 → 收起', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false }), 1000);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true }), 5000)).toBeNull();
+  });
+
+  it('失败当时 tunnel 已是 true（此前拨通过）→ 之后 err 清空本机判不了 → 粘住等用户关', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: true }), 1000);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true }), 5000)).toBe(n0);
+  });
+
+  it('knock 类失败：err 清空就是一次成功敲门 → 真恢复 → 收起', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: '取敲门令牌失败：dial tcp 127.0.0.1:8090: connection refused', tunnelUsed: false }), 1000);
+    expect(n0?.cls).toBe('knock');
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: false }), 16000)).toBeNull();
+  });
+
+  it('同一失败再次出现 → 刷新时刻（提示写的是「最近一次」）；换了失败 → 换文本', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR }), 1000);
+    const n1 = nextDataplaneNotice(n0, view({ error: PIN_ERR }), 30000);
+    expect(n1).toMatchObject({ text: PIN_ERR, at: 30000 });
+    const n2 = nextDataplaneNotice(n1, view({ error: '隧道拨号失败（未敲门成功/网关隐身?）' }), 31000);
+    expect(n2?.text).toContain('隧道拨号失败');
+  });
+
+  it('进程未运行 → null（退出后的原因走「数据面退出」那条路，不归提示条）', () => {
+    const prev: DataplaneNotice = { text: PIN_ERR, at: 1, cls: 'tunnel', tunnelUsedAtFail: false };
+    expect(nextDataplaneNotice(prev, view({ running: false, error: PIN_ERR }), 2)).toBeNull();
+  });
+
+  it('无失败且无历史 → null', () => {
+    expect(nextDataplaneNotice(null, view({}), 1)).toBeNull();
   });
 });

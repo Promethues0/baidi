@@ -102,6 +102,20 @@
           <div v-else class="ck-connecting">接入中…</div>
 
           <div v-if="err2" class="ck-err2"><icon-exclamation-circle-fill /> {{ err2 }}</div>
+          <!--
+            数据面运行中的失败（指纹不匹配 / 全部落点拨不通 / 取不到敲门令牌…）。
+            ★独立于 err2 且**不随 ready 翻回 true 自动消失**：隧道类失败在健康行里最多挂 15s 就会被
+            一次无关的保活敲门擦掉（Go 侧 markKnock 不分类别清 lastErr），跟着擦掉的话一个持续性的
+            中间人告警只会闪一下。何时自动收起由 nextDataplaneNotice 决定，其余靠用户手动关。
+          -->
+          <div v-if="dpNotice" class="ck-dp">
+            <icon-exclamation-circle-fill class="ck-dp__ic" />
+            <div class="ck-dp__b">
+              <div class="ck-dp__t">数据面报告（{{ dpAt }}）：{{ dpNotice.text }}</div>
+              <div v-if="dpNotice.cls === 'tunnel'" class="ck-dp__h">此后敲门保活仍正常；隧道是否已恢复本机判不了——再访问一次应用可复测，确认无误后可关掉此条。</div>
+            </div>
+            <button class="ck-dp__x" title="关掉此条" @click="dpNotice = null">×</button>
+          </div>
           <div v-if="!isTauri" class="ck-devnote">浏览器联调模式 · 真 utun 接管流量需打包客户端运行（需管理员授权）</div>
         </div>
 
@@ -135,7 +149,7 @@
           </div>
 
           <div class="dk-card ck-conn" :class="{ off: stage !== 'connected' }">
-            <div class="ck-card__h">接入信息<span v-if="stage === 'connected'" class="ck-live" :class="{ bad: !tun.ready }">{{ tun.ready ? '● 隧道活动' : '● 隧道异常' }}</span></div>
+            <div class="ck-card__h">接入信息<span v-if="stage === 'connected'" class="ck-live" :class="{ bad: !tun.ready }">{{ liveText }}</span></div>
             <!--
               剖面拿不到 = 接入退回本机默认配置（单网段、无资源映射、无证书钉扎），
               隧道会照常建起来、UI 也会走到「已接入」，但真实业务网段一条都没接管。
@@ -219,7 +233,7 @@ import { Message } from '@arco-design/web-vue';
 import { api, fetchProfile, checkClientUpdate, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
-import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, type TunView } from '@/lib/tunnel';
+import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, type TunView, type DataplaneNotice } from '@/lib/tunnel';
 import { postureState, collectPosture, reportPosture } from '@/lib/posture';
 import { explainControlFailure, type TcpProbe } from '@/lib/diagnose';
 import { invoke } from '@tauri-apps/api/core';
@@ -396,9 +410,17 @@ const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
 const showLog = ref(false);
-const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', denied: false, deniedReason: '', stale: false, staleReason: '', endpointIndex: 1, endpointTotal: 1, endpointId: '', endpointReason: '', lines: [] };
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', tunnelUsed: null, denied: false, deniedReason: '', stale: false, staleReason: '', endpointIndex: 1, endpointTotal: 1, endpointId: '', endpointReason: '', lines: [] };
 const tun = ref<TunView>({ ...EMPTY_TUN });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
+// 数据面运行中的失败提示（见模板处说明与 tunnel.ts nextDataplaneNotice）。
+const dpNotice = ref<DataplaneNotice | null>(null);
+const dpAt = computed(() => (dpNotice.value ? new Date(dpNotice.value.at).toLocaleTimeString() : ''));
+// 接入信息角标：ready 但隧道还没拨通过 = 健康的空闲态，不是异常——tunnel 位只在第一条业务流拨通时才置位。
+const liveText = computed(() => {
+  if (!tun.value.ready) return '● 隧道异常';
+  return tun.value.tunnelUsed === false ? '● 已就绪 · 尚无业务流量' : '● 隧道活动';
+});
 // 控制面在剖面里下发的降级告警：网关未上报隧道证书指纹（隧道加密但不认证）、
 // 应用未关联受控资源（点开必然不走隧道）等。这些都是「配置齐全、就是不生效」
 // 的静默失效，控制面已经识别出来了，客户端不呈现等于白识别。
@@ -459,7 +481,7 @@ async function syncPostureBeforeConnect(): Promise<boolean> {
 }
 
 async function connect() {
-  err2.value = ''; connectTimedOut.value = false; denied.value = false; deniedReason.value = ''; postureSynced.value = true;
+  err2.value = ''; dpNotice.value = null; connectTimedOut.value = false; denied.value = false; deniedReason.value = ''; postureSynced.value = true;
   if (!isTauri) { await connectDev(); return; }   // 浏览器联调：真敲门探测，不接管流量
   // 剖面可能过期（管理员改了资源/网关重启换了证书指纹），接入前刷新一次，
   // 拿到的路由表与钉扎指纹才与当前策略一致。
@@ -505,8 +527,9 @@ async function connect() {
     if (stage.value === 'connecting') {
       connectTimedOut.value = true;
       // 数据面自己报了原因（健康行 err）就用它——那句「请确认网关已运行…」只是猜的归因。
-      err2.value = tun.value.error
-        ? '接入超时：' + tun.value.error
+      const reason = dpNotice.value?.text || tun.value.error;
+      err2.value = reason
+        ? '接入超时：' + reason
         : '接入超时：数据面已启动但未就绪，请确认网关已运行、且「国密隧道」开关与网关一致';
     }
   }, 25000);
@@ -535,16 +558,18 @@ function startPolling() {
       return;
     }
     step.value = stepFromTun(v);
+    // ★运行中的失败也要到界面：v.error 取自数据面健康行（tunnel.ts parseTunStatus），
+    //   指纹钉扎失败（疑似中间人）/ 敲门令牌取不到 / 隧道拨不通都会落在这里。
+    //   此前 error 只在进程退出后才非空，这三类故障运行中界面一律绿色「已接入」。
+    //   提示条的去留由 nextDataplaneNotice 判（隧道类失败被保活敲门擦掉不算恢复），
+    //   **不**跟着下面的 ready 一起清；不自动重连（重连要重新提权、会打断在途连接）。
+    dpNotice.value = nextDataplaneNotice(dpNotice.value, v, Date.now());
     if (v.ready) {
       stage.value = 'connected'; session.connected = true;
       connectTimedOut.value = false; err2.value = ''; clearTimeout(connectTO);
-    } else {
-      // ★运行中的失败也要到界面：v.error 现在取自数据面健康行（tunnel.ts parseTunStatus），
-      //   指纹钉扎失败（疑似中间人）/ 敲门令牌取不到 / 隧道拨不通都会落在这里。
-      //   此前 error 只在进程退出后才非空，这三类故障运行中界面一律绿色「已接入」。
-      //   已接入后再出现失败：session.connected 由 App 级心跳按 ready 同步翻成 false，
-      //   这里只负责把原因摆出来，不自动重连（重连要重新提权、会打断在途连接）。
-      if (v.error) { err2.value = '数据面报告：' + v.error; session.connected = false; }
+    } else if (v.error) {
+      // 已接入后再出现失败：session.connected 由 App 级心跳按 ready 同步翻成 false，这里同步一下。
+      session.connected = false;
     }
   }, 1500);
 }
@@ -552,7 +577,7 @@ function startPolling() {
 async function disconnect() {
   try { await tunnelStop(); } catch (e) { err2.value = String((e as Error)?.message ?? e); return; }
   pollGen++; clearInterval(pollTimer); clearTimeout(connectTO);
-  stage.value = 'idle'; session.connected = false; connectTimedOut.value = false; err2.value = '';
+  stage.value = 'idle'; session.connected = false; connectTimedOut.value = false; err2.value = ''; dpNotice.value = null;
   denied.value = false; deniedReason.value = '';
   tun.value = { ...EMPTY_TUN };
 }
@@ -615,6 +640,7 @@ onMounted(async () => {
       tun.value = v;
       stage.value = v.ready ? 'connected' : 'connecting';
       session.connected = v.ready;
+      dpNotice.value = nextDataplaneNotice(null, v, Date.now());
       startPolling();
     } else {
       // ★此前没有这条 else 分支：v.running 为假时 session.connected / denied / error
@@ -691,6 +717,12 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-cta { height: 42px; padding: 0 28px; font-size: 14px; margin-top: 10px; }
 .ck-connecting { font-size: 13px; color: var(--bd-primary); margin-top: 12px; }
 .ck-err2 { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-danger); margin-top: 12px; max-width: 280px; text-align: left; }
+.ck-dp { display: flex; gap: 8px; align-items: flex-start; margin-top: 12px; max-width: 300px; text-align: left; padding: 10px 12px; border-radius: 10px; background: rgba(255, 125, 0, .08); border: 1px solid rgba(255, 125, 0, .3); }
+.ck-dp__ic { color: var(--bd-warning, #FF7D00); flex: none; margin-top: 2px; }
+.ck-dp__b { flex: 1; min-width: 0; }
+.ck-dp__t { font-size: 12px; color: var(--bd-t1); line-height: 1.5; word-break: break-all; }
+.ck-dp__h { font-size: 11px; color: var(--bd-t3); margin-top: 4px; line-height: 1.6; }
+.ck-dp__x { flex: none; border: 0; background: transparent; color: var(--bd-t3); cursor: pointer; font-size: 14px; line-height: 1; padding: 0 2px; }
 .ck-denied { display: flex; gap: 10px; align-items: flex-start; margin-top: 16px; max-width: 300px; text-align: left; padding: 12px 14px; border-radius: 10px; background: rgba(245, 63, 63, .08); border: 1px solid rgba(245, 63, 63, .28); }
 .ck-denied__ic { font-size: 20px; color: var(--bd-danger); flex: none; margin-top: 1px; }
 .ck-denied__t { font-size: 13px; font-weight: 600; color: var(--bd-danger); }

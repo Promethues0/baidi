@@ -478,8 +478,10 @@ BAIDI_CLIENT_SRC_REV=$(git log -1 --format=%h -- clients/) bash clients/build-ar
   也没有留放密钥的口子（与桌面同一条：要做签名分发，先想清楚密钥托管在哪）。
 - 数据面（`VpnService` 建 TUN → `Baidimobile.start(fd,cfg)` → SPA 敲门 + 国密 TLCP 隧道）
   **没有在任何一台真实安卓设备上跑通过**。「能装」与「能连」之间那一段还没有证据。
-- 这条流水线同样**没有在 GitHub Actions 上真实运行过**。本机验证到 `build-gomobile.sh`
-  为止（见上），`actionlint`（含 shellcheck）对该 workflow 零告警。
+- 这条流水线**已在 GitHub Actions 上真实跑通**（2026-08-12 首跑即绿，产出 31.3 MB debug APK，
+  无步骤跳过，见 `clients-mobile.yml` 文件头），**出的包未装机**。本机能验的仍只到
+  `build-gomobile.sh` 为止（见上），`actionlint`（含 shellcheck）对该 workflow 零告警。
+  这句话此前写的是"没有真实运行过"——与第七节同款的「注释停在旧事实上」。
 
 ## 九、iOS 与鸿蒙：为什么 CI 上一个 job 都没有
 
@@ -494,8 +496,11 @@ BAIDI_CLIENT_SRC_REV=$(git log -1 --format=%h -- clients/) bash clients/build-ar
 **还没有 Xcode 工程**：即便签名齐了，也不是"跑个命令"就能出包。
 
 **鸿蒙.** 工具链（DevEco Studio / HarmonyOS SDK）不在 GitHub Actions 的 runner 镜像里，
-也没有官方 action，更没有可直接 `apt install` 的 CLI。`native/harmony/` 目前也只有
-`VpnExtAbility.ets` 这一份骨架源码，同样没有工程。
+也没有官方 action，更没有可直接 `apt install` 的 CLI。移动端的 `native/harmony/` 目前只有
+`VpnExtAbility.ets` 这一份骨架源码，没有工程。**鸿蒙桌面壳是另一回事**：`clients/harmony/`
+是完整的 DevEco 工程（ArkWeb 壳复用 `clients/desktop` 的 Vue 源码，命令行可构建可签名），
+已在真机（MateBook 14，鸿蒙 PC）跑通 UI 与控制面通信，但**数据面未实现**——
+`startTunnel` 如实报失败，见 `clients/harmony/README.md`。它同样不进 CI（工具链原因同上）。
 
 **为什么不挂两个 skip 掉的 job 占位**：那会把"我们没有这个能力"伪装成"这次没跑"。
 Actions 页面上一片绿、每次都跳过，看起来像是配置问题，实际是能力缺口 —— 与本项目
@@ -536,9 +541,13 @@ macOS 那一行是同一条纪律的另一半：脚本在**缺 dmg** 时曾写 `
 
 ## 十、Windows 实机验证（把 UNVERIFIED 摘掉的唯一途径）
 
-Windows 这条链路至今**从未在真实 Windows 上跑过**：包出得来、wintun.dll 与许可随包、
-提权链有单测，但**建虚拟网卡、UAC 交互、NRPT 分离式 DNS 一次都没实测**。
-产物因此标 UNVERIFIED 且不进下载中心——这不是保守，是那几条确实没有证据。
+Windows 这条链路的实机证据截至 2026-08-21 只来自**一台 Windows 11 ARM64 真机**（10.3b~10.3g）：
+阶段 A 7/7 通过、阶段 B 已跑通（建出 baidi0）、阶段 C 两次（8/21）走到
+UAC → 拉起 baidi-tun → 换到敲门令牌 → 建卡，但**尚未完整通过**；
+**NRPT 分离式 DNS 与隧道端到端仍未实测，x64 这一份全部未实机**。
+产物因此仍标 UNVERIFIED 且不进下载中心——这不是保守，是余下那几条确实没有证据。
+（本章开头此前写的是「至今从未在真实 Windows 上跑过」，那是 2026-08-18 之前的事实；
+下文各小节按时间记录了它是怎么一步步不再成立的。）
 
 `clients/verify-windows.ps1` 就是用来把这些逐条变成「已验证」或「确认坏了」的。
 **它不修任何东西，只观察并如实报告**，最后写一份纯文本报告（不含任何凭据，
@@ -609,6 +618,11 @@ B1 刻意用一个必然连不通的网关地址（`127.0.0.1:1`），只让它�
 - **有 FAIL** → 把报告回传，按 Id 逐条修。失败比不测有价值得多。
 - **UNKNOWN** → 脚本读不出（如 PE 头损坏、System32 里有别的软件装的 wintun）。
   按不可判定处理，**不当成通过**。
+
+顺带一条**不在脚本判定项里、却是真机旁证**的记录：2026-08-19/21 那台 ARM64 真机的
+posture 上报里 BitLocker 未开，被 `bl-admission` 基线判 **block** → 拒发敲门令牌 →
+撤窗断隧道（提交 `697c9fb` 正文，13:48 那次 C1 FAIL 的真实原因）。这是 Windows 采集器
+`disk_encrypted` 一项**唯一**的真机证据——其余五项仍只有按文档构造的解析单测。
 
 ### 10.3b 已经跑过的：阶段 A（2026-08-18，第一次有真机证据）
 

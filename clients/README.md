@@ -12,7 +12,7 @@
 
 ## 共享数据面引擎
 
-桌面与移动跑的是**同一份** `gateway/internal/dataplane`（gVisor 网络栈 + 逐流 SPA 敲门 + 国密 TLCP/通用 TLS 隧道 + 双向泵 + 敲门保活）。桌面 `baidi-tun` 自建 utun 后调 `Run(dev, cfg)`；移动端由平台 VPN 扩展拿到 TUN fd，经 `baidimobile.Start(fd, cfg)` 调同一 `Run`。
+桌面与移动跑的是**同一份** `gateway/internal/dataplane`（gVisor 网络栈 + SPA 敲门开窗与 15s 保活续窗（对全部网关落点各敲一次，不逐流）+ 国密 TLCP/通用 TLS 隧道 + 双向泵）。桌面 `baidi-tun` 自建 utun 后调 `Run(dev, cfg)`；移动端由平台 VPN 扩展拿到 TUN fd，经 `baidimobile.Start(fd, cfg)` 调同一 `Run`。
 
 ## 接入配置（两端同构，可配置）
 
@@ -68,10 +68,13 @@ npm install && npm run dev             # :5295，vite /api→control:8090、/kno
 
 | 层 | 状态 |
 |---|---|
-| 桌面 utun 数据面（Tauri + osascript + baidi-tun） | ✅ 落地，真机验证进行中 |
+| 桌面 utun 数据面 · macOS（Tauri + osascript + baidi-tun） | ✅ 落地，**端到端已实机验证**（2026-08-25，见 [`BUILD.md`](BUILD.md) 第十一章） |
+| 桌面数据面 · Windows | ⚠ ARM64 一台真机：阶段 A、B 过，阶段 C（完整链路）未完；**x64 未实机**；产物仍标 UNVERIFIED 不进下载中心（第十章） |
+| 桌面数据面 · Linux | ⚠ 包能出，**未实机**（第五章） |
 | 桌面系统托盘常驻 | ✅ 落地 |
 | 移动 webview（登录/接入/应用/诊断/配置） | ✅ 落地，浏览器实测 |
-| 共享引擎 `dataplane` + gomobile `baidimobile` | ✅ 多平台基座编译过 |
-| 三端原生壳脚手架（读 UI 下传 cfg） | ✅ 参考源码；安卓壳已能在 CI 上编出 APK，iOS/鸿蒙仍无壳工程 |
-| 安卓 debug APK（CI 出包） | ⚠ 流水线已写但**未真实运行过**；出的包 debug 签名、未上真机 |
-| iOS `.ipa` / 鸿蒙 `.hap` | ❌ 只能人工构建（付费账号签名 + NE 授权 / DevEco），见 [`BUILD.md`](BUILD.md) 第九节 |
+| 共享引擎 `dataplane` + gomobile `baidimobile` | ✅ 多平台基座编译过；移动端数据面**未在任何真机上跑过** |
+| 三端原生壳脚手架（读 UI 下传 cfg） | ✅ 参考源码；安卓壳已能在 CI 上编出 APK，iOS 仍无壳工程 |
+| 安卓 debug APK（CI 出包） | ⚠ 流水线已在 GitHub Actions 上真实跑通；出的包 debug 签名、**未装机** |
+| 鸿蒙 | ⚠ 桌面壳工程 [`harmony/`](harmony/) 已在真机（MateBook 14，鸿蒙 PC）跑通 UI 与控制面通信；**数据面未实现**，`startTunnel` 如实报失败 |
+| iOS `.ipa` | ❌ 无工程，只有 `PacketTunnelProvider.swift` 参考源码；出包需付费账号签名 + NE 授权，见 [`BUILD.md`](BUILD.md) 第九节 |

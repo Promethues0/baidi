@@ -24,7 +24,7 @@
 | `baidi-gateway` | 网关数据面：SPA UDP 监听 + 门控隧道代理。`-gm` 国密 TLCP，`-pf` 内核态隐身 |
 | `baidi-knock` | SPA 敲门器：向网关发携带 JWT 的 UDP 包。桌面客户端"接入"时由 **Tauri sidecar** 调用 |
 | `baidi-tlcp-probe` | 国密 TLCP 验证探针：敲门 + tlcp.Dial 握手 + 取后端（curl 不支持国密，用它验证） |
-| `baidi-tun` | **客户端数据面（macOS，需 root）**：utun 接管系统流量 → gVisor 网络栈终止 TCP → 逐流敲门 + 隧道 |
+| `baidi-tun` | **客户端数据面（macOS 实测，需 root；Windows/Linux 见 clients/BUILD.md）**：utun 接管系统流量 → gVisor 网络栈终止 TCP → SPA 敲门开窗（15s 保活，不逐流）+ 隧道 |
 
 ```bash
 baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -ttl 30s \
@@ -50,6 +50,8 @@ baidi-tlcp-probe -spa 127.0.0.1:18201 -proxy 127.0.0.1:18443 -token <JWT> -contr
 ### ② 内核态隐身 — `-pf`（防火墙 DROP）
 
 把 SPA 放行落到内核防火墙：默认 **DROP** 代理端口（无 RST，扫描器只见 `filtered`＝端口在网络层不存在），仅放行经敲门授权的源 IP，TTL 到期自动撤。自动适配 **Linux nftables / macOS pf**。
+
+> ⚠️ **默认不开**（`deploy/systemd/baidi-gateway.service` 明写不带 `-pf`）：此时未敲门的 TCP 会完成三次握手再被 `proxy.go` accept-then-close 断开，扫描器判 `open` 而非 `filtered`。生效与否以网关页的实测回执八态（`darkfw.Probe()` 随心跳上报）为准，只有 `armed` 计入生效；**`armed` 态尚未在 Linux root 实机上验证过**，控制面也不做外部扫描，建议从外网侧实测。
 
 ```bash
 # Linux：  sudo firewall/baidi-nft.sh setup
@@ -84,7 +86,7 @@ SPA 敲门放行   src=127.0.0.1 user=li.ming role=user ttl=30s
 
 ## 与三组件的关系 / 后续
 
-- **控制面**：网关与 `baidi-control` 共享 `BAIDI_JWT_SECRET`；后续网关向控制面注册、拉取访问策略（按用户/应用细粒度放行，而非仅源 IP）。
+- **控制面**：网关只装控制面下发的 Ed25519 **公钥**验令牌（SPA 口 knock 公钥、L7 口 web 公钥），凭 mTLS 客户端证书注册心跳、拉取访问策略（按用户/资源细粒度放行，而非仅源 IP）；`BAIDI_JWT_SECRET` 只剩 HS256 逃生舱用途（默认关）。
 - **客户端**：桌面 Tauri sidecar 已打包 `baidi-knock` 接真实敲门；`baidi-tun` 进一步用 utun 接管系统流量进隧道（真引流，非 UX 动画）。
-- **已落地**：✅ 国密 TLCP 隧道（`-gm`，SM2 双证书）；✅ 防火墙层 DROP 真隐身（`-pf`，nftables/pf）；✅ utun 身份引流（`baidi-tun`，gVisor 网络栈）。
+- **已落地**：✅ 国密 TLCP 隧道（`-gm`，SM2 双证书）；✅ 防火墙层 DROP 隐身（`-pf`，nftables/pf）——**默认不开，`armed` 态未在 Linux root 实机验证**，以网关页实测回执为准；✅ utun 身份引流（`baidi-tun`，gVisor 网络栈，macOS 端到端实测）。
 - **生产化待续**：① 正式 SM2 证书（CA 签发，非自签）；② 网关按 `dst` 多资源路由（utun 多目标需客户端送目标地址前缀，当前演示单 VIP→固定后端）；③ Linux/Windows 端 utun/wintun 客户端；④ 远端部署到云网关并开安全组。

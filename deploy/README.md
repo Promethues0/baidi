@@ -20,7 +20,8 @@ web/                    console 构建产物（vite dist）
 data/baidi.db           SQLite（首启自动建表+播种，WAL）
 etc/baidi.env           control 专属 env（0600；仅 HS256 逃生舱备用密钥）
 etc/keys/               ★control 身份私钥（0700）：jwt-ed25519.pem 签会话令牌、
-                          jwt-ed25519-knock.pem 只签敲门令牌。首启自动生成，公钥写同名 .pub
+                          jwt-ed25519-knock.pem 只签敲门令牌、jwt-ed25519-web.pem 只签七层 Web 代理票据。
+                          首启自动生成，公钥写同名 .pub（网关 SPA 口只装 knock 公钥、L7 口只装 web 公钥）
 etc/pki/                ★内部 CA（0700，标准 X.509/P-256）：签发网关 mTLS 客户端证书
 etc/gwcerts/            网关身份材料（仅 WITH_GATEWAY=1）：gw.crt/key.pem + ca.crt.pem + knock.pub
 etc/baidi-gateway.env   网关专属 env（0640）——只有验证材料，没有任何签发能力
@@ -188,7 +189,7 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 - [ ] `etc/keys/` 与 `etc/pki/` 已生成且 0700；**私钥绝不下发给网关**（网关只拿 `knock.pub` 与自己的客户端证书）
 - [ ] 网关证书可随时吊销：`POST /api/v1/pki/gateway-certs/{fingerprint}/revoke`（指纹白名单是执行点，下次握手即被拒）
 - [ ] 备份 `etc/keys/` 与 `etc/pki/`：**丢了这两个目录，所有已分发公钥的网关会全部拒绝敲门**，且日志只显示「令牌无效」而非「密钥换了」
-- [ ] 把管理员登录从演示口令换成真实校验（接 IdP / 本地用户表 + 强口令）
+- [ ] 首登强制改密**已默认强制**（`BAIDI_SEED_MUST_CHANGE` 缺省 1，`deploy.sh` 与 `install-remote.sh` 两处一致）；演示机在 `config.env` 里显式关掉的，上线前要开回——种子口令 `baidi@123` 是公开的
 - [ ] `data/baidi.db` 纳入定期备份（WAL，可热备 `.backup`）
 - [ ] 要冗余就装温备（上一节）；装了之后**定期看一眼系统页的同步新鲜度**——备机静默落后与没有备机，只在切换那天才区分得出来
 - [ ] 安全组放行 443（仅 nginx 对外；8090 仅本机）

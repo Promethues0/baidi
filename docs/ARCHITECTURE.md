@@ -259,6 +259,28 @@ src/views/Connect.vue    接入状态机（吃 parseTunStatus 的结论；运行
 src/views/Apps.vue       ★应用中心：真实打开 VIP 地址
 ```
 
+### 客户端 `clients/mobile/`（移动端 UI + 原生 VPN 壳参考源码，数据面均未实机）
+
+```
+src/                     移动优先 Vue UI（登录 / 接入 / 应用 / 我的），浏览器视口实测
+src/lib/vpn.ts           原生桥 window.__BAIDI_NATIVE__（无桥时退化为经 knock-agent 真敲门）
+native/android/          VpnService 壳：可在 CI 出 debug APK（clients-mobile.yml），未装机
+native/ios/              仅 PacketTunnelProvider.swift 参考源码，无 Xcode 工程
+native/harmony/          仅 VpnExtAbility.ets 骨架，NAPI 桥未实现
+```
+
+### 客户端 `clients/harmony/`（鸿蒙桌面壳：真机跑通 UI，数据面未实现）
+
+```
+entry/                   ArkWeb 壳 + 原生桥注入（platform / startTunnel / stopTunnel）
+build.sh                 命令行构建 / 装机 / 拉起（签名那一步要 DevEco 一次）
+inline-webui.py          把 clients/desktop 的 Vue 源码内联成单文件进 rawfile
+                         （desktop 侧 vite.harmony.config.ts 用 alias 把三个 Tauri 模块换成 webui/shim/）
+```
+
+★两个目录的共同边界：**没有一条移动/鸿蒙数据面在任何真机上跑过**。`startTunnel` 在鸿蒙上如实返回失败，
+不会画出「已接入」。
+
 ---
 
 ## 六·五、站点组网：自研 IKEv2 + ESP
@@ -355,7 +377,7 @@ sequenceDiagram
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
 | **管理员分级分权 / 三权分立（有真执行方 + 防自锁）** | [admins_sqlite.go](../control/internal/store/admins_sqlite.go)、[api/admins.go](../control/internal/api/admins.go)、[adminrbac_test.go](../control/internal/api/adminrbac_test.go)、[admins_sqlite_test.go](../control/internal/store/admins_sqlite_test.go) |
 | **消息通道 SMTP / Webhook（真发；STARTTLS 不降级；安全事件真通知）** | [internal/notify/](../control/internal/notify/)、[smtp_test.go](../control/internal/notify/smtp_test.go)（进程内 SMTP 服务端跑真协议）、[api/notify_test.go](../control/internal/api/notify_test.go)。★`kind=sms` 就是 webhook，不是短信网关实现 |
-| **七层 Web 代理（B/S 免客户端：票据换会话 + 逐请求重新鉴权 + 反代）** | `./web-e2e.sh` 六条断言；[gateway/internal/webproxy/](../gateway/internal/webproxy/)、[api/webproxy.go](../control/internal/api/webproxy.go)、[api/webproxy_test.go](../control/internal/api/webproxy_test.go) |
+| **七层 Web 代理（B/S 免客户端：票据换会话 + 逐请求重新鉴权 + 反代）** | `./web-e2e.sh` 九条断言；[gateway/internal/webproxy/](../gateway/internal/webproxy/)、[api/webproxy.go](../control/internal/api/webproxy.go)、[api/webproxy_test.go](../control/internal/api/webproxy_test.go) |
 | **业务告警实体与规则（八类触发源全部读真实信号 + 冷却去重 + 处置状态机）** | [internal/alerting/](../control/internal/alerting/)、[alerting_test.go](../control/internal/alerting/alerting_test.go)、[api/alerts_test.go](../control/internal/api/alerts_test.go)（真把心跳调旧 / 真连错口令锁账号 / 真篡改一行审计） |
 
 **按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
@@ -816,7 +838,7 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 
 **不能声称**：
 
-- **Windows / Linux 分支从未在真机上跑过**。本机只装了 apple 目标（无 clippy、无交叉目标），验证方式是：解析逻辑在 macOS 上 `cargo test` 全绿，两条平台分发臂用临时改写 cfg 谓词的方式各做过一次 `cargo check`。命令输出样本是**按文档构造**的，不是抓来的真实输出。
+- **Linux 分支从未在真机上跑过；Windows 分支仅 `disk_encrypted`（BitLocker）一项有真机旁证**——2026-08-19/21 那台 ARM64 真机的上报被 `bl-admission` 基线判 block（BitLocker 未开），见 `clients/BUILD.md` 10.3 与提交 `697c9fb`；其余五项在 Windows 上仍无真机证据。本机只装了 apple 目标（无 clippy、无交叉目标），验证方式是：解析逻辑在 macOS 上 `cargo test` 全绿，两条平台分发臂用临时改写 cfg 谓词的方式各做过一次 `cargo check`。命令输出样本是**按文档构造**的，不是抓来的真实输出。
 - ~~桌面客户端整体目前还不能在 Windows 上构建~~ **（已过时，改了）**：`tunnel_start` 曾经是 macOS 专属（写死 `osascript` + `std::os::unix::fs::PermissionsExt`），现在提权分平台收在 `elevate.rs`（macOS `osascript` / Linux `pkexec` / Windows UAC），unix 专属代码全部 `#[cfg(unix)]` 门控，Windows 的 `wintun.dll` 也随包分发了。**但"能构建"离"能用"还差一次实机验证** —— 见下一节。
 - 判据里有取舍：Windows 的 `sys_integrity` 是 Secure Boot（次选 Defender 篡改防护），Linux 的 `sys_integrity` 是 SELinux/AppArmor enforcing、`os_version` 比的是**内核** ≥ 5.10（发行版号各家规则不同，拿来比大小只会误判）。这些都不是行业统一定义，换环境需要重新校准。
 
@@ -858,11 +880,11 @@ false→true（失败时还没拨通过、之后拨通了）才自动收起，�
 `parseHealth` / `nextDataplaneNotice`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
 那句已不成立，以本节为准。
 
-### ⚠️ Windows 桌面数据面（源码完整、组件齐了，但**从未在真 Windows 上跑过**）
+### ⚠️ Windows 桌面数据面（源码完整、组件齐了；ARM64 一台真机阶段 A/B 已过、阶段 C 未完，x64 未实机）
 
 链路与 macOS 同构：Tauri 前端点「接入」→ `elevate.rs` 按平台生成提权计划（Windows 是
 UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sidecar `baidi-tun.exe` →
-它用 **Wintun** 建虚拟网卡、接管剖面下发的网段、逐流 SPA 敲门 + 隧道。
+它用 **Wintun** 建虚拟网卡、接管剖面下发的网段、SPA 敲门开窗（15s 保活）+ 隧道。
 
 **能声称**：
 
@@ -913,9 +935,14 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 
 **不能声称**：
 
-- **没有任何人在真实 Windows 上跑过这条链路**。建虚拟网卡、路由接管、NRPT 分域解析及其清理、
-  UAC 交互（同意/取消/超时）、卸载残留 —— 一次都没实测。上面那些断言证明的是**构造正确**
-  （命令行怎么拼、文件装到哪），不是**运行正确**。
+- ~~**没有任何人在真实 Windows 上跑过这条链路**。建虚拟网卡、路由接管、NRPT 分域解析及其清理、
+  UAC 交互（同意/取消/超时）、卸载残留 —— 一次都没实测。~~ —— **2026-08-18 起 ARM64 阶段 A/B 已过**：
+  一台 Windows 11 ARM64 真机上，打包落位 7/7 通过、UAC 提权 + 建出 `baidi0` 已跑通，
+  阶段 C 两次（08-21）走到 UAC → 拉起 → 换到敲门令牌 → 建卡但未完整通过
+  （过程与抓到的四个产品缺陷见 `clients/BUILD.md` 10.3b~10.3g）。**仍然没有实机证据的**：
+  NRPT 分域解析及其清理、隧道端到端业务流量、UAC 取消/超时分支、卸载残留，以及 **x64 的全部**。
+  上面那些断言证明的仍是**构造正确**（命令行怎么拼、文件装到哪），阶段 A/B 把其中「装到哪」
+  升级成了观测结果，「跑得通」这一半还没有。
 - ~~**Rust/Tauri 侧甚至没有在 Windows 上编译过**~~ —— 2026-08-12 起这条**不再成立**：
   `.github/workflows/clients.yml` 已在 GitHub Actions 上跑通，windows-latest 上完成 release
   编译并产出 `.msi` 与 NSIS `.exe`（`baidi-desktop-windows-x86_64-UNVERIFIED`）。

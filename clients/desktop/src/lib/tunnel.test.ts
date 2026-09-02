@@ -196,6 +196,25 @@ function view(over: Partial<TunView>): TunView {
 
 const PIN_ERR = '网关证书指纹不匹配（疑似中间人）：期望 abc 实得 def';
 
+describe('parseHealth · 与 Go 侧 wave10 起多带的 terr= 键兼容', () => {
+  // Go 侧（gateway/internal/dataplane/dataplane.go logHealth）从 wave10 起把失败按 knock/tunnel 分记，
+  // 健康行形如 `knock=true tunnel=false terr=- err="…"`，terr 刻意排在 err 之前。
+  // TS 侧还没消费 terr（待接），但 err 的取值绝不能被 terr= 里的文本污染——
+  // 键名整词匹配 + 取行尾自由文本这两条规则合在一起才保证这一点，这里把两者的交点钉住。
+  it('terr= 排在 err= 前：err 仍取 err= 之后的自由文本，且还原 Go 引号', () => {
+    const h = parseHealth('knock=true tunnel=false terr=- err="SPA 拨号失败：网络不可达"');
+    expect(h).toEqual({ knock: true, tunnel: false, err: 'SPA 拨号失败：网络不可达' });
+  });
+  it('terr= 有值而 err=- 时：err 为空（不把隧道类历史失败当成当前错误）', () => {
+    const h = parseHealth('knock=true tunnel=true terr=网关证书指纹不匹配 err=-');
+    expect(h).toEqual({ knock: true, tunnel: true, err: '' });
+  });
+  it('terr= 带引号含空格也不影响 err 的定位', () => {
+    const h = parseHealth('knock=true tunnel=false terr="拨号超时 5s" err="取敲门令牌失败：403"');
+    expect(h?.err).toBe('取敲门令牌失败：403');
+  });
+});
+
 describe('nextDataplaneNotice · 隧道类失败不被保活敲门擦掉', () => {
   it('classifyFail：Go 侧两个固定前缀是 knock 类，其余（含认不出的）一律 tunnel 类', () => {
     expect(classifyFail('取敲门令牌失败：dial tcp: refused')).toBe('knock');

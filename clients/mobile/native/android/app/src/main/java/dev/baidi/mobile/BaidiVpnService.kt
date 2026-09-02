@@ -22,7 +22,10 @@ class BaidiVpnService : VpnService() {
         if (token.isNullOrBlank()) {
             // ★每条失败路径都要把原因交给 TunnelState，否则 UI 只能靠猜。
             //   改造前这里是裸 `return START_NOT_STICKY`，而桥无条件回 ok:true。
-            TunnelState.markFailed("未收到身份令牌（请重新登录后再接入）")
+            //   走到这里的形态是系统自己拉起服务（「始终开启」/ 进程被杀后重建）：那些 Intent 都不带
+            //   token 与 cfg——令牌只活在 webview 的会话里，服务拿不到。manifest 已声明
+            //   SUPPORTS_ALWAYS_ON=false 让那个开关不出现在系统设置里；这里把原因说全。
+            TunnelState.markFailed("未收到身份令牌：令牌未随 Intent 下发（系统重建 / 始终开启路径尚不支持），请从应用内重新接入")
             return START_NOT_STICKY
         }
         // UI 下传的接入配置（gateway/spaPort/proxyPort/route/ip/gm/control）；缺省回退演示值
@@ -30,7 +33,7 @@ class BaidiVpnService : VpnService() {
         val gateway = c.optString("gateway", "gw.baidi.local")
         val spaPort = c.optString("spaPort", "18201")
         val proxyPort = c.optString("proxyPort", "18443")
-        val route = c.optString("route", "10.99.0.0/24")
+        val route = c.optString("route", Routes.DEFAULT)
         val vip = c.optString("ip", "10.99.0.2")
         val gmOn = c.optBoolean("gm", true)
         val ctl = c.optString("control", "")
@@ -40,18 +43,25 @@ class BaidiVpnService : VpnService() {
         val pinHex = c.optString("pin", "")
         val resmap = c.optString("resmap", "")
         val defRes = c.optString("defaultResource", "")
-        val net = route.split("/")
-        val netAddr = net.getOrElse(0) { "10.99.0.0" }
-        val prefix = net.getOrElse(1) { "24" }.toIntOrNull() ?: 24
+        // ★多网段：剖面 routes 经 vpn.ts `join(',')` 下传成逗号串（与桌面 baidi-tun -route 同契约）。
+        //   改造前 `route.split("/")` 只切一次，两段以上时前缀解析成 null → 静默回落 24 → 只接管
+        //   第一段的首地址；第二段的应用直连不走隧道，UI 却显示「已接入」。
+        //   现在任何一条不合法就整体失败并点名那一条（fail-closed，见 Routes.parse）。
+        val routes = try {
+            Routes.parse(route)
+        } catch (e: IllegalArgumentException) {
+            TunnelState.markFailed("受保护网段配置无效：${e.message}（下发原文：$route）")
+            return START_NOT_STICKY
+        }
 
-        // 1) 建立 TUN：虚拟 IP + 把受保护网段（来自配置）路由进来
+        // 1) 建立 TUN：虚拟 IP + 把受保护网段（来自配置，可多条）逐条路由进来
         val pfd = try {
-            Builder()
+            val b = Builder()
                 .setSession("白帝安全接入")
                 .setMtu(1420)
                 .addAddress(vip, 32)
-                .addRoute(netAddr, prefix)
-                .establish()
+            for (r in routes) b.addRoute(r.addr, r.prefix)
+            b.establish()
         } catch (e: Exception) {
             TunnelState.markFailed("建立系统 VPN 通道失败：${e.message ?: e.javaClass.simpleName}")
             return START_NOT_STICKY
@@ -95,10 +105,22 @@ class BaidiVpnService : VpnService() {
         return START_STICKY
     }
 
+    /**
+     * 另一 VPN 应用抢占、或用户在系统设置里断开本 VPN 时系统回调。
+     * ★改造前未覆盖：默认实现只 stopSelf，TunnelState 不会翻成失败——TUN fd 已失效，而 Go 引擎
+     *   只在读写报错时才退出，UI 于是继续显示「已接入」直到不知何时。先把原因写下，再停服务。
+     */
+    override fun onRevoke() {
+        TunnelState.markFailed("VPN 被系统或其它应用撤销")
+        stopSelf()
+    }
+
     override fun onDestroy() {
         session?.stop()
         session = null
-        TunnelState.markStopped()
+        // onRevoke → stopSelf → onDestroy 这条链里，这里若无条件 markStopped，「被撤销」的原因会在
+        // UI 下一次轮询之前就被冲回 idle。用户主动断开走的是 MainActivity.stopTunnel 的 markStopped。
+        TunnelState.markStoppedUnlessFailed()
         super.onDestroy()
     }
 }

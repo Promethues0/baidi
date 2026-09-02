@@ -171,6 +171,15 @@ jobs:
           test -f "$AAR" || { echo "✗ 缺 $AAR"; ls -la clients/mobile/native/out/ || true; exit 1; }
           echo "✓ $AAR（$(stat -c%s "$AAR") 字节）"
 
+      - name: JVM 单测（纯 Kotlin：网段解析 / 运行态，不需要模拟器）
+        working-directory: clients/mobile/native/android
+        run: |
+          # ★app/src/test 守的是两条静默失效：「多网段只切一次 → 静默回落 /24 只接管第一段」、
+          #   「onRevoke 写下的原因被 onDestroy 冲回 idle」。开发机上没有 gradle/Android SDK
+          #   跑不了它们——这一步是它们在流水线上的唯一执行方，别为了省一分钟去掉。
+          chmod +x ./gradlew
+          ./gradlew --no-daemon testDebugUnitTest
+
       - name: 打包（gradle assembleDebug）
         working-directory: clients/mobile/native/android
         env:

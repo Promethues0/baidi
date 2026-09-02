@@ -67,6 +67,10 @@ BAIDI_GOMOBILE_DRYRUN=1 native/build-gomobile.sh android    # 只打印命令与
 JDK 17 + Android SDK/NDK + gomobile → gradle `assembleDebug`），debug 签名、未实机验证。
 webview 页面必须**平铺**进 `app/src/main/assets/`（漏了会开机白屏且无报错）。
 完整说明、溯源注入与已知的坑见 [`../BUILD.md`](../BUILD.md) 第八节。
+**「始终开启」（Always-on VPN）暂不支持**：manifest 已声明 `SUPPORTS_ALWAYS_ON=false`——系统从设置里
+拉起服务时 Intent 不带令牌与配置（令牌只活在 webview 会话里），服务必然起不来；与其留一个永远起不来的
+开关，不如让它不出现在系统设置里。多网段 `route`（逗号分隔，与桌面 `baidi-tun -route` 同契约）在安卓 /
+iOS 壳里逐条解析、任一条非法即整体拒绝并点名（`RouteSpec.kt` / `RouteSpec.swift`），不再静默回落 /24。
 
 **iOS 与鸿蒙不在 CI 上，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +
 Network Extension 授权，鸿蒙的 DevEco 工具链根本不在 runner 镜像里；而且这两端目前

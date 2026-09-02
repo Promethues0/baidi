@@ -73,7 +73,14 @@ class MainActivity : Activity() {
 
     override fun onActivityResult(req: Int, res: Int, data: Intent?) {
         super.onActivityResult(req, res, data)
-        if (req == REQ_VPN && res == RESULT_OK) pendingToken?.let { startVpn(it, pendingCfg) }
+        if (req != REQ_VPN) return
+        if (res == RESULT_OK) {
+            pendingToken?.let { startVpn(it, pendingCfg) }
+        } else {
+            // ★用户在系统 VPN 授权对话框点了「取消」（或对话框被系统关掉）：改造前这个分支什么都不做，
+            //   UI 只能等桥 30s 超时后**猜**一句「是否未授予 VPN 权限？」。现在立即写下真实原因。
+            TunnelState.markFailed("用户拒绝了 VPN 授权（系统对话框未允许），请重新接入并在对话框中选择允许")
+        }
     }
 
     companion object {

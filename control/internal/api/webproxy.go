@@ -99,15 +99,16 @@ func (s *Server) handleWebTicket(w http.ResponseWriter, r *http.Request) {
 
 	base, gwID, err := s.webEntryBase(res)
 	if err != nil {
-		// ★如实回「网关没开七层」而不是给一个连不上的地址：后者会让管理员
-		// 去查浏览器、查网络、查证书，而真正要做的只是给网关加 -web。
+		// ★如实回「网关没开七层」/「入口地址推导不出可达值」而不是给一个连不上的地址：
+		// 后者会让管理员去查浏览器、查网络、查证书，而真正要做的只是给网关加 -web、
+		// 或在网关页登记一下对外接入地址。
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
 	tok := s.keys.Sign(auth.Claims{
 		Sub: c.Sub, Role: c.Role, Name: account,
 		Jti: auth.RandJTI(), Use: auth.UseWeb, Res: res.ID,
-		// ★票据钉到具体网关（入口是由某台在线网关自报落点算出来时才填）：
+		// ★票据钉到具体网关（入口是由某台在线网关的登记地址或自报落点算出来时才填）：
 		// 数据面的一次性去重是每台网关自己的内存，不带网关维度的话，同一张票在
 		// 每台装了 web 公钥的网关上都能各换一次会话。走 webEntry / 环境变量覆盖时
 		// 控制面确实不知道票会落到哪台，留空并在边界文档里说清。
@@ -183,11 +184,26 @@ func (s *Server) resolveWebApp(r *http.Request, appID string) (store.App, store.
 // 取值优先级：
 //  1. 该资源自己的 WebEntry 覆盖（管理员为这个应用配的专属域名）；
 //  2. BAIDI_WEB_ENTRY_BASE（整站统一的对外入口，通常是前置 nginx 的地址）；
-//  3. 心跳最新鲜的在线网关**自报的**七层落点。
+//  3. 在线且开了七层的网关上，**管理员登记的对外接入地址**（网关页那两栏，与客户端
+//     剖面同一处取数 gatewayAccessMap；内网栏优先，与剖面「内网在前」同序）；
+//  4. 该网关**自报的**七层监听地址里的 host（空/通配时退 SPA 监听的 host，再退
+//     BAIDI_CLIENT_GW_HOST）。
 //
-// 三条都拿不到就报错——绝不猜一个地址出来。
+// ★第 3 档是后补的。改造前直接从 2 跳到 4，而参考部署（install-remote.sh）的网关是
+// `-spa :18201` + `BAIDI_GW_WEB=127.0.0.1:18444`（回环监听、前置 nginx 终结 HTTPS）：
+// 第 4 档算出 http://127.0.0.1:18444，票据 URL 把浏览器指向**用户自己的机器**，
+// 而 webProxyStatus 照报 ready、门户「访问」按钮亮着、控制台零报错——正是 CLAUDE.md
+// 点名的「配置齐全却零报错不生效」形态。管理员在网关页登记的接入地址此前只喂给了
+// 客户端剖面，七层这条路对它视而不见。
 //
-// 第二个返回值是**票据该绑到哪台网关**（只有走第 3 条时才有值）：前两条覆盖下票会经过
+// ★第 3/4 档推导出来的 host 若是回环 / 通配 / 空（webHostUnroutable），**如实报错**
+// 而不是发一张指向 127.0.0.1 的票：webProxyStatus 与 handleWebTicket 都经这一个函数，
+// 门户按钮置灰的原因与取票被拒的原因是同一句话。第 1/2 档是管理员的显式配置，不受此判
+// （本机 e2e 正是靠 BAIDI_WEB_ENTRY_BASE=http://127.0.0.1:… 跑起来的）。
+//
+// 四档都拿不到就报错——绝不猜一个地址出来。
+//
+// 第二个返回值是**票据该绑到哪台网关**（走第 3/4 档时才有值）：前两档覆盖下票会经过
 // 一个前置入口，可能落到任意一台网关上，写一个猜的值只会让正常访问被拒。
 func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	if v := strings.TrimSpace(res.WebEntry); v != "" {
@@ -206,15 +222,29 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 		}
 		return "", "", errors.New("没有网关在线，无法经浏览器访问（请先确认网关已注册到控制面）")
 	}
-	host, port := splitHostPortLoose(gw.Web)
-	// 网关上报的常是 ":18444" / "0.0.0.0:18444" 这类监听地址，对浏览器没有意义：
-	// 回退到与客户端剖面同一个对外主机名配置，口径一致。
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		spaHost, _ := splitHostPortLoose(gw.SPA)
-		host = spaHost
+	reportedHost, port := splitHostPortLoose(gw.Web)
+	// 第 3 档：管理员登记的对外接入地址。与剖面 profileGateways 同一张表、同一个取数函数，
+	// 别在这里另查一遍库——两处判据分叉的症状是「客户端连得上、浏览器打不开」或反过来。
+	host, source := "", ""
+	if a := s.gatewayAccessMap()[gw.ID]; a.Configured() {
+		host, source = orDefault(a.LANHost, a.WANHost), "管理员登记的接入地址"
+	} else {
+		// 第 4 档：网关自报的监听地址。":18444" / "0.0.0.0:18444" 这类通配对浏览器没有意义，
+		// 回退到与客户端剖面同一个对外主机名配置，口径一致。
+		host, source = reportedHost, "网关自报的七层监听地址 "+strings.TrimSpace(gw.Web)
+		if webHostUnroutable(host) {
+			host, _ = splitHostPortLoose(gw.SPA)
+			source = "网关自报的 SPA 监听地址 " + strings.TrimSpace(gw.SPA)
+		}
+		if webHostUnroutable(host) {
+			host, source = envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1"), "全局兜底 BAIDI_CLIENT_GW_HOST"
+		}
 	}
-	if host == "" || host == "0.0.0.0" || host == "::" {
-		host = envOr("BAIDI_CLIENT_GW_HOST", "127.0.0.1")
+	if webHostUnroutable(host) {
+		// ★宁可不发票，也不发一张浏览器打不开的票。文案第一句固定（门户与取票共用），
+		// 括号里说清此刻算出来的是什么、从哪来——否则管理员无从知道该去改哪一项。
+		return "", "", fmt.Errorf("%s（网关 %s 当前只能推导出 %q，来源：%s；浏览器无法到达回环或通配地址）",
+			webEntryUnresolvedMsg, gw.ID, host, source)
 	}
 	scheme := "http"
 	if gw.WebTLS {
@@ -224,6 +254,27 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 		return scheme + "://" + host, gw.ID, nil
 	}
 	return fmt.Sprintf("%s://%s:%s", scheme, host, port), gw.ID, nil
+}
+
+// webEntryUnresolvedMsg 七层入口地址推导不出可达值时的固定文案。
+// 门户磁贴置灰的 note 与取票 503 的正文都以它开头，前端据它给出同一条补救路径。
+const webEntryUnresolvedMsg = "七层入口地址无法确定：请在网关页登记对外接入地址，或配置 BAIDI_WEB_ENTRY_BASE"
+
+// webHostUnroutable 判一个推导出来的入口主机名是否**必然**到不了浏览器：
+// 空 / 通配（0.0.0.0、::）/ 回环（127.x、::1、localhost）。
+//
+// 这是 webEntryBase 第 3/4 档的唯一判据，webProxyStatus 与 handleWebTicket 都经它。
+// 只判「必然不通」的形态，不判「可能不通」（内网 IP 对外网浏览器也不通，但控制面无从知道
+// 浏览器在哪一侧，那属于登记地址那一节写明的边界）。
+func webHostUnroutable(host string) bool {
+	h := strings.TrimSpace(host)
+	if h == "" || strings.EqualFold(h, "localhost") {
+		return true
+	}
+	if ip := net.ParseIP(h); ip != nil {
+		return ip.IsLoopback() || ip.IsUnspecified()
+	}
+	return false
 }
 
 // gatewayBindNote 审计里描述这张票绑没绑网关（措辞只说已发生的事实）。

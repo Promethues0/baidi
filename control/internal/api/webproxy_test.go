@@ -11,11 +11,18 @@ import (
 	"baidi.dev/control/internal/store"
 )
 
+// webGWHost 测试网关显式 bind 的对外可达地址（TEST-NET-2）。
+//
+// ★不能再用 127.0.0.1：入口推导对回环/通配地址现在如实报「无法确定」而不是签票
+// （见 webHostUnroutable），而参考部署里网关正是 `-spa :18201 -web 127.0.0.1:18444`。
+// 这里给网关一个显式可达的 bind 地址，等价于「少数部署直接 bind 公网 IP」那条路。
+const webGWHost = "198.51.100.7"
+
 // registerWebGateway 让一台带七层落点的网关上线（走真实的注册端点，
 // 而不是直接改 s.gateways——注册报文的字段名对不上是这类改动最常见的失败形态）。
 func registerWebGateway(t *testing.T, h http.Handler, web string, tlsOn bool) {
 	t.Helper()
-	body := map[string]any{"id": "gw-1", "proxy": "127.0.0.1:18443", "spa": "127.0.0.1:18201"}
+	body := map[string]any{"id": "gw-1", "proxy": webGWHost + ":18443", "spa": webGWHost + ":18201"}
 	if web != "" {
 		body["web"] = web
 		body["webTls"] = tlsOn
@@ -54,8 +61,8 @@ func TestWebTicketHappyPath(t *testing.T) {
 		t.Fatalf("有权限的 Web 应用应签出票据，得 %d %v", code, out)
 	}
 	entry, _ := out["url"].(string)
-	if !strings.HasPrefix(entry, "http://127.0.0.1:18444"+webEntryPath+"?t=") {
-		t.Fatalf("入口 URL 应指向网关自报的七层落点，得 %q", entry)
+	if !strings.HasPrefix(entry, "http://"+webGWHost+":18444"+webEntryPath+"?t=") {
+		t.Fatalf("入口 URL 应指向网关自报的七层落点（host 取自显式 bind 的 SPA 地址），得 %q", entry)
 	}
 	c := ticketClaims(t, entry)
 	if c.Use != auth.UseWeb {
@@ -357,11 +364,11 @@ func TestWebEntryPicksOnlyGatewaysWithWebListener(t *testing.T) {
 	h := newTestServer(t)
 	// gw-old 没开七层（旧版网关连 web 键都不发），gw-web 开了
 	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
-		map[string]any{"id": "gw-old", "proxy": "127.0.0.1:18443", "spa": "127.0.0.1:18201"}); code != http.StatusOK {
+		map[string]any{"id": "gw-old", "proxy": webGWHost + ":18443", "spa": webGWHost + ":18201"}); code != http.StatusOK {
 		t.Fatal("注册 gw-old 失败")
 	}
 	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
-		map[string]any{"id": "gw-web", "proxy": "127.0.0.1:18453", "spa": "127.0.0.1:18211",
+		map[string]any{"id": "gw-web", "proxy": webGWHost + ":18453", "spa": webGWHost + ":18211",
 			"web": "0.0.0.0:18444"}); code != http.StatusOK {
 		t.Fatal("注册 gw-web 失败")
 	}
@@ -374,6 +381,149 @@ func TestWebEntryPicksOnlyGatewaysWithWebListener(t *testing.T) {
 		}
 		if c := ticketClaims(t, out["url"].(string)); c.Gw != "gw-web" {
 			t.Fatalf("★第 %d 次选中了没开七层的网关 %q", i+1, c.Gw)
+		}
+	}
+}
+
+// ── 七层入口主机名改读管理员登记的对外接入地址（wave9，web-entry-base）──
+//
+// 缺陷原样：webEntryBase 的优先级是 资源 WebEntry → BAIDI_WEB_ENTRY_BASE → 网关自报监听
+// 地址的 host（空/通配时退 SPA host，再退 BAIDI_CLIENT_GW_HOST 默认 127.0.0.1），
+// **不读** wave8 行动 4 给剖面补的管理员登记接入地址。参考部署 `-spa :18201` +
+// `BAIDI_GW_WEB=127.0.0.1:18444` 下票据 URL 是 http://127.0.0.1:18444/__baidi/enter，
+// 而 webProxyStatus 照报 ready=true——浏览器被指向自己、零报错。
+
+// registerLoopbackWebGateway 复刻参考部署形态：七层监听在回环、SPA 通配监听（不带 host）。
+func registerLoopbackWebGateway(t *testing.T, h http.Handler, id string) {
+	t.Helper()
+	if code, out := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+		map[string]any{"id": id, "proxy": ":18443", "spa": ":18201", "web": "127.0.0.1:18444"}); code != http.StatusOK {
+		t.Fatalf("网关 %s 注册 http %d: %v", id, code, out)
+	}
+}
+
+func webTicketURL(t *testing.T, h http.Handler) (int, string, map[string]any) {
+	t.Helper()
+	code, out := doJSON(t, h, "POST", "/api/v1/portal/web-ticket", userToken("li.fang"),
+		map[string]string{"appId": "a1"})
+	u, _ := out["url"].(string)
+	return code, u, out
+}
+
+// 用例①：网关监听回环 + 管理员登记了对外接入地址 → 票据 URL 用登记地址（端口仍取自报监听）。
+// 撤掉 webEntryBase 里「登记地址」那一档，这条会红（回落到 127.0.0.1 被回环判据拒成 503）。
+func TestWebEntryUsesRegisteredGatewayAccess(t *testing.T) {
+	h := newTestServer(t)
+	registerLoopbackWebGateway(t, h, "gw-1")
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"lanHost": "", "wanHost": "gw.example.com"}); code != http.StatusOK {
+		t.Fatalf("登记接入地址 http %d: %v", code, out)
+	}
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusOK {
+		t.Fatalf("★登记了接入地址就该签出票据，得 %d %v", code, out)
+	}
+	if !strings.HasPrefix(entry, "http://gw.example.com:18444"+webEntryPath+"?t=") {
+		t.Fatalf("★入口 URL 应用管理员登记的接入地址 + 自报七层端口，得 %q", entry)
+	}
+	// 走登记地址时控制面确切知道票会落到哪台网关，票据照样钉网关（一次性去重是每台各自做的）。
+	if c := ticketClaims(t, entry); c.Gw != "gw-1" {
+		t.Fatalf("经登记地址下发的票据仍应绑定该网关，得 %q", c.Gw)
+	}
+	// 门户状态同源：登记之后就绪。
+	_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+	if wp, _ := apps["webProxy"].(map[string]any); wp == nil || wp["ready"] != true {
+		t.Fatalf("登记接入地址后门户应报七层入口就绪，得 %v", apps["webProxy"])
+	}
+
+	// 两栏都登记：内网栏优先，与剖面「内网在前」同序（顺序不确定会让入口主机名在两栏之间乱跳）。
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"lanHost": "gw.corp.internal", "wanHost": "gw.example.com"}); code != http.StatusOK {
+		t.Fatalf("登记两栏 http %d: %v", code, out)
+	}
+	if _, entry, _ := webTicketURL(t, h); !strings.HasPrefix(entry, "http://gw.corp.internal:18444"+webEntryPath) {
+		t.Fatalf("两栏都登记时应取内网栏（与剖面同序），得 %q", entry)
+	}
+}
+
+// 用例②：无登记 + 监听回环 → 门户状态非 ready、取票 503，且两处原因是同一句话。
+// 撤掉 webHostUnroutable 那道判据，这条会红（签出一张指向 127.0.0.1 的票、状态照报 ready）。
+func TestWebEntryLoopbackIsNotReady(t *testing.T) {
+	for name, web := range map[string]string{
+		"七层监听回环":     "127.0.0.1:18444",
+		"七层监听通配":     "0.0.0.0:18444",
+		"七层监听不带host": ":18444",
+	} {
+		t.Run(name, func(t *testing.T) {
+			h := newTestServer(t)
+			if code, out := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+				map[string]any{"id": "gw-1", "proxy": ":18443", "spa": ":18201", "web": web}); code != http.StatusOK {
+				t.Fatalf("网关注册 http %d: %v", code, out)
+			}
+			code, entry, out := webTicketURL(t, h)
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("★入口 host 推导成回环/通配时不得签票（拿到的是 %q），得 %d %v", entry, code, out)
+			}
+			errObj, _ := out["error"].(map[string]any)
+			msg, _ := errObj["message"].(string)
+			if !strings.HasPrefix(msg, webEntryUnresolvedMsg) {
+				t.Fatalf("★取票被拒必须带出补救路径，得 %q", msg)
+			}
+			if !strings.Contains(msg, "127.0.0.1") && !strings.Contains(msg, "0.0.0.0") && !strings.Contains(msg, `""`) {
+				t.Fatalf("拒绝原因应写出此刻推导出的地址，得 %q", msg)
+			}
+			_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+			wp, _ := apps["webProxy"].(map[string]any)
+			if wp == nil || wp["ready"] != false {
+				t.Fatalf("★入口地址无法确定时门户不得报 ready，得 %v", apps["webProxy"])
+			}
+			if note, _ := wp["note"].(string); note != msg {
+				t.Fatalf("门户 note 与取票 503 必须是同一句话（同一判据），得\n  note=%q\n  503 =%q", note, msg)
+			}
+		})
+	}
+}
+
+// 用例③：显式 BAIDI_WEB_ENTRY_BASE 仍优先于登记地址（顺序不变），且统一入口下票不绑网关。
+// 资源级 WebEntry 又优先于环境变量——三档顺序一并钉住。
+func TestWebEntryExplicitBaseBeatsRegisteredAccess(t *testing.T) {
+	h := newTestServer(t)
+	registerLoopbackWebGateway(t, h, "gw-1")
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"wanHost": "gw.example.com"}); code != http.StatusOK {
+		t.Fatalf("登记接入地址 http %d: %v", code, out)
+	}
+	t.Setenv("BAIDI_WEB_ENTRY_BASE", "https://portal.example.com/")
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusOK {
+		t.Fatalf("取票 http %d %v", code, out)
+	}
+	if !strings.HasPrefix(entry, "https://portal.example.com"+webEntryPath+"?t=") {
+		t.Fatalf("★显式 BAIDI_WEB_ENTRY_BASE 应优先于登记地址，得 %q", entry)
+	}
+	if c := ticketClaims(t, entry); c.Gw != "" {
+		t.Fatalf("统一入口下控制面不知道票会落到哪台网关，不该绑 gw，得 %q", c.Gw)
+	}
+	// 资源级覆盖压过环境变量
+	if code, _ := doJSON(t, h, "POST", "/api/v1/resources", adminToken(), map[string]any{
+		"id": "oa", "name": "OA 协同办公", "backend": "10.20.1.10:8080",
+		"allowRoles": []string{"admin", "user"}, "webEntry": "https://oa.corp.example"}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("保存资源 http %d", code)
+	}
+	if _, entry, _ := webTicketURL(t, h); !strings.HasPrefix(entry, "https://oa.corp.example"+webEntryPath) {
+		t.Fatalf("资源级 WebEntry 应优先于 BAIDI_WEB_ENTRY_BASE，得 %q", entry)
+	}
+}
+
+// 判据本身：只拦「必然不通」的形态；内网 IP / 域名放行（控制面无从知道浏览器在哪一侧）。
+func TestWebHostUnroutable(t *testing.T) {
+	for host, want := range map[string]bool{
+		"": true, "  ": true, "0.0.0.0": true, "::": true, "127.0.0.1": true, "127.8.8.8": true,
+		"::1": true, "localhost": true, "LOCALHOST": true,
+		"10.0.0.5": false, "198.51.100.7": false, "gw.example.com": false, "fd00::1": false,
+	} {
+		if got := webHostUnroutable(host); got != want {
+			t.Errorf("webHostUnroutable(%q)=%v, want %v", host, got, want)
 		}
 	}
 }

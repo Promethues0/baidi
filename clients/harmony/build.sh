@@ -12,7 +12,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 
 DEVECO="${DEVECO_HOME:-/Applications/DevEco-Studio.app/Contents}"
-[ -d "$DEVECO" ] || { echo "找不到 DevEco Studio：$DEVECO（可用 DEVECO_HOME 指定）" >&2; exit 1; }
+[ -d "$DEVECO" ] || { echo "找不到 DevEco Studio：${DEVECO}（可用 DEVECO_HOME 指定）" >&2; exit 1; }
 
 # ★JAVA_HOME 必须指到 DevEco 自带的 JBR：打包阶段（PackageHap）要 Java，
 # 而 macOS 上通常没装系统 JDK——不设的话构建会走到最后一步才失败。
@@ -46,7 +46,7 @@ mkdir -p "$RAW"
 cp webui/dist/index.html "$RAW/"
 echo "  UI 已就位：$(find "$RAW" -type f | wc -l | tr -d ' ') 个文件，$(du -sh "$RAW" | cut -f1)"
 
-echo "▸ 构建 HAP（$MODE）"
+echo "▸ 构建 HAP（${MODE}）"
 # ★不让 set -e 直接吞掉：签名失败是最常见的一种失败，而它的补救动作很具体
 # （去 DevEco 点一次自动签名），值得单独给提示而不是丢一堆 hvigor 栈。
 BUILD_RC=0

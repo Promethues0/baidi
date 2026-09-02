@@ -276,16 +276,23 @@ const healthPrefix = "数据面健康"
 //
 // ★与「网关落点」那行同一条纪律（见 tunnel.ts 对 endpoint 字段的说明）：只在**状态变化**时打，
 // 否则每条流一行会把 4000 字节的日志尾巴瞬间冲满，反而把该看的信息挤出窗口。
+//
+// ★三个状态字段必须在锁内**快照成局部变量**再打日志。此前 `slog.Info` 那行是在解锁之后
+// 直接读 `t.knockOK / t.tunnelOK / t.lastErr`——`knock()` 对每个落点各起一个 goroutine
+// 并发调 markKnock/markFail，于是 A 在锁外打日志时 B 正在锁内改字段，`-race` 报 data race
+// （CI 约 2/5 间歇红）。这不是授权/信任链上的竞态，只是日志行的撕裂读：去重比的是 `line`，
+// 真打出去的却可能是另一个更新的状态，两者对不上号。快照之后打出去的恒等于去重那一份。
 func (t *tunneler) logHealth() {
 	t.hmu.Lock()
-	line := fmt.Sprintf("knock=%t tunnel=%t err=%s", t.knockOK, t.tunnelOK, orNone(t.lastErr))
+	knock, tunnel, errStr := t.knockOK, t.tunnelOK, orNone(t.lastErr)
+	line := fmt.Sprintf("knock=%t tunnel=%t err=%s", knock, tunnel, errStr)
 	if line == t.lastHealth {
 		t.hmu.Unlock()
 		return
 	}
 	t.lastHealth = line
 	t.hmu.Unlock()
-	slog.Info(healthPrefix, "knock", t.knockOK, "tunnel", t.tunnelOK, "err", orNone(t.lastErr))
+	slog.Info(healthPrefix, "knock", knock, "tunnel", tunnel, "err", errStr)
 }
 
 func orNone(s string) string {

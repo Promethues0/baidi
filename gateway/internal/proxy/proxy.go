@@ -174,8 +174,10 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 	// 否则任何人往隧道口打一个包就能替别人的会话续命。
 	al.Touch(ip)
 
-	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 的 Accept 不在 Accept 内握手，
-	// 若把握手推迟到带 3s deadline 的前导 Peek 里触发会与之卡死（gotlcp 在 Accept 即握手故无此问题）。
+	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 与 gotlcp（v1.4.5 `listener.Accept` 只是
+	// `Server(c, cfg)` 包一层，同样不握手）的 Accept 都不在 Accept 内握手，若把握手推迟到带 3s deadline
+	// 的前导 Peek 里触发会与之卡死——两种监听都走下面这个 Handshake() 分支（*tlcp.Conn 同样实现了它）。
+	// （此处此前写作「gotlcp 在 Accept 即握手故无此问题」，是错的；行为上没受影响，因为这个分支两者都命中。）
 	if hs, isHS := c.(interface{ Handshake() error }); isHS {
 		_ = c.SetReadDeadline(time.Now().Add(8 * time.Second))
 		if err := hs.Handshake(); err != nil {

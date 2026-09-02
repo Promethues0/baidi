@@ -35,7 +35,8 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args as Record<string, unknown>);
 }
 
-interface TunStatusRaw {
+/** Rust 侧 tunnel_status 回传的原始状态（serde 字段名一一对应 main.rs 的 TunStatus）。导出只为单测。 */
+export interface TunStatusRaw {
   running: boolean;
   pid: string;
   log: string;
@@ -49,6 +50,19 @@ interface TunStatusRaw {
    * 此时退回从尾巴里找（能找到多少算多少）。
    */
   endpoint?: string;
+  /**
+   * 最近一条「数据面健康」行（契约见 gateway/internal/dataplane/dataplane.go 的 logHealth）：
+   *   `... msg=数据面健康 knock=true tunnel=false err="网关证书指纹不匹配（疑似中间人）…"`
+   * 同样由 Rust 侧（main.rs `last_health_line`，serde 字段名就是 `health`）从**整份日志**里捞出来。
+   *
+   * ★它才是接入态的真判据。knock / tunnel 记的是**真实事件**（敲门包真的发出去了 /
+   * 隧道真的拨通过），err 是最近一次失败的原因（任何一次成功即清空）。此前 ready/keepalive
+   * 判的是「数据面就绪」「敲门保活」两行**启动日志**——它们打印于任何一次 knock 与拨号之前，
+   * 于是全部落点拨不通 / gm 开关与网关不一致 / 指纹钉扎失败（疑似中间人）三类故障，
+   * 界面一律绿色「已接入」。老壳（无此字段）或数据面尚未产生任何事件时为空 / 缺席，
+   * 那时才退回旧判据（见 parseTunStatus）。
+   */
+  health?: string | null;
 }
 
 /** 从 baidi-tun 真实日志解析出的接入态。 */
@@ -229,19 +243,44 @@ export async function forceQuit(): Promise<void> {
 
 export async function tunnelStatus(): Promise<TunView> {
   const s = await invoke<TunStatusRaw>('tunnel_status');
-  return parse(s);
+  return parseTunStatus(s);
 }
 
-function parse(s: TunStatusRaw): TunView {
+/**
+ * 把 Rust 侧回传的原始状态解析成接入态。导出只为单测（src/lib/tunnel.test.ts），
+ * 生产路径只经 tunnelStatus 调它。
+ *
+ * ready / keepalive / error 三项的判据**优先取数据面健康行**（TunStatusRaw.health）：
+ *   - keepalive：敲门包真的发出去过（knock=true）；
+ *   - ready：敲门与隧道都真成功过，且最近一次事件不是失败（err 为空）——
+ *     隧道拨通过一次之后每次都因指纹不匹配拨不通，err 会一直挂着，那不是「已接入」；
+ *   - error：运行中如实显示 err（改造前 `!s.running && …` 让运行中的失败恒为空串，
+ *     指纹钉扎失败 / 敲门被拒 / 隧道拨不通三类故障因此到不了界面）。
+ * 健康行缺席（老壳、老数据面、尚无任何事件）时才退回旧判据，且旧判据**逐字不变**。
+ */
+export function parseTunStatus(s: TunStatusRaw): TunView {
   const log = s.log || '';
   const lines = log.split('\n').map((l) => l.trim()).filter(Boolean);
   const dev = (log.match(/dev=(utun\d+)/) || [])[1] || '';
-  // ready/keepalive 仅在进程存活时才认（进程已退出=旧日志残留，不据此误判）
-  const ready = s.running && /数据面就绪/.test(log);
-  const keepalive = s.running && /敲门保活/.test(log);
-  // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示
+  // 取最近一条失败（创建/敲门/隧道/退出）作为错误提示（旧判据 / 进程已退出时的兜底）
   const fails = lines.filter((l) => /失败|未敲门成功|panic|fatal|退出/i.test(l));
-  const error = !s.running && fails.length ? stripTs(fails[fails.length - 1]) : '';
+  const lastFail = fails.length ? stripTs(fails[fails.length - 1]) : '';
+  const h = parseHealth(s.health ?? '');
+  let ready: boolean;
+  let keepalive: boolean;
+  let error: string;
+  if (h) {
+    // ready/keepalive 仅在进程存活时才认（进程已退出=旧日志残留，不据此误判）
+    keepalive = s.running && h.knock;
+    ready = s.running && h.knock && h.tunnel && !h.err;
+    // 运行中：健康行里的 err 就是数据面此刻的结论；已退出：优先它，没有再退回日志尾巴。
+    error = s.running ? h.err : (h.err || lastFail);
+  } else {
+    // ★旧判据（健康行拿不到时的回落），逐字保留：两行启动日志 + 只在退出后报错。
+    ready = s.running && /数据面就绪/.test(log);
+    keepalive = s.running && /敲门保活/.test(log);
+    error = !s.running && fails.length ? lastFail : '';
+  }
   // 控制面定性拒绝：dataplane 的 knock.ErrDenied 原文含「接入被拒」，Run 停机前会 warn「接入被控制面拒绝」。
   // 与瞬时失败区别对待——被强制下线/账号禁用不可自愈，UI 应显著提示且不诱导重试。
   const denyLine = lines.filter((l) => /接入被拒|接入被控制面拒绝/.test(l)).pop() || '';
@@ -375,15 +414,33 @@ function staleAgainstProfile(running: boolean): { stale: boolean; staleReason: s
   };
 }
 
-/** 解析「数据面健康」行。拿不到（旧壳 / 尚无事件）返回 null，调用方退回旧判据。 */
-function parseHealth(line: string): { knock: boolean; tunnel: boolean; err: string } | null {
+/** 健康行解析结果：knock / tunnel 是「真成功过」，err 是最近一次失败（空 = 最近一次事件是成功）。 */
+export interface TunHealth { knock: boolean; tunnel: boolean; err: string }
+
+/**
+ * 解析「数据面健康」行。拿不到（旧壳 / 尚无事件 / 缺 knock 或 tunnel 字段）返回 null，
+ * 调用方退回旧判据——**返回 null 而不是猜一个值**，猜错的两个方向都在界面上看不出来。
+ *
+ * 行是 slog TextHandler 打的：`time=… level=INFO msg=数据面健康 knock=true tunnel=false err=…`。
+ * 容错：键之间多余空白、字段顺序、未知键一律不影响；`err=` 缺席按无错误处理；
+ * err 值含空格时 slog 会用 Go 字面量引号包起来（内部 `"` 转成 `\"`），这里还原成人话。
+ * `-` 是数据面对「无错误」的占位（见 dataplane.orNone）。
+ */
+export function parseHealth(line: string | null | undefined): TunHealth | null {
   if (!line) return null;
-  const k = /knock=(true|false)/.exec(line);
-  const t = /tunnel=(true|false)/.exec(line);
+  const k = /(?:^|\s)knock=(true|false)(?=\s|$)/.exec(line);
+  const t = /(?:^|\s)tunnel=(true|false)(?=\s|$)/.exec(line);
   if (!k || !t) return null;
-  // err 是行尾自由文本（可能含空格与中文标点），取 `err=` 之后的全部；`-` 表示无错误。
-  const e = /err=(.*)$/.exec(line)?.[1]?.trim() ?? '';
+  // err 是行尾自由文本（可能含空格与中文标点），取 `err=` 之后的全部。
+  const raw = /(?:^|\s)err=(.*)$/.exec(line)?.[1]?.trim() ?? '';
+  const e = unquoteGo(raw);
   return { knock: k[1] === 'true', tunnel: t[1] === 'true', err: e === '-' ? '' : e };
+}
+
+/** 还原 slog TextHandler 用 strconv.Quote 包起来的值；未加引号的原样返回。 */
+function unquoteGo(v: string): string {
+  if (v.length < 2 || !v.startsWith('"') || !v.endsWith('"')) return v;
+  return v.slice(1, -1).replace(/\\(["\\nt])/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
 }
 
 function stripTs(l: string): string {

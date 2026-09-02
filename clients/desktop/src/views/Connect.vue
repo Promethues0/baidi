@@ -135,7 +135,7 @@
           </div>
 
           <div class="dk-card ck-conn" :class="{ off: stage !== 'connected' }">
-            <div class="ck-card__h">接入信息<span v-if="stage === 'connected'" class="ck-live">● 隧道活动</span></div>
+            <div class="ck-card__h">接入信息<span v-if="stage === 'connected'" class="ck-live" :class="{ bad: !tun.ready }">{{ tun.ready ? '● 隧道活动' : '● 隧道异常' }}</span></div>
             <!--
               剖面拿不到 = 接入退回本机默认配置（单网段、无资源映射、无证书钉扎），
               隧道会照常建起来、UI 也会走到「已接入」，但真实业务网段一条都没接管。
@@ -504,7 +504,10 @@ async function connect() {
   connectTO = window.setTimeout(() => {
     if (stage.value === 'connecting') {
       connectTimedOut.value = true;
-      err2.value = '接入超时：数据面已启动但未就绪，请确认网关已运行、且「国密隧道」开关与网关一致';
+      // 数据面自己报了原因（健康行 err）就用它——那句「请确认网关已运行…」只是猜的归因。
+      err2.value = tun.value.error
+        ? '接入超时：' + tun.value.error
+        : '接入超时：数据面已启动但未就绪，请确认网关已运行、且「国密隧道」开关与网关一致';
     }
   }, 25000);
 }
@@ -535,6 +538,13 @@ function startPolling() {
     if (v.ready) {
       stage.value = 'connected'; session.connected = true;
       connectTimedOut.value = false; err2.value = ''; clearTimeout(connectTO);
+    } else {
+      // ★运行中的失败也要到界面：v.error 现在取自数据面健康行（tunnel.ts parseTunStatus），
+      //   指纹钉扎失败（疑似中间人）/ 敲门令牌取不到 / 隧道拨不通都会落在这里。
+      //   此前 error 只在进程退出后才非空，这三类故障运行中界面一律绿色「已接入」。
+      //   已接入后再出现失败：session.connected 由 App 级心跳按 ready 同步翻成 false，
+      //   这里只负责把原因摆出来，不自动重连（重连要重新提权、会打断在途连接）。
+      if (v.error) { err2.value = '数据面报告：' + v.error; session.connected = false; }
     }
   }, 1500);
 }
@@ -699,6 +709,7 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-trust { font-size: 11px; font-weight: 500; color: var(--bd-success); background: #E8FFEA; padding: 2px 8px; border-radius: 10px; }
 .ck-trust.bad { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
 .ck-live { font-size: 11px; font-weight: 500; color: var(--bd-success); }
+.ck-live.bad { color: var(--bd-danger); }
 .ck-posture { padding-bottom: 6px; }
 .ck-pi { display: flex; align-items: center; gap: 9px; padding: 9px 16px; font-size: 13px; }
 .ck-pi__l { flex: 1; color: var(--bd-t1); }

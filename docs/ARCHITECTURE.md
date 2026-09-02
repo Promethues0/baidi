@@ -941,6 +941,41 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   「包内已含 wintun.dll…但 UAC 提权与数据面均未实机验证…请联系管理员」，两处文案
   （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。
 
+### ⚠️ 移动端原生壳（安卓 VpnService / iOS PacketTunnelProvider：源码级修复，两端均未实机）
+
+`clients/mobile/native/android/…/BaidiVpnService.kt`、`MainActivity.kt`、`TunnelState.kt` 与
+`native/ios/PacketTunnelProvider.swift`。安卓 CI 只编到 APK（从未装过真机），iOS 连 Xcode 工程都还没有
+（见 clients/BUILD.md 第九节）。源码层修掉的几条，以及随之定下的边界：
+
+- **多网段解析是 fail-closed 的**：剖面 `routes` 经 `vpn.ts` 用逗号拼成一串下传（与桌面 `baidi-tun -route`
+  同一契约），两端壳此前都只按 `/` 切一次——两段以上时前缀解析失败**静默回落 /24**、只接管第一段，第二段的
+  应用直连不走隧道而 UI 显示「已接入」（本项目最迷惑人的失败形态在移动端的复现）。现在逐条解析
+  （`RouteSpec.kt` / `RouteSpec.swift` 同构），任一条非法（前缀非整数或越出 0..32、地址非 IPv4）**整体拒绝
+  并点名那一条**，绝不回落到任何"看起来合理"的值；只有 `route` 完全缺席时才用 `10.99.0.0/24`。
+- **授权被拒立即可见**：VPN 授权对话框点「取消」此前无人处理，UI 只能等桥 30s 超时后**猜**一句
+  「是否未授予 VPN 权限？」；现在 `onActivityResult` 非 OK 立即 `markFailed`，原因写的是真实成因。
+- **「始终开启」（Always-on VPN）明示不支持**：manifest 声明 `SUPPORTS_ALWAYS_ON=false`。系统拉起服务时
+  Intent 里没有令牌与配置（令牌只活在 webview 会话里），服务必然失败——有开关无执行方就不该出现在系统
+  设置里；无令牌那条失败原因也写成「令牌未随 Intent 下发（系统重建 / 始终开启路径尚不支持）」。
+- **被抢占也留痕**：另一 VPN 应用抢占 / 用户在系统设置里断开时系统回调 `onRevoke`，此前未覆盖（默认只
+  `stopSelf`），`TunnelState` 不会翻成失败。现覆盖为 `markFailed("VPN 被系统或其它应用撤销")` 后 `stopSelf`，
+  且 `onDestroy` 改用 `markStoppedUnlessFailed`——否则销毁那一步会把原因冲回 idle。**留痕必须有读端**：
+  桥上的 `tunnelStatus` 此前只在启动期被轮询（拿到 up 即停），进入「已接入」之后 webview 再不读它，被抢占后
+  用户看到的是纹丝不动的「已接入企业内网」，直到自己点断开把原因一并清掉。现在 `vpn.ts startTunnelWatch`
+  在隧道就绪后每 2s 读一次（模块级、寿命跟隧道不跟页面——切到「应用」页 Connect.vue 就卸载了），判成中断即
+  翻 `session.connected=false`、把原因写进 `session.dropReason`（App.vue 弹窗 + Connect.vue 常驻红条）并
+  `stopTunnel` 清掉原生残留（判定口径见 `src/lib/tunnelwatch.ts`，`node --test` 钉住）。**读不到状态一律不可
+  判定、不判中断**：误判成断开会让 UI 去 `stopTunnel` 把一条好隧道真的断掉；故 iOS / 鸿蒙壳（桥上没有
+  `tunnelStatus`）与 dev 浏览器在接入后的中断**仍然不可见**——这是那两端的边界，不是安卓那条的回归。
+- **iOS fd 类型**：`tunnelFD()` 返回 `Int32`，而 gomobile 头文件里 `BaidimobileStart(long tunFd, …)` 在 Swift
+  侧是 `Int`——对着 xcframework `-typecheck` 直接报类型不匹配，现改为 `Int(fd)`。没有工程就没有编译，
+  类型错才能留到今天；Swift 侧 `BaidimobileConfig` 的字段名已逐个对过 Go 侧 `Config`。
+- **鸿蒙壳 `VpnExtAbility.ets` 有同款单切问题**，本轮未改（没有 DevEco，连语法都验不到）。
+- 验证边界：开发机无 gradle/模拟器，安卓侧做的是「gradle 缓存里的 kotlin-compiler-embeddable + android.jar +
+  按当前 Go API 手写的 baidimobile 桩」编译与 JVM 断言（CI `testDebugUnitTest` 是 JUnit 用例的唯一执行方）；
+  iOS 侧 `native/ios/test-routespec.sh` 用 swiftc 真跑断言，`PacketTunnelProvider.swift` 对着过期 xcframework
+  做 `-typecheck`（`pin`/`resmapJSON` 两处是产物过期的既有报错）。**两端都没有装到真机上过。**
+
 ### ✅ 消息通道 SMTP / Webhook（真，但「短信」就是 webhook，别当短信网关用）
 
 `control/internal/notify/` + `notify_channels` 表 + 系统管理页「消息通道」区块。PRD ch15.2 此前是**整章空的**（grep smtp/sms/webhook 零命中），而第 5 章的「告警邮件通知」压在它上面。

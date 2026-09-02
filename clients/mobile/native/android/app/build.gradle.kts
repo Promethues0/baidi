@@ -28,4 +28,6 @@ android {
 dependencies {
     implementation(files("libs/baidimobile.aar"))
     implementation("androidx.webkit:webkit:1.11.0")
+    // JVM 单测（src/test）：网段解析与运行态两处纯 Kotlin 逻辑，CI 用 testDebugUnitTest 跑
+    testImplementation("junit:junit:4.13.2")
 }

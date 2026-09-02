@@ -40,6 +40,19 @@ object TunnelState {
     }
 
     /**
+     * 服务销毁时调：**只有没有待展示的失败原因时**才回 idle。
+     * BaidiVpnService.onRevoke → stopSelf → onDestroy 这条链里，若 onDestroy 无条件 markStopped，
+     * 「VPN 被系统或其它应用撤销」会在 webview 下一次读 tunnelStatus 之前就被冲成 idle——
+     * 读端是 vpn.ts 的 startTunnelWatch（接入后每 2s 一次；启动期是桥里 400ms 的那个轮询），
+     * 它只把 failed 的 reason 原样显示；冲成 idle 后它只能说「服务已不在运行」而说不出为什么。
+     * 用户主动断开走 MainActivity.stopTunnel 的 markStopped。
+     */
+    @Synchronized fun markStoppedUnlessFailed() {
+        if (stage == "failed") { session?.stop(); session = null; return }
+        markStopped()
+    }
+
+    /**
      * 当前真实状态。**每次都问引擎**（Session.Running()），不缓存——
      * 引擎因强制下线 / 账号禁用 / 终端合规阻断而停机时，stage 必须跟着翻，
      * 否则 UI 会一直显示「已接入」而隧道早就断了。

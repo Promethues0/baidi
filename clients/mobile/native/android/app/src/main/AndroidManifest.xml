@@ -19,6 +19,10 @@
             <intent-filter>
                 <action android:name="android.net.VpnService" />
             </intent-filter>
+            <!-- ★「始终开启」（Always-on VPN）明示不支持：系统从设置里拉起本服务时，Intent 不带
+                 token/cfg（令牌只活在 webview 会话里），onStartCommand 必然失败。不声明 false 的话
+                 设置页会出现一个永远起不来的开关——有开关无执行方，按仓库纪律不留。 -->
+            <meta-data android:name="android.net.VpnService.SUPPORTS_ALWAYS_ON" android:value="false" />
         </service>
     </application>
 </manifest>

@@ -13,8 +13,9 @@
  * dev 浏览器无原生桥时，退化为经本地 baidi-knock-agent(/knock) 发起**真实** SPA 敲门 +
  * 隧道可达性探测——同桌面 dev 路径，便于在移动视口里验证 UI 与后端链路。
  */
-import { config } from './store';
+import { config, session } from './store';
 import { api } from './api';
+import { createTunnelWatch, type TunnelStatus, type TunnelWatch } from './tunnelwatch';
 
 export interface TunnelResult { ok: boolean; detail?: string }
 
@@ -68,6 +69,8 @@ interface NativeBridge {
   apiBase?: string;
   startTunnel?: (token: string, cfg?: TunnelConfig) => Promise<{ ok: boolean; detail?: string }>;
   stopTunnel?: () => Promise<void>;
+  /** 原生真实运行态（目前只有安卓壳实现；iOS / 鸿蒙壳没有 → 接入后的中断在那两端不可判定）。 */
+  tunnelStatus?: () => TunnelStatus;
 }
 
 function native(): NativeBridge | undefined {
@@ -132,6 +135,7 @@ export async function startTunnel(token: string): Promise<TunnelResult> {
   if (nb?.startTunnel) {
     try {
       const r = await nb.startTunnel(token, tunnelConfig());
+      if (r.ok) startTunnelWatch();
       return { ok: !!r.ok, detail: r.detail };
     } catch (e) {
       return { ok: false, detail: String(e) };
@@ -148,10 +152,48 @@ export async function startTunnel(token: string): Promise<TunnelResult> {
   }
 }
 
-/** 断开隧道。 */
+/** 断开隧道（用户主动）。先停监视：主动断开不是中断，不该被判成一次「隧道已停止」。 */
 export async function stopTunnel(): Promise<void> {
+  stopTunnelWatch();
   const nb = native();
   if (nb?.stopTunnel) {
     try { await nb.stopTunnel(); } catch { /* ignore */ }
   }
+}
+
+/** 读原生真实运行态；无桥 / 桥没有 tunnelStatus / 调用抛错 → null（不可判定，不是「已断开」）。 */
+export function tunnelStatus(): TunnelStatus | null {
+  const nb = native();
+  if (!nb?.tunnelStatus) return null;
+  try { return nb.tunnelStatus() ?? null; } catch { return null; }
+}
+
+let watch: TunnelWatch | null = null;
+
+/**
+ * 接入成功后开始监视原生运行态。**这是 TunnelState 里那些失败原因的唯一读端**：
+ * 另一 VPN 抢占（onRevoke）/ 系统回收服务 / 引擎因强制下线、账号禁用、终端合规阻断而停机，
+ * 原生侧都会把 stage 翻成 failed 并留下原因——没有这道轮询，用户看到的是纹丝不动的
+ * 「已接入企业内网」，直到他自己点断开把原因一并清掉。
+ *
+ * 放在模块级而不是 Connect.vue 里：切到「应用」页 Connect 就卸载了，隧道却还在跑；
+ * 监视的寿命要跟隧道走，不跟页面走。中断的处置只有三件事——把会话翻成未接入、
+ * 把原因写进 session.dropReason（UI 各页自己读）、把原生侧的残留清掉（stopTunnel）。
+ */
+export function startTunnelWatch(): void {
+  stopTunnelWatch();
+  if (!native()?.tunnelStatus) return; // 不可判定就不监视，也不假装监视
+  session.dropReason = '';
+  watch = createTunnelWatch(tunnelStatus, (reason) => {
+    watch = null;
+    session.connected = false;
+    session.dropReason = reason;
+    // 原生侧可能还挂着一个引擎已死的服务，清掉它；这里的 stopTunnel 会再调一次 stopTunnelWatch，幂等。
+    void stopTunnel();
+  });
+}
+
+export function stopTunnelWatch(): void {
+  watch?.stop();
+  watch = null;
 }

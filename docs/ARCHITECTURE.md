@@ -871,11 +871,13 @@ false→true（失败时还没拨通过、之后拨通了）才自动收起，�
 现在由 `clients/desktop/src/lib/tunnel.test.ts` 钉住（把 `parseTunStatus` 改回只用旧正则，5 条用例变红）。
 
 **边界**：① `knock`/`tunnel` 是"**曾**成功过"的粘性位，`err` 是最近一次失败——判「此刻通不通」靠的是 `err`，
-而任何一次成功（含每 15s 的保活敲门）都会清掉它，隧道持续拨不通而敲门正常时 `ready` 会随之抖动（**Go 侧语义，
-本轮未改**）；TS 侧的粘性提示条是对这件事的**兜底而非根治**——失败时 `tunnel` 位已是 true 的情形本机分不出
+而任何一次成功（含每 15s 的保活敲门）都会清掉它，隧道持续拨不通而敲门正常时 `ready` 会随之抖动（**这是 `err=` 键的语义，
+wave10 刻意保留**——旧 TS 就靠它判 `ready`，让隧道类失败在里面粘住会把应用页的「访问」闸卡死）；TS 侧的粘性提示条是对这件事的**兜底而非根治**——失败时 `tunnel` 位已是 true 的情形本机分不出
 「之后恢复了」与「之后没人再访问」，只能等用户关；持续性告警要能自己稳定在界面上，得 Go 侧把 `lastErr` 按 knock/tunnel
 拆成两个字段、健康行多带一个键（`parseHealth` 已容忍未知键，届时 TS 兼容缺席即可）。别把「这三类故障现在能到界面」
-读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。② 健康行反映的是**本机数据面**的观感，网关侧的
+读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。**Go 侧已按 knock/tunnel 分类记错并多带 `terr=` 键（wave10，
+`tunneler.knockErr/tunnelErr`，`markKnock` 只清前者、`markTunnel` 只清后者；`err=` 逐字保持旧语义供旧 TS 判 `ready`，
+`terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉），TS 消费待接。** ② 健康行反映的是**本机数据面**的观感，网关侧的
 `resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
 `parseHealth` / `nextDataplaneNotice`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
 那句已不成立，以本节为准。

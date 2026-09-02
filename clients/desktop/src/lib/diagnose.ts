@@ -172,7 +172,15 @@ export function judgeTunnel(tun: TunState & { error?: string; denied?: boolean; 
     return { state: 'skip', say: '未接入', detail: tun.error ? `上次接入失败：${tun.error}` : '数据面未运行' };
   }
   if (!tun.ready) {
-    return { state: 'warn', say: '建立中 / 未就绪', detail: '数据面进程在跑，但尚未打印「数据面就绪」——隧道可能仍在建立，或建立失败但进程未退出。' };
+    // 健康行带 err 时把数据面的原话交出去（指纹不匹配 / 取令牌失败 / 拨号超时…），
+    // 没有才落到中性的「尚未报告」——不再说「尚未打印数据面就绪」：判据早已不是那行启动日志。
+    return {
+      state: 'warn',
+      say: '建立中 / 未就绪',
+      detail: tun.error
+        ? `数据面报告：${tun.error}`
+        : '数据面尚未报告隧道拨通——可能仍在建立，或建立失败但进程未退出。'
+    };
   }
   return { state: 'pass', say: '正常', detail: '数据面进程在跑，隧道已就绪' };
 }
@@ -185,7 +193,7 @@ export function judgeKnock(tun: TunState & { keepalive?: boolean }): DiagVerdict
     return {
       state: 'warn',
       say: '未见保活',
-      detail: '数据面在跑，但日志里没有「敲门保活」——放行窗口（默认 30s）到期后隧道会断。多见于控制面不可达，换不到新的短时效敲门令牌。'
+      detail: '数据面在跑，但尚未报告敲门成功——放行窗口（默认 30s）到期后隧道会断。多见于控制面不可达，换不到新的短时效敲门令牌。'
     };
   }
   return { state: 'pass', say: '正常', detail: '敲门保活在跑，放行窗口持续续期' };

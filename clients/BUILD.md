@@ -492,8 +492,8 @@ BAIDI_CLIENT_SRC_REV=$(git log -1 --format=%h -- clients/) bash clients/build-ar
 `com.apple.developer.networking.networkextension` **授权**（这个 entitlement 需向 Apple 申请，
 不是勾一下就有）、以及一台装了完整 Xcode 的 macOS。公共 runner 上有 Xcode，但**没有**、
 也不该有前两样 —— 往仓库 Secrets 里塞签名私钥是另一个量级的决定，不能顺手做。
-此外 `native/ios/` 目前只有 `PacketTunnelProvider.swift` 这一份参考源码，
-**还没有 Xcode 工程**：即便签名齐了，也不是"跑个命令"就能出包。
+此外 `native/ios/` 目前只有参考源码（`PacketTunnelProvider.swift` / `RouteSpec.swift`）与一个不依赖
+Xcode 工程的 swiftc 自检脚本（`test-routespec.sh`），**仍没有 Xcode 工程**：即便签名齐了，也不是"跑个命令"就能出包。
 
 **鸿蒙.** 工具链（DevEco Studio / HarmonyOS SDK）不在 GitHub Actions 的 runner 镜像里，
 也没有官方 action，更没有可直接 `apt install` 的 CLI。移动端的 `native/harmony/` 目前只有

@@ -121,7 +121,9 @@ async function connect() {
   const r = await startTunnel(session.token);
   if (!r.ok) {
     stage.value = 'idle';
-    Message.error('SPA 敲门失败：' + (r.detail || '网关不可达'));
+    // 前缀刻意中性：startTunnel 的失败不只有敲门——原生侧点名的「用户拒绝了 VPN 授权」
+    // 「受保护网段配置无效」都从这里出来，冠以「SPA 敲门失败」会把用户支去查网关。
+    Message.error('接入失败：' + (r.detail || '网关不可达'));
     return;
   }
   // ②③ 建隧道与引流由原生扩展在自己的进程里完成，webview **收不到分步进度**：

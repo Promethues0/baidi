@@ -877,8 +877,9 @@ false→true（失败时还没拨通过、之后拨通了）才自动收起，�
 拆成两个字段、健康行多带一个键（`parseHealth` 已容忍未知键，届时 TS 兼容缺席即可）。别把「这三类故障现在能到界面」
 读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。② 健康行反映的是**本机数据面**的观感，网关侧的
 `resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
-`parseHealth` / `nextDataplaneNotice`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
-那句已不成立，以本节为准。
+`parseHealth` / `nextDataplaneNotice`，诊断页的 `judgeTunnel` / `judgeKnock`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
+那句已不成立，以本节为准；⑤ 鸿蒙壳（`clients/harmony/webui/shim/core.ts`）的 `tunnel_status` 桥尚未回传 `health`，该端接入态
+仍按旧判据（两行启动日志）显示，待鸿蒙数据面接上后同步补字段。
 
 ### ⚠️ Windows 桌面数据面（源码完整、组件齐了；ARM64 一台真机阶段 A/B 已过、阶段 C 未完，x64 未实机）
 

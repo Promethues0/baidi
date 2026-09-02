@@ -157,14 +157,32 @@ describe('parseHealth · 格式容错', () => {
     expect(parseHealth('knock=true tunnel=false err=隧道拨号失败')?.err).toBe('隧道拨号失败');
   });
 
+  it('strconv.Quote 的全部转义都还原：\\r \\n \\t \\xNN \\uNNNN \\\\（改造前 \\r 与 \\xNN 字面量原样上屏）', () => {
+    // Windows 侧系统错误文本常带 \r\n；控制字符（如 ESC）被 Quote 成 \x1b；不可打印的非 ASCII 码点成 \uNNNN。
+    const h = parseHealth(SLOG + 'knock=true tunnel=false err="SPA 拨号失败：line1\\r\\nline2\\tesc\\x1bnbsp\\u00a0back\\\\slash"');
+    expect(h?.err).toBe('SPA 拨号失败：line1\r\nline2\tesc\x1bnbsp\u00a0back\\slash');
+  });
+
+  it('认不出的转义序列（\\U、\\a）不猜，原样保留', () => {
+    expect(parseHealth('knock=true tunnel=false err="a\\U0001F600b\\ac"')?.err).toBe('a\\U0001F600b\\ac');
+  });
+
   it('缺 knock 或 tunnel、非 true/false、空/null/undefined → null（让调用方回落，不猜）', () => {
     expect(parseHealth('knock=true err=-')).toBeNull();
     expect(parseHealth('tunnel=true err=-')).toBeNull();
     expect(parseHealth('knock=yes tunnel=no')).toBeNull();
-    expect(parseHealth('reknock=true retunnel=false')).toBeNull();   // 键名必须整词匹配
     expect(parseHealth('')).toBeNull();
     expect(parseHealth(null)).toBeNull();
     expect(parseHealth(undefined)).toBeNull();
+  });
+
+  // 键名必须整词匹配：两条各自成立，合成一条断言时任一侧的正则松掉都会被另一侧的 null 掩住。
+  it('整词匹配：reknock=true 不算 knock（tunnel 在、knock 缺 → null）', () => {
+    expect(parseHealth('reknock=true tunnel=false')).toBeNull();
+  });
+
+  it('整词匹配：retunnel=false 不算 tunnel（knock 在、tunnel 缺 → null）', () => {
+    expect(parseHealth('knock=true retunnel=false')).toBeNull();
   });
 });
 

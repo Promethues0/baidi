@@ -1,6 +1,6 @@
 # 白帝 · 零信任访问控制系统（ZTNA/SDP）
 
-独立于烛龙的全栈自研 ZTNA（从烛龙 PRD 分叉做减法，取舍见 docs/SCOPE.md：UEM 整章不做）：SPA 单包授权服务隐身 + 国密 TLCP/TLS 隧道 + utun 真流量接管 + 身份/策略/审计闭环。控制台 21 页全部真实组件、数据面真链路实测、桌面 Tauri 客户端带 utun 数据面。在线演示 https://101.43.125.131/（admin/baidi@123）。研究/演示用途，未经安全审计。
+独立于烛龙的全栈自研 ZTNA（从烛龙 PRD 分叉做减法，取舍见 docs/SCOPE.md：UEM 整章不做）：SPA 单包授权服务隐身 + 国密 TLCP/TLS 隧道 + utun 真流量接管 + 身份/策略/审计闭环。控制台 21 页全部真实组件（由 check-dead-ui 规则四守住：nav.ts 每个 done 叶子必须在 router.ts BUILT 里）、数据面真链路实测、桌面 Tauri 客户端带 utun 数据面。在线演示 https://101.43.125.131/（admin/baidi@123）。研究/演示用途，未经安全审计。
 
 ## 交流与协作约定
 
@@ -19,9 +19,11 @@ cd gateway && ./web-e2e.sh           # 七层 Web 代理自检（无 root）：�
 cd gateway && go run ./cmd/baidi-ipsec -h  # 站点组网守护进程（IKEv2+ESP，需 CAP_NET_ADMIN）
 cd gateway && go run ./cmd/baidi-gateway -gm   # 国密 TLCP 隧道网关
 cd clients/desktop && npm run dev    # :5294
+cd clients/desktop && npm test       # 桌面端纯函数单测（接入态解析等，vitest）
 cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build   # 打包前必先 build sidecar
 cd clients/desktop && ./src-tauri/build-sidecars.sh --target aarch64-pc-windows-msvc   # 交叉出别的架构（CI 的 Windows ARM64 腿走这条）
 cd clients/mobile && npm run dev     # :5295
+cd clients/mobile && npm test        # 移动端纯函数单测（隧道状态监视判定，node --test）
 cd control && go run ./cmd/baidi-standby -h   # 控制面温备节点（拉加密备份/校验/落盘，不提供服务）
 cd control && go run ./cmd/baidi-license -h   # License 发行 CLI（发行方离线用；私钥绝不进控制面机器）
 cd control && go run ./cmd/baidi-upgrade -h   # 升级包签名 CLI（发布方离线用；同上，私钥不进控制面）

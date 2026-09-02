@@ -1,7 +1,7 @@
 /**
  * 客户端数据面隧道控制（真 utun 接管流量）：
  *  - Tauri 运行时：经自定义命令 tunnel_start/status/stop 以管理员权限拉起 baidi-tun，
- *    真正用 utun 接管受保护网段 → 逐流 SPA 敲门 → 加密隧道 → 网关。
+ *    真正用 utun 接管受保护网段 → SPA 敲门开窗（15s 保活续窗）→ 加密隧道 → 网关。
  *  - 浏览器 dev：无 utun（需 root + Tauri），退化为经 baidi-knock-agent 的真实敲门探测，
  *    供 UI 联调；不接管系统流量。
  */
@@ -68,13 +68,13 @@ export interface TunStatusRaw {
 /** 从 baidi-tun 真实日志解析出的接入态。 */
 export interface TunView {
   running: boolean;
-  ready: boolean;       // 数据面就绪（TUN→netstack→隧道）
+  ready: boolean;       // 敲门真成功过且最近一次事件不是失败（健康行 knock ∧ err 空；无健康行时回落判「数据面就绪」启动行）
   dev: string;          // utunN
   vip: string;          // 虚拟 IP
   route: string;        // 受保护网段
   gateway: string;      // 网关隧道地址
   cipher: string;       // 隧道密码学
-  keepalive: boolean;   // 敲门保活已起
+  keepalive: boolean;   // 敲门包真发出过（健康行 knock=true；无健康行时回落判「敲门保活」启动行）
   error: string;        // 最近的失败原因（若有）
   /** 隧道是否**曾**拨通过（健康行 tunnel 位）。null = 不可判定（老壳 / 老数据面没有健康行）。
    *
@@ -451,10 +451,26 @@ export function parseHealth(line: string | null | undefined): TunHealth | null {
   return { knock: k[1] === 'true', tunnel: t[1] === 'true', err: e === '-' ? '' : e };
 }
 
-/** 还原 slog TextHandler 用 strconv.Quote 包起来的值；未加引号的原样返回。 */
+/**
+ * 还原 slog TextHandler 用 strconv.Quote 包起来的值；未加引号的原样返回。
+ *
+ * strconv.Quote 会产出的转义只有这几种：`\"` `\\` `\n` `\r` `\t`、不可打印字节 `\xNN`、
+ * 不可打印的非 ASCII 码点 `\uNNNN`（可打印的中文原样保留，不转义）。此前只还原
+ * `\" \\ \n \t` 四种，于是 err 里若带 `\r`（Windows 侧系统错误文本常见）或控制字符，
+ * 字面量 `\r` / `\x1b` 会原样上屏。认不出的序列（如 `\U`、`\a`）保持原样不猜。
+ */
 function unquoteGo(v: string): string {
   if (v.length < 2 || !v.startsWith('"') || !v.endsWith('"')) return v;
-  return v.slice(1, -1).replace(/\\(["\\nt])/g, (_, c: string) => (c === 'n' ? '\n' : c === 't' ? '\t' : c));
+  return v.slice(1, -1).replace(/\\(x[0-9a-fA-F]{2}|u[0-9a-fA-F]{4}|["\\nrt])/g, (_, c: string) => {
+    switch (c[0]) {
+      case 'x':
+      case 'u': return String.fromCharCode(parseInt(c.slice(1), 16));
+      case 'n': return '\n';
+      case 'r': return '\r';
+      case 't': return '\t';
+      default: return c; // `"` 与 `\`
+    }
+  });
 }
 
 /**

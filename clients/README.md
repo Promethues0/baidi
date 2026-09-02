@@ -33,7 +33,7 @@
 
 ```
 tunnel_start(opts)   // 写 /tmp launcher（0600，token 走 BAIDI_TOKEN env）→ osascript 提权拉起 baidi-tun
-tunnel_status()      // ps -p 判活 + 回 baidi-tun 日志（前端解析 utun 设备/就绪/敲门保活/失败）
+tunnel_status()      // ps -p 判活 + 回 baidi-tun 日志尾巴，另从整份日志单独捞出 endpoint（网关落点行）与 health（数据面健康行，接入态真判据）；前端 parseTunStatus 优先按 health 判，缺席才回落两行启动日志
 tunnel_stop()        // 管理员 kill root 进程（utun/路由随之回收）
 ```
 

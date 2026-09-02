@@ -18,16 +18,26 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
         let spaPort  = (opts["spaPort"] as? String)  ?? "18201"
         let proxyPort = (opts["proxyPort"] as? String) ?? "18443"
         let vip      = (opts["ip"] as? String)       ?? "10.99.0.2"
-        let route    = (opts["route"] as? String)    ?? "10.99.0.0/24"
+        let route    = (opts["route"] as? String)    ?? Routes.defaultSpec
         let gmOn     = (opts["gm"] as? NSNumber)?.boolValue ?? true
-        let net = route.split(separator: "/", maxSplits: 1).map(String.init)
-        let netAddr = net.first ?? "10.99.0.0"
-        let prefix = net.count > 1 ? (Int(net[1]) ?? 24) : 24
+        // ★多网段：剖面 routes 经 vpn.ts `join(',')` 下传成逗号串（与桌面 baidi-tun -route 同契约）。
+        //   改造前 `split(separator: "/", maxSplits: 1)` 只认第一段，其余静默丢弃、前缀解析失败还回落 24：
+        //   第二段的应用直连不走隧道而 UI 显示「已接入」。现在任一条不合法就整体失败并点名那一条
+        //   （fail-closed，见 RouteSpec.swift；断言在 test-routespec.sh）。
+        let routes: [RouteSpec]
+        do {
+            routes = try Routes.parse(route)
+        } catch {
+            completionHandler(NSError(domain: "baidi", code: -2, userInfo: [
+                NSLocalizedDescriptionKey: "受保护网段配置无效：\(error)（下发原文：\(route)）"
+            ]))
+            return
+        }
 
-        // 1) 配置 TUN：虚拟 IP + 把受保护网段（来自配置）路由进 utun（其余流量仍走系统默认）
+        // 1) 配置 TUN：虚拟 IP + 把受保护网段（来自配置，可多条）逐条路由进 utun（其余流量仍走系统默认）
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: gateway)
         let ipv4 = NEIPv4Settings(addresses: [vip], subnetMasks: ["255.255.255.255"])
-        ipv4.includedRoutes = [NEIPv4Route(destinationAddress: netAddr, subnetMask: Self.mask(prefix))]
+        ipv4.includedRoutes = routes.map { NEIPv4Route(destinationAddress: $0.addr, subnetMask: $0.mask) }
         settings.ipv4Settings = ipv4
         settings.mtu = 1420
 
@@ -58,15 +68,12 @@ class PacketTunnelProvider: NEPacketTunnelProvider {
             cfg.defaultResource = (opts["defaultResource"] as? String) ?? ""
 
             var startErr: NSError?
-            self.session = BaidimobileStart(fd, cfg, &startErr)
+            // ★fd 是 Int32（utun 的 socket fd），而 gomobile 头文件里 `BaidimobileStart(long tunFd, …)`
+            //   在 Swift 侧是 Int——对着 xcframework -typecheck 直接报类型不匹配；没有 Xcode 工程就没有编译，
+            //   这个错才能留到今天。显式转宽。
+            self.session = BaidimobileStart(Int(fd), cfg, &startErr)
             completionHandler(startErr)
         }
-    }
-
-    /// CIDR 前缀长度 → 点分十进制子网掩码。
-    static func mask(_ p: Int) -> String {
-        let bits: UInt32 = p >= 32 ? 0xFFFF_FFFF : (p <= 0 ? 0 : (0xFFFF_FFFF << (32 - UInt32(p))))
-        return "\((bits >> 24) & 0xFF).\((bits >> 16) & 0xFF).\((bits >> 8) & 0xFF).\(bits & 0xFF)"
     }
 
     override func stopTunnel(with reason: NEProviderStopReason, completionHandler: @escaping () -> Void) {

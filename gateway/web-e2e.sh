@@ -97,6 +97,10 @@ export BAIDI_JWT_KEY="$WORK/jwt-ed25519.pem"
 export BAIDI_JWT_KNOCK_KEY="$WORK/jwt-ed25519-knock.pem"
 export BAIDI_JWT_WEB_KEY="$WORK/jwt-ed25519-web.pem"
 export BAIDI_MTLS_ADDR=127.0.0.1:8092
+# ★七层入口基址显式指到本机：控制面对「推导出来的」回环/通配入口地址如实报「无法确定」
+#   并拒绝签票（参考部署 -web 127.0.0.1:18444 正是这个形态），而网关页登记接入地址
+#   又拒收回环——本机自检只能走这条显式统一入口（此时票据不绑网关，与生产统一入口同形）。
+export BAIDI_WEB_ENTRY_BASE="http://127.0.0.1:$WEB_PORT"
 
 echo "==> 端口预检"
 RC=0

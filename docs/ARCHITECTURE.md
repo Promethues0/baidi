@@ -1249,18 +1249,45 @@ SCOPE 或本节里说过不做。按「完成度的另一半是把不做说清�
 `ipsec-e2e.sh` / `web-e2e.sh`）全是功能断言，无并发或吞吐用例。凡验收方式是
 「压测达标 / P95 ≤ 阈值 / 渗透测试 / 兼容矩阵」的条目，**一律没有交付物**。
 
-**唯一的例外是 `control/internal/store` 的四组 Go benchmark**（`SubjectIndex` /
-`Users` / `BlockedAccounts`，wave9 新增）。它们的定位写在文件头上：**防回归，不是容量承诺**。
+**例外只有两处 Go benchmark，定位都写在文件头上：防回归，不是容量承诺。**
+
+其一是 `control/internal/store` 的四组（`SubjectIndex` / `Users` / `BlockedAccounts`，wave9 新增）。
 口径三条，缺一条就会被读成规格：① 测的是**一次库调用**，不是一次登录、不是一次网关轮询；
 ② modernc 纯 Go SQLite（本项目免 CGO），与 CGO 版性能特征不同；③ 库是刚建好刚写完的
 ——无碎片、页缓存全热，生产上的冷库更慢。**这几个数字不构成任何并发/容量/时延规格。**
 
-除此之外仍然是「连测量点都不存在」。
+其二是数据面的三组微基准（`spa.BenchmarkAllowed*` / `knock.BenchmarkSeen_*` / `resource.BenchmarkAuthorize*`，
+纯内存、无 IO，各自的结论写在下表 PERF-01/02 行里）加上 **wave9 第二批：`gateway/internal/proxy/bench_test.go`
+的数据面首批基准**——每流握手成本 / 单流吞吐 / 并发建流与到顶行为。这一批第一次给「每条 TCP 流各拨一条
+完整 TLS/TLCP 连接 + 首行 `CONNECT <资源id>`」这个传输模型的**固有代价一个量级**。口径六条（文件头同文）：
+① **全部进程内回环**——客户端、网关 proxy、后端三方在同一进程同一批核上，ns/op 里客户端与网关两侧的握手
+CPU 是**加在一起**的，无网络 RTT（真实链路每流握手还要多付 1~2 个 RTT）；② 每流都是**完整**握手——
+`dataplane.tlsClientConfig` 没配 `ClientSessionCache`，无会话复用；③ 证书形态照生产：网关启动期自签
+**RSA-2048**，ECDSA 只是对照、生产没有这个选项；④ handle 每流两行 slog 被丢弃，生产上它们走 journald；
+⑤ 钉扎回调不在口径内；⑥ 并发组的上限是**注入的小值**（`serve` 的 `limit` 形参），不代表 1024 附近的行为。
+**本机样本**（2026-09-02，Apple M1 Pro 8 核 / 16 GB，macOS 27.0，go1.26.3，`go test -count=3 -run '^$' -bench . -benchmem ./internal/proxy/`
+取三轮**中位数**；测量时机器上没有别的 `go test`/构建在跑，`uptime` 1 分钟负载均值 5.5~5.8（8 核），三轮之间偏差 < 5%。
+★复测前先看 `uptime`：首版写进这里的握手数字（RSA 5.7 / ECDSA 2.5 / TLCP 2.4 ms）是机器同时跑着多个 agent、15 分钟负载均值 10.7 时量的，
+空载复测只有其 1/3~1/2，而同一组的 B/op 与 allocs/op 与首版**逐字一致**——「只有时间慢、分配完全相同」是「测量时 CPU 被别的进程抢走」的签名，
+吞吐与并发两组当时对得上是因为它们本就吃满多核、对抢占不敏感。**不是容量承诺**）：
+
+| 组 | 样本 | 读法 |
+|---|---|---|
+| 每流握手 · RSA-2048 自签（生产形态）TLS 1.3 | **2.1 ms/流**（约 480 流/s 串行），192 KB / 858 allocs 每流 | 这就是「每流一条 TLS」的直接成本：一个开 30 条并发连接的网页 = 30 次这个数（≈ 60 ms 纯握手 CPU，再加 30 × 1~2 个 RTT） |
+| 每流握手 · ECDSA P-256（对照） | 0.9 ms/流 | 与上行之差 ≈ 1.2 ms 是服务端 RSA 签名（Go 的常量时间 RSA 实现偏慢），占 RSA 形态每流成本的一半以上——换证书算法是可量化的改进方向，但生产当前无此选项 |
+| 每流握手 · 国密 TLCP `ECC_SM4_GCM_SM3`（-gm 形态） | 1.0 ms/流，116 KB / 541 allocs 每流 | SM2 双证书握手比 RSA-2048 形态便宜一半，与 ECDSA 对照同量级 |
+| 单流吞吐 · 经网关 TLS 1.3 `AES_128_GCM` | **1.0 GB/s** | 直连 TCP 对照 5.4 GB/s：网关（TLS 终止 + 用户态转发）在单流上约 5.4× 于裸 TCP 的成本；真实链路上限通常在网络而不在这里 |
+| 单流吞吐 · 经网关国密 TLCP `SM4_GCM` | **155 MB/s** | 比 TLS 1.3 慢 **6.5×**，国密隧道的单流带宽上限在这里。**原因未定位**——首版写的「gmsm 软件实现、无硬件加速」是猜的且与事实相反：gateway 锁定的 gmsm v0.43.0 在 arm64/amd64 上有 AESE/PMULL 汇编路径（`internal/sm4/gcm_arm64.s`、`cipher_asm.go` 按 CPU 特性门控），M1 Pro 上跑的就是它；对这一子基准取 `-cpuprofile`（`go test -run '^$' -bench 'FlowThroughput/经网关国密' -benchtime=3s -cpuprofile`）：SM4-GCM 加解密（`gcmSm4Enc/Dec`）合计只占 **~5%** 样本，**>90% 在套接字读写系统调用里**——TLS 1.3 那组同样 >90% 在系统调用。也就是说差距不在密码算法，在两个记录层库的 IO 路径上；而 gotlcp v1.4.5 的 `maxPayloadSizeForWrite`/`readFromUntil`/`Conn.Read` 与 crypto/tls 逐行同源，读到这里仍解释不了 6.5×。剖到这一步为止，别照「换硬件加速」去做决策 |
+| 并发建流 · limit=256、16 条并发（RSA） | 2.1k 建流/s，0 拒绝 | 8 核进程内、客户端与网关同抢 CPU，**不是**单机 conn/s 规格 |
+| 并发建流 · limit=4、16 条并发 | 95% 被拒，被拒一次 **~76 µs** | 到顶时是**立刻拒绝**（`proxy-capacity`）而不是挂住——改造前的形态是停在内核 backlog 里直到客户端超时 |
+
+不在这一批口径内、仍然「连测量点都不存在」的：多流聚合吞吐、真实网络下的时延分布、`dataplane`
+的 utun/netstack 那一段、以及任何 P95。
 
 | 不能声称的 | NFR | 事实 |
 |---|---|---|
-| **并发容量达标** | PERF-01（P0） | 没有规格表、没有压测，也没有把并发当成可声明量（`license.Manifest` 只有 MaxUsers/MaxGateways，容量模型刻意排除并发）。全仓唯一相关数字是 `proxy.maxConcurrent = 1024`，一个防 OOM 的信号量——**别拿它当规格**。它此前的注释写作「握手/前导阶段上限」，实际覆盖整条会话寿命（slot 在 `handle()` 返回后才释放，而末尾是同步 `io.Copy`），wave9 已纠正；同批把「到顶时阻塞 accept 循环」改成拒绝并留痕 `proxy-capacity`（原形态下新连接停在内核 backlog，客户端挂到超时而网关零日志零上报，与"一切正常"同形）。★wave9 另修掉一个**算法复杂度攻击面**：敲门去重表 `knock.Cache.Seen` 此前**每次调用都遍历整个 map** 做惰性清理、且表无上界。SPA 是免认证的公网 UDP 口，nonce 去重又排在**验签之前**——不需要任何有效令牌，发合法 JSON 信封（正确时间戳 + 随机 nonce）即可同时撑大表与触发全表扫描，成本 O(N²)，而 `spa.Serve` 是**单 goroutine**，CPU 一打满「五道门」的第一道就被关掉。实测（`BenchmarkSeen_*`）：表内 5 万条时单次 Seen 从 **360μs 降到 332ns**（1084×），改造前完美线性。换算过去，**不到 1000 包/秒的洪泛就能让敲门面饱和**——家用带宽即可。改成摊销清理（`sweepEvery`）+ 表上界（`maxEntries`，满时 fail-closed 当作重放拒绝：宁可洪泛期间拒掉新敲门，也不能因为记不下而放过一次真重放）。表满与真重放**分类分开**（`knock.ErrCacheFull` → `knock-cache-full`），且该类别归入 `store.AttackExemptCats` —— 被表满挡下的包很可能来自**正常用户**（洪泛者填满表、正常敲门跟着遭殃），把他的 IP 列进「攻击源 TOP」等于让管理员去封一个受害者 |
-| **转发吞吐 / 时延 P95** | PERF-02（P0） | 三个被验收项都没有测量点。`gateway_metrics` 的 `RxBps/TxBps` 采的是**宿主机全机非回环网卡之和**，同机跑别的服务时与隧道流量完全脱节；没有 conn/s 计数；全仓仅两处 ms 级测量（`reachprobe` 的后端拨号 RTT、`diag` 的 SQLite ping），都不在转发路径上。★wave9 量并修掉一处每请求开销：`resource.Authorize` 原是**线性扫 + `strings.EqualFold`**，而 `AllowUsers` 的长度**由控制面的组织授权展开决定**——一条授权给根组织的资源，在 5000 人目录下带着 5000 个账号下发。实测（`BenchmarkAuthorize_*`）5000 人时一次判定约 **35μs**，且成本随账号的**公共前缀长度**上升（同组织账号常共享前缀，EqualFold 要逐字符比到分歧位）。L4 每连接一次尚可，L7 是**每个 HTTP 请求**判一次——一个页面五十个请求就是毫秒级的纯授权开销。改成 `Replace` 时预计算查找表（每轮策略下发一次），判定降到 **~26ns 且与规模无关**（1157×）。★引入第二条判定路径必须证明它与第一条同真同假：`TestAuthorize两条路径同真同假` 表格 + 随机对照，当场抓出第一版实现顺手加的 `TrimSpace` —— `EqualFold(" a ", "a")` 是 false，加了 trim 就是**放宽授权** |
+| **并发容量达标** | PERF-01（P0） | 没有规格表、没有压测，也没有把并发当成可声明量（`license.Manifest` 只有 MaxUsers/MaxGateways，容量模型刻意排除并发）。全仓唯一相关数字是 `proxy.maxConcurrent = 1024`，一个防 OOM 的信号量——**别拿它当规格**。★wave9 第二批基准（`proxy.BenchmarkConcurrentFlows`，口径与样本见上方通则）只在**注入的小上限**上观察了到顶行为：limit=4 时 95% 的建流被拒且**一次拒绝约 76 µs**——证明的是「到顶时拒绝路径便宜且立刻」，**不是** 1024 附近的容量数字；limit=256 时 8 核进程内约 2.1k 建流/s、零拒绝（三轮中位数，与握手组同一次测量），客户端与网关同抢一批核，同样不是单机 conn/s。它此前的注释写作「握手/前导阶段上限」，实际覆盖整条会话寿命（slot 在 `handle()` 返回后才释放，而末尾是同步 `io.Copy`），wave9 已纠正；同批把「到顶时阻塞 accept 循环」改成拒绝并留痕 `proxy-capacity`（原形态下新连接停在内核 backlog，客户端挂到超时而网关零日志零上报，与"一切正常"同形）。★wave9 另修掉一个**算法复杂度攻击面**：敲门去重表 `knock.Cache.Seen` 此前**每次调用都遍历整个 map** 做惰性清理、且表无上界。SPA 是免认证的公网 UDP 口，nonce 去重又排在**验签之前**——不需要任何有效令牌，发合法 JSON 信封（正确时间戳 + 随机 nonce）即可同时撑大表与触发全表扫描，成本 O(N²)，而 `spa.Serve` 是**单 goroutine**，CPU 一打满「五道门」的第一道就被关掉。实测（`BenchmarkSeen_*`）：表内 5 万条时单次 Seen 从 **360μs 降到 332ns**（1084×），改造前完美线性。换算过去，**不到 1000 包/秒的洪泛就能让敲门面饱和**——家用带宽即可。改成摊销清理（`sweepEvery`）+ 表上界（`maxEntries`，满时 fail-closed 当作重放拒绝：宁可洪泛期间拒掉新敲门，也不能因为记不下而放过一次真重放）。表满与真重放**分类分开**（`knock.ErrCacheFull` → `knock-cache-full`），且该类别归入 `store.AttackExemptCats` —— 被表满挡下的包很可能来自**正常用户**（洪泛者填满表、正常敲门跟着遭殃），把他的 IP 列进「攻击源 TOP」等于让管理员去封一个受害者 |
+| **转发吞吐 / 时延 P95** | PERF-02（P0） | 三个被验收项此前都没有测量点。★wave9 第二批基准（`gateway/internal/proxy/bench_test.go`，进程内回环、**不是规格**，口径与样本表见上方通则）补了两个：**单流吞吐** TLS 1.3 约 1.0 GB/s、国密 TLCP（`ECC_SM4_GCM_SM3`）约 155 MB/s（慢 6.5×，国密隧道的单流带宽上限在此；**原因未定位**——cpuprofile 里 SM4-GCM 只占 ~5%、>90% 在套接字系统调用，gmsm 在 arm64/amd64 有 AESE/PMULL 汇编路径，不能归为「无硬件加速」，见上表）、直连 TCP 对照 5.4 GB/s；**每流一条完整 TLS 握手的成本量级**——这是传输模型「每条 TCP 流各拨一条 TLS + `CONNECT <资源id>`」的**已量化代价**：RSA-2048 自签（生产形态）**约 2.1 ms/流**（空载三轮中位数；首版写的 5.7 ms 是机器带着并行负载时量的），其中约 1.2 ms 是服务端 RSA 签名（ECDSA 对照 0.9 ms），TLCP 约 1.0 ms/流；客户端无会话复用，一个开几十条并发连接的网页就是几十次这个数，且真实链路每流还要多付 1~2 个 RTT。**P95 与聚合吞吐仍无测量点。**`gateway_metrics` 的 `RxBps/TxBps` 采的是**宿主机全机非回环网卡之和**，同机跑别的服务时与隧道流量完全脱节；没有 conn/s 计数；全仓仅两处 ms 级测量（`reachprobe` 的后端拨号 RTT、`diag` 的 SQLite ping），都不在转发路径上。★wave9 量并修掉一处每请求开销：`resource.Authorize` 原是**线性扫 + `strings.EqualFold`**，而 `AllowUsers` 的长度**由控制面的组织授权展开决定**——一条授权给根组织的资源，在 5000 人目录下带着 5000 个账号下发。实测（`BenchmarkAuthorize_*`）5000 人时一次判定约 **35μs**，且成本随账号的**公共前缀长度**上升（同组织账号常共享前缀，EqualFold 要逐字符比到分歧位）。L4 每连接一次尚可，L7 是**每个 HTTP 请求**判一次——一个页面五十个请求就是毫秒级的纯授权开销。改成 `Replace` 时预计算查找表（每轮策略下发一次），判定降到 **~26ns 且与规模无关**（1157×）。★引入第二条判定路径必须证明它与第一条同真同假：`TestAuthorize两条路径同真同假` 表格 + 随机对照，当场抓出第一版实现顺手加的 `TrimSpace` —— `EqualFold(" a ", "a")` 是 false，加了 trim 就是**放宽授权** |
 | **认证时延达标（P95）** | PERF-03（P1） | ⚠️ **wave9 已改造，但仍不能声称达标**。改造前：登录链路零埋点，LDAP 缺省 5s 连接 + 10s 请求且 api 层**从不设**这两个字段，而 `RequestTimeout` 是**逐请求**的——一次口令认证要走**两次拨号**（服务账号一条、用户 bind 另开一条，理由见 `ldapsrc.go` 的 RFC 4511 §4.2.1 注释）+ StartTLS + 服务账号 bind + search + 用户 bind，最坏约 **60s**（本表此前写的「~15s」是低估）。**现在**：`ldapsrc` 的逐请求超时按 ctx 剩余预算折算（`requestTimeout`，与既有 `dialTimeout` 同款、同样兜到 1ms —— go-ldap 的 `conn.SetTimeout` 对非正值不 clamp，`<=0` = 不挂定时器 = **无限阻塞**），外部认证调用套 `BAIDI_EXTAUTH_TIMEOUT`（默认 8s）预算，两个 LDAP 超时经 `BAIDI_LDAP_*_TIMEOUT` 下发。**刻意不给 handler 加整体 deadline**：go-ldap 的拨号与请求都不吃 ctx，handler 上挂 3s 压不住它；而 deadline 一过期，后面所有吃 ctx 的动作会一起失败——审计写不进库（`/diag` 的 audit-write 翻红且把运维指向磁盘可写性，方向全错）、锁定落不了库、`stepUpDecision` 的两次库读失败即 **fail-closed 拒登录**（`SubjectIndex` 是每次登录现算的全表 JOIN，正好排在外部认证之后，最先被饿死），那等于把「目录慢」升级成「全员登录不了」而文案是「认证策略暂不可用」。有对照用例钉住这条设计：把预算改成贯穿 handler，`Test外部认证预算耗尽后审计仍然写得进去` 立刻红。**仍不能声称达标的部分**：① 没有 P95 统计，也没有压测（通则同上）——现在有的是**单次**耗时，写进 slog 与审计正文（`extAuthTookZh`，AuditEntry 无数值列，加列会动防篡改 MAC 的覆盖面）；② ~~OIDC 未覆盖~~ **OIDC 已同批覆盖**：`AuthURL` 与 `Exchange` 各套同一个预算（`RedirectAuthenticator.AuthURL` 补了 ctx 参数——它要拉发现文档、是一次真出网，签名里却没有 ctx，实现只能用 `context.Background()` 自造超时，而同一接口里的 `Exchange` 是有 ctx 的）。OIDC 侧比 LDAP 简单：net/http 原生吃 ctx，一个 deadline 就封得住三次出网。同批修了两个非超时的真缺陷——**三类错误被塌缩**（`oidcsrc` 内部认真分了 unavailable/notConfigured/invalidToken 三类且注释写明是契约，而 api 侧一次 `errors.Is` 都没调，IdP 连不上与 nonce 重放在审计里完全同形）、**Provider 每请求新建**（`discoveryCache`/`jwksCache` 跨请求恒不命中 → 两处「拉不动用旧值」的降级永远进不去，`minRefresh` 防拉取风暴限流跨不了请求，而 `TestJWKS_伪造kid不会打成拉取风暴` 在单 Provider 内是过的）；③ 本地认证的 bcrypt 不吃 ctx，任何预算都打不断它 |
 | **抗 OWASP Top 10 / 已加固** | SEC-08（P1） | 无渗透测试、无依赖漏洞扫描（govulncheck / gosec / CodeQL / npm audit / trivy / dependabot **全仓零命中**）、无任何安全响应头（CSP / HSTS / X-Frame-Options / X-Content-Type-Options **全仓零命中**）。`BAIDI_CORS_ORIGIN` 默认 `*` 并被 `deploy.sh` 带进生产装机——wave9 补了白名单能力 + 控制面启动告警 + 装机脚本复述，**默认值刻意未收紧**（客户端 webview 的 origin 逐平台不同：Tauri mac/Linux `tauri://localhost`、Windows `http://tauri.localhost`、安卓 `https://appassets.local`，而只实测过 macOS 一个平台，漏一个 = 该平台升级即全员连不上）。散点式的正确做法（Bearer 而非 Cookie 故无经典 CSRF 面、L7 Cookie HttpOnly+Secure+SameSite、XFF 先剥再重写）是逐条设计决策的副产品，不构成"按 OWASP Top 10 加固并验证" |
 | **管理通道独立** | SEC-05（P0）第三句 | **未实现**，而 SCOPE 此前把整条 SEC-05 记作「已收口」。管理 API 与门户/控制台共用 `:8090` 一个监听、一份 nginx 站点，没有独立管理口也没有管理网段限制；`deploy/nginx/baidi.conf` 里那段 `allow/deny` 是注释掉的样例且只挂在管理员登录端点上（控制台与门户共享 `/`，整站限源会把普通用户一起挡掉）。与 FR-SYSCFG-08 同一条理由：属网络层收敛，产品不另造一层假开关。**已收口的是另外两句**（首登强制改密、无默认弱口令，wave8 行动 16） |

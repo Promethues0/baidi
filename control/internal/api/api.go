@@ -2250,7 +2250,7 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 
 // handleUsers 访问者目录（身份源 + 组织树 + 用户清单）。
 //
-// ★这里此前**一道闸都没有**：任何登录用户（含门户普通账号）都能拉走全量账号、
+// ★与 /apps /overview /security /authpolicy 同批收口（wave10）：此前任何登录用户（含门户普通账号）都能拉走全量账号、
 // 组织归属与在线态，而它同时也是"哪个账号是管理员"的枚举入口。加 requireAdmin
 // 之后它与 /online、/userstate 同门槛，并随 requireAdmin 一起吃「角色现算」——
 // 被撤销管理员身份的人拿旧令牌也读不到。

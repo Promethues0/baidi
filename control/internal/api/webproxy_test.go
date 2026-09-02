@@ -1,6 +1,8 @@
 package api
 
 import (
+	"context"
+	"errors"
 	"net/http"
 	"net/url"
 	"strings"
@@ -607,5 +609,90 @@ func TestWebHostUnroutable(t *testing.T) {
 		if got := webHostUnroutable(host); got != want {
 			t.Errorf("webHostUnroutable(%q)=%v, want %v", host, got, want)
 		}
+	}
+}
+
+// ── 七层入口的两条收尾（wave10）──
+
+// 用例：登记 IPv6 接入地址 fd00::1 → 入口 URL 必须写成 http://[fd00::1]:18444。
+// 撤掉 webURLHost（退回 host+":"+port 拼接），这条会红：签出 http://fd00::1:18444，
+// 浏览器解析成 host=fd00、端口非法，跳转失败而票据照签、门户照报 ready。
+func TestWebEntryBracketsIPv6RegisteredAccess(t *testing.T) {
+	h := newTestServer(t)
+	registerWildcardWebGateway(t, h, "gw-1")
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"lanHost": "", "wanHost": "fd00::1"}); code != http.StatusOK {
+		t.Fatalf("登记 IPv6 接入地址 http %d: %v", code, out)
+	}
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusOK {
+		t.Fatalf("登记了 IPv6 接入地址就该签出票据，得 %d %v", code, out)
+	}
+	if !strings.HasPrefix(entry, "http://[fd00::1]:18444"+webEntryPath+"?t=") {
+		t.Fatalf("★IPv6 字面量在 URL 里必须加方括号，得 %q", entry)
+	}
+}
+
+func TestWebURLHost(t *testing.T) {
+	cases := []struct{ host, port, want string }{
+		{"gw.example.com", "18444", "gw.example.com:18444"},
+		{"gw.example.com", "", "gw.example.com"},
+		{"203.0.113.9", "18444", "203.0.113.9:18444"},
+		{"fd00::1", "18444", "[fd00::1]:18444"},
+		{"fd00::1", "", "[fd00::1]"},
+		{"[fd00::1]", "", "[fd00::1]"},
+	}
+	for _, c := range cases {
+		if got := webURLHost(c.host, c.port); got != c.want {
+			t.Errorf("webURLHost(%q,%q) = %q, want %q", c.host, c.port, got, c.want)
+		}
+	}
+}
+
+// failingGwAccess 一个读库必失败的 GatewayAccessStore 桩。
+type failingGwAccess struct{ err error }
+
+func (f failingGwAccess) GatewayAccessList(context.Context) ([]store.GatewayAccess, error) {
+	return nil, f.err
+}
+func (f failingGwAccess) SetGatewayAccess(_ context.Context, a store.GatewayAccess) (store.GatewayAccess, error) {
+	return a, f.err
+}
+
+// 用例：网关接入地址**读库失败**时，七层入口必须说「读取失败（原因）」，而不是把空表当
+// 「未登记」走到第 4 档、回一句「请在网关页登记对外接入地址」——管理员登记过，照着提示
+// 再登记一遍也不会好，真正的原因只在服务端日志里出现过一次。
+// 撤掉 webEntryBase 里对 gatewayAccessMapErr 错误的判定（改回 gatewayAccessMap），这条会红。
+func TestWebEntryReportsAccessReadFailure(t *testing.T) {
+	h, s := newTestServerWithSrv(t)
+	registerWildcardWebGateway(t, h, "gw-1")
+	s.gwAccess = failingGwAccess{err: errors.New("database is locked")}
+
+	code, _, out := webTicketURL(t, h)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("读库失败应 503，得 %d %v", code, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) || !strings.Contains(msg, "读取失败") || !strings.Contains(msg, "database is locked") {
+		t.Fatalf("★503 文案要说清是读库失败并带原因，得 %q", msg)
+	}
+	if strings.Contains(msg, "请在网关页登记") {
+		t.Fatalf("★读库失败不该把责任推给管理员去登记地址（登记过也没用）：%q", msg)
+	}
+	// 门户状态同源：同一句话。
+	_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+	wp, _ := apps["webProxy"].(map[string]any)
+	if wp == nil || wp["ready"] != false || wp["note"] != msg {
+		t.Fatalf("门户状态应与取票 503 同一句话（ready=false），得 %v", apps["webProxy"])
+	}
+
+	// 剖面那条路保持原行为：读失败照样下发落点（fail-open），不因七层的收口而变。
+	code, prof := doJSON(t, h, "GET", "/api/v1/client/profile", userToken("li.fang"), nil)
+	if code != http.StatusOK {
+		t.Fatalf("剖面在接入地址读失败时仍应下发，得 %d %v", code, prof)
+	}
+	if gws, _ := prof["gateways"].([]any); len(gws) == 0 {
+		t.Fatalf("剖面在接入地址读失败时仍应下发落点（fail-open），得 %v", prof["gateways"])
 	}
 }

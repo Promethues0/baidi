@@ -743,20 +743,38 @@ func (s *Server) profileGateways() ([]ProfileGateway, []string) {
 // gatewayAccessMap 管理员登记的对外接入地址，按网关 id 索引。
 // 读失败只记日志回空表：落点该照发（客户端至少还能试自报地址），
 // 但「这是猜的」会由 endpointWarnings 说出来。
+//
+// ★这是**剖面与网关页**的口径（fail-open：宁可下发一个可能连不上的落点，也不让客户端
+// 一个落点都拿不到）。七层入口走 gatewayAccessMapErr：那条路上「读失败」与「未登记」
+// 必须分得开，见 webEntryBase。
 func (s *Server) gatewayAccessMap() map[string]store.GatewayAccess {
+	out, err := s.gatewayAccessMapErr()
+	if err != nil {
+		slog.Error("网关接入地址读取失败，本次剖面退回「自报地址 + 全局兜底」", "err", err.Error())
+	}
+	return out
+}
+
+// gatewayAccessMapErr 同 gatewayAccessMap，但把读库失败**交给调用方判**。
+//
+// 纯内存栈（gwAccess 为 nil）不是失败：那是「没有这个配置面」，回空表 + nil。
+// 读失败时返回空表 + err——调用方拿到 err 就不该把空表当「管理员没登记」用：
+// webEntryBase 改造前正是这么做的，于是库读失败会一路走到第 4 档，503 文案写着
+// 「请在网关页登记对外接入地址」——管理员明明登记过，照着提示再登记一遍也不会好，
+// 而真正的原因（库读不到）只在服务端日志里出现过一次。
+func (s *Server) gatewayAccessMapErr() (map[string]store.GatewayAccess, error) {
 	out := map[string]store.GatewayAccess{}
 	if s.gwAccess == nil {
-		return out
+		return out, nil
 	}
 	list, err := s.gwAccess.GatewayAccessList(context.Background())
 	if err != nil {
-		slog.Error("网关接入地址读取失败，本次剖面退回「自报地址 + 全局兜底」", "err", err.Error())
-		return out
+		return out, err
 	}
 	for _, a := range list {
 		out[a.GatewayID] = a
 	}
-	return out
+	return out, nil
 }
 
 // endpointWarnings 把「落点地址多半连不上」的三种形态说出来。

@@ -193,11 +193,27 @@ func parseRegisteredRoutes(t *testing.T) map[string]bool {
 			if !ok {
 				return true
 			}
+			// ★两条自检，防止注册从守卫视野里消失（守卫只认 mux.HandleFunc("字面量", …)）：
+			//   (a) mux.Handle / mux.ServeHTTP 之类的非 HandleFunc 调用——mux.Handle 注册的路由
+			//       这里解析不到，等于一条路由在守卫眼里不存在；
+			//   (b) 把 mux 当实参传给别的函数（如 s.registerFoo(mux)）——注册发生在另一个函数体里，
+			//       同样解析不到。两种都是「守卫照旧全绿、覆盖面悄悄缩水」的形态，必须当场红。
+			for _, arg := range call.Args {
+				if id, ok := arg.(*ast.Ident); ok && id.Name == "mux" {
+					t.Errorf("Routes 里把 mux 当实参传给了别的函数（%s）：那里面的注册守卫看不到，请把注册留在 Routes 函数体内或扩展解析",
+						fset.Position(call.Pos()))
+				}
+			}
 			sel, ok := call.Fun.(*ast.SelectorExpr)
-			if !ok || sel.Sel.Name != "HandleFunc" {
+			if !ok {
 				return true
 			}
 			if x, ok := sel.X.(*ast.Ident); !ok || x.Name != "mux" {
+				return true
+			}
+			if sel.Sel.Name != "HandleFunc" {
+				t.Errorf("Routes 里出现了 mux.%s（%s）：守卫只解析 mux.HandleFunc，这条注册会从负向鉴权覆盖里消失，请改用 HandleFunc 或扩展解析",
+					sel.Sel.Name, fset.Position(call.Pos()))
 				return true
 			}
 			if len(call.Args) == 0 {

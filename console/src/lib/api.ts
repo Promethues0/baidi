@@ -933,7 +933,8 @@ export interface Resource {
   webScheme?: 'http' | 'https';
   /**
    * 对外访问入口基址覆盖（store.Resource.WebEntry），如 https://oa.corp.example。
-   * 空 = 用网关自报的七层落点。只影响控制面发给浏览器的跳转地址，不影响网关路由。
+   * 空 = 依次用整站入口 BAIDI_WEB_ENTRY_BASE / 网关页登记的对外接入地址 / 网关自报落点
+   *（api.webEntryBase 的第 2/3/4 档）。只影响控制面发给浏览器的跳转地址，不影响网关路由。
    */
   webEntry?: string;
   addrRef?: string; svcRef?: string;
@@ -1175,7 +1176,8 @@ export interface PortalTile {
    *  前端自己算一遍就会给出一个点了必然失败的按钮。 */
   renewable?: boolean;
 }
-/** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线）。
+/** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线 /
+ *  入口地址推导出回环或通配——如网关只监听 127.0.0.1 又没配整站入口或登记接入地址）。
  *  ★门户据此把 Web 磁贴的「访问」按钮置灰并显示原因，而不是让人点了才拿到一个一闪而过的 503。 */
 export interface WebProxyStatus { ready: boolean; note: string }
 export interface PortalAppsResp { apps: PortalTile[]; webProxy?: WebProxyStatus }

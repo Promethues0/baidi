@@ -262,7 +262,7 @@ jobs:
           - os: windows-latest
             arch: aarch64
             target: aarch64-pc-windows-msvc
-            label: Windows ARM64 · msi + nsis（x64 runner 上交叉构建，未实机验证）
+            label: Windows ARM64 · msi + nsis（x64 runner 交叉构建；ARM64 一台真机阶段 A/B 过，阶段 C 未完）
 
     env:
       # ★传了 --target 之后 cargo/tauri 把产物挪到 target/<三元组>/release。
@@ -894,7 +894,7 @@ jobs:
           **不写「构建中，敬请期待」**——那等于让人一直等一个按现有决策不会下发的包）。
 
           ── 怎么把「未验证」变成「已验证」──────────────────────────────
-          本包**同目录**附了 verify-windows.ps1：上面那三项未验证的东西，它逐条测。
+          本包**同目录**附了 verify-windows.ps1：前两项它逐条测；第三项要在 x64 真机上把三个阶段重跑一遍。
           这是「先验后发」唯一认可的证据来源——跑通它、把报告回传，Windows 客户端
           才会进下载中心。
 

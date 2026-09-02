@@ -202,7 +202,7 @@
               <label>对外访问域名（可选）</label>
               <a-input v-model="wz.f.webEntry" placeholder="https://oa.corp.example" class="bd-mono" allow-clear />
               <span class="bd-fld__d">
-                浏览器该跳到哪个入口。留空 = 用网关自报的七层落点。只填到主机[:端口]，不要带路径；
+                浏览器该跳到哪个入口。留空 = 依次用整站入口 BAIDI_WEB_ENTRY_BASE / 网关页登记的对外接入地址 / 网关自报落点。只填到主机[:端口]，不要带路径；
                 实际路由按 <code>/app/&lt;资源id&gt;/</code> 路径前缀分流，与域名无关。
               </span>
             </div>
@@ -224,7 +224,7 @@
             <b>发布摘要</b>
             <div>{{ modeMeta(wz.mode || 'web').label }} · {{ wz.f.name || '未命名' }} · {{ wz.f.addr || '—' }} · {{ wz.f.resourceId ? `关联资源 ${wz.f.resourceId}` : '未关联资源' }}</div>
             <div v-if="wz.mode === 'web' && wz.f.resourceId" class="bd-wz__summary-sub">
-              七层代理：后端 {{ wz.f.webScheme.toUpperCase() }} · 入口 {{ wz.f.webEntry || '网关默认落点' }}
+              七层代理：后端 {{ wz.f.webScheme.toUpperCase() }} · 入口 {{ wz.f.webEntry || '默认推导（整站入口 / 登记的接入地址 / 网关自报落点）' }}
               （这两项会写进资源「{{ wz.f.resourceId }}」）
             </div>
           </div>

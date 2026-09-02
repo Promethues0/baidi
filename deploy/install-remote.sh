@@ -280,6 +280,9 @@ chmod 0700 "$BD_PREFIX/etc/keys" "$BD_PREFIX/etc/pki"
 # control 专属 env（0600）。注意：令牌已全部由 Ed25519 私钥签发，
 # BAIDI_JWT_SECRET 只在 BAIDI_ACCEPT_HS256=1 的过渡逃生舱下才有意义，
 # 这里仍生成一个随机值以备回滚，但默认不参与任何鉴权。
+# 本脚本不写、但开七层 Web 代理（网关 env 里的 BAIDI_GW_WEB）时要手工加进这个文件的一项：
+#   BAIDI_WEB_ENTRY_BASE=https://<nginx 对外地址>   # 浏览器该跳的整站入口（前置 nginx 终结 HTTPS）
+# 不配的话控制面只能从网关自报的回环监听推导入口，门户会当面报「七层入口地址无法确定」。
 if [ ! -f "$BD_PREFIX/etc/baidi.env" ]; then
   echo "BAIDI_JWT_SECRET=$(head -c 32 /dev/urandom | base64 | tr -d '=+/')" > "$BD_PREFIX/etc/baidi.env"
   chmod 0600 "$BD_PREFIX/etc/baidi.env"
@@ -461,6 +464,9 @@ BAIDI_GW_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/knock.pub
 # 该端口必须对浏览器可达，不受 SPA 隐身保护，是一个真实的入站攻击面。
 # 要开就取消下面 BAIDI_GW_WEB 的注释，并**务必**在它前面放一层 HTTPS
 # （会话 Cookie 恒带 Secure，纯 HTTP 暴露时浏览器根本不会保存它）。
+# ★开了之后 control 侧还须配 BAIDI_WEB_ENTRY_BASE=https://<nginx 对外地址>（写进 etc/baidi.env），
+#   或在控制台网关页登记对外接入地址且把 -web 改成直接对外的监听——否则控制面从
+#   127.0.0.1:18444 推导不出浏览器能到达的入口，门户 Web 磁贴会当面报「七层入口地址无法确定」。
 BAIDI_GW_WEB_JWT_PUBKEY=$BD_PREFIX/etc/gwcerts/web.pub
 #BAIDI_GW_WEB=127.0.0.1:18444
 # ★开了 BAIDI_GW_WEB 就**必须**同时填这一行：前置 nginx 的地址（逗号分隔可多段）。

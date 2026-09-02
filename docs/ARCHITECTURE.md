@@ -436,7 +436,7 @@ sequenceDiagram
 - **角色落库**：`admin_roles("key", name, power, builtin, scope_json)` + `users.admin_role`（补列 + 回填，见下）。内置四角色 root / system / security / audit 每次启动按 `PowerPerms` 重算 `scope_json` 覆盖，新增权限键时内置角色自动跟上。
 - **执行方是 `api.requirePerm`**，不是页面文案：`scope_json` 里的权限键（`system` / `security` / `audit` / `admins` / `*`）逐端点比对。审计管理员读得到 `/api/v1/audit`（含链校验与导出）却改不了用户与策略；安全管理员管认证源 / 认证策略 / 资源应用 / 用户组织 / 审批，但**读不到全量审计**；系统管理员管网关证书 / 组网 / 对象库 / 锁定阈值 / `/diag`。权限矩阵有双向用例（能做的 2xx、不能做的 403）。
 - **角色现算不进令牌**：写进 8h 会话令牌的话一次降权要等到令牌过期才生效。读不出角色（库抖动 / 角色悬空 / 从未分派）一律 **fail-closed 403**，越权尝试落审计（category=security、verdict=deny）。
-- **读端点同样过角色闸；全部路由的负向鉴权由 `TestEveryRouteRejectsNonAdminUnlessListed`（`api/routeguard_test.go`）全量守卫**：管理台的 `GET /apps`、`/overview`、`/security`、`/authpolicy` 此前一道闸都没有——任何 role=user 甚至 role=gateway 令牌都读得到应用后端地址、攻击源 IP、全部基线与认证策略里的可信网段 CIDR（消费方核对：四条只有管理台在读，门户磁贴走 `/portal/apps`，/screen 大屏对 role=user 在 router 层就被重定向）。现在四条都是 `requireAdmin`（现算，撤销管理员后旧令牌立刻 403，`readgates_test.go`）。守卫用 go/ast 解析 `Routes` 里每一条 `mux.HandleFunc` 注册（167 条，含 compat 分支），用 user 与 gateway 令牌各打一次：不在例外清单里的**必 403**，清单里的**必不是 403** 且必须是真实路由——例外只有三类（免认证登录/票据/公开分发、`requireUser` 自助端点、compat 明文口的两条网关接口），逐条写理由。新加一条路由漏了闸，CI 当场红；变异检查撤掉任一条 `requireAdmin`/`requirePerm` 都能让它红。
+- **读端点同样过角色闸；全部路由的负向鉴权由 `TestEveryRouteRejectsNonAdminUnlessListed`（`api/routeguard_test.go`）全量守卫**：管理台的 `GET /apps`、`/overview`、`/security`、`/authpolicy` 此前一道闸都没有——任何 role=user 甚至 role=gateway 令牌都读得到应用后端地址、攻击源 IP、全部基线与认证策略里的可信网段 CIDR（消费方核对：四条只有管理台在读，门户磁贴走 `/portal/apps`，/screen 大屏对 role=user 在 router 层就被重定向）。现在四条都是 `requireAdmin`（现算，撤销管理员后旧令牌立刻 403，`readgates_test.go`）。守卫用 go/ast 解析 `Routes` 里每一条 `mux.HandleFunc` 注册（全部注册，含 compat 分支；条数以用例 t.Logf 输出为准，少于 100 条守卫自身 Fatal），用 user 与 gateway 令牌各打一次：不在例外清单里的**必 403**，清单里的**必不是 403** 且必须是真实路由——例外只有三类（免认证登录/票据/公开分发、`requireUser` 自助端点、compat 明文口的两条网关接口），逐条写理由。新加一条路由漏了闸，CI 当场红；变异检查的实测范围：撤掉 `handleSaveResource` 的 `requirePerm`、或四条读端点任一条 `requireAdmin`，守卫都红；恢复后绿。守卫另有两条自检守住自己的视野：`Routes` 里出现 `mux.Handle` 之类非 `HandleFunc` 的注册、或把 `mux` 当实参传给别的函数，都当场红——那两种形态都会让注册从守卫眼里消失而用例照旧全绿。
 - **补列回填是「不被自己锁在门外」的唯一保证**：既有 `role='admin'` 的账号一次性回填成 root（`admin.role.backfill.v1` 标记）。不回填的话升级后所有管理员立即什么都干不了，而"给自己分配角色"本身也要管理员权限——死锁。做成**一次性**则是另一面：每次启动都补的话，任何造出「是管理员但没角色」的路径都变成「重启即提权到超管」。
 - **防自锁三条路都堵上**：最后一名可登录的超管不可降权（`SetAdminRole`）、不可撤销（`RemoveAdmin`）、不可禁用/锁定（`SetUserStatus`），三处判定在同一个事务内做计数，回 409 + 原因。**已被禁用的 root 不计入剩余超管**——留着一个登不进来的 root 当"还有人管"，等于闸没生效。
 - **自定义角色只能在三权内收缩**：`*` 与 `admins` 保存时拒绝。拿得到它们的自定义角色等价于一个不叫 root 的超管，而防自锁的计数只认 `power=root`。
@@ -965,7 +965,7 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 - **posture 采集的 Windows 分支同样未实机**（见上一节），**网关侧 Windows 的系统指标五项全部
   不可判定**（见后面「网关设备状态采集」一节）—— 三处的 Windows 支持都停在同一道线上。
 - 因此 **CI 产物标 `UNVERIFIED`，刻意不进下载中心 manifest**。下载页的 Windows 占位文案照实说
-  「包内已含 wintun.dll…但 UAC 提权与数据面均未实机验证…请联系管理员」，两处文案
+  「ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机…请联系管理员」，两处文案
   （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。
 
 ### ⚠️ 移动端原生壳（安卓 VpnService / iOS PacketTunnelProvider：源码级修复，两端均未实机）

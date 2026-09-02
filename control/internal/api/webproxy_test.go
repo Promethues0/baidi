@@ -393,11 +393,23 @@ func TestWebEntryPicksOnlyGatewaysWithWebListener(t *testing.T) {
 // `BAIDI_GW_WEB=127.0.0.1:18444` 下票据 URL 是 http://127.0.0.1:18444/__baidi/enter，
 // 而 webProxyStatus 照报 ready=true——浏览器被指向自己、零报错。
 
-// registerLoopbackWebGateway 复刻参考部署形态：七层监听在回环、SPA 通配监听（不带 host）。
+// registerLoopbackWebGateway 复刻参考部署形态：七层**显式绑回环**、SPA 通配监听（不带 host）。
+// 这种形态下登记地址 + 自报端口组合不出一个有人监听的地址，只有前置入口能救。
 func registerLoopbackWebGateway(t *testing.T, h http.Handler, id string) {
 	t.Helper()
+	registerWebGatewayListening(t, h, id, "127.0.0.1:18444")
+}
+
+// registerWildcardWebGateway 七层**通配监听**（不带 host）：这才是「登记地址 + 自报端口」成立的形态。
+func registerWildcardWebGateway(t *testing.T, h http.Handler, id string) {
+	t.Helper()
+	registerWebGatewayListening(t, h, id, ":18444")
+}
+
+func registerWebGatewayListening(t *testing.T, h http.Handler, id, web string) {
+	t.Helper()
 	if code, out := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
-		map[string]any{"id": id, "proxy": ":18443", "spa": ":18201", "web": "127.0.0.1:18444"}); code != http.StatusOK {
+		map[string]any{"id": id, "proxy": ":18443", "spa": ":18201", "web": web}); code != http.StatusOK {
 		t.Fatalf("网关 %s 注册 http %d: %v", id, code, out)
 	}
 }
@@ -410,11 +422,13 @@ func webTicketURL(t *testing.T, h http.Handler) (int, string, map[string]any) {
 	return code, u, out
 }
 
-// 用例①：网关监听回环 + 管理员登记了对外接入地址 → 票据 URL 用登记地址（端口仍取自报监听）。
-// 撤掉 webEntryBase 里「登记地址」那一档，这条会红（回落到 127.0.0.1 被回环判据拒成 503）。
+// 用例①：网关七层通配监听 + 管理员登记了对外接入地址 → 票据 URL 用登记地址（端口仍取自报监听）。
+// 撤掉 webEntryBase 里「登记地址」那一档，这条会红（回落到空 host → SPA host 也空 → 兜底
+// 127.0.0.1 被回环判据拒成 503）。
+// ★夹具必须是通配监听（`:18444`）而不是回环：回环绑定 + 登记地址是另一条用例里的**反例**。
 func TestWebEntryUsesRegisteredGatewayAccess(t *testing.T) {
 	h := newTestServer(t)
-	registerLoopbackWebGateway(t, h, "gw-1")
+	registerWildcardWebGateway(t, h, "gw-1")
 	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
 		map[string]any{"lanHost": "", "wanHost": "gw.example.com"}); code != http.StatusOK {
 		t.Fatalf("登记接入地址 http %d: %v", code, out)
@@ -466,11 +480,20 @@ func TestWebEntryLoopbackIsNotReady(t *testing.T) {
 			}
 			errObj, _ := out["error"].(map[string]any)
 			msg, _ := errObj["message"].(string)
-			if !strings.HasPrefix(msg, webEntryUnresolvedMsg) {
+			if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) {
 				t.Fatalf("★取票被拒必须带出补救路径，得 %q", msg)
 			}
 			if !strings.Contains(msg, "127.0.0.1") && !strings.Contains(msg, "0.0.0.0") && !strings.Contains(msg, `""`) {
 				t.Fatalf("拒绝原因应写出此刻推导出的地址，得 %q", msg)
+			}
+			// 补救路径按形态给：显式绑回环时「登记接入地址」救不了它，文案不能照抄那一句；
+			// 通配/不带 host 时两条路都真能救。
+			if web == "127.0.0.1:18444" {
+				if strings.Contains(msg, "请在网关页登记对外接入地址") || !strings.Contains(msg, "BAIDI_WEB_ENTRY_BASE") {
+					t.Fatalf("★七层显式绑回环时补救路径只有前置入口，不得建议登记接入地址，得 %q", msg)
+				}
+			} else if !strings.HasPrefix(msg, webEntryUnresolvedMsg) {
+				t.Fatalf("通配监听时两条补救路径都成立，文案应是整句 webEntryUnresolvedMsg，得 %q", msg)
 			}
 			_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
 			wp, _ := apps["webProxy"].(map[string]any)
@@ -484,8 +507,54 @@ func TestWebEntryLoopbackIsNotReady(t *testing.T) {
 	}
 }
 
+// 反例（复核补）：七层**显式绑回环** + 管理员登记了接入地址 → 仍不就绪、仍拒签，且原因点名回环监听。
+//
+// 第一版第 3 档只看「登记地址是否存在」：参考部署 `BAIDI_GW_WEB=127.0.0.1:18444` 的管理员为了让
+// C/S 客户端连得上去网关页登记了 gw.example.com 之后，webEntryBase 算出 http://gw.example.com:18444、
+// 门户报就绪、审计记「签发 Web 访问票据」——而网关的 L7 只 bind 在 127.0.0.1，那个地址上什么都
+// 没在听。撤掉 webEntryBase 里 webListenLoopback 那道闸，这条会红（签出票、状态报 ready）。
+func TestWebEntryLoopbackListenerRejectsRegisteredAccess(t *testing.T) {
+	h := newTestServer(t)
+	registerLoopbackWebGateway(t, h, "gw-1")
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"lanHost": "", "wanHost": "gw.example.com"}); code != http.StatusOK {
+		t.Fatalf("登记接入地址 http %d: %v", code, out)
+	}
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("★七层只监听回环时登记地址上没有服务，不得签票（拿到的是 %q），得 %d %v", entry, code, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) {
+		t.Fatalf("拒绝文案应以固定开头起，得 %q", msg)
+	}
+	for _, want := range []string{"gw-1", "127.0.0.1:18444", "gw.example.com", "BAIDI_WEB_ENTRY_BASE"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("★拒绝原因必须点名网关、回环监听地址、登记地址与真正的补救路径（缺 %q），得 %q", want, msg)
+		}
+	}
+	if strings.Contains(msg, "请在网关页登记对外接入地址") {
+		t.Fatalf("★管理员已经登记了，再让他去登记是把人指去一条走不通的路，得 %q", msg)
+	}
+	_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+	wp, _ := apps["webProxy"].(map[string]any)
+	if wp == nil || wp["ready"] != false {
+		t.Fatalf("★七层显式绑回环时门户不得报 ready，得 %v", apps["webProxy"])
+	}
+	if note, _ := wp["note"].(string); note != msg {
+		t.Fatalf("门户 note 与取票 503 必须是同一句话，得\n  note=%q\n  503 =%q", note, msg)
+	}
+	// 同一台网关改成通配监听（重新注册覆盖），登记地址立刻成立——两种形态分得开、且只差这一处。
+	registerWildcardWebGateway(t, h, "gw-1")
+	if code, entry, out := webTicketURL(t, h); code != http.StatusOK || !strings.HasPrefix(entry, "http://gw.example.com:18444"+webEntryPath) {
+		t.Fatalf("改成通配监听后登记地址 + 自报端口应成立，得 %d %q %v", code, entry, out)
+	}
+}
+
 // 用例③：显式 BAIDI_WEB_ENTRY_BASE 仍优先于登记地址（顺序不变），且统一入口下票不绑网关。
 // 资源级 WebEntry 又优先于环境变量——三档顺序一并钉住。
+// 夹具刻意用**回环绑定**的网关：显式统一入口是回环绑定的唯一正确出路，它不受回环闸约束。
 func TestWebEntryExplicitBaseBeatsRegisteredAccess(t *testing.T) {
 	h := newTestServer(t)
 	registerLoopbackWebGateway(t, h, "gw-1")
@@ -512,6 +581,19 @@ func TestWebEntryExplicitBaseBeatsRegisteredAccess(t *testing.T) {
 	}
 	if _, entry, _ := webTicketURL(t, h); !strings.HasPrefix(entry, "https://oa.corp.example"+webEntryPath) {
 		t.Fatalf("资源级 WebEntry 应优先于 BAIDI_WEB_ENTRY_BASE，得 %q", entry)
+	}
+}
+
+// 监听形态判据：只认「显式绑回环」；空/通配是「所有接口都听」，与回环走相反的分支。
+func TestWebListenLoopback(t *testing.T) {
+	for host, want := range map[string]bool{
+		"127.0.0.1": true, "127.8.8.8": true, "::1": true, "localhost": true, "LOCALHOST": true,
+		"": false, "  ": false, "0.0.0.0": false, "::": false,
+		"10.0.0.5": false, "gw.example.com": false,
+	} {
+		if got := webListenLoopback(host); got != want {
+			t.Errorf("webListenLoopback(%q)=%v, want %v", host, got, want)
+		}
 	}
 }
 

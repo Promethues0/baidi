@@ -186,10 +186,10 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 ## 生产化清单（上线前）
 
 - [ ] `etc/tls` 换正式证书（替换自签）
-- [ ] `etc/keys/` 与 `etc/pki/` 已生成且 0700；**私钥绝不下发给网关**（网关只拿 `knock.pub` 与自己的客户端证书）
+- [ ] `etc/keys/` 与 `etc/pki/` 已生成且 0700；**私钥绝不下发给网关**（网关只拿 `knock.pub` / `web.pub` 两把公钥与自己的客户端证书）
 - [ ] 网关证书可随时吊销：`POST /api/v1/pki/gateway-certs/{fingerprint}/revoke`（指纹白名单是执行点，下次握手即被拒）
 - [ ] 备份 `etc/keys/` 与 `etc/pki/`：**丢了这两个目录，所有已分发公钥的网关会全部拒绝敲门**，且日志只显示「令牌无效」而非「密钥换了」
-- [ ] 首登强制改密**已默认强制**（`BAIDI_SEED_MUST_CHANGE` 缺省 1，`deploy.sh` 与 `install-remote.sh` 两处一致）；演示机在 `config.env` 里显式关掉的，上线前要开回——种子口令 `baidi@123` 是公开的
+- [ ] 首登强制改密**已默认强制**（`BAIDI_SEED_MUST_CHANGE` 缺省 1，`deploy.sh` 与 `install-remote.sh` 两处一致）；演示机在 `config.env` 里显式关掉的，注意它**只在首次建库时生效**：演示机若已建库，开回该值无效，需重建库（删 `data/baidi.db` 重灌种子）或手工给种子账号置首登改密——种子口令 `baidi@123` 是公开的
 - [ ] `data/baidi.db` 纳入定期备份（WAL，可热备 `.backup`）
 - [ ] 要冗余就装温备（上一节）；装了之后**定期看一眼系统页的同步新鲜度**——备机静默落后与没有备机，只在切换那天才区分得出来
 - [ ] 安全组放行 443（仅 nginx 对外；8090 仅本机）

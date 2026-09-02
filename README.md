@@ -114,7 +114,7 @@ cd console && npm install && npm run dev     # → http://localhost:5193
 ```
 
 - **登录**：管理台 `admin / baidi@123`；终端门户 `/portal/login` 用**种子账号**（如 `li.fang`）+ 口令 `baidi@123`——登录查的是目录账号 + bcrypt 哈希，**不是任意用户名都能登**。按脚本部署（`deploy/deploy.sh`）时 `BAIDI_SEED_MUST_CHANGE` 默认 1，种子账号**首次登录强制改密**；演示机在 `config.env` 里显式关闭。
-- **二次认证（passkey + TOTP）**：passkey 由 `BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 驱动，门户与管理台均覆盖——已注册 passkey 的账号登录需 Touch ID / Windows Hello / 安全密钥断言，`/portal/security` 管理凭据。注意 **RP ID 必须是可注册域名或 `localhost`，浏览器不允许裸 IP**，故上述 IP 演示站启用不了 passkey；**裸 IP 站用 TOTP**（`/portal/security` 绑定，自研 RFC 6238，不依赖域名，也是桌面/移动 C/S 客户端唯一能走的二因子）。演示验证码 `123456` 仅在「未注册 TOTP **且**认证策略未列二次方式」时残留；注册 TOTP 后对该账号从密码学上不可达。
+- **二次认证（passkey + TOTP）**：passkey 由 `BAIDI_WEBAUTHN_RPID` + `BAIDI_WEBAUTHN_ORIGIN` 驱动，门户与管理台均覆盖——已注册 passkey 的账号登录需 Touch ID / Windows Hello / 安全密钥断言，`/portal/security` 管理凭据。注意 **RP ID 必须是可注册域名或 `localhost`，浏览器不允许裸 IP**，故上述 IP 演示站启用不了 passkey；**裸 IP 站用 TOTP**（`/portal/security` 绑定，自研 RFC 6238，不依赖域名，也是桌面/移动 C/S 客户端唯一能走的二因子）。演示验证码 `123456` 仅在「WebAuthn RP 未配置 **且** 未注册 TOTP **且** 认证策略未列二次方式」时残留（裸 IP 演示站即前一条恒成立的形态）；注册 TOTP 后对该账号从密码学上不可达。
 - 未起后端时各页降级为内置演示数据，UI 完整可点。**「设备状态」与「业务告警」两页例外**：连不上就如实显示为空，不画假曲线、不编假告警。
 
 ### 数据面网关

@@ -126,8 +126,9 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 #   - iOS 与鸿蒙缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 +
 #     Network Extension 授权 / DevEco Studio 工具链）；
 #   - Windows 的包组件已经齐了（wintun.dll 构建期取件 + 哈希校验，随包装在 baidi-tun.exe
-#     旁边），缺的是**实机验证**：UAC 提权、建卡、NRPT 分离式 DNS 一次都没在真实 Windows
-#     上跑过。CI 出的包因此标 UNVERIFIED 且刻意不进下载中心。
+#     旁边），缺的是**完整的实机验证**：截至 2026-08-21 只有一台 ARM64 真机跑过，UAC 提权
+#     与建卡已通过，隧道端到端与 NRPT 分离式 DNS 未验，x64 那一份全部未实机。CI 出的包
+#     因此标 UNVERIFIED 且刻意不进下载中心。文案说的是**此刻**的缺口，别写回「均未实机验证」。
 #     对用户来说重点不是"包能不能出"，是"能不能用"：写「敬请期待」等于让他一直等一个
 #     按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）恰恰是存在的，
 #     却被那句占位文案挡住了。
@@ -140,8 +141,8 @@ clients = [
           note="" if os.environ["MAC_FILE"] else "构建中，敬请期待",
           rev=os.environ.get("MAC_REV", ""), built=os.environ.get("MAC_BUILT", "")),
     entry("windows", "Windows 桌面客户端", "",
-          note="包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；"
-               "CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
+          note="ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；"
+               "x64 全部未实机；产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("linux", "Linux 桌面客户端", "", note="pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"),
     entry("ios", "iOS 客户端", "",
           note="需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"),

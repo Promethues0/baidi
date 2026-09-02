@@ -154,10 +154,19 @@ func TestBuildArtifactsPlaceholdersMatchServer(t *testing.T) {
 		}
 	}
 	// Windows 那句必须给得出真实的下一步，否则与「敬请期待」是同一种没用。
-	// ★还要说清"未实机验证"：包现在组件是齐的（wintun.dll 随包分发），只说"找管理员要"
-	// 而不说为什么不上架，用户会以为这只是流程麻烦，而不是一份没人试过的产物。
-	if n := got["windows"].Note; !strings.Contains(n, "未实机验证") || !strings.Contains(n, "联系管理员") {
-		t.Errorf("Windows 占位要说清为什么没有包、找谁：%q", n)
+	// ★还要说清验证缺口：包现在组件是齐的（wintun.dll 随包分发），只说"找管理员要"
+	// 而不说为什么不上架，用户会以为这只是流程麻烦，而不是一份没验完的产物。
+	// 缺口要按**此刻**的证据说（clients/BUILD.md 第十节）：ARM64 一台真机 A/B 过、C 未完，
+	// x64 一次没跑——既不能退回「均未实机验证」（把已有的证据说没了），也不能只写「UNVERIFIED」
+	// 这个标签（用户看不出到底缺什么）。
+	n := got["windows"].Note
+	for _, must := range []string{"未验", "x64", "未实机", "UNVERIFIED", "联系管理员"} {
+		if !strings.Contains(n, must) {
+			t.Errorf("Windows 占位要说清缺什么验证、为什么没有包、找谁（缺 %q）：%q", must, n)
+		}
+	}
+	if strings.Contains(n, "均未实机验证") {
+		t.Errorf("Windows 占位不该再说「均未实机验证」——ARM64 真机的阶段 A/B 证据已经存在（BUILD.md 10.3）：%q", n)
 	}
 }
 

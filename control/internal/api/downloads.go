@@ -62,8 +62,11 @@ type downloadsManifest struct {
 // iOS 与鸿蒙不是——它们缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号
 // 签名 + Network Extension 授权 / DevEco Studio 工具链）。
 // **Windows 也不是**：包在 CI 上出得来、组件也齐（wintun.dll 构建期从官方取件 + 哈希校验，
-// 随包装在 baidi-tun.exe 旁边），缺的是**实机验证**——UAC 提权、建卡、NRPT 分离式 DNS
-// 一次都没在真实 Windows 上跑过，产物因此标 UNVERIFIED 且刻意不进下载中心。
+// 随包装在 baidi-tun.exe 旁边），缺的是**完整的实机验证**——截至 2026-08-21 只有一台
+// Windows 11 ARM64 真机跑过：UAC 提权与建卡（阶段 A/B）已通过，隧道端到端与 NRPT 分离式
+// DNS（阶段 C）未验；x64 那一份全部未实机。产物因此标 UNVERIFIED 且刻意不进下载中心。
+// 占位文案说的必须是**此刻**的缺口（clients/BUILD.md 第十节），既不能仍写「均未实机验证」
+// （ARM64 的证据已经存在），也不能写成「已验证」（阶段 C 没过、x64 一次没跑）。
 // **Linux 同处境**（.deb/.AppImage 出得来，pkexec 提权与数据面未实机验证），同样不写那句。
 // 用户看到的不是「包能不能出」，是「能不能用」——对他写「敬请期待」等于让他
 // 一直等一个按现有决策不会下发的包，而正确的下一步（找管理员要 UNVERIFIED 包）
@@ -71,7 +74,7 @@ type downloadsManifest struct {
 func placeholderManifest() downloadsManifest {
 	return downloadsManifest{Clients: []ClientDownload{
 		{Platform: "macos", Label: "macOS 桌面客户端", Note: "构建中，敬请期待"},
-		{Platform: "windows", Label: "Windows 桌面客户端", Note: "包内已含建虚拟网卡所需的 wintun.dll（构建期官方取件 + 哈希校验），但 UAC 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
+		{Platform: "windows", Label: "Windows 桌面客户端", Note: "ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机；产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "linux", Label: "Linux 桌面客户端", Note: "pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "ios", Label: "iOS 客户端", Note: "需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"},
 		{Platform: "android", Label: "Android 客户端", Note: "构建中，敬请期待"},

@@ -234,7 +234,15 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	reportedHost, port := splitHostPortLoose(gw.Web)
 	// 第 3 档：管理员登记的对外接入地址。与剖面 profileGateways 同一张表、同一个取数函数，
 	// 别在这里另查一遍库——两处判据分叉的症状是「客户端连得上、浏览器打不开」或反过来。
-	access := s.gatewayAccessMap()[gw.ID]
+	//
+	// ★读库失败**不是**「未登记」：剖面那条路 fail-open 退回自报地址是对的（客户端至少还
+	// 能试），但这里退回第 4 档会把 503 文案写成「请在网关页登记对外接入地址」——责任推给
+	// 管理员，而他登记过、再登记一遍也不会好。读不到就说读不到，把原因带出来。
+	accessMap, err := s.gatewayAccessMapErr()
+	if err != nil {
+		return "", "", fmt.Errorf("%s网关接入地址读取失败（%v）", webEntryUnresolvedPrefix, err)
+	}
+	access := accessMap[gw.ID]
 	if webListenLoopback(reportedHost) {
 		// ★显式绑回环：登记地址与自报端口组合不出一个有人监听的地址，别往下走第 3/4 档。
 		// 这一判必须排在第 3 档**之前**——排在后面就是第一版的形态：登记了就报就绪。
@@ -271,10 +279,24 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	if gw.WebTLS {
 		scheme = "https"
 	}
-	if port == "" {
-		return scheme + "://" + host, gw.ID, nil
+	return scheme + "://" + webURLHost(host, port), gw.ID, nil
+}
+
+// webURLHost 把 host[:port] 拼成能放进 URL 的 authority：IPv6 字面量必须加方括号。
+//
+// ★管理员登记 fd00::1 这样的 IPv6 接入地址（NormalizeAccessHost 收 IP 字面量，不区分 v4/v6），
+// 改造前直接 host+":"+port 拼出 http://fd00::1:18444——浏览器把它解析成 host=fd00、
+// port=":1:18444"，跳转直接失败，而票据照签、门户按钮照亮、控制面零报错。
+// port 非空走 net.JoinHostPort（它自己会包括号）；port 为空时按「含冒号即 IPv6」包括号
+// （主机名与 IPv4 里不可能出现冒号——带端口的写法在 NormalizeAccessHost 入口就被拒了）。
+func webURLHost(host, port string) string {
+	if port != "" {
+		return net.JoinHostPort(host, port)
 	}
-	return fmt.Sprintf("%s://%s:%s", scheme, host, port), gw.ID, nil
+	if strings.Contains(host, ":") && !strings.HasPrefix(host, "[") {
+		return "[" + host + "]"
+	}
+	return host
 }
 
 // webEntryUnresolvedPrefix 七层入口地址推导不出可达值时的固定开头。

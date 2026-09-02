@@ -1,6 +1,6 @@
 # 白帝 · 零信任访问控制系统（ZTNA/SDP）
 
-独立于烛龙的全栈自研 ZTNA（从烛龙 PRD 分叉做减法，取舍见 docs/SCOPE.md：UEM 整章不做）：SPA 单包授权服务隐身 + 国密 TLCP/TLS 隧道 + utun 真流量接管 + 身份/策略/审计闭环。控制台 15 页脱 mock、数据面真链路实测、桌面 Tauri 客户端带 utun 数据面。在线演示 https://101.43.125.131/（admin/baidi@123）。研究/演示用途，未经安全审计。
+独立于烛龙的全栈自研 ZTNA（从烛龙 PRD 分叉做减法，取舍见 docs/SCOPE.md：UEM 整章不做）：SPA 单包授权服务隐身 + 国密 TLCP/TLS 隧道 + utun 真流量接管 + 身份/策略/审计闭环。控制台 21 页全部真实组件、数据面真链路实测、桌面 Tauri 客户端带 utun 数据面。在线演示 https://101.43.125.131/（admin/baidi@123）。研究/演示用途，未经安全审计。
 
 ## 交流与协作约定
 
@@ -43,7 +43,7 @@ BAIDI_STANDBY_PASSPHRASE=… deploy/promote-standby.sh --dry-run  # 提升备机
 
 ## 架构地图
 
-- `console/` — 单 SPA：管理台（监控中心/业务管理/安全防护/系统，15 真实页余 ComingSoon）+ 门户 /portal/* + 大屏 /screen + 诊断 /diag；路由生成式：nav.ts 定义 IA → router.ts BUILT 映射
+- `console/` — 单 SPA：管理台（监控中心/业务管理/安全防护/系统，21 页全部真实组件、无 ComingSoon 叶子）+ 门户 /portal/* + 大屏 /screen + 诊断 /diag；路由生成式：nav.ts 定义 IA → router.ts BUILT 映射
 - `console/src/lib/api.ts` — 唯一 HTTP 封装：BASE=/api/v1，token 存 localStorage(baidi_token)
 - `control/` — Go 控制面（**stdlib mux + Go 1.22 方法路由，无 gin**；modernc SQLite 免 CGO；自实现 JWT）；store 层 = 领域文件 + 同名 _sqlite.go 成对；两个二进制（baidi-control 管理 API / **baidi-standby 温备节点**，后者不开任何监听）
 - `docs/ARCHITECTURE.md` — **架构与技术方案解析**（含接入时序图、信任模型、五道门、代码地图、真伪清单）。改动数据面/信任链前先读它

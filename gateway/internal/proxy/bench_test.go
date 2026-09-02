@@ -13,7 +13,8 @@ package proxy
 //      客户端 tlsClientConfig 没配 ClientSessionCache → 每流都是**完整**握手（无会话复用）。
 //      一个网页几十条并发流就是几十次握手，这是传输模型的固有代价，此前从未量过。
 //   ③ 证书形态照生产：网关启动期自签 **RSA-2048**（cmd/baidi-gateway mustSelfSigned），
-//      握手成本里服务端 RSA 签名占一半以上（RSA 与 ECDSA 对照之差）；ECDSA P-256 那组只是对照，**生产没有这个选项**。
+//      握手成本里服务端 RSA 签名占一半以上（RSA 与 ECDSA 对照之差，含客户端验签差异、未单独剖析）；
+//      ECDSA P-256 那组只是对照，**生产没有这个选项**。
 //   ④ slog 输出丢弃（handle 每流打两行 Info）：生产上这两行走 journald，是这里没算的成本。
 //      secevent 上报器接的是空 sink（节流表照常走，网络上报不在口径内）。
 //   ⑤ 钉扎回调（dataplane.PinVerifier）不在口径内——它只是一次 SHA-256 与常量比较。
@@ -150,6 +151,18 @@ func tlcpMaterial(tb testing.TB) ([]tlcp.Certificate, *smx509.CertPool) {
 }
 
 // ── 脚手架：后端 / 网关 / 拨号 ──
+
+// benchIODeadline：基准里每一次等对端字节 / 推大块数据都带这个 deadline。
+// ★没有它，脚手架一坏（放行表没放行、后端不回 ack、slot 泄漏卡住）io.ReadFull 会永远挂住，
+// 表现是 `go test` 10 分钟超时被杀而不是变红——超时日志里只有 goroutine dump，看不出是哪一组、为什么。
+// 5s 对进程内回环是天文数字（单次迭代毫秒级），正常路径永远碰不到它。
+const benchIODeadline = 5 * time.Second
+
+// isTimeout 判一个 IO 错误是不是 deadline 超时（区分「脚手架挂住」与「对端主动拒绝/关闭」）。
+func isTimeout(err error) bool {
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
 
 // quietLog 把默认 slog 换成丢弃（handle 每流两行 Info，成千上万次迭代会淹掉基准输出）；结束恢复。
 func quietLog(b *testing.B) {
@@ -327,7 +340,11 @@ func BenchmarkPerFlowHandshake(b *testing.B) {
 			if err != nil {
 				b.Fatalf("建流失败：%v", err)
 			}
+			_ = c.SetReadDeadline(time.Now().Add(benchIODeadline))
 			if _, err := io.ReadFull(c, make([]byte, 1)); err != nil {
+				if isTimeout(err) {
+					b.Fatalf("%v 内没收到后端首字节：脚手架挂住（放行表 / 注册表 / 前导三者之一没接对）", benchIODeadline)
+				}
 				b.Fatalf("没收到后端首字节：%v", err)
 			}
 			_ = c.Close()
@@ -377,10 +394,19 @@ func BenchmarkFlowThroughput(b *testing.B) {
 		b.ReportAllocs()
 		b.ResetTimer()
 		for i := 0; i < b.N; i++ {
+			// 1 MiB 写入也带 deadline：后端若停读，内核缓冲填满后 Write 同样会永远挂住。
+			_ = c.SetWriteDeadline(time.Now().Add(benchIODeadline))
 			if _, err := c.Write(payload); err != nil {
+				if isTimeout(err) {
+					b.Fatalf("%v 内没写完 1 MiB：脚手架挂住（后端停读 / 网关转发卡住）", benchIODeadline)
+				}
 				b.Fatalf("写入失败：%v", err)
 			}
+			_ = c.SetReadDeadline(time.Now().Add(benchIODeadline))
 			if _, err := io.ReadFull(c, ack); err != nil {
+				if isTimeout(err) {
+					b.Fatalf("%v 内没收到 ack：脚手架挂住（后端没按 %d 字节计数回 ack）", benchIODeadline, throughputChunk)
+				}
 				b.Fatalf("没收到 ack：%v", err)
 			}
 		}
@@ -455,9 +481,18 @@ func BenchmarkConcurrentFlows(b *testing.B) {
 					rejN.Add(1)
 					continue
 				}
+				_ = c.SetWriteDeadline(time.Now().Add(benchIODeadline))
 				_, werr := c.Write(payload)
+				_ = c.SetReadDeadline(time.Now().Add(benchIODeadline))
 				_, rerr := io.ReadFull(c, ack)
 				_ = c.Close()
+				if isTimeout(werr) || isTimeout(rerr) {
+					// 到顶时的拒绝是**立刻**的（EOF / RST），永远不会表现成超时：
+					// 超时只可能是脚手架挂住（slot 泄漏 / 后端不回 ack）。RunParallel 的 goroutine 里
+					// 不能 Fatalf（FailNow 只许在测试 goroutine 调），Errorf 之后退出本 goroutine 的循环。
+					b.Errorf("%v 内没等到 4 KiB 的 ack：脚手架挂住而非到顶（werr=%v rerr=%v）", benchIODeadline, werr, rerr)
+					break
+				}
 				if werr != nil || rerr != nil {
 					rejN.Add(1) // 握手后被拒（如 slot 在握手期间被抢）也算一次未建成
 					continue
@@ -474,6 +509,11 @@ func BenchmarkConcurrentFlows(b *testing.B) {
 		b.ReportMetric(float64(okN.Load())/b.Elapsed().Seconds(), "ok_flows/s")
 		if limit > 64 && rejN.Load() > 0 {
 			b.Errorf("上限充足（limit=%d）却有 %d 次被拒：要么 slot 泄漏，要么脚手架有误", limit, rejN.Load())
+		}
+		// 「上限紧张」组要看的是「大部分被拒、少数建成」：limit=4 再紧也不该一条都建不成——
+		// 到顶只会拒掉超出上限的那部分，全拒是脚手架坏了（放行表/后端），与到顶行为无关。
+		if okN.Load() == 0 {
+			b.Errorf("一条流都没建成（limit=%d，rejected=%d）：脚手架有误而非到顶", limit, rejN.Load())
 		}
 	}
 
@@ -506,8 +546,7 @@ func smokeFlow(t *testing.T, d dialer) {
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	got := make([]byte, 1)
 	if _, err := io.ReadFull(c, got); err != nil {
-		var ne net.Error
-		if errors.As(err, &ne) && ne.Timeout() {
+		if isTimeout(err) {
 			t.Fatal("基准脚手架：3s 内没收到后端首字节（放行表 / 注册表 / 前导三者之一没接对）")
 		}
 		t.Fatalf("基准脚手架：读后端首字节失败：%v", err)

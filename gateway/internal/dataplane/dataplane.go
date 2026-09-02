@@ -262,14 +262,43 @@ type tunneler struct {
 	// 于是三类真实故障在界面上完全看不见：全部落点拨不通、gm 开关与网关不一致导致
 	// 握手 100% 失败、以及指纹钉扎失败（判定为"疑似中间人"）——界面一律绿色「已接入」。
 	// 现在改成按**真实事件**回报：敲门有没有成功过、隧道有没有拨通过、最近一次失败是什么。
+	//
+	// ★失败原因**按类别分记**（wave10）：此前只有一个 lastErr，markKnock 与 markTunnel 都不分类别地清空它，
+	// 而保活敲门每 15s 成功一次——「网关证书指纹不匹配（疑似中间人）」这类隧道拨号失败在健康行里最多挂 15s
+	// 就被一次与它无关的敲门成功擦掉，TS 侧只能靠粘性提示条兜底（见 docs/ARCHITECTURE.md 第七节
+	// 「桌面端接入态判据」边界①）。现在敲门成功只清 knockErr、隧道拨通只清 tunnelErr。
 	hmu        sync.Mutex
-	knockOK    bool   // 至少成功发出过一次 SPA 敲门包
-	tunnelOK   bool   // 至少成功拨通过一次隧道
-	lastErr    string // 最近一次拨号/敲门失败的原因（成功后清空）
-	lastHealth string // 上一次打印的健康行，用于去重（每条流都打会把日志冲爆）
+	knockOK    bool      // 至少成功发出过一次 SPA 敲门包
+	tunnelOK   bool      // 至少成功拨通过一次隧道
+	knockErr   string    // 最近一次**敲门类**失败（取令牌 / SPA 拨号），敲门成功即清
+	tunnelErr  string    // 最近一次**隧道类**失败（落点拨不通 / 握手失败 / 指纹不匹配…），隧道拨通即清
+	lastClass  failClass // 最近一次被 mark* 触碰的类别（err= 键按它取值，见 logHealth）
+	lastHealth string    // 上一次打印的健康行，用于去重（每条流都打会把日志冲爆）
 }
 
+// failClass 是健康状态里失败原因的类别：敲门类 / 隧道类。
+type failClass uint8
+
+const (
+	classKnock  failClass = iota // 取敲门令牌 / SPA 拨号
+	classTunnel                  // 隧道落点拨号 / 握手 / 指纹钉扎
+)
+
 // 健康行的固定前缀。客户端（tunnel.ts）按它解析，改这里要同步改那边的正则。
+//
+// ★健康行契约（键序即契约，客户端 `tunnel.ts parseHealth` 按键名解析）：
+// `数据面健康 knock=<bool> tunnel=<bool> terr=<str> err=<str>`
+// · knock / tunnel：粘性位，「曾」成功过（tunnel 只在业务流真拨通时置位，Run 启动期不预拨）。
+// · err：**语义与拆分前逐字一致**——最近一次被触碰的那一类的当前错误：任何一次失败把它设成该原因，
+// 任何一次成功（含每 15s 的保活敲门）把它清成 `-`。旧 TS 按 `ready = knock ∧ err 为空` 判接入态，
+// 这个键必须保持这个语义：若让隧道类失败在 err 里粘住，旧 TS 会在一次瞬时拨号失败后把 `ready`
+// 卡成 false → 应用页拒绝「访问」→ 永远产生不出下一条流去清它（就是边界①里写过的那种死锁）。
+// · terr（wave10 新增）：**隧道类**最近一次失败，只被隧道拨通清掉、敲门成功碰不到它——持续性的
+// 「指纹不匹配 / 落点拨不通 / gm 开关不一致」告警靠它稳定在界面上。为空时同样写 `-`。
+// · ★terr 必须排在 err **之前**：parseHealth 对 err 取的是 `err=` 之后到行尾的全部（值是含空格与中文标点
+// 的自由文本，slog 可能加引号也可能不加），排在后面会被旧 TS 当成 err 值的一部分吞掉。
+// `terr=` 前面是字母 t 不是空白，不会被 `(?:^|\s)err=` 误配。
+// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS 消费 terr 留给下一轮。
 const healthPrefix = "数据面健康"
 
 // logHealth 打一行结构固定的健康状态，供客户端解析真实接入态。
@@ -277,22 +306,33 @@ const healthPrefix = "数据面健康"
 // ★与「网关落点」那行同一条纪律（见 tunnel.ts 对 endpoint 字段的说明）：只在**状态变化**时打，
 // 否则每条流一行会把 4000 字节的日志尾巴瞬间冲满，反而把该看的信息挤出窗口。
 //
-// ★三个状态字段必须在锁内**快照成局部变量**再打日志。此前 `slog.Info` 那行是在解锁之后
+// ★状态字段必须在锁内**快照成局部变量**再打日志。此前 `slog.Info` 那行是在解锁之后
 // 直接读 `t.knockOK / t.tunnelOK / t.lastErr`——`knock()` 对每个落点各起一个 goroutine
 // 并发调 markKnock/markFail，于是 A 在锁外打日志时 B 正在锁内改字段，`-race` 报 data race
 // （CI 约 2/5 间歇红）。这不是授权/信任链上的竞态，只是日志行的撕裂读：去重比的是 `line`，
 // 真打出去的却可能是另一个更新的状态，两者对不上号。快照之后打出去的恒等于去重那一份。
 func (t *tunneler) logHealth() {
 	t.hmu.Lock()
-	knock, tunnel, errStr := t.knockOK, t.tunnelOK, orNone(t.lastErr)
-	line := fmt.Sprintf("knock=%t tunnel=%t err=%s", knock, tunnel, errStr)
+	knock, tunnel := t.knockOK, t.tunnelOK
+	terrStr, errStr := orNone(t.tunnelErr), orNone(t.currentErrLocked())
+	line := fmt.Sprintf("knock=%t tunnel=%t terr=%s err=%s", knock, tunnel, terrStr, errStr)
 	if line == t.lastHealth {
 		t.hmu.Unlock()
 		return
 	}
 	t.lastHealth = line
 	t.hmu.Unlock()
-	slog.Info(healthPrefix, "knock", knock, "tunnel", tunnel, "err", errStr)
+	slog.Info(healthPrefix, "knock", knock, "tunnel", tunnel, "terr", terrStr, "err", errStr)
+}
+
+// currentErrLocked 是 `err=` 键的取值：最近一次被触碰的那一类的当前错误（须持 hmu）。
+// 这正好复现拆分前单个 lastErr 的语义——任何失败设成该原因、任何成功清空——
+// 而不必再留第三个字段（见 healthPrefix 上方的契约说明）。
+func (t *tunneler) currentErrLocked() string {
+	if t.lastClass == classTunnel {
+		return t.tunnelErr
+	}
+	return t.knockErr
 }
 
 func orNone(s string) string {
@@ -302,25 +342,33 @@ func orNone(s string) string {
 	return s
 }
 
-// markKnock / markTunnel / markFail 记录真实事件（成功即清掉上一次的错误——
-// 留着会让一次早已恢复的瞬时失败永远挂在界面上）。
+// markKnock / markTunnel / markKnockFail / markTunnelFail 记录真实事件。
+// 成功只清掉**同类**上一次的错误——留着会让一次早已恢复的瞬时失败永远挂在界面上；
+// 清到别的类头上则会让一次与之无关的成功擦掉一条还在持续的告警（见 tunneler 字段注释）。
 func (t *tunneler) markKnock() {
 	t.hmu.Lock()
-	t.knockOK, t.lastErr = true, ""
+	t.knockOK, t.knockErr, t.lastClass = true, "", classKnock
 	t.hmu.Unlock()
 	t.logHealth()
 }
 
 func (t *tunneler) markTunnel() {
 	t.hmu.Lock()
-	t.tunnelOK, t.lastErr = true, ""
+	t.tunnelOK, t.tunnelErr, t.lastClass = true, "", classTunnel
 	t.hmu.Unlock()
 	t.logHealth()
 }
 
-func (t *tunneler) markFail(reason string) {
+func (t *tunneler) markKnockFail(reason string) {
 	t.hmu.Lock()
-	t.lastErr = reason
+	t.knockErr, t.lastClass = reason, classKnock
+	t.hmu.Unlock()
+	t.logHealth()
+}
+
+func (t *tunneler) markTunnelFail(reason string) {
+	t.hmu.Lock()
+	t.tunnelErr, t.lastClass = reason, classTunnel
 	t.hmu.Unlock()
 	t.logHealth()
 }
@@ -377,13 +425,13 @@ func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
 		// 否则 control 抖动会直接关窗——这是 fail-closed 的代价，须靠 reknock 频度补偿）。
 		slog.Warn("取短时效敲门令牌失败，本轮放弃敲门（等待下轮 reknock 重试）",
 			"gateway", ep.Label(), "err", err.Error())
-		t.markFail("取敲门令牌失败：" + err.Error())
+		t.markKnockFail("取敲门令牌失败：" + err.Error())
 		return false
 	}
 	uc, err := net.Dial("udp", ep.SPAAddr)
 	if err != nil {
 		slog.Warn("SPA 拨号失败", "gateway", ep.Label(), "err", err.Error())
-		t.markFail("SPA 拨号失败：" + err.Error())
+		t.markKnockFail("SPA 拨号失败：" + err.Error())
 		return false
 	}
 	defer uc.Close()
@@ -406,7 +454,7 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 		// ★这条失败此前**到不了界面**：tunnel.ts 的 error 判据是 `!s.running && …`，
 		//   运行中恒为空串。于是「全部落点拨不通」「gm 开关与网关不一致」
 		//   「指纹钉扎失败（疑似中间人）」三类故障，界面一律显示绿色「已接入」。
-		t.markFail(err.Error())
+		t.markTunnelFail(err.Error())
 		return
 	}
 	defer remote.Close()

@@ -119,7 +119,14 @@ func (s *Server) authDirectories(ctx context.Context, pols []store.AuthPolicy) (
 }
 
 // handleAuthPolicies 返回全部认证策略 + 规则能力声明（前端按目录分组展示、按能力置灰）。
+//
+// ★读闸：策略里带 trustedNetwork 的可信网段 CIDR、工作时段与豁免条件——那是
+// 「从哪来、什么时候来可以少一道认证」的完整说明书。此前任何登录令牌（含 gateway）
+// 都读得到，而它唯一的消费方是管理台 Auth 页。读=任意管理员现算角色，写仍是 PermSecurity。
 func (s *Server) handleAuthPolicies(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	pols, err := s.store.AuthPolicies(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load auth policies")

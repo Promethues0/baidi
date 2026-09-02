@@ -2112,6 +2112,12 @@ func (s *Server) handleAuthSrc(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecurity(w http.ResponseWriter, r *http.Request) {
+	// ★安全基线全量（检查项 / 处置档 / 适用范围）+ 组织与用户组候选，是「合规怎么判、
+	// 判到谁」的完整规则面。此前无闸：普通用户读完就知道自己该伪造哪几项 posture 才能过。
+	// 同批收口的 GET /security/lockouts、/security/lockout-config 已是 requireAdmin，这条补齐。
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.Security(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load security")
@@ -2224,7 +2230,16 @@ func atoiDefault(s string, def int) int {
 // handleGateway 已搬到 gatewaypage.go：它现在按 mTLS 注册心跳的真实网关构建，
 // 不再读 store 的区域拓扑种子（那张「华东/华南出口」是编的）。
 
+// handleApps 管理台的应用清单（含后端地址 / 发布形态 / 关联资源 / 已授权账号）。
+//
+// ★与 handleUsers 同一批「一道闸都没有」的读端点：此前任何 role=user 甚至 role=gateway
+// 令牌都读得到全部应用的 addr / mode / resourceId / authedUsers——那是内网业务拓扑与
+// 授权面的全量枚举。门户磁贴走 GET /portal/apps（按账号裁剪），这条只有管理台在读，
+// 故按「读端点 = 任意管理员现算角色」收口；写面 POST/PUT/DELETE 仍是 PermSecurity。
 func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	b, err := s.store.Apps(r.Context())
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load apps")
@@ -2355,6 +2370,13 @@ func (s *Server) sessionIPsByAccount() map[string]string {
 }
 
 func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
+	// ★态势总览含攻击源 TOP（源 IP 明文）、三条防线的判定计数与在线会话数——
+	// 是管理台首页与 /screen 大屏的数据源，两者都在管理员登录之后才可达
+	// （console router 把 role=user 一律重定向回 /portal/apps）。此前无闸，
+	// 一张门户普通用户令牌就能拉走"这套系统此刻在拦谁"。读端点按任意管理员现算角色。
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	// 时间窗（?hours=）：审计派生统计与攻击源共用它，钳边界在 store 一处。
 	// 不传就是默认 24h——与改造前"攻击源 24h"那一半口径一致，页面不会突然换语义。
 	ov, err := s.store.Overview(r.Context(), atoiDefault(r.URL.Query().Get("hours"), 0))

@@ -6,7 +6,10 @@ const ls = localStorage;
 export const session = reactive({
   token: ls.getItem('baidi_m_token') || '',
   user: ls.getItem('baidi_m_user') || '',
-  connected: false
+  connected: false,
+  /** 最近一次**非用户主动**的隧道中断原因（被抢占 / 被系统回收 / 引擎停机），由 vpn.ts 的监视写入；
+   *  下一次接入或用户主动断开时清空。非空即意味着「上一段接入不是你断的」，UI 必须当面显示。 */
+  dropReason: ''
 });
 
 /**
@@ -58,6 +61,7 @@ export function logout(): void {
   session.token = '';
   session.user = '';
   session.connected = false;
+  session.dropReason = '';
   ls.removeItem('baidi_m_token');
   ls.removeItem('baidi_m_user');
 }

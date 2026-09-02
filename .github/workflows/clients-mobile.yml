@@ -93,7 +93,9 @@ jobs:
       - name: Node（移动端 webview 页面是 Vue3 + Vite 打的）
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          # 22 而不是 20：`npm test` 用 node 自带的 --experimental-strip-types 直接跑 .ts 单测
+          # （22.6 起才有），不另装测试框架；Vite 5 在 22 上照常打包。
+          node-version: '22'
           cache: npm
           cache-dependency-path: clients/mobile/package-lock.json
 
@@ -141,6 +143,9 @@ jobs:
         working-directory: clients/mobile
         run: |
           npm ci
+          # 隧道存活监视的判定与接线单测（tests/tunnelwatch.test.ts）：本机与 CI 是它仅有的两个执行方，
+          # 少了这一步，「接入后无人读 tunnelStatus」那类回归在 APK 里看不出来。
+          npm test
           npm run build
 
       - name: 铺 webview 资源进 app assets

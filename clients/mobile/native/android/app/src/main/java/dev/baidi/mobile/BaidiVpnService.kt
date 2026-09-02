@@ -119,7 +119,8 @@ class BaidiVpnService : VpnService() {
         session?.stop()
         session = null
         // onRevoke → stopSelf → onDestroy 这条链里，这里若无条件 markStopped，「被撤销」的原因会在
-        // UI 下一次轮询之前就被冲回 idle。用户主动断开走的是 MainActivity.stopTunnel 的 markStopped。
+        // webview 下一次读 tunnelStatus（vpn.ts startTunnelWatch，接入后每 2s）之前就被冲回 idle——
+        // 那边就只能显示「服务已不在运行」而不是被谁撤销的。用户主动断开走 MainActivity.stopTunnel 的 markStopped。
         TunnelState.markStoppedUnlessFailed()
         super.onDestroy()
     }

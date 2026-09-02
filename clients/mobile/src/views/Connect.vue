@@ -46,11 +46,18 @@
       </div>
     </div>
 
+    <!-- 上一段接入不是用户断的（被抢占 / 被系统回收 / 引擎停机）：原因由 vpn.ts 的监视写进
+         session.dropReason。此前这些原因只有原生侧的写端、没有 webview 侧的读端——用户看到的是
+         纹丝不动的「已接入」。留在这里直到下一次接入，弹窗一闪而过不算「看见」。 -->
+    <div v-if="stage === 'idle' && session.dropReason" class="m-card cn__drop">
+      <b>上一次接入已中断</b>：{{ session.dropReason }}
+    </div>
+
     <!-- 终端环境检测：移动端**尚未实现采集**，如实说明而不是画一张全绿的卡片。
          此处此前是四行硬编码 ok:true（磁盘已加密 / 未越狱 / 版本合规 / 客户端最新），
          对着一台从没被检测过的手机显示「终端安全检测 合规」——而合规判定权在控制面，
          它对这台设备根本没有任何数据。 -->
-    <div v-else class="m-card cn__posture">
+    <div v-if="stage === 'idle'" class="m-card cn__posture">
       <div class="cn__posture-h"><icon-safe /> 终端安全检测 <em class="na">未采集</em></div>
       <div class="cn__na">
         移动端暂未实现终端环境采集：原生 VPN 扩展只暴露了建立/断开隧道的接口，
@@ -66,7 +73,7 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed } from 'vue';
+import { ref, computed, watch } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import {
   IconPoweroff, IconCheckCircleFill, IconCheck, IconLoading
@@ -89,6 +96,10 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  *  多半是半成功状态（无资源映射 → 发不出 CONNECT 前导 → 网关 fail-closed）。 */
 const profileErr = ref('');
 
+// 接入后隧道被抢占 / 被系统回收 / 引擎停机：vpn.ts 的监视把 session.connected 翻回 false，
+// 这里跟着把大环翻回 idle（原因在模板里读 session.dropReason；弹窗在 App.vue，与当前页无关）。
+watch(() => session.connected, (v) => { if (!v && stage.value === 'connected') stage.value = 'idle'; });
+
 
 function toggle() {
   if (stage.value === 'connected') return disconnect();
@@ -98,7 +109,7 @@ function toggle() {
 async function connect() {
   const bad = validateConfig();
   if (bad) { Message.warning(bad); return; }   // 接入前配置校验（端口/网段/虚拟IP/控制中心）
-  stage.value = 'connecting'; step.value = 0;
+  stage.value = 'connecting'; step.value = 0; session.dropReason = '';
   // ★接入前拉一次接入剖面。移动端此前**全仓零处**拉它，接入配置全靠用户在「我的」页手填——
   //   于是网关落点、受保护网段、资源映射、证书指纹一概由终端自己猜，而只有控制面
   //   同时知道这四样。拉不到不阻断（退回手填配置），但要把原因说出来：那种接入多半是
@@ -113,10 +124,11 @@ async function connect() {
     Message.error('SPA 敲门失败：' + (r.detail || '网关不可达'));
     return;
   }
-  // ②③ 建隧道与引流由原生扩展在自己的进程里完成，webview **收不到进度回报**
-  //    （NativeBridge 只有 startTunnel/stopTunnel 两个方法）。这里按固定节奏推进
-  //    进度条，是展示性的——不代表这两步各自何时真正完成。要把它变成真进度，
-  //    得先给原生桥加一个状态查询接口，三端各实现一遍。
+  // ②③ 建隧道与引流由原生扩展在自己的进程里完成，webview **收不到分步进度**：
+  //    桥的 tunnelStatus 只有 idle/starting/up/failed 四态（安卓 startTunnel 的 Promise 就是
+  //    轮询它到 up 才 resolve 的），没有「隧道已建、引流未起」这种中间态。这里按固定节奏
+  //    推进进度条，是展示性的——不代表这两步各自何时真正完成。接入之后的存活由
+  //    vpn.ts 的监视每 2s 读同一个 tunnelStatus 来守（见 startTunnelWatch）。
   step.value = 1; await sleep(450);
   step.value = 2; await sleep(350);
   step.value = STEPS.length; stage.value = 'connected'; session.connected = true;
@@ -180,6 +192,8 @@ async function disconnect() {
 .cn__p-ic { font-size: 17px; }
 .cn__p-ic.ok { color: var(--bd-success); }
 .cn__p-ic.bad { color: var(--bd-danger); }
+.cn__drop { font-size: 12.5px; line-height: 1.7; color: var(--bd-danger); background: var(--bd-tag-red-bg, #FFECE8); }
+.cn__drop b { font-weight: 600; }
 .cn__warn2 { margin-top: 10px; padding: 9px 11px; font-size: 12px; line-height: 1.65;
   color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); border-radius: 8px; }
 </style>

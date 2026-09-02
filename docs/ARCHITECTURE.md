@@ -897,7 +897,14 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   设置里；无令牌那条失败原因也写成「令牌未随 Intent 下发（系统重建 / 始终开启路径尚不支持）」。
 - **被抢占也留痕**：另一 VPN 应用抢占 / 用户在系统设置里断开时系统回调 `onRevoke`，此前未覆盖（默认只
   `stopSelf`），`TunnelState` 不会翻成失败。现覆盖为 `markFailed("VPN 被系统或其它应用撤销")` 后 `stopSelf`，
-  且 `onDestroy` 改用 `markStoppedUnlessFailed`——否则销毁那一步会把原因冲回 idle，用户看到的是隧道悄悄消失。
+  且 `onDestroy` 改用 `markStoppedUnlessFailed`——否则销毁那一步会把原因冲回 idle。**留痕必须有读端**：
+  桥上的 `tunnelStatus` 此前只在启动期被轮询（拿到 up 即停），进入「已接入」之后 webview 再不读它，被抢占后
+  用户看到的是纹丝不动的「已接入企业内网」，直到自己点断开把原因一并清掉。现在 `vpn.ts startTunnelWatch`
+  在隧道就绪后每 2s 读一次（模块级、寿命跟隧道不跟页面——切到「应用」页 Connect.vue 就卸载了），判成中断即
+  翻 `session.connected=false`、把原因写进 `session.dropReason`（App.vue 弹窗 + Connect.vue 常驻红条）并
+  `stopTunnel` 清掉原生残留（判定口径见 `src/lib/tunnelwatch.ts`，`node --test` 钉住）。**读不到状态一律不可
+  判定、不判中断**：误判成断开会让 UI 去 `stopTunnel` 把一条好隧道真的断掉；故 iOS / 鸿蒙壳（桥上没有
+  `tunnelStatus`）与 dev 浏览器在接入后的中断**仍然不可见**——这是那两端的边界，不是安卓那条的回归。
 - **iOS fd 类型**：`tunnelFD()` 返回 `Int32`，而 gomobile 头文件里 `BaidimobileStart(long tunFd, …)` 在 Swift
   侧是 `Int`——对着 xcframework `-typecheck` 直接报类型不匹配，现改为 `Int(fd)`。没有工程就没有编译，
   类型错才能留到今天；Swift 侧 `BaidimobileConfig` 的字段名已逐个对过 Go 侧 `Config`。

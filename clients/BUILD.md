@@ -975,3 +975,68 @@ cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build
   `CONNECT <id>` 送得到，但网关答「资源未注册」。要么配 mTLS 注册，要么用 `-resources` 给静态清单；
 - 种子库里的后端（`10.20.1.10:8080` 等）是**虚构地址**，从网关侧拨不通。
   要验端到端得把某个资源的 backend 指向一个真实可达的东西（本地栈里指 `127.0.0.1:8090` 最省事）。
+
+## 十二、Android 实机验证（2026-09-03，首次装进真设备）
+
+设备：OPPO PKU110（ColorOS），**Android 16 / API 36**，arm64-v8a。开发者模式 + USB 调试。
+这是白帝安卓端**第一次**进入真实设备——此前全部证据止于「CI 能出包」。
+
+### 12.1 结论先写：数据面在 Android 上**必然起不来**（已定位、未修）
+
+点接入后 UI 报 **「数据面引擎启动失败：permission denied」**，隧道永远建不起来。
+根因不是推测，是设备内核的 SELinux 审计原文（`adb logcat`，按应用 pid 过滤）：
+
+```
+avc: denied { bind } for scontext=u:r:untrusted_app:s0:c223,c257,c512,c768
+     tcontext=u:r:untrusted_app:s0:c223,c257,c512,c768
+     tclass=netlink_route_socket permissive=0 bug=b/155595000 app=dev.baidi.mobile
+```
+
+`baidimobile.Start` 调 `tun.CreateTUNFromFile`，而该函数内部顺序是
+`Name → initFromFlags → getIFIndex → createNetlinkSocket → setMTU`
+（wireguard `tun/tun_linux.go:585` 起）：**netlink 那步排在 setMTU 之前**，一被拒就 return，
+所以报的是 `permission denied` 而不是审计当初预判的 `failed to set MTU`——预判方向对、落点更靠前。
+
+Android 10 起禁止 `untrusted_app` 绑 `netlink_route_socket`（AOSP 既定策略，**不是 ColorOS 定制**，
+`b/155595000` 就是这条限制的编号），因此**任何 Android 10+ 设备都是同一结果**，与机型无关。
+
+修法：安卓侧改用同库的 `tun.CreateUnmonitoredTUNFromFD(fd)`（只 SetNonblock，不建 netlink 套接字，
+wireguard-android 官方走的就是它）。代价是拿不到链路事件，而 VpnService 的 fd 由系统托管、
+MTU 在 `Builder.setMtu` 已定，这些事件在本项目无消费方。iOS/darwin 维持 `CreateTUNFromFile`。
+
+### 12.2 同一轮验到的（都是首次）
+
+| 项 | 结果 |
+|---|---|
+| 旧 `out/baidimobile.aar` 与当前 Kotlin 是否兼容 | **否**。旧包无 `setPin`/`setResmapJSON`，`javap` 可证；用它连编都编不过——**任何今天之前构建的 APK 都不含钉扎与资源映射接线** |
+| `gomobile bind` 重建 `.aar`（NDK 26.3） | 通过，30 MB |
+| `./gradlew testDebugUnitTest`（真 gradle，非镜像桩） | **9 条全绿**：`RoutesTest` 5 + `TunnelStateTest` 4 |
+| `assembleDebug` | 通过，104 MB |
+| 安装到真机 | 通过。★首次 `adb install` 返回 `Failure [-99]`，是 ColorOS 的安装确认弹窗拦的，**不是包的问题**，确认后即成功 |
+| webview 资源平铺（白屏陷阱） | 通过：包内 `assets/index.html` 在根；真机上登录页完整渲染（截图存档） |
+| `libgojni.so` 随包 | 四套 ABI 齐全 |
+| `SUPPORTS_ALWAYS_ON=false`（wave10 新增） | 已进 manifest，`aapt2 dump xmltree` 可证 |
+| APK 签名 | 仅 v2 方案 + debug 密钥，与文档口径一致 |
+| `VpnService.Builder.establish()` | **成功**（consent 具备时）——系统建 TUN 这一步没问题，卡在其后的 Go 侧 |
+
+### 12.3 三个会挡住下一个人的环境事实
+
+- **演示站自签证书 → WebView 直接拒登录**：`E/chromium: handshake failed … net_error -202`
+  （`ERR_CERT_AUTHORITY_INVALID`）。应用 `targetSdk 34` 且无 `network_security_config`，
+  所以**装用户 CA 也没用**（API 24+ 起应用默认不信任用户 CA）。要在真机走通登录，
+  得让控制面有受信证书，或加一个 debug 专用的 `network_security_config`。
+- **adb 授不了 VPN 权限**：`cmd appops set … ACTIVATE_VPN` 报
+  `SecurityException: uid 2000 does not have android.permission.MANAGE_APP_OPS_MODES`（ColorOS 收紧）。
+  系统 VPN 授权只能由人在设备上点。
+- **绕开登录直达数据面的办法**（本次即用它拿到 12.1 的结论）：debug 包可远程调试，
+  `adb forward tcp:9222 localabstract:webview_devtools_remote_<pid>`，再用 CDP 的
+  `Runtime.evaluate` 直接调桥：
+  `window.__BAIDI_NATIVE__.startTunnel(token, cfgObject)`。
+  ★`cfg` 必须传**对象**：注入的包装函数自己会 `JSON.stringify(cfg)`，传字符串会被二次编码，
+  Kotlin 侧 `JSONObject` 解析后所有字段取缺省值，症状是「缺少控制中心地址」这类**误导性**报错。
+  令牌用 `curl` 从控制面 `/api/v1/portal/login` 取一个真的即可。
+
+### 12.4 仍未验证
+
+隧道端到端（敲门 → 国密隧道 → 业务流量）在 Android 上**一次都没跑通过**，
+因为 12.1 那条把链路截断在建卡这一步。修掉 `CreateUnmonitoredTUNFromFD` 之后要重跑本节。

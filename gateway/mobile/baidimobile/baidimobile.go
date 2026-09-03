@@ -133,6 +133,26 @@ func Start(tunFd int, c *Config) (*Session, error) {
 	}
 
 	// 平台给的 TUN fd → tun.Device（linux/android 与 darwin/ios 同走 CreateTUNFromFile）
+	//
+	// ★★ 已知缺陷（2026-09-03 安卓真机首测确认，尚未修）：这条在 **Android 上必然失败**。
+	// 现象：UI 报「数据面引擎启动失败：permission denied」，隧道永远起不来。
+	// 根因不是猜的——设备 logcat 里有内核 SELinux 审计原文：
+	//
+	//	avc: denied { bind } for scontext=u:r:untrusted_app:s0
+	//	     tclass=netlink_route_socket permissive=0 bug=b/155595000 app=dev.baidi.mobile
+	//
+	// `CreateTUNFromFile` 内部顺序是 Name → initFromFlags → getIFIndex →
+	// **createNetlinkSocket** → setMTU（见 wireguard tun_linux.go:585 起）：netlink 那步排在
+	// setMTU 之前，所以一被拒就直接返回，`setMTU` 根本没执行。Android 10 起禁止
+	// untrusted_app 绑 netlink_route_socket（AOSP 既定策略，非厂商定制，任何 10+ 设备同此）。
+	//
+	// 修法：安卓侧改用同库的 `tun.CreateUnmonitoredTUNFromFD(fd)`——它只 SetNonblock，
+	// 不建 netlink 套接字、不读 MTU 事件（wireguard-android 官方走的就是这条）。代价是拿不到
+	// 链路事件（MTU/上下线变化），而 VpnService 的 fd 本来就由系统托管、MTU 在 Builder 里已定，
+	// 这些事件对本项目无消费方。iOS/darwin 侧维持现状（NEPacketTunnelProvider 无此限制）。
+	// ★改之前别把「移动端数据面可用」写进任何文档：本函数是移动端唯一的建卡入口。
+	//
+	// 真机实测记录见 clients/BUILD.md 第十二节。
 	file := os.NewFile(uintptr(tunFd), "baidi-tun")
 	dev, err := tun.CreateTUNFromFile(file, mtu)
 	if err != nil {

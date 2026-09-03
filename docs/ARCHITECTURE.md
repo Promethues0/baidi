@@ -1037,6 +1037,19 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 
 ### ⚠️ 移动端原生壳（安卓 VpnService / iOS PacketTunnelProvider：源码级修复，两端均未实机）
 
+
+**★2026-09-03 安卓真机首测：数据面在 Android 上必然起不来（已定位、未修）。**
+OPPO PKU110 / Android 16 / arm64。UI 报「数据面引擎启动失败：permission denied」，
+设备内核 SELinux 审计原文：`avc: denied { bind } … tclass=netlink_route_socket
+permissive=0 bug=b/155595000`。`tun.CreateTUNFromFile` 里 `createNetlinkSocket()` 排在
+`setMTU` 之前，故一被拒即 return（审计当初预判的 `failed to set MTU` 方向对、落点更靠前）。
+Android 10 起禁止 `untrusted_app` 绑 netlink 路由套接字，**AOSP 既定策略而非厂商定制**，
+任何 10+ 设备同此。修法是安卓侧改用 `tun.CreateUnmonitoredTUNFromFD`（wireguard-android 官方路径）。
+**在它修好之前，「移动端数据面可用」这句话在任何文档里都不能出现**——那是移动端唯一的建卡入口。
+同轮首次验到的（含 `assembleDebug`、真 gradle 跑 9 条 JVM 单测、白屏陷阱已避开、
+`establish()` 本身成功）与三条环境陷阱（自签证书拒登录 / adb 授不了 VPN 权限 / CDP 调桥须传对象），
+逐条见 `clients/BUILD.md` 第十二节。
+
 `clients/mobile/native/android/…/BaidiVpnService.kt`、`MainActivity.kt`、`TunnelState.kt` 与
 `native/ios/PacketTunnelProvider.swift`。安卓 CI 只编到 APK（从未装过真机），iOS 连 Xcode 工程都还没有
 （见 clients/BUILD.md 第九节）。源码层修掉的几条，以及随之定下的边界：

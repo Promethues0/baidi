@@ -1,7 +1,8 @@
 // 白帝安全接入桌面客户端 · Tauri 壳。
 //   - shell 插件：按需 sidecar 调 baidi-knock 发起真实 SPA 敲门（dev/轻量路径）。
 //   - 自定义命令 tunnel_*：以管理员权限拉起 baidi-tun 数据面引擎，真正用 TUN 接管
-//     受保护网段流量 → 逐流 SPA 敲门 → 加密隧道 → 网关。需管理员权限：
+//     受保护网段流量 → SPA 敲门开窗（15s 保活对全部网关落点各敲一次，**不逐流敲门**，
+//     见 dataplane.Run 的保活 ticker）→ 加密隧道 → 网关。需管理员权限：
 //     macOS 走 osascript、Linux 走 pkexec(polkit)、Windows 走 UAC 提升，
 //     三条路的**构造**都在 elevate.rs 里（纯函数 + 单测），这里只负责落盘与 spawn。
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]

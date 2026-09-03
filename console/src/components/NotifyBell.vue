@@ -2,10 +2,8 @@
   <a-trigger v-model:popup-visible="open" trigger="click" position="br" :popup-offset="8" @popup-visible-change="onToggle">
     <button class="bd-bell" :class="{ on: open }" :title="bellTitle" aria-haspopup="menu" :aria-expanded="open">
       <icon-notification />
-      <!-- ★角标只在**取到真实计数**时渲染。此前这里是写死的 `6`：一个常驻在
-           每一页右上角、永远是 6 的红点，与真实待处理数完全同形。
-           取不到就不画（"我不知道有几条"≠"有 0 条"），为 0 时也不画红点——
-           红点的语义是"有事要办"。 -->
+      <!-- ★角标只在取到真实计数时渲染：取不到就不画（「不知道有几条」≠「有 0 条」），
+           为 0 也不画——红点的语义是「有事要办」。 -->
       <span v-if="pending !== undefined && pending > 0" class="bd-bell__dot">{{ pending > 99 ? '99+' : pending }}</span>
     </button>
 
@@ -17,8 +15,8 @@
         </div>
 
         <div v-if="loading" class="bd-noti__msg">加载中…</div>
-        <!-- 三态分得开：加载中 / 取不到 / 确实没有。★"没加载出来"被画成"一切正常"
-             正是这个铃铛该避免的事——它是管理员判断"要不要立刻处理"的第一眼。 -->
+        <!-- ★三态必须分得开：加载中 / 取不到 / 确实没有。这里是管理员判断「要不要立刻
+             处理」的第一眼，把「没加载出来」画成「一切正常」等于替系统背书。 -->
         <div v-else-if="err" class="bd-noti__msg bd-noti__msg--err">
           <icon-exclamation-circle-fill /> 待处理告警取不到（{{ err }}）——这里显示的**不是**「没有告警」
         </div>
@@ -50,12 +48,7 @@
 /**
  * 顶栏通知铃铛。
  *
- * ★改造前：`<button class="bd-bell"><icon-notification /><span class="bd-bell__dot">6</span></button>`
- * ——红点写死 6，按钮没有任何 click handler。它与侧栏那两个已经被修过的写死角标
- * （'10' / '2'，见 nav.ts 顶部那段注释）是同一族缺陷，只是当时没有一起修：
- * 纪律只做了一半，而漏掉的这一半恰恰在最显眼的位置。
- *
- * 现在数据源与侧栏角标同一个（GET /alerts 的 counts.pending），两处不会打架。
+ * ★角标与侧栏角标同一个数据源（GET /alerts 的 counts.pending），另立一份必然对不上。
  */
 import { computed, ref } from 'vue';
 import { useRouter } from 'vue-router';

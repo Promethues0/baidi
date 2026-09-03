@@ -361,12 +361,8 @@ const tickerLoop = computed<AuditEntry[]>(() => {
   return a.length >= 6 ? [...a, ...a] : a;
 });
 
-/* 接入网关分布。
- *
- * ★这一格原来是「接入来源 TOP 地域」，按 s.location 分组——而 location 对每条真实
- * 会话恒为 "—"（白帝没有 GeoIP 库），于是这块大屏面板永远只有一根标着「—」的柱子，
- * 却顶着一个"我们知道用户从哪接入"的标题。改成按接入网关分组：那是网关上报里
- * 真实存在的一维，且在大屏上更有用——哪台网关在扛流量。 */
+/* 接入网关分布。★分组维度只能是网关：白帝没有 GeoIP 库，会话的 location 对每条真实
+ * 记录恒为 "—"，按地域分组的面板永远只有一根标着「—」的柱子。 */
 const topRegions = computed(() => {
   const m = new Map<string, number>();
   sessions.value.forEach((s) => {
@@ -381,15 +377,9 @@ const regionMax = computed(() => Math.max(...topRegions.value.map((r) => r.count
 /**
  * 三路取数各自独立成败。
  *
- * ★上一轮已经修掉了「接口回空数组时被演示常量顶替」，但漏掉了**接口失败**那一半：
- * 三路里只要 /overview 成功，`live` 就置真，而 /online 或 /audit 失败时
- * MOCK_SESS / MOCK_AUDIT **原样留在屏上**——右上角亮着「实时」，滚动播报里跑着
- * 四条编造的安全事件。这在 NOC 大屏上是最坏的形态：它正是给人「现在有没有事」
- * 这个判断用的，而 /audit 归 PermAudit，安全/系统管理员打开大屏拿到的就是 403。
- *
- * 现在的判据：**只要有任何一路拿到了真数据，就绝不让另一路的演示数据同屏**。
- * 三路全挂才保留整屏演示态（那是无后端时的离线演示，本就没有真数据可混淆）。
- * `live` 要求三路全成，缺哪一路在徽标上点名。
+ * ★只要有任何一路拿到真数据，就绝不让另一路的演示数据同屏——真假混在一块 NOC 大屏上
+ * 比整屏假更难识别；三路全挂才保留整屏演示态（那时没有真数据可混淆）。`live` 要求三路
+ * 全成，缺哪一路在徽标上点名。/audit 归 PermAudit，安全/系统管理员打开这页拿到的是 403。
  */
 async function load() {
   const [o, on, au] = await Promise.all([

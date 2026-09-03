@@ -1,9 +1,6 @@
 <template>
-  <!-- 触发器：顶栏那个框。★它此前是 `<div class="bd-search">` + 一个图标 + 一句
-       静态中文「搜索用户、应用、策略…」，没有 input、没有 handler——与 Users /
-       Resources / Apps 三页曾经的假搜索框是同一个缺陷，那三页已经修过一轮，
-       而这个**全局**的、最显眼的一个漏在了外面（scripts/check-dead-ui.mjs 的
-       规则一只认 class="bd-searchbox"，这里叫 bd-search，正好从守卫底下溜过去）。 -->
+  <!-- 顶栏触发器。★check-dead-ui 规则一按 class="bd-searchbox" 认搜索框，这里叫
+       bd-search 不在守卫覆盖内，改成不可点的静态框不会被构建期拦住。 -->
   <button class="bd-search" @click="openPanel" :title="`全局搜索（${hotkeyLabel}）`">
     <icon-search />
     <span class="bd-search__ph">{{ PLACEHOLDER }}</span>
@@ -26,9 +23,8 @@
         <span v-if="loading" class="bd-gs__loading">加载中…</span>
       </div>
 
-      <!-- ★取数失败必须当面说，且要点名**哪一类**搜不到。
-           一个悄悄少搜了一类的搜索框比没有搜索框更坏：管理员搜不到某个用户，
-           得到的结论会是"系统里没有这个人"，而不是"用户目录没拉下来"。 -->
+      <!-- ★取数失败要点名是哪一类搜不到：静默少一类结果时，管理员得到的结论是
+           「系统里没有这个人」而不是「用户目录没拉下来」。 -->
       <div v-if="failed.length" class="bd-gs__warn">
         <icon-exclamation-circle-fill />
         <span>{{ failed.map((f) => f.label).join('、') }} 没有取到，下面的结果**不含**这些类别（{{ failed[0].err }}）</span>
@@ -73,18 +69,10 @@
 /**
  * 全局搜索（顶栏 + Cmd/Ctrl-K）。
  *
- * 两条纪律，都是这个项目反复吃过亏的地方：
- *
- *  1. **占位文案与真实过滤字段逐字对应**。原来那句「搜索用户、应用、策略…」
- *     一个字都没兑现。现在 PLACEHOLDER 由 SOURCES 生成，加一类搜索就必然改一次文案，
- *     不会出现"说能搜、其实搜不到"。
- *
- *  2. **搜不到与没搜过必须分得开**。四个数据源里任何一个取数失败，都在结果区
- *     顶部点名说明；绝不静默地少给一类结果。
- *
- * 数据量：控制台的用户/应用/资源/网关都是**管理规模**（几十到几千），一次性拉全量
- * 在前端过滤是合适的；进入面板才拉、拉一次缓存 60s。刻意不做后端全文检索——
- * 那需要一个新端点与一套新的权限判定，而这四个读端点任意管理员本就可读。
+ * ★占位文案由 SOURCES 生成，加一类搜索必然改一次文案，杜绝「说能搜、其实搜不到」；
+ * 任一数据源取数失败都在结果区顶部点名，绝不静默少给一类。
+ * 用户/应用/资源/网关都是管理规模，进面板拉全量在前端过滤（缓存 60s）；刻意不做后端
+ * 全文检索——那要新端点与一套新的权限判定，而这四个读端点任意管理员本就可读。
  */
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 import { useRouter } from 'vue-router';
@@ -122,7 +110,7 @@ const hotkeyLabel = navigator.platform.toLowerCase().includes('mac') ? '⌘K' : 
 
 /** 拉到的原始条目（不含页面——页面来自 NAV，永远可用）。 */
 const remote = ref<Hit[]>([]);
-/** 取数失败的类别：{ label, err }。必须原样显示，见上面第 2 条纪律。 */
+/** 取数失败的类别：{ label, err }。必须原样显示，不可静默吞掉。 */
 const failed = ref<{ label: string; err: string }[]>([]);
 let loadedAt = 0;
 

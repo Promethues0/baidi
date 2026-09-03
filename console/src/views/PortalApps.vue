@@ -49,12 +49,10 @@
                 <span class="bd-tile__icon" :class="'m-' + app.mode">
                   <component :is="modeMeta[app.mode].icon" />
                 </span>
-                <!-- 三种"不可访问"必须分开说，因为用户的下一步动作完全不同：
-                     降权 → 先修终端（申请也没用，降权否决压过 JIT 授予）；
-                     未关联资源 → 配置缺口，找管理员（申请会被后端以「不支持自助申请」拒掉）；
-                     未授权 → 可以走自助申请。
-                     ★徽标文案不再写死「高敏」：不可访问与敏感度是两件事，普通资源没授权同样进不去，
-                     而已授权的高敏资源是能直接访问的（服务端判定见 appAccessState）。 -->
+                <!-- ★三种"不可访问"必须分开说，用户的下一步动作完全不同：降权 → 先修终端
+                     （申请无效，降权否决压过 JIT 授予）；未关联资源 → 找管理员（申请会被后端以
+                     「不支持自助申请」拒掉）；未授权 → 走自助申请。徽标不许写死「高敏」：
+                     普通资源没授权同样进不去，已授权的高敏资源则能直接访问。 -->
                 <span
                   v-if="app.degraded"
                   class="bd-tile__gold bd-tile__gold--deg"
@@ -76,12 +74,9 @@
               <div class="bd-tile__meta">
                 <span class="bd-mtag" :class="'mt-' + app.mode">{{ modeMeta[app.mode].label }}</span>
               </div>
-              <!-- ★这一串 v-if/v-else-if 必须**连续**（中间不许插任何别的元素）：
-                   Vue 的 v-else-if 只认紧邻的上一个兄弟节点，此前那条「七层入口不可用」的
-                   <div v-if> 插在中间，把链从这里截断了——于是 v-else-if 挂到了那个 div 上，
-                   一个**可访问**的隧道类应用会同时画出「接入地址」和「申请权限」两个按钮
-                   （给已经有权限的人一个申请入口，点下去后端还会以「无需申请」400 顶回来）。
-                   告警文案改挂在整条链之后，它本来也只是补充说明、不参与状态分支。 -->
+              <!-- ★这一串 v-if/v-else-if 必须连续，中间不许插任何元素：v-else-if 只认紧邻的
+                   上一个兄弟节点，链一断就会让已授权的应用同时画出「访问」和「申请权限」
+                   两个按钮。补充说明性的提示一律挂在整条链之后。 -->
               <button
                 v-if="app.accessible"
                 class="bd-tile__btn"
@@ -89,12 +84,9 @@
                 :title="webBlocked(app) ? webBlockNote(app) : ''"
                 @click="openApp(app)"
               ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
-              <!-- 续期（PRD FR-AUTH-03/04）。★只在**服务端说可以续**时出现：
-                   renewable 的判据与 store.CreateAccessRequest 的放行条件同源
-                   （剩余 ≤ RenewWindowMinutes），早于窗口点它必然 409。
-                   此前门户在这条路上什么都没有：磁贴渲染的是「访问」，「我的申请」页
-                   只被动显示「剩余 X」并在 <300s 时标红，**红了也没有任何可点的动作**——
-                   用户只能等它到期、访问断掉之后重新申请并等审批。 -->
+              <!-- 续期（PRD FR-AUTH-03/04）。★只在服务端说可以续时出现：renewable 的判据与
+                   store.CreateAccessRequest 的放行条件同源（剩余 ≤ RenewWindowMinutes），
+                   早于窗口点它必然 409。 -->
               <button
                 v-if="app.accessible && app.renewable"
                 class="bd-tile__btn bd-tile__btn--ghost"
@@ -145,8 +137,8 @@
       :ok-loading="submitting" @ok="submitRequest" ok-text="提交申请" cancel-text="取消">
       <div class="bd-reqtip">
         <icon-safe class="bd-reqtip__ic" />
-        <!-- 不再一律写「高敏」：走到这个抽屉只说明「你当前没有这个资源的访问权」，
-             它可能是高敏资源，也可能只是一条你不在授权名单里的普通资源。 -->
+        <!-- 文案按 sensitivity 分档，不许一律写「高敏」：走到这个抽屉只说明当前没有该资源的
+             访问权，它可能只是一条你不在授权名单里的普通资源。 -->
         <div>
           你当前<b>未获授权</b>访问<b>{{ reqApp?.sensitivity === 'high' ? '该高敏资源' : '该资源' }}</b>，
           需管理员审批。批准后你将获得<b>限时访问授予</b>，到期自动回收。
@@ -195,17 +187,15 @@ const submitting = ref(false);
 const modeMeta: Record<PortalTile['mode'], { label: string; icon: string }> = {
   tunnel: { label: '隧道代理', icon: 'icon-swap' },
   web:    { label: 'Web 应用', icon: 'icon-common' },
-  // ★原名「全局加速」——它既不加速也不受控。这类应用不经网关、不进隧道路由、
-  // 不做鉴权，剖面与门户都直接给 accessible: true，凡是能登录的人都看得到。
-  // 三处名字（向导 / 门户 / 移动端）统一成同一个词（wave8 行动 14）。
+  // ★「直连书签」的名字在向导 / 门户 / 移动端三处必须一致：这类应用不经网关、不进隧道
+  // 路由、不做鉴权，剖面与门户直接给 accessible: true，任何叫得像"受控"的名字都是误导。
   global: { label: '直连书签', icon: 'icon-public' }
 };
 
 const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
 const accessibleCount = computed(() => apps.value.filter(a => a.accessible).length);
-// 「待申请」只数**真的能去申请**的那些：被降权的申请必然被否（降权否决压过 JIT 授予），
-// 未关联受控资源的会被后端以「该应用不支持自助申请」拒掉。把这两类算进来，
-// 这个数字就在替一批点不动的磁贴承诺「你还有 N 件事可做」——与磁贴上写的字自相矛盾。
+// ★「待申请」只数真的能去申请的：被降权的必然被否（降权否决压过 JIT 授予），未关联受控
+// 资源的会被后端以「不支持自助申请」拒掉——算进来就是替点不动的磁贴承诺「还有 N 件事可做」。
 const pendingCount = computed(() => apps.value.filter(a => !a.accessible && !a.degraded && !a.unavailable).length);
 
 const filtered = computed(() => {
@@ -229,10 +219,9 @@ function logout() {
  *  - tunnel：浏览器没有载体，要桌面客户端。 */
 function browserOpenable(app: PortalTile) { return app.mode === 'web'; }
 /** 这个磁贴的七层入口此刻能不能点。
- *  ★逐磁贴判而不是看全局那份：资源级 webEntry 只对它自己生效，而服务端的全局结论是用
- *  空资源算的（那一档在它那里永远不可达）。用全局判会把「管理员按提示给某个资源配了
- *  webEntry」的应用一起置灰——取票接口其实签得出票，用户照着提示做了却点不动。
- *  旧后端不下发 app.web → 回落到全局字段，行为与改造前逐字一致。 */
+ *  ★必须逐磁贴判：资源级 webEntry 只对它自己生效，而服务端那份全局结论是用空资源算的，
+ *  拿它判会把已配好 webEntry 的应用一起置灰——票其实签得出，用户照做了却点不动。
+ *  旧后端不下发 app.web 时回落到全局字段。 */
 function webBlocked(app: PortalTile) {
   if (!browserOpenable(app)) return false;
   return app.web ? !app.web.ready : !webProxy.value.ready;
@@ -255,20 +244,15 @@ function bookmarkURL(app: PortalTile): string {
 }
 
 /**
- * 真正打开一个受保护业务。
+ * 真正打开一个受保护业务：控制面按资源鉴权 → 签一张 60s 一次性访问票据（use=web，绑定
+ * 资源 id）→ 浏览器跳网关七层入口 → 网关验票换会话 Cookie → 逐请求重新鉴权后反代。
  *
- * ★这里此前整个函数体就是一句 Message.success——磁贴点得动、什么也不会发生，
- * 是本项目"页面存在≠功能存在"最典型的一例。现在的流程是：
- *   控制面按资源鉴权 → 签一张 60s 一次性访问票据（use=web，绑定资源 id）
- *   → 浏览器跳到网关七层入口 → 网关验票换会话 Cookie → 逐请求重新鉴权后反代。
- *
- * 用 window.open 新开标签而不是当前页跳转：门户本身是这条链路的入口，
- * 被业务系统顶掉之后用户再打开第二个应用就得重新登录门户。
+ * ★用 window.open 新开标签而不是当前页跳转：门户本身是这条链路的入口，被业务系统顶掉
+ * 之后用户再开第二个应用就得重新登录门户。
  */
 async function openApp(app: PortalTile) {
-  // 直连书签：不经白帝任何通道，能拼出 URL 就直接开。
-  // ★改造前这里统一提示「请用桌面客户端接入后访问 X」——对 global 是**错的**：
-  // 它压根不走隧道，客户端接入了也帮不上忙，等于把用户指去一条不存在的路。
+  // ★直连书签不经白帝任何通道，能拼出 URL 就直接开——绝不能提示「请用客户端接入后访问」，
+  // 它不走隧道，接入了也帮不上忙，等于把用户指去一条不存在的路。
   if (app.mode === 'global') {
     const u = bookmarkURL(app);
     if (u) { window.open(u, '_blank', 'noopener'); return; }

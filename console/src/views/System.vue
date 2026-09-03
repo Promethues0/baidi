@@ -54,10 +54,8 @@
             <span v-for="p in g.perms" :key="p" class="bd-perm bd-mono">{{ p }}</span>
           </div>
           <div class="bd-gcard__scope">{{ g.scope }}</div>
-          <!-- ★「编辑」此前不存在：后端 SaveAdminRole 一直是 upsert（handler 注释也写着
-               「新建/**修改**自定义角色」），控制台只用了它的一半。而角色有成员时删不掉，
-               于是「收缩某个角色的权限」在控制台上**无路可走**——只能先把成员全部改派走、
-               删掉、再建一个同名的、再把人改派回来。 -->
+          <!-- ★「编辑」不可省：角色有成员时删不掉，少了它，收缩某个角色的权限在控制台上
+               就无路可走（只能把人全改派走、删角色、重建、再改派回来）。 -->
           <div v-if="!g.builtin" class="bd-gcard__ops">
             <span class="bd-link" @click="openRole(g)">编辑</span>
             <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeRole(g)">删除角色</span>
@@ -112,10 +110,8 @@
               </td>
               <td>{{ a.auth }}</td>
               <td>
-                <!-- ★因子清单来自后端 factors（机读），不是从 twoFa 猜出来的：
-                     此前这里对 twoFa=true 一律写「已注册 passkey」，一个只绑了 TOTP
-                     的管理员在这一栏被显示成绑了 passkey，而两者的补救路径完全不同
-                     （TOTP 有管理员侧重置通道，passkey 没有）。 -->
+                <!-- ★因子清单只能来自后端 factors，不许从 twoFa 猜：TOTP 有管理员侧重置
+                     通道、passkey 没有，猜错一种就把补救路径指反了。 -->
                 <template v-if="a.factors?.length">
                   <span v-for="f in a.factors" :key="f" class="bd-tg" :style="tagStyle('#00B42A')"
                         style="margin-right: 5px">{{ factorZh(f) }}</span>
@@ -155,9 +151,8 @@
       <div v-if="smsNote" class="bd-warn">
         <icon-exclamation-circle-fill />{{ smsNote }}
       </div>
-      <!-- 哪些事件真的会发通知。★不列的话，「没收到」与「这类事件根本没接线」
-           在页面上完全同形——管理员配好通道后无从知道自己会收到什么。
-           与告警规则页展示 alertKindSpecs.Signal 同款做法：逐条写出触发源。 -->
+      <!-- 哪些事件真的会发通知。★必须逐条列出触发源，否则「没收到」与「这类事件根本
+           没接线」在页面上完全同形。 -->
       <div v-if="notifyEvents.length" class="bd-nev">
         <div class="bd-nev__h">会触发通知的安全事件</div>
         <div v-for="e in notifyEvents" :key="e.event" class="bd-nev__i" :class="{ off: !e.wired }">
@@ -484,10 +479,9 @@
     </a-modal>
 
     <!-- ============ 集群（控制面温备，PRD 15.5）============
-         三态全部来自 GET /api/v1/system 的 cluster 块（standby_nodes 真实台账），
-         与 /diag 的 checkCluster 同一个后端函数——这一页刻意**没有**降级演示数据：
-         编一台"同步正常"的备机，与真的备机在页面上无法区分，而这一页的存在意义
-         正是"切换那天手上到底有没有一份能用的备份"。 -->
+         三态全部来自 GET /api/v1/system 的 cluster 块，与 /diag 的 checkCluster 同一个后端
+         函数。★这一页不许有降级演示数据：一台编出来的「同步正常」备机与真备机同形，而这页
+         回答的正是「切换那天手上有没有一份能用的备份」。 -->
     <div v-show="tab === 'license'">
       <div class="bd-section-title">License · 容量与有效期</div>
 
@@ -728,9 +722,8 @@ const kw = ref('');
 const saving = ref(false);
 
 /* 全部数据来自 GET /api/v1/system（admin_roles 表 + users 表）。
- * 此前这里有 MOCK_GROUPS / MOCK_ADMINS / MOCK_CLUSTER 三份编造数据，
- * 后端不可达时页面照样显示"五个管理组八个管理员三个集群节点"——那是全项目
- * 最容易被误读成"已实现"的地方。现在拉不到就空着并显式报错。 */
+ * ★拉不到就空着并显式报错，不许放降级演示数据：一屏编造的管理组与管理员是全项目
+ * 最容易被误读成「已实现」的东西。 */
 const roles = ref<AdminRole[]>([]);
 const admins = ref<AdminAccount[]>([]);
 /* 集群 = 控制面温备（PRD 15.5）。初值刻意是「不可判定」而不是「未配置备机」：

@@ -725,3 +725,19 @@ test('接线守卫：控制中心信任锚必须同时接上 WebView（NSC）与
   assert.ok(!/baidiControlHost|baidiNscDomain/.test(gradle),
     'NSC 的域名必须从 baidiApiBase 的 host 推，不许另开一个入参');
 });
+
+test('源码守卫：接入失败的原因必须常驻，不能只有一闪而过的 toast', () => {
+  // ★方向此前是反的：「未就绪」（可自愈的中间态）有常驻卡片，而「接入被拒」
+  //   （定性拒绝——强制下线 / 账号禁用 / 终端环境不合规，重试无用）反而只有 Message.error。
+  //   2026-09-03 真机实测：li.fang 被终端合规闸拒，大环回到「未接入」、屏上什么都不剩。
+  //   本页 dropReason 那条注释里早就写着「弹窗一闪而过不算「看见」」——那条纪律没覆盖到这一半。
+  const code = codeOnly(src('src/views/Connect.vue'));
+  assert.match(code, /lastFail/, 'Connect.vue 必须把接入失败的原因留在页面上（常驻卡片）');
+  assert.match(code, /stage === 'idle' && lastFail/,
+    '常驻卡片要在回到 idle 之后仍然显示——那正是用户盯着屏幕找原因的时刻');
+  // 写入点：失败分支必须落库，不能只喂给 Message
+  assert.match(code, /lastFail\.value\s*=\s*r\.detail/,
+    '失败分支要把原生/控制面给的原文写进常驻卡片，且**原样转述不改写**');
+  // 清除点：下一次接入开始时清掉，否则新一次接入的界面上挂着上一次的失败
+  assert.match(code, /lastFail\.value\s*=\s*''/, '新一次接入开始时要清掉上一次的失败原因');
+});

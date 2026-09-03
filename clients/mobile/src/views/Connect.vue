@@ -53,6 +53,23 @@
       </div>
     </div>
 
+    <!-- 上一次接入**没建立起来**的原因。常驻到下一次接入为止。
+         ★为什么不能只靠 Message.error：本页 dropReason 那条注释里就写着「弹窗一闪而过不算看见」，
+         而这里的方向此前恰好是反的——「未就绪」（可自愈的中间态）有常驻卡片，
+         「接入被拒」（定性拒绝，不会自愈，用户必须去找管理员或修自己的机器）反而只有一闪而过的提示。
+         2026-09-03 真机实测：li.fang 被终端合规闸拒（那台 Windows 验证机没开 BitLocker，
+         而这道闸按**账号**判、不分设备），用户看到的是大环回到「未接入」、屏上什么都不剩。
+         与 dropReason 分开：那条说「上一段接入不是你断的」（隧道曾经建起来过），
+         这条说「这一次压根没建起来」，用户的下一步动作不同。 -->
+    <div v-if="stage === 'idle' && lastFail" class="m-card cn__fail">
+      <b>上一次接入没有建立</b>
+      <div class="cn__unready-r">{{ lastFail }}</div>
+      <div class="cn__unready-n">
+        原因由控制中心或原生侧给出，此处原样转述、不做改写。
+        「接入被拒」属于定性拒绝（强制下线 / 账号禁用 / 终端环境不合规），重试无用，请联系管理员。
+      </div>
+    </div>
+
     <!-- 隧道类当前失败（健康行 terr=）。**与就绪判定无关，故必须另立一格常驻**：
          wave10 把就绪判据收紧成敲门类的 knockErr 之后，一次持续性的隧道故障
          （指纹不匹配「疑似中间人」/ 网关装了隐身规则集却没带 -pf → 放行集合永远为空 /
@@ -216,6 +233,10 @@ const knockView = computed<{ cls: string; text: string }>(() => {
  *  多半是半成功状态（无资源映射 → 发不出 CONNECT 前导 → 网关 fail-closed）。 */
 const profileErr = ref('');
 
+/** 上一次接入失败的原因（常驻到下一次接入）。**刻意是页内 ref 而不是 session 字段**：
+ *  它只在「接入」页有意义，塞进全局 session 会多出一个要在登出、断开、认领三处各清一遍的字段。 */
+const lastFail = ref('');
+
 /**
  * 会话侧两个事实 → 大环状态的映射。写端只有一个（vpn.ts 的监视），这里是读端。
  *   · connected 翻真 —— 门敲开了（可能是接入那一刻，也可能是未就绪之后**自愈**）；
@@ -245,7 +266,7 @@ function toggle() {
 async function connect() {
   const bad = validateConfig();
   if (bad) { Message.warning(bad); return; }   // 接入前配置校验（端口/网段/虚拟IP/控制中心）
-  stage.value = 'connecting'; step.value = 0; session.dropReason = ''; session.notReady = '';
+  stage.value = 'connecting'; step.value = 0; session.dropReason = ''; session.notReady = ''; lastFail.value = '';
   startConnectingPoll();
   // ★接入前拉一次接入剖面。移动端此前**全仓零处**拉它，接入配置全靠用户在「我的」页手填——
   //   于是网关落点、受保护网段、资源映射、证书指纹一概由终端自己猜，而只有控制面
@@ -268,7 +289,8 @@ async function connect() {
     stage.value = 'idle';
     // 前缀刻意中性：startTunnel 的失败不只有敲门——原生侧点名的「用户拒绝了 VPN 授权」
     // 「受保护网段配置无效」都从这里出来，冠以「SPA 敲门失败」会把用户支去查网关。
-    Message.error('接入失败：' + (r.detail || '网关不可达'));
+    lastFail.value = r.detail || '网关不可达';
+    Message.error('接入失败：' + lastFail.value);
     return;
   }
   // ②③ 建隧道与引流由原生扩展在自己的进程里完成，webview **收不到分步进度**：
@@ -344,6 +366,8 @@ async function disconnect() {
 .cn__unready { border-left: 3px solid var(--bd-warning); }
 /* 隧道类失败用同一套排版、但换一色：它与「未就绪」是两件事（门开着 vs 门没开），
    同色会让用户以为是同一条告警换了句措辞。 */
+.cn__fail { border-left: 3px solid var(--bd-danger); }
+.cn__fail > b { color: var(--bd-danger); font-size: 14px; }
 .cn__tnote { border-left: 3px solid var(--bd-danger); }
 .cn__tnote > b { color: var(--bd-danger); font-size: 14px; }
 .cn__unready > b { color: var(--bd-warning); font-size: 14px; }

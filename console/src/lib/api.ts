@@ -55,32 +55,16 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 /**
- * failReason 把一次失败翻译成**该给管理员看的那句话**。
- *
- * ★这是本项目在控制台上重复得最多的一个缺陷的收口处：全仓有二十多处写操作长成
- *
- *     } catch { Message.error('删除失败，请检查权限或后端连接'); }
- *
- * ——后端明明回了「分类下仍有 3 个应用，请先改归属」「最后一名超级管理员不可禁用」
- * 「角色「审计管理员」无权执行该操作（需要权限：security）」这类**唯一能指导下一步动作**
- * 的话，errText 也已经把它取出来了，却在 catch 那一行被整句丢掉，换成一个**猜的归因**。
- * 管理员照着提示去查网络、去重登、去找人要权限，而真正的原因就在被丢掉的那个字符串里。
- * api.ts 自己在 errText 上方写下了这条纪律，然后二十多个调用点一个都没照做。
- *
- * 三种情况分开说：
- *   - 后端明确拒绝 → **原样转述**，一个字不改；
- *   - 请求没到后端 → 这时才该说"检查连接"；
- *   - 其它（前端自身异常）→ 兜底。
+ * failReason 把一次失败翻译成该给管理员看的那句话：后端明确拒绝 → **原样转述**，
+ * 一个字不改；请求没到后端 → 这时才该说"检查连接"；其它（前端自身异常）→ 兜底。
+ * ★catch 里绝不许编造归因——后端那句「分类下仍有 3 个应用，请先改归属」往往是唯一
+ * 能指导下一步动作的信息，换成"请检查权限或后端连接"只会把管理员支去查网络、去重登。
  */
 /**
  * failStatus 取失败的 HTTP 状态码（不是 ApiError 就回 0）。
- *
- * ★全仓有十几处写成 `String(e.message).startsWith('403')` 来判状态码，而 api() 抛出的
- * message 是**后端的中文原文**（errText 已经把 {"error":{"message":…}} 解出来了），
- * 永远不以状态码开头——只有后端回了非 JSON（前置 nginx 的 502 之类）时才退回
- * `${status} ${statusText}`。也就是说：正常路径上那些分支一次都不会命中，
- * 每一次真实的 403/409 都掉进 else 里的"请检查后端连接"。
- * 状态码现在在 ApiError 上，判它就好。
+ * ★判状态码只能用它：api() 抛出的 message 是**后端中文原文**（errText 已把
+ * {"error":{"message":…}} 解出来），永远不以状态码开头，`startsWith('403')` 那种写法
+ * 在正常路径上一次都不会命中，真实的 403/409 全掉进 else 分支。
  */
 export function failStatus(e: unknown): number {
   return e instanceof ApiError ? e.status : 0;
@@ -95,9 +79,8 @@ export function failReason(e: unknown): string {
 
 /**
  * errText 取后端的错误文案（httpx.Error 的 {"error":{"message":…}}），拿不到才退回状态行。
- * ★后端的守卫消息常常是**唯一能指导下一步动作**的信息（"分类下仍有 3 个应用，请先改归属"、
- * "该组织仍有子部门"），只把 "409 Conflict" 抛给调用方，等于把这些话全丢掉，
- * 管理员看到的就只是一次没有原因的失败。
+ * ★后端的守卫消息是唯一能指导下一步动作的信息（"该组织仍有子部门"），
+ * 只把 "409 Conflict" 抛给调用方，管理员看到的就是一次没有原因的失败。
  */
 async function errText(res: Response): Promise<string> {
   try {
@@ -113,11 +96,9 @@ export interface KV { name: string; value: number }
 /** 三道防线之一。刻意没有 trend：趋势要有历史快照才算得出来，后端一张历史态势表都没有。 */
 export interface DefenseLine {
   key: string; name: string; risk: number; top: string[];
-  /** scope 这条防线的数是**窗口内累计**（window）还是**当前状态**（current）。
-   *  ★三条线里只有隐身防线真按时间窗算：账号防线读 users 表的当前状态，
-   *  终端防线读 posture_reports 的最新一份（压根没有历史）。时间选择器对后两条
-   *  不生效——不标出来的话，切到「近 7 天」看到的是当前状态却以为是七天内的情况。
-   *  一个悄悄不生效的筛选比没有筛选更坏。 */
+  /** 这条防线的数是**窗口内累计**（window）还是**当前状态**（current）。
+   *  ★只有隐身防线真按时间窗算：账号防线读 users 当前状态、终端防线读 posture_reports
+   *  最新一份，时间选择器对后两条不生效，不逐条标出来就是一个悄悄失效的筛选。 */
   scope?: 'window' | 'current';
   note?: string;
 }
@@ -142,8 +123,8 @@ export interface Overview {
   /** 缺席 = 后端没有攻击表（内存种子模式），整块面板不画。 */
   attack?: AttackStat;
   /** 审计派生统计（访问决策/判定分布/威胁事件/攻击源）的时间窗（小时）。
-   *  ★改造前它们是**建库以来累计**，而攻击源是严格 24h，两个口径并排显示在
-   *  标着「实时判定态势」的同一屏上，页面一处不标。 */
+   *  ★这一屏只有这一个口径，攻击源面板也跟随它：两个窗口并排而页面一处不标，
+   *  就分不出哪个数是几天内的。 */
   windowHours?: number;
   /** 口径说明（含"实际能覆盖多久"）。 */
   windowNote?: string;
@@ -153,10 +134,8 @@ export interface Overview {
 
 /* ── 接入策略（FR-POLICY-29 同时在线设备上限 / FR-POLICY-30 接入超时注销）──
  *
- * ★这里原来是 PolicyBundle / OrgNode（策略继承树）+ 8 项继承编辑器。那 8 项落进
- * policy_overrides.settings 之后**全仓零消费方**，而保存 toast 写着「已下发至代理网关」。
- * 整批摘除（wave8 行动 13-①），换成下面这两条真有执行方的规则：执行点是敲门令牌
- * （api.accessSessionGate → handleKnockToken），撤销在一个 15s 保活周期内必然生效。 */
+ * ★只有这两条规则有执行方（api.accessSessionGate → handleKnockToken，撤销在一个 15s
+ * 保活周期内必然生效）。别往这里加没有执行方的开关，页面会照样弹「已下发至代理网关」。 */
 export interface AccessPolicy {
   /** 是否启用「同时在线设备上限」。★与 maxDevices=0 不是一回事：0 = 禁止接入（PRD 原文）。 */
   deviceLimitEnabled: boolean;
@@ -239,8 +218,7 @@ export interface DirUser {
   /** 组织归属（org_units.id）。org/orgKey 是展示遗物，有 orgId 时由后端对齐到组织表。 */
   orgId: string;
   /** 这个账号属于哪个**用户目录**：外部源 id，或 'local'。
-   *  ★身份源选项卡此前是纯装饰的——点哪个目录看到的都是同一张全量表，
-   *  顶部四个聚合数也永远是全库口径。判据与选项卡上的计数同源（绑定表）。 */
+   *  ★身份源选项卡的过滤判据，与选项卡上的计数同源（都读绑定表）。 */
   sourceId?: string;
   /** 所属用户组 id（含角色组的派生归属）。 */
   groups: string[];
@@ -258,10 +236,10 @@ export interface UserDirBundle { directories: Directory[]; orgTree: OrgUnit[]; g
 
 /* ── 用户批量导入导出（GET /users/export → CSV 附件；POST /users/import ← CSV 原文）──
  *
- * ★导出**不含口令哈希、也不含口令强度**：前者是能拿去离线爆破的材料，后者是一张
- * "先打哪个账号"的排序表。两者都由后端的 store.UserExportRow 从类型层面排除。
- * ★导入**只建普通用户**：CSV 里出现「角色 / role / 管理员角色」一类列，后端整份拒收
- * （建管理员的唯一入口是 /api/v1/admins）。界面必须照实说，别让人以为能用表格发管理员。
+ * ★导出**不含口令哈希、也不含口令强度**（前者能拿去离线爆破，后者是一张"先打哪个账号"
+ * 的排序表），由后端 store.UserExportRow 从类型层面排除。导入**只建普通用户**：CSV 里
+ * 出现「角色 / role / 管理员角色」一类列，后端整份拒收（建管理员的唯一入口是
+ * /api/v1/admins）。界面必须照实说，别让人以为能用表格发管理员。
  */
 export interface UserImportRow {
   /** 文件里的**物理行号**（含表头行，故首个数据行通常是 2）——管理员拿它回 Excel 定位。 */
@@ -340,8 +318,8 @@ export interface DeviceBundle { settings: DeviceTrustSetting; devices: Device[];
 export interface DiskStat { usedPct: number; totalGB: number; retainDays: number; dbBytes: number; selfPct: number }
 /** 一条审计记录。★seq/mac 是防篡改链的序号与链式 MAC：列表、CSV 导出、
  *  syslog/SIEM 外送三个出口同源（后端就是同一个 store.AuditEntry）。 */
-/** 审计类别。★与后端 store.AuditCategories 一一对应——此前这里少了 policy 与 system，
- *  而那两类**真的会被写进库**（保存安全基线 / 接入策略 / 网关接入地址…）。 */
+/** 审计类别。★必须与后端 store.AuditCategories 一一对应：少一类，那类审计
+ *  （如 policy：保存安全基线 / 接入策略）在页面上就永远筛不出来。 */
 export type AuditCategory = 'access' | 'auth' | 'admin' | 'policy' | 'security' | 'dataplane' | 'system';
 export interface AuditEntry { time: string; category: AuditCategory; user: string; srcIp: string; event: string; verdict: 'allow' | 'deny' | 'mfa' | 'ok' | 'fail'; seq?: number; mac?: string }
 /* AuditWriteHealth 控制面**自己**没能把审计写进库的读数（api.auditWriteHealth）。
@@ -359,9 +337,8 @@ export interface AuditBundle {
 /* ── 网关机器身份 · mTLS 客户端证书（GET/POST /api/v1/pki/gateway-certs）──
  *
  * ★这是网关身份的**唯一路径**：控制面内部 CA 签发，网关凭它调 /api/v1/gateways/*。
- * 吊销即刻生效（指纹白名单是执行点），并把该网关从下发给终端的落点清单里摘掉。
- * 三个端点后端一直都有，控制台此前**没有任何入口**——机器身份只能用 curl 管，
- * 而"吊销"恰恰是一台网关失陷时唯一的即刻处置手段。 */
+ * 吊销即刻生效（指纹白名单是执行点），并把该网关从下发给终端的落点清单里摘掉——
+ * 那是一台网关失陷时唯一的即刻处置手段，界面上不能没有入口。 */
 export interface GatewayCert {
   /** 证书 DER 的 SHA-256（主键，也是吊销的入参）。 */
   fingerprint: string;
@@ -411,9 +388,8 @@ export interface OpsReport {
 
 /* ── 网关与隐身（GET /api/v1/gateway → api.GatewayPageBundle）──
  *
- * ★数据源是 mTLS 注册心跳的在线登记（与 GET /api/v1/gateways、诊断页同一份），
- * 不再是「华东/华南出口」那张编造的区域拓扑。区域、主备角色、负载百分比三个维度
- * 已整体去掉：白帝没有区域概念、没有选主、也不采集负载，画出来就是假的。
+ * ★整页数据来自 mTLS 注册心跳的在线登记，与 GET /api/v1/gateways、诊断页同一份。
+ * 区域、主备角色、负载百分比这三维不要加：白帝没有区域概念、没有选主、也不采集负载。
  */
 export interface GwNode {
   id: string; proxy: string; spa: string;
@@ -443,10 +419,9 @@ export interface GatewayBundle {
   onlineWindowSec: number;
   /** 控制面签发的敲门令牌有效期（秒）。 */
   knockTokenTtlSec: number;
-  /** 逐台在线网关的**隐身实测回执**（wave8 行动 7）。
-   *  ★页面上那四条「端口扫描全程超时 / 攻击面 = 0」此前是写死的，而参考部署根本
-   *  不开 -pf——未敲门的 TCP 会先完成三次握手再被用户态断开，nmap 判 open。
-   *  现在改成跟随这里的真实态渲染。 */
+  /** 逐台在线网关的**隐身实测回执**。
+   *  ★「端口扫描全程超时 / 攻击面 = 0」那几条断言必须跟随它渲染、不许写死：参考部署
+   *  默认不开 -pf，未敲门的 TCP 会先完成三次握手再被用户态断开，nmap 判 open。 */
   stealth: StealthReceipt[];
   /** 内核态隐身**实测生效**的台数（只有 armed 计入；不可判定与未上报都不算）。 */
   stealthArmed: number;
@@ -466,10 +441,10 @@ export interface StealthReceipt {
   gatewayId: string;
   /** unreported | off | orphan-ruleset | no-ruleset | no-drop-rule | port-mismatch | unknown | armed */
   status: string;
-  /** wanted = -pf 管理意图，与 status（实测态）分开——一列同时表达"想开"和
-   *  "真的开着"正是 ipsec 那段注释批判过的形态。 */
-  /** ★可选 = 该网关根本没上报（旧版本）。用 boolean 的话零值会在页面上渲染成
-   *  确定结论「-pf 未开启 · 非 root」，与「控制面无从判断」的措辞直接打架。 */
+  /** wanted = -pf 管理意图，与 status（实测态）分列：一格同时表达"想开"和"真的开着"，
+   *  就分不出「本来没开」与「开了没生效」。 */
+  /** ★可选 = 该网关根本没上报。写成 boolean 的话零值会渲染成确定结论
+   *  「-pf 未开启 · 非 root」，与「控制面无从判断」直接打架。 */
   wanted?: boolean;
   backend: string; root?: boolean;
   proxyAddr: string; guardedPort?: number;
@@ -498,9 +473,9 @@ export interface AdminAccount {
   /** 认证方式的**中文摘要**（由 factors 派生）。别拿它当判据。 */
   auth: string;
   twoFa: boolean;
-  /** 已注册的第二因子（机读）：'passkey' | 'totp'。★页面渲染用这一份。
-   *  改造前页面对 twoFa=true 一律写「已注册 passkey」，于是只绑了 TOTP 的管理员
-   *  被显示成绑了 passkey——而后端两者一直算得清清楚楚。 */
+  /** 已注册的第二因子（机读）：'passkey' | 'totp'。
+   *  ★页面必须渲染这一份：按 twoFa=true 一律写「已注册 passkey」，只绑了 TOTP 的
+   *  管理员就会被显示成绑了 passkey。 */
   factors?: string[];
   lastLogin: string; status: string;
 }
@@ -686,9 +661,9 @@ export interface AuditForwardFlushResp { ok: boolean; reset: number; target: Aud
 /* ── 认证源接入 · 聚合视图（GET /api/v1/authsrc → store.AuthSrcBundle）──
  *
  * 与下面的 AuthSourceRec 同源（都读 auth_sources），差别只在这份多带一个
- * **账号计数**、不带凭据元信息。原来的 status / users / primary 三个字段已删除：
- * status 恒 online 是替一台可能早已宕掉的目录打包票；users（「AD 域 1160 用户」）
- * 纯属编造——目录规模要遍历整个 LDAP 才数得出来，白帝没有那个能力。
+ * **账号计数**、不带凭据元信息。★别加"在线状态"与"目录纳管用户数"：控制面不探活
+ * 认证源（恒 online 是替一台可能早已宕掉的目录打包票），目录规模也要遍历整个 LDAP
+ * 才数得出来，白帝没有那个能力。
  */
 export interface AuthSource {
   key: string;
@@ -747,7 +722,7 @@ export interface LdapConfig {
   bindDn?: string;
   baseDn: string;
   userFilter?: string;
-  /** 账号状态回验的属性映射（wave8 行动 11）。AD 的禁用是 userAccountControl 的位
+  /** 账号状态回验的属性映射。AD 的禁用是 userAccountControl 的位
    *  （内置）；通用 LDAP 协议里没有"禁用"语义，各家用各家的属性——不配这两项的话，
    *  非 AD 部署下回验只剩「条目被删除」一种触发条件。 */
   statusAttr?: string;
@@ -769,11 +744,11 @@ export interface OidcConfig {
   useUserInfo?: boolean;
 }
 
-/** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC 共用；wave8 行动 10）。
+/** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC 共用）。
  *  ★两项的判定时机不同：白名单**每次登录都判**（目录侧移出组后下次登录就该被拒），
  *  审批**只判首次建号**（已批过的账号不必天天再批）。 */
 export interface AdmitConfig {
-  /** auto = 认证通过即建号（改造前的行为）；approval = 首登只登记待批单。 */
+  /** auto = 认证通过即建号；approval = 首登只登记待批单。 */
   admitPolicy?: 'auto' | 'approval';
   allowedDomains?: string[];
   allowedGroups?: string[];
@@ -791,27 +766,23 @@ export interface ExtAdmission {
 export interface ProbeResp { ok: boolean; detail: string; elapsedMs?: number }
 export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: string }
 
-/* ── 认证策略 · PC/移动端分栏 + 自适应规则（store.AuthPolicy，FR-INTRO-07/08、FR-AUTH-12）──
+/* ── 认证策略（store.AuthPolicy，FR-INTRO-07/08、FR-AUTH-12）──
  *
- * ★这些开关是**登录链路真读的**（control/internal/authpolicy.Evaluate），不再是纯展示：
- * 命中增强条件且未被豁免 → 登录被要求二次认证。因此界面上任何一个勾都必须是真能生效的，
- * 判不了的规则由后端 capabilities 声明为不可用并在此置灰（不是静默无效）。
+ * ★这些开关是**登录链路真读的**（control/internal/authpolicy.Evaluate）：命中增强条件
+ * 且未被豁免 → 登录被要求二次认证。因此界面上任何一个勾都必须真能生效，判不了的规则
+ * 由后端 capabilities 声明为不可用并在此置灰，不许静默无效。
  */
-/** 可作为「用户目录」出现的取值。★这个类型此前叫 PrimaryMethod、兼作"主认证方式"，
- *  而主认证那一维已摘除（wave8 行动 13-②）；radius/oauth/sms/cert 四个从来没有实现，
+/** 可作为「用户目录」出现的取值。radius/oauth/sms/cert 四个从来没有实现，
  *  留在这里只是因为存量策略的 directory 字段里可能还有它们。 */
 export type DirectoryKind = 'local' | 'ad' | 'ldap' | 'oidc' | 'radius' | 'oauth' | 'sms' | 'cert';
 export type SecondaryMethod = 'sms' | 'totp' | 'radius' | 'cert' | 'http';
 /** 可接受的二次认证方式（AuthPolicy.secondary）。
  *
- *  ★PC / 移动端两栏已合并（wave8 行动 13-②）：三端走**同一个** /portal/login，
- *  请求里没有任何端标识，两栏并排会让人以为「移动端可以配得更严」。
- *  同批摘掉了每栏里的 primary（主认证方式）——策略匹配第一步就按目录筛，
- *  一条策略只作用于已经被该目录认出来的人，对他说"主认证用证书"不可能生效。
- *
  *  **唯一执行语义**：非空时，本策略要求二次认证而账号又没绑任何认证器的情况下，
  *  不接受 legacy 演示验证码回落（回「请先注册」）。它不决定用哪个因子——
- *  那由账号已注册的认证器决定（passkey > TOTP）。 */
+ *  那由账号已注册的认证器决定（passkey > TOTP）。
+ *  ★不要拆成 PC / 移动端两栏：三端走同一个 /portal/login，请求里没有任何端标识，
+ *  并排两栏只会让人以为「移动端可以配得更严」。 */
 export interface ExemptRule {
   trustedDevice: boolean;
   trustedNetwork: boolean;
@@ -821,7 +792,7 @@ export interface ExemptRule {
   winDomain: boolean;
 }
 export interface EnhanceRule {
-  /** 范围内一律二次认证（取代此前写死的「账号名以 ext 开头或含外包」启发式）。 */
+  /** 范围内一律二次认证（按组织/用户组配，不做账号名启发式）。 */
   always: boolean;
   weakPwd: boolean;
   offHours: boolean;
@@ -838,10 +809,9 @@ export interface AuthPolicy {
   /** 适用范围：组织（含子树）与用户组。非默认策略两者皆空则匹配不到任何账号，后端拒绝保存。 */
   scopeOrgs: string[]; scopeGroups: string[];
   exempt: ExemptRule; enhance: EnhanceRule;
-  /** ★这里曾经有 authzApps（"默认授权应用"，自由文本）。已摘除（wave8 行动 13-③）：
-   *  它零执行方，而策略卡把空值渲染成「不授权」、种子还预置「默认授权全部应用」——
-   *  两者都在暗示这条策略决定了能访问哪些应用。授权的唯一真相是**资源侧的主体清单**
-   *  （allowUsers/allowGroups/allowOrgs + JIT 授予），与认证策略无关。 */
+  /** ★认证策略不决定授权：授权的唯一真相是**资源侧的主体清单**
+   *  （allowUsers/allowGroups/allowOrgs + JIT 授予）。别在这里加"默认授权应用"一类字段，
+   *  它没有执行方，却会让策略卡看起来在决定这个人能访问哪些应用。 */
 }
 /** 一条规则的能力声明：能不能判、判据是什么、判不了是为什么（后端 authpolicy.Capabilities）。 */
 export interface AuthRuleCapability {
@@ -879,19 +849,13 @@ export interface AuthPolicyResp {
 
 /* ── 安全中心（store.SecurityBundle）── */
 export interface BaselineCheck { key: string; label: string; platform: 'Windows' | 'macOS' | 'Linux' | 'All'; expect: string; severity: 'high' | 'medium' | 'low' }
-/** 安全基线。
- *
- *  ★`type`（上线准入 / 应用防护）已删：风险引擎 risk.Evaluate 从不读它——两类基线的
- *  检测项、处置、判定路径完全一样，它只是列表上的一个色块。留着就是"看起来有分类、
- *  实际上没有任何行为差异"。
- *
- *  ★`scope` 自由文本已换成 scopeOrgs/scopeGroups **结构化范围**（组织含子树）。
- *  自由文本那栏写着「个人 BYOD 设备」而判定对全体终端生效，是本项目最典型的
- *  「界面上写了、代码里没人读」。两者皆空 = 对全体生效。 */
+/** 安全基线。适用范围只有 scopeOrgs/scopeGroups 两栏参与判定（组织含子树），
+ *  **两者皆空 = 对全体终端生效**；别把范围做成自由文本，写什么都不影响判定。
+ *  ★也别加"基线类型"一类的分栏：风险引擎 risk.Evaluate 只读检测项与处置，
+ *  多出来的维度在列表上是个色块、在判定里没有任何行为差异。 */
 export interface BaselinePolicy { id: string; name: string; scopeOrgs: string[]; scopeGroups: string[]; disposal: 'allow' | 'degrade' | 'block' | 'gray'; status: 'enabled' | 'disabled'; platforms: string[]; checks: BaselineCheck[] }
-/** 只有 baselines。原来还有一段 spa（G3 / 已隐身 / 敲门正常）是纯种子——控制面既不实测
- *  端口可见性、也不代数据面宣布敲门是否正常，整段连同安全中心页那张卡片已删除。
- *  真实出处是「网关与隐身」页：那里每一项都来自网关 mTLS 注册心跳。 */
+/** 只有 baselines。★端口可见性与敲门状态不归这里：控制面既不实测端口、也不代数据面
+ *  宣布敲门是否正常，真实出处是「网关与隐身」页（逐台来自网关 mTLS 注册心跳）。 */
 /** 采集器**真的会上报**的一个检查项。基线检测项的 key 只能取自这份目录——
  *  采集器不报的 key 会让该基线对全平台终端永远判违规（接入准入基线默认处置是 block，
  *  等于一键给所有人拒发敲门令牌）。后端 handleSaveBaseline 与本页下拉读同一份。 */
@@ -955,11 +919,9 @@ export interface GatewaysResp { gateways: GatewayReg[] }
 /* ── 监控中心 · 在线用户（store.OnlineSession）── */
 /** 一条真实接入会话。**唯一来源**是网关注册心跳里的 sessions。
  *
- *  ★网关按会话上报的只有 {IP, 账号, 角色, 建立时刻}。此前这里还有
- *  location / device / os / app 四个字段，由后端逐条填 "—"，页面上并排渲染成四列
- *  永远空着的表头；而「异地·公网接入」KPI 与筛选页签因此**结构性恒为 0**。
- *  四个字段连同那个 KPI 已整体删除——白帝没有 GeoIP 库，网关也不按会话上报
- *  设备与当前应用。org / trust / risk 三格改由控制面按账号从库里现取真值。 */
+ *  ★网关按会话上报的只有 {IP, 账号, 角色, 建立时刻}：别加 location / device / os / app，
+ *  白帝没有 GeoIP 库、网关也不按会话上报设备与当前应用，加进来只能恒空，依赖它们的
+ *  KPI 与筛选页签会结构性恒为 0。org / trust / risk 三格是控制面按账号现取的真值。 */
 export interface OnlineSession {
   id: string; user: string; account: string; org: string;
   ip: string;
@@ -986,10 +948,9 @@ export interface UserStateBucket { key: string; label: string; count: number; to
 export interface UserStateItem {
   id: string; user: string; account: string; org: string;
   /**
-   * 档位。★与风险引擎的处置四档**同一套名字**：block/degrade/gray 就是控制面此刻
+   * 档位。★必须与风险引擎的处置四档**同一套名字**：block/degrade/gray 就是控制面此刻
    * 正在执行的那一档（degrade 已摘掉高敏资源、gray 每轮下发都在记 observing 审计），
-   * locked/disabled 是与风险正交的目录账号状态。
-   * 旧的 risk-high/risk-low/idle 已删除——同一个概念在两处两套名字，管理员无从对照。
+   * locked/disabled 是与风险正交的目录账号状态。另起一套叫法，就没法与风险页对照。
    */
   state: 'block' | 'degrade' | 'gray' | 'locked' | 'disabled';
   risk: 'none' | 'low' | 'high'; online: boolean;
@@ -1021,12 +982,12 @@ export interface LockoutConfig {
 
 /* ── IPSec VPN 组网（配置 store.IpsecSite ＋ 运行态 ipsec_sa_state）──
  *
- * ★这两半必须分开看，混在一个结构里就是旧实现出事的根源：
+ * ★两半必须分开：
  *   · 配置 / 管理意图 —— 管理员写，控制面权威（peer、subnet、phase1/phase2、auth、suite、enabled…）
  *   · 实测运行态     —— 网关经 mTLS 心跳回报，网关权威（全在 sa 子对象里）
- * 旧版把 status/rxBytes 与配置列平级摆在同一张表，于是「toggle 一下把 status 改成 up」
- * 成了合法写法：界面上那条「已建立 · 已传 184 MB」其实是播种时灌进库的常量，永不变化。
- * 现在配置侧不再暴露任何可读的运行态字段——想显示状态就只能去读 sa，读不到就老实说未回报。
+ * 配置侧不暴露任何可读的运行态字段：两者平级摆在一张表时，「toggle 一下把状态改成 up」
+ * 就成了合法写法，而那条「已建立 · 已传 184 MB」不过是库里一个永不变化的常量。
+ * 想显示状态只能去读 sa，读不到就老实说未回报。
  */
 export interface IpsecPhase { enc: string; hash: string; dh: string }
 
@@ -1093,8 +1054,8 @@ export interface IpsecSite {
   localRef?: string; remoteRef?: string; // 本端/对端网段引用的地址对象 id（对象库复用）
 
   /** @deprecated ipsec_sites 的 status/rx_bytes/tx_bytes/last_up 四列已冻结为只读兼容：
-   *  控制面不再写、UI 一律不得渲染——它们正是那份「永远不变的 184 MB」。
-   *  仍留在类型里只是为了让旧后端的响应能通过类型检查，不是给人用的。 */
+   *  控制面不再写、UI 一律不得渲染（渲染出来的是一个永不变化的常量）。
+   *  仍留在类型里只是为了让旧后端的响应能通过类型检查。 */
   status?: 'up' | 'down' | 'connecting';
   /** @deprecated 见 status；流量一律读 sa.rxBytes。 */
   rxBytes?: number;
@@ -1133,7 +1094,7 @@ export interface PortalLoginResp {
   reason?: string;
   token?: string;
   displayName?: string;
-  /** needDirectory 配了多个认证域又没指定：前端据此渲染下拉并重试（wave8 行动 12）。
+  /** needDirectory 配了多个认证域又没指定：前端据此渲染下拉并重试。
    *  ★不指定时后端**拒绝**而不是挨个去问——挨个问等于把明文口令逐台投递给
    *  每一个排在前面的目录服务器。 */
   needDirectory?: boolean;
@@ -1155,8 +1116,8 @@ export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
   sensitivity: 'low' | 'normal' | 'high';
   /** 服务端算出的授权结论：静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
-   *  ★与客户端剖面、七层票据同一个判定函数（control 侧 appAccessState）——前端不得再按
-   *  sensitivity 之类的字段自己推一遍，那正是这块曾经的缺陷：门户说「需申请」而客户端直接能进。 */
+   *  ★与客户端剖面、七层票据同一个判定函数（control 侧 appAccessState）。前端不得再按
+   *  sensitivity 之类的字段自己推一遍——第二套结论会让门户说「需申请」而客户端直接能进。 */
   accessible: boolean; resourceId: string;
   /** 因终端风险降权而不可访问（而非缺授权）。降权否决压过 JIT 授予，此时提交申请必然无效，
    *  用户该做的是修复终端环境——两种"不可访问"的下一步动作完全不同，必须分开提示。 */
@@ -1381,8 +1342,7 @@ export interface GatewayIface {
  *
  *  ★与 policy.enabled（管理意图）是两件事，页面必须分栏呈现。合成一格的话，
  *  「网关没带 -nat 启动」和「规则灌入内核失败」与正常完全同形——而这两种失效
- *  网关侧一行日志都不打，症状只是「发布的业务公网打不开 / 内网上不了网」。
- *  同一条纪律已在 IPSec 上执行过（ipsec_sites.status 废弃、运行态改读 ipsec_sa_state）。 */
+ *  网关侧一行日志都不打，症状只是「发布的业务公网打不开 / 内网上不了网」。 */
 export interface NATReceipt {
   gatewayId: string;
   /** unreported=旧网关没报过 · disabled=网关没开 -nat · failed=灌内核失败
@@ -1463,7 +1423,7 @@ export interface UpgradeCheckResult {
   nextHop?: string; manifest?: { version: string; component: string; notes?: string };
 }
 
-/* ── 终端设备台账批量出入口（wave7 行动 14）──────────────────────────────
+/* ── 终端设备台账批量出入口 ──────────────────────────────────────────────
  *
  * GET  /api/v1/devices/export  → CSV 附件（流式，全列过公式注入中和）
  * POST /api/v1/devices/import  → 正文是 CSV 文本，回执逐行可见

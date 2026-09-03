@@ -1010,6 +1010,16 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   按当前 Go API 手写的 baidimobile 桩」编译与 JVM 断言（CI `testDebugUnitTest` 是 JUnit 用例的唯一执行方）；
   iOS 侧 `native/ios/test-routespec.sh` 用 swiftc 真跑断言，`PacketTunnelProvider.swift` 对着过期 xcframework
   做 `-typecheck`（`pin`/`resmapJSON` 两处是产物过期的既有报错）。**两端都没有装到真机上过。**
+- **iOS 的 `RouteSpec` 断言在 CI 里有执行方了**（`clients-mobile.yml` 的 `ios-routespec` job，macos runner
+  上跑 `test-routespec.sh`）。加它之前 CI 里**一个执行方都没有**——那条 fail-closed 的多网段解析只靠开发机上
+  有人记得手工跑，而没人跑它也不会有任何提示。**这条腿的边界要一起写清**：它只证明「解析逻辑没回归」，
+  **不出包、不签名、不碰 Network Extension**（那需要 Apple 付费账号，见 `clients-mobile.yml` 文件头），
+  更不证明 iOS 壳能装能连；`PacketTunnelProvider.swift` 本身在这条腿上编不了（要 Baidimobile.xcframework
+  + iOS SDK）。**鸿蒙壳仍然没有任何 CI 执行方**（镜像里没有 DevEco/HarmonyOS SDK）。
+- **安卓 gradle wrapper 未钉发行版哈希**（`gradle-wrapper.properties` 缺 `distributionSha256Sum`，非本波引入）：
+  CI 上两次 `./gradlew` 复用的是同一条**未经校验**的 `gradle-*-bin.zip` 下载链。**未修**——补它要求哈希从
+  Gradle 官方 release-checksums 页面**人工逐字符抄来**（与 `fetch-wintun.sh` 同一条纪律：把下载到的文件算一遍
+  填上等于给任何一次投毒盖章），本轮没有可信来源就不填，缺口与正确补法写在那个文件与 CI 步骤的注释里。
 
 ### ✅ 消息通道 SMTP / Webhook（真，但「短信」就是 webhook，别当短信网关用）
 

@@ -5,12 +5,18 @@
 #   去编 dmg。分开还有个实际作用：桌面那条已经能出包，安卓这条是新的、大概率要修几轮，
 #   混在一起会让"客户端安装包"这个检查项长期红着。
 #
-# ★这里**只有 Android**，而且这不是遗漏：
+# ★**出包**这件事这里只有 Android，而且这不是遗漏：
 #   - iOS：需 Apple 付费账号的签名证书 + Network Extension（`com.apple.developer.networking.
 #     networkextension`）授权。公共 runner 上没有、也不该往仓库 Secrets 里塞。
 #   - 鸿蒙：DevEco Studio / HarmonyOS SDK 根本不在 GitHub Actions 的镜像里，也没有官方 action。
 #   与其挂两个永远失败（或永远 skip）的 job 把"没有能力"伪装成"这次没跑"，不如一个都不写，
 #   把原因写在 clients/BUILD.md 第九节，并让下载中心的占位文案照实说。
+#
+# ★但**出不了包不等于测不了**：iOS 侧的 `RouteSpec.swift` 只用标准库、不碰
+#   Network Extension，`test-routespec.sh` 用 macos runner 上现成的 swiftc 编它 + 一个
+#   命令行 main 跑断言，几十秒。加这条腿之前它在 CI 里**一个执行方都没有**——多网段
+#   fail-closed 那类回归只靠开发机上有人记得手工跑，而那台机器上没人跑它也不会有任何提示。
+#   这条腿证明的是「解析逻辑没回归」，**不证明** iOS 壳能装能连（那仍然没有任何证据）。
 #
 # ★2026-08-12：本文件已在 GitHub Actions 上真实跑通，**首次运行即绿**，产出
 #   baidi-mobile-android-debug-UNVERIFIED（31.3 MB APK），全部步骤无跳过。
@@ -59,6 +65,18 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # iOS 壳的网段解析自检。**只跑纯 Swift 断言，不出包、不签名、不碰 Network Extension**——
+  # 那些需要付费账号，见文件头。RouteSpec.swift 只用标准库，macos runner 自带 swiftc。
+  ios-routespec:
+    name: iOS · RouteSpec 断言（不出包）
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: swiftc 版本（出问题时先看它，runner 镜像换 Xcode 是常见变量）
+        run: xcrun swiftc --version
+      - name: 跑 RouteSpec 断言
+        run: bash clients/mobile/native/ios/test-routespec.sh
+
   android:
     name: Android · debug APK（未实机验证）
     runs-on: ubuntu-latest
@@ -179,6 +197,21 @@ jobs:
       - name: JVM 单测（纯 Kotlin：网段解析 / 运行态，不需要模拟器）
         working-directory: clients/mobile/native/android
         run: |
+          # ★★已知缺口（**未修**，别当它已经修了）：这是本工作流第一次执行 ./gradlew，
+          #   也就是 gradle wrapper 第一次去 services.gradle.org 下载
+          #   `gradle-8.7-bin.zip`——而 `gradle/wrapper/gradle-wrapper.properties` 里
+          #   **没有 `distributionSha256Sum`**，这个 zip 下载下来不经任何校验就被解开、
+          #   执行。下一步 `assembleDebug` 复用同一份缓存，等于同一条未校验的下载链
+          #   被用了两次。上游被投毒 / 传输被劫持时，跑的是别人的构建脚本，而 CI 全绿。
+          #   （非本波引入：wrapper 一开始就是这么生成的。）
+          #   ★正确的补法与 `clients/desktop/src-tauri/fetch-wintun.sh` 同一条纪律：
+          #   哈希必须**从 Gradle 官方的 release checksums 页面人工逐字符抄来**
+          #   （https://gradle.org/release-checksums/ 上 8.7 那一行的 "Binary-only (-bin) ZIP Checksum"），
+          #   **绝不能"把下载到的 zip 算一遍填上"**——那等于给任何一次投毒盖章。
+          #   抄准之后写进 gradle-wrapper.properties 的 `distributionSha256Sum=`，
+          #   并与 `distributionUrl` 挨着写：改版本号必须同一次改掉哈希，忘了也不会静默
+          #   （wrapper 校验不过当场拒）。没有可信来源就先别填，也别拿这条注释当已修。
+          #
           # ★app/src/test 守的是两条静默失效：「多网段只切一次 → 静默回落 /24 只接管第一段」、
           #   「onRevoke 写下的原因被 onDestroy 冲回 idle」。开发机上没有 gradle/Android SDK
           #   跑不了它们——这一步是它们在流水线上的唯一执行方，别为了省一分钟去掉。

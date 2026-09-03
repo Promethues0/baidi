@@ -1,8 +1,10 @@
 package dataplane
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -54,23 +56,124 @@ func TestHealthReflectsRealEvents(t *testing.T) {
 }
 
 // 健康行只在**状态变化**时打——每条流都打会把 4000 字节的日志尾巴瞬间冲满，
-// 反而把该看的信息（含落点行）挤出窗口。
+// 反而把该看的信息（含落点行）挤出窗口（Rust 壳只从尾巴里捞最后一条健康行）。
+//
+// ★改造前这条用例**钉不住任何东西**：它断言的是 `tn.lastHealth` 前后一不一样，
+// 而 `lastHealth` 在去重早退**之前**就被赋成了同一个字符串——把 logHealth 里
+// `if line == t.lastHealth { … return }` 整段删掉（保留赋值），断言照样全绿。
+// 现在改成数**真打出去的记录条数**，那才是这条属性的唯一可观测面。
 func TestHealthLineDedup(t *testing.T) {
+	lines := captureHealth(t)
 	tn := &tunneler{}
+
 	tn.markTunnel()
-	first := tn.lastHealth
-	if first == "" {
-		t.Fatal("应记下已打印的健康行")
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("首次状态变化应恰好打 1 条健康行，实得 %d 条：%q", len(got), got)
 	}
 	tn.markTunnel() // 同样的状态再来一次
-	if tn.lastHealth != first {
-		t.Error("状态未变时不应产生新的健康行")
+	if got := lines(); len(got) != 1 {
+		t.Errorf("状态未变时不应再打健康行（去重早退没生效），实得 %d 条：%q", len(got), got)
 	}
 	tn.markTunnelFail("隧道拨号失败")
-	if tn.lastHealth == first {
-		t.Error("状态变了必须打新行，否则界面停在旧结论上")
+	got := lines()
+	if len(got) != 2 {
+		t.Fatalf("状态变了必须打新行，否则界面停在旧结论上；实得 %d 条：%q", len(got), got)
 	}
-	assertHealthKeys(t, tn.lastHealth)
+	assertHealthKeys(t, got[1])
+}
+
+// captureHealth 把 slog 换成写进 buffer 的 TextHandler（结束按 t.Cleanup 还原，
+// 与同包 TestHealthMarksConcurrentlyRaceFree 各自 Cleanup、互不影响），
+// 返回「取出目前为止打过的健康行」的闭包。
+//
+// ★断言的对象刻意是**真打出去的那一行**而不是 `tn.lastHealth`：后者只是去重键，
+// 客户端一个字都读不到；而 slog 会给含空格的值加引号，两者并不逐字相同。
+func captureHealth(t *testing.T) func() []string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return func() []string {
+		var out []string
+		for _, l := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			if strings.Contains(l, healthPrefix) {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
+}
+
+// 失败原因里的**对端可控文本**不得伪造出字段分隔符（security-5 的数据面侧纵深）。
+//
+// ★这不是假想：中间人出示一张 SAN 里塞了 `http://a b err=…` 的证书，crypto/tls 在
+// ParseCertificate 阶段就把那串原文拼进错误（`x509: cannot parse URI %q: …`，Go 1.26 实测），
+// 经 `dialTunnel` → `markTunnelFail` 进 `terr=`。健康行 terr 排在 err 之前，而旧 TS 用
+// `(?:^|\s)err=(.*)$` 取行尾 → **最左**那个 ` err=`（在 terr 值里）被当成字段起点，
+// 界面上「失败原因」的头几个字就成了攻击者写的话。根治在 TS 侧做带引号感知的分词，
+// 这里保证数据面这一侧写不出这种行。
+func TestHealthReasonCannotForgeFields(t *testing.T) {
+	// 探针实测拿到的那条 error 原文（对端只需在证书 SAN 里放一个带空格的 URI）
+	const evil = `tls: failed to parse certificate from server: x509: cannot parse URI "http://a b err=网关一切正常": invalid domain`
+
+	lines := captureHealth(t)
+	tn := &tunneler{}
+	tn.markTunnelFail(evil)
+	tn.markKnock() // err= 按旧契约清空，terr= 留着——被污染的正是这一格
+	got := lines()
+	if len(got) != 2 {
+		t.Fatalf("应打 2 条健康行，实得 %d 条：%q", len(got), got)
+	}
+	for _, line := range got {
+		if n := strings.Count(line, " err="); n != 1 {
+			t.Errorf("行内 ` err=` 只能出现一次（多出来的会抢走字段起点），实得 %d 次：%s", n, line)
+		}
+		if n := strings.Count(line, " terr="); n != 1 {
+			t.Errorf("行内 ` terr=` 只能出现一次，实得 %d 次：%s", n, line)
+		}
+	}
+	// 直接拿旧 TS 的那条正则验「按键切分」：敲门成功后 err 必须是空标记 `-`
+	m := tsErrRe.FindStringSubmatch(got[1])
+	if m == nil {
+		t.Fatalf("旧 TS 正则取不到 err=：%s", got[1])
+	}
+	if m[1] != "-" {
+		t.Errorf("terr= 里的文本污染了 err=：取到 %q，应为 \"-\"（原行：%s）", m[1], got[1])
+	}
+}
+
+// tsErrRe 复刻桌面端 tunnel.ts parseHealth 取 err 的那条正则，用来在 Go 侧验证
+// 「健康行按键切分」这个跨端契约（改那边的正则要连这里一起改）。
+var tsErrRe = regexp.MustCompile(`(?:^|\s)err=(.*)$`)
+
+// sanitizeReason 的三条规则各自钉一条。
+func TestSanitizeReason(t *testing.T) {
+	cases := []struct{ name, in, want string }{
+		{"正常原因逐字不动", "SPA 拨号失败：网络不可达", "SPA 拨号失败：网络不可达"},
+		{"裸等号换成全角", "err=x", "err＝x"},
+		{"换行折成空格", "第一行\n第二行\t第三行", "第一行 第二行 第三行"},
+		{"首尾空白裁掉", "  abc  ", "abc"},
+		{"连续空白折成一个", "a \t\n b", "a b"},
+	}
+	for _, c := range cases {
+		if got := sanitizeReason(c.in); got != c.want {
+			t.Errorf("%s：sanitizeReason(%q) = %q，应为 %q", c.name, c.in, got, c.want)
+		}
+	}
+	// 截断必须**可见**：读的人得知道话没说完
+	long := strings.Repeat("长", healthReasonMax+50)
+	got := sanitizeReason(long)
+	if !strings.HasSuffix(got, "…（原因过长已截断）") {
+		t.Errorf("超长原因必须可见地截断，实得：%s", got)
+	}
+	if n := len([]rune(strings.TrimSuffix(got, "…（原因过长已截断）"))); n != healthReasonMax {
+		t.Errorf("截断后正文应为 %d 个字符，实得 %d", healthReasonMax, n)
+	}
+	// 恰好等于上限时不加截断标记（免得每条正常原因都挂个"已截断"）
+	if got := sanitizeReason(strings.Repeat("长", healthReasonMax)); strings.Contains(got, "截断") {
+		t.Errorf("正好 %d 个字符不该判截断：%s", healthReasonMax, got)
+	}
 }
 
 // healthErr 取健康行 `err=` 键的当前取值（即旧 TS 读到的那个值），测试用。

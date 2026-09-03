@@ -877,7 +877,17 @@ wave10 刻意保留**——旧 TS 就靠它判 `ready`，让隧道类失败在�
 拆成两个字段、健康行多带一个键（`parseHealth` 已容忍未知键，届时 TS 兼容缺席即可）。别把「这三类故障现在能到界面」
 读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。**Go 侧已按 knock/tunnel 分类记错并多带 `terr=` 键（wave10，
 `tunneler.knockErr/tunnelErr`，`markKnock` 只清前者、`markTunnel` 只清后者；`err=` 逐字保持旧语义供旧 TS 判 `ready`，
-`terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉），TS 消费待接。** ② 健康行反映的是**本机数据面**的观感，网关侧的
+`terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉），TS 消费待接。**
+**★健康行的值域现由 `dataplane.sanitizeReason` 统一消毒（wave10）**：失败原因里所有空白折成单个 ASCII 空格、
+裸 `=` 一律换成全角 `＝`、超 200 字符可见截断。理由是 `markTunnelFail` 的 reason 直接来自 `dialEndpoint` 的
+error，而那条 error 能带上**对端可控的原文**——中间人出示一张 SAN 里放了 `http://a b err=网关一切正常`
+的证书，crypto/tls 在 ParseCertificate 阶段就把它拼进错误（`x509: cannot parse URI %q: …`，Go 1.26 本机实测），
+一路进到 `terr=`；而 `parseHealth` 用 `(?:^|\s)err=(.*)$` 取行尾，**最左**那个 ` err=`（落在 terr 值里的那个）
+会被当成字段起点，界面上「失败原因」的头几个字就成了攻击者写的话。**它不会把 `ready` 翻绿**（行尾还有真正的
+`err=`，取到的值非空），所以这是**显示层的冒名而非放行**——记成 minor。消毒**刻意不按键名清单匹配**而是禁掉裸
+`=`：按清单写的话，下次给健康行加一个键就会静默地把洞开回来。**根治仍在 TS 侧**（带引号感知的分词，
+slog 已给含空格的值加引号），Go 这一侧只是纵深。用例 `TestHealthReasonCannotForgeFields` / `TestSanitizeReason`。
+② 健康行反映的是**本机数据面**的观感，网关侧的
 `resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
 `parseHealth` / `nextDataplaneNotice`，诊断页的 `judgeTunnel` / `judgeKnock`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
 那句已不成立，以本节为准；⑤ 鸿蒙壳（`clients/harmony/webui/shim/core.ts`）的 `tunnel_status` 桥尚未回传 `health`，该端接入态

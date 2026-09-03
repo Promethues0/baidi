@@ -23,6 +23,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
 	"github.com/emmansun/gmsm/smx509"
@@ -298,6 +299,9 @@ const (
 // · ★terr 必须排在 err **之前**：parseHealth 对 err 取的是 `err=` 之后到行尾的全部（值是含空格与中文标点
 // 的自由文本，slog 可能加引号也可能不加），排在后面会被旧 TS 当成 err 值的一部分吞掉。
 // `terr=` 前面是字母 t 不是空白，不会被 `(?:^|\s)err=` 误配。
+// · ★值域由 `sanitizeReason` 统一消毒（wave10）：失败原因里**结构性地不可能**出现
+// `<空白><名字>=`——否则 terr 值里塞一个 ` err=` 就能把旧 TS 的字段起点抢到自己身上，
+// 而那段文本可以是对端可控的（见 sanitizeReason 上方的实测说明）。
 // TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS 消费 terr 留给下一轮。
 const healthPrefix = "数据面健康"
 
@@ -360,6 +364,7 @@ func (t *tunneler) markTunnel() {
 }
 
 func (t *tunneler) markKnockFail(reason string) {
+	reason = sanitizeReason(reason)
 	t.hmu.Lock()
 	t.knockErr, t.lastClass = reason, classKnock
 	t.hmu.Unlock()
@@ -367,10 +372,61 @@ func (t *tunneler) markKnockFail(reason string) {
 }
 
 func (t *tunneler) markTunnelFail(reason string) {
+	reason = sanitizeReason(reason)
 	t.hmu.Lock()
 	t.tunnelErr, t.lastClass = reason, classTunnel
 	t.hmu.Unlock()
 	t.logHealth()
+}
+
+// healthReasonMax 是健康行里单条失败原因的字符（rune）上限。
+// 对端可控文本同样可以很长，而健康行整条纪律就是别把 4000 字节的日志尾巴冲掉
+// （Rust 壳只从日志尾巴里捞最后一条健康行）。
+const healthReasonMax = 200
+
+// sanitizeReason 把失败原因折成「一行、无裸 `=`、有长度上限」的文本，是健康行值域的唯一消毒口。
+//
+// ★为什么必须有这道纵深：`markTunnelFail` 的 reason 直接来自 `dialEndpoint` 的 error，
+// 而那条 error 能带上**对端可控的原文**——中间人出示一张 SAN 里塞了
+// `http://a b err=网关一切正常` 的证书，crypto/tls 在 ParseCertificate 阶段就会把它拼进错误
+// （`x509: cannot parse URI %q: …`，Go 1.26 实测），一路进到 `terr=`。健康行是
+// `knock= tunnel= terr= err=`，而客户端 `tunnel.ts parseHealth` 用 `(?:^|\s)err=(.*)$` 取行尾：
+// **最左**那个 ` err=`——落在 terr 值里的那个——会被当成字段起点，于是界面上「失败原因」
+// 头几个字变成攻击者写的话（真实原因被推到后面）。它不会把 `ready` 翻绿（行尾还有真正的
+// `err=`，取到的值非空），但正被钉扎拦下的中间人能替我们给用户写提示语。
+// TS 侧的根治是带引号感知的分词，这里做的是数据面侧的纵深：**值里结构性地不可能出现
+// `<空白><名字>=` 这种字段起始形态**。
+//
+// 三条规则：
+//   - 所有空白（含换行/制表）折成单个 ASCII 空格并 trim——换行会让按行解析的消费方
+//     直接把一行劈成两行（TextHandler 会转义，但这个判据不该依赖谁挑了哪个 handler）；
+//   - ASCII `=` 一律换成全角 `＝`。**刻意不按键名清单匹配**：按清单写的话，下次给健康行加一个键
+//     就会静默地把洞开回来（本仓最常见的「纪律只做了一半」）。合法 reason 里本来就不含 `=`
+//     ——取令牌失败 / SPA 拨号失败 / 指纹不匹配三类都没有，故这条规则的实际代价是零。
+//   - 超过 healthReasonMax 个字符**可见地**截断（截断必须看得见，否则读的人不知道话没说完）。
+func sanitizeReason(reason string) string {
+	// ①折空白（行首行尾的直接吃掉，中间的折成一个 ASCII 空格）+ ②换裸 `=`
+	out := make([]rune, 0, len(reason))
+	space := false // 上一段是否吃掉过空白，且前面已经有内容
+	for _, r := range reason {
+		if unicode.IsSpace(r) {
+			space = len(out) > 0
+			continue
+		}
+		if space {
+			out = append(out, ' ')
+			space = false
+		}
+		if r == '=' {
+			r = '＝'
+		}
+		out = append(out, r)
+	}
+	// ③可见截断
+	if len(out) > healthReasonMax {
+		return string(out[:healthReasonMax]) + "…（原因过长已截断）"
+	}
+	return string(out)
 }
 
 // newTunneler 是构造 tunneler 的**唯一**入口：落点选择器必须随之建好。

@@ -1,6 +1,7 @@
 package dataplane
 
 import (
+	"bytes"
 	"io"
 	"log/slog"
 	"strconv"
@@ -54,23 +55,53 @@ func TestHealthReflectsRealEvents(t *testing.T) {
 }
 
 // 健康行只在**状态变化**时打——每条流都打会把 4000 字节的日志尾巴瞬间冲满，
-// 反而把该看的信息（含落点行）挤出窗口。
+// 反而把该看的信息（含落点行）挤出窗口（Rust 壳只从尾巴里捞最后一条健康行）。
+//
+// ★改造前这条用例**钉不住任何东西**：它断言的是 `tn.lastHealth` 前后一不一样，
+// 而 `lastHealth` 在去重早退**之前**就被赋成了同一个字符串——把 logHealth 里
+// `if line == t.lastHealth { … return }` 整段删掉（保留赋值），断言照样全绿。
+// 现在改成数**真打出去的记录条数**，那才是这条属性的唯一可观测面。
 func TestHealthLineDedup(t *testing.T) {
+	lines := captureHealth(t)
 	tn := &tunneler{}
+
 	tn.markTunnel()
-	first := tn.lastHealth
-	if first == "" {
-		t.Fatal("应记下已打印的健康行")
+	if got := lines(); len(got) != 1 {
+		t.Fatalf("首次状态变化应恰好打 1 条健康行，实得 %d 条：%q", len(got), got)
 	}
 	tn.markTunnel() // 同样的状态再来一次
-	if tn.lastHealth != first {
-		t.Error("状态未变时不应产生新的健康行")
+	if got := lines(); len(got) != 1 {
+		t.Errorf("状态未变时不应再打健康行（去重早退没生效），实得 %d 条：%q", len(got), got)
 	}
 	tn.markTunnelFail("隧道拨号失败")
-	if tn.lastHealth == first {
-		t.Error("状态变了必须打新行，否则界面停在旧结论上")
+	got := lines()
+	if len(got) != 2 {
+		t.Fatalf("状态变了必须打新行，否则界面停在旧结论上；实得 %d 条：%q", len(got), got)
 	}
-	assertHealthKeys(t, tn.lastHealth)
+	assertHealthKeys(t, got[1])
+}
+
+// captureHealth 把 slog 换成写进 buffer 的 TextHandler（结束按 t.Cleanup 还原，
+// 与同包 TestHealthMarksConcurrentlyRaceFree 各自 Cleanup、互不影响），
+// 返回「取出目前为止打过的健康行」的闭包。
+//
+// ★断言的对象刻意是**真打出去的那一行**而不是 `tn.lastHealth`：后者只是去重键，
+// 客户端一个字都读不到；而 slog 会给含空格的值加引号，两者并不逐字相同。
+func captureHealth(t *testing.T) func() []string {
+	t.Helper()
+	var buf bytes.Buffer
+	old := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(&buf, nil)))
+	t.Cleanup(func() { slog.SetDefault(old) })
+	return func() []string {
+		var out []string
+		for _, l := range strings.Split(strings.TrimRight(buf.String(), "\n"), "\n") {
+			if strings.Contains(l, healthPrefix) {
+				out = append(out, l)
+			}
+		}
+		return out
+	}
 }
 
 // healthErr 取健康行 `err=` 键的当前取值（即旧 TS 读到的那个值），测试用。

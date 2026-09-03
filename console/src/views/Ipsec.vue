@@ -133,8 +133,8 @@
               <div class="bd-sub3">
                 承载网关
                 <span class="bd-mono">{{ r.s.gatewayId || '未指派' }}</span>
-                <!-- 没指派网关 = 没有任何进程会拉到这条站点，界面表现为永远「未回报」，
-                     且全程零报错。这正是 apps.resource_id 那类静默断裂的形态，必须点名。 -->
+                <!-- ★没指派网关 = 没有任何进程会拉到这条站点，表现为永远「未回报」且全程零报错，
+                     必须在行内点名，否则看不出与「还没协商成功」的区别。 -->
                 <span v-if="!r.s.gatewayId" class="bd-err">· 无网关承载，永远不会协商</span>
                 <span v-else-if="r.s.sa && r.s.sa.gatewayId && r.s.sa.gatewayId !== r.s.gatewayId" class="bd-err">
                   · 回报来自 {{ r.s.sa.gatewayId }}，与指派不符（两台网关在抢同一条站点）
@@ -198,7 +198,7 @@
               <div v-if="r.unsupported.length" class="bd-err">本实现不支持：{{ r.unsupported.join('、') }} · 网关装载期会直接拒绝</div>
             </td>
 
-            <!-- SA 剩余寿命：假数据不会倒数 -->
+            <!-- SA 剩余寿命：按网关回报的 rekeyAt 本地倒数 -->
             <td>
               <template v-if="r.s.sa && (r.vs === 'up' || r.vs === 'rekeying') && r.s.sa.rekeyAt > 0">
                 <div class="bd-life" :class="{ soon: lifePct(r.s.sa) < 0.1 }">{{ remainText(r.s.sa.rekeyAt - nowSec) }}</div>
@@ -523,9 +523,9 @@ const LEGEND: { v: ViewState; t: string }[] = [
 ];
 
 /* ── 降级演示数据 ──
- * 时间戳按「相对现在」现算，所以倒计时会真的走、新鲜度也不会一进页面就过期。
- * 五条覆盖全部五态，其中 site-bj 刻意造成「配了 AES256 实际谈成 AES128」的降级，
- * 用来验证套件对比那一格确实会亮红——这一格如果永远显示 ✓ 就等于没做。 */
+ * ★时间戳一律按「相对现在」现算，写死绝对值会让倒计时不动、新鲜度一进页面就过期。
+ * 五条覆盖全部五态，site-bj 刻意造成「配了 AES256 实际谈成 AES128」的降级，
+ * 用来验证套件对比那一格确实会亮红——那一格若永远显示 ✓ 就等于没做。 */
 function mockSites(): IpsecSite[] {
   const t = nowFn();
   return [
@@ -592,8 +592,8 @@ function mockSites(): IpsecSite[] {
       }
     },
     {
-      // 已启用却从未被回报：多半是 gatewayId 指错或该网关的 baidi-ipsec 没起。
-      // 旧界面下这条会显示成「未建立」，与「本来就没开」长得一模一样。
+      // 已启用却从未被回报（多半是 gatewayId 指错或该网关的 baidi-ipsec 没起）：
+      // ★这一态必须与「本来就没开」分开渲染，两者在页面上极易同形。
       id: 'site-wh', name: '武汉测试点', peer: '198.51.100.42', localSubnet: '10.10.0.0/16', remoteSubnet: '10.60.0.0/24',
       ikeVersion: 'IKEv2', auth: 'psk', suite: 'standard', gatewayId: 'gw-3', enabled: true,
       phase1: { enc: 'AES256-GCM', hash: 'SHA256', dh: 'group19' },
@@ -700,13 +700,10 @@ function unsupportedOf(s: { auth: string; pqHybrid: boolean; phase1: IpsecPhase;
   return out;
 }
 
-/* ── 在途窗口（异步 toggle 的核心）──
- * busy[siteId] = 点击时刻。真协商不可能瞬时完成，点一下就翻状态是旧实现最直接的「假」。
- *
- * ★判定「还在途中」不能只看 sa.state === 'connecting'：心跳 15s 一跳，刚点完启用时
- * 拿到的 sa 还是**上一跳的旧快照**（多半是 down）。只看 state 的症状是：点了启用、
- * 界面立刻弹回「未建立」，运维以为功能坏了，其实只是还没到下一跳。
- * 所以要拿回报时刻和点击时刻比——只有比点击更新的回报才算数。 */
+/* ── 在途窗口（异步 toggle 的核心）：busy[siteId] = 点击时刻。真协商不可能瞬时完成。
+ * ★判定「还在途中」必须拿回报时刻与点击时刻比，不能只看 sa.state === 'connecting'：
+ * 心跳 15s 一跳，刚点完启用拿到的 sa 还是上一跳的旧快照（多半是 down），
+ * 界面会立刻弹回「未建立」，看起来像功能坏了。只有比点击更新的回报才算数。 */
 const busy = ref<Record<string, number>>({});
 function markBusy(id: string) { busy.value = { ...busy.value, [id]: nowSec.value }; }
 function clearBusy(id: string) { const m = { ...busy.value }; delete m[id]; busy.value = m; }
@@ -870,9 +867,8 @@ async function save() {
     formOpen.value = false;
     await load();
   } catch (e) {
-    // ★后端对站点 peer 的拒绝是**说得出原因**的（"peer 不能填域名，IKEv2 守护进程
-    //   刻意不解析 DNS…"）。整句丢掉换成"请检查权限"，管理员会反复换写法去试，
-    //   而那条站点会安静地永远 down——wave8 行动 17 专门为此改过后端文案。
+    // ★必须原样转述后端：peer 的拒绝理由是说得出原因的（如"不能填域名，IKEv2 守护进程
+    //   刻意不解析 DNS"），换成自拟归因，管理员会反复换写法去试，而那条站点安静地永远 down。
     Message.error(`站点保存失败：${failReason(e)}`);
   } finally { saving.value = false; }
 }
@@ -889,8 +885,7 @@ async function del(s: IpsecSite) {
 
 /* ── 启停：异步语义 ──
  * 点击只写「管理意图」，随后进入在途窗口并开始轮询，直到网关回报出结果为止。
- * ★绝不能再像旧实现那样点完就宣布「已建立 IPSec 隧道」——控制面根本没有能力知道
- * 隧道建没建起来，那句提示（连同同款审计记录）是在谎报一个从未发生的事实。 */
+ * ★点完不许宣布「已建立 IPSec 隧道」：控制面没有能力知道隧道建没建起来。 */
 async function toggle(r: Row) {
   const s = r.s;
   if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
@@ -971,14 +966,14 @@ const detailOpen = computed({
 });
 
 /* ── 加载与轮询 ──
- * 只在「有站点在途」时以 POLL_SEC 节拍轮询，收敛后自动停：常开轮询白白给控制面加压，
- * 而旧写法（toggle 完立刻 load 一次就收工）则永远只能看到那一跳的旧快照。 */
+ * ★只在「有站点在途」时以 POLL_SEC 节拍轮询，收敛后自动停：常开轮询白白给控制面加压，
+ * 而 toggle 后只 load 一次则永远只能看到那一跳的旧快照。 */
 const polling = computed(() => decorated.value.some((r) => r.vs === 'pending' || r.vs === 'connecting' || r.vs === 'rekeying'));
 let ticker: number | undefined;
 let lastPoll = 0;
 
-// 演示数据只生成一次并缓存：每次重试都重算一遍的话，里面的 rekeyAt 会跟着「现在」一起往后跑，
-// 倒计时就永远倒不下去——那恰好复刻了这次要消灭的东西（一个不会变化的假数字）。
+// ★演示数据只生成一次并缓存：每次重试都重算的话，rekeyAt 会跟着「现在」一起往后跑，
+// 倒计时永远倒不下去，看起来就是个不会变化的假数字。
 let demoCache: IpsecSite[] | null = null;
 function demoSites(): IpsecSite[] {
   if (!demoCache) demoCache = mockSites();

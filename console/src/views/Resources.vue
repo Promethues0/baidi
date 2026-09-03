@@ -73,9 +73,8 @@
               </a-tooltip>
             </td>
             <td>
-              <!-- 网关侧真实拨测的聚合（60s 一轮随心跳上报）。「未探测」是三态之一：
-                   旧网关不上报 / 新资源未到下一轮，绝不显示成可达——那正是
-                   「一切显示正常、点开才炸」要消灭的形态。 -->
+              <!-- 网关侧真实拨测的聚合（60s 一轮随心跳上报）。★「未探测」是独立一态
+                   （旧网关不上报 / 新资源未到下一轮），绝不能渲染成可达。 -->
               <a-tooltip v-if="reachOf(r.id)" :content="reachTip(r.id)">
                 <span class="bd-rtag" :style="tagStyle(reachColor(reachOf(r.id)!.status))">{{ reachLabel(reachOf(r.id)!.status) }}<template v-if="reachOf(r.id)!.status === 'ok'"> · {{ reachOf(r.id)!.ms }}ms</template></span>
               </a-tooltip>
@@ -121,9 +120,8 @@
               <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="askDel(r)">删除</span>
             </td>
           </tr>
-          <!-- ★空态判据必须用**过滤后**的行数。用 resources.length 的话，
-               库里有资源但关键字一个都没命中时，表体是**整片空白**：没有行，
-               也没有"无匹配"那句话——看起来像页面坏了或者数据丢了。 -->
+          <!-- ★空态判据必须用**过滤后**的行数：用 resources.length 的话，有资源但关键字
+               零命中时表体是整片空白，既没有行也没有"无匹配"那句话，看起来像页面坏了。 -->
           <tr v-if="!shown.length">
             <td colspan="9" class="bd-empty">
               <template v-if="resources.length">没有匹配「{{ kw.trim() }}」的资源（共 {{ resources.length }} 条，按 id / 名称 / 后端检索）</template>
@@ -251,7 +249,7 @@ function seenAgo(ts: number) {
   return `${Math.floor(d / 3600)} 时前`;
 }
 
-/* ── 后端可达性（wave7 行动 9：网关侧拨测聚合）── */
+/* ── 后端可达性（网关侧拨测聚合）── */
 interface ReachAgg { status: 'ok' | 'partial' | 'fail' | 'unknown'; detail: string[]; ms: number }
 const reach = ref<Record<string, ReachAgg>>({});
 function reachOf(id: string): ReachAgg | undefined { return reach.value[id]; }
@@ -384,19 +382,9 @@ async function save() {
 }
 
 /**
- * 删除受控资源。
- *
- * ★改造前这里是**点中即删**：表格里一个常驻可见的「删除」链接，没有任何确认，
- * 而删除是不可撤销的，且它的后果不止于这一行——
- *   · 引用它的应用 → apps.resource_id 变成悬空引用，管理台把那个应用折叠成
- *     「未关联资源」，**与从未关联过完全同形**，事后谁也看不出这是删资源造成的；
- *   · 该资源上的 JIT 授予 → 仍留在台账里，显示的是一个已失真的授权状态。
- *
- * 后端**专门为此算了一份影响面回执**（handleDeleteResource 里的 blastRadius：
- * apps / grants / note，注释写明"删之前先算清，删之后就查不到了"），
- * 而前端此前连应答体都没接——那份专门算出来的话从来没有人看见过。
- * 现在：删之前二次确认，删之后把后端那份回执原样呈现（用不会自动消失的 Modal，
- * 不用 3 秒就飘走的 toast——影响面是要照着去补救的，不是通知）。
+ * 删除受控资源。不可撤销，且连带影响不止本行：引用它的应用会折叠成「未关联资源」
+ * （与从未关联过同形，事后无从分辨），其上的 JIT 授予仍留在台账里显示失真的授权状态。
+ * ★因此必须二次确认，并把后端算好的影响面回执原样呈现（Modal 而非会飘走的 toast）。
  */
 function askDel(r: Resource) {
   Modal.confirm({
@@ -428,9 +416,8 @@ async function del(r: Resource) {
   } catch (e) { Message.error(`资源删除失败：${failReason(e)}`); }
 }
 
-/** 关键词检索。★这里原先是 `const _shown = computed(() => resources.value); void _shown;`
- *  ——一个占位符加一句「预留搜索过滤位」，而页面上那个搜索框是纯装饰的 div。
- *  过滤字段与占位文案逐字对应（id / 名称 / 后端）。 */
+/** 关键词检索。★过滤字段必须与搜索框占位文案逐字对应（id / 名称 / 后端）：
+ *  搜得比说的少 = 管理员以为库里没有；多则搜出一堆解释不了的命中。 */
 const kw = ref('');
 const shown = computed(() => {
   const k = kw.value.trim().toLowerCase();

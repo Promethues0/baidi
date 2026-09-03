@@ -16,8 +16,8 @@
       <div class="bd-card bd-cats">
         <div class="bd-cats__h">
           <span>应用分类</span>
-          <!-- 真 button 而非 <span @click>：裸 span 不进 Tab 焦点序列、读屏也报不出它是可操作的，
-               键盘用户根本到不了分类维护这唯一的入口（Users.vue 的组织树同批已改）。 -->
+          <!-- ★真 button 而非 <span @click>：裸 span 不进 Tab 焦点序列、读屏也报不出它可操作，
+               而这是分类维护的唯一入口。 -->
           <button type="button" class="bd-link bd-cats__mgr" @click="openCatMgr"><icon-settings />管理分类</button>
         </div>
         <button v-for="c in categories" :key="c.key" class="bd-cat" :class="{ on: cat === c.key }" @click="cat = c.key">
@@ -54,10 +54,8 @@
                 </div>
               </td>
               <td><span class="bd-tg" :style="tagStyle(modeMeta(a.mode).color)">{{ modeMeta(a.mode).label }}</span></td>
-              <!-- 这里原来是「所属区域」，恒定显示「华东出口」：管理员根本没有这个输入项，
-                   CreateApp 一律写死它，唯一消费方就是这一列。已随 apps.node 一并摘除
-                   （wave8 行动 14）。换成真有内容的一列：这个应用挂在哪条受控资源上——
-                   它决定了访问授权与网关能不能拨出去。 -->
+              <!-- 关联资源：它决定访问授权与网关能不能拨出去。★这一列不许换成恒值字段
+                   （如"所属区域"），管理员没有那个输入项，列出来就是一列假事实。 -->
               <td>
                 <span v-if="a.resourceId" class="bd-mono">{{ a.resourceId }}</span>
                 <span v-else class="bd-auth--none" title="未关联受控资源：隧道与七层两条路都不通">未关联</span>
@@ -66,9 +64,8 @@
               <td>
                 <span class="bd-st"><span class="d" :style="{ background: a.status === 'running' ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ a.status === 'running' ? '运行中' : '已停用' }}</span>
               </td>
-              <!-- ★「编辑」此前走的是 openWizard → POST /apps，点一次多出一条同名应用。
-                   现在进真编辑抽屉（PUT /apps/{id}）。旁边那个没有 @click 的「详情」
-                   已删除——一个点不动的链接与死按钮同族。 -->
+              <!-- ★「编辑」必须走编辑抽屉（PUT /apps/{id}），不能复用发布向导：
+                   向导发的是 POST，点一次就多出一条同名应用。 -->
               <td class="r">
                 <span class="bd-link" @click="openEdit(a)">编辑</span>
                 <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="confirmDelete(a)">下架</span>
@@ -243,9 +240,8 @@
     </a-drawer>
 
     <!-- ============ 编辑已发布应用（PUT /apps/{id}）============
-         ★与发布向导分开：向导是三步引导 + POST，编辑是一屏改完 + PUT。
-         复用向导的话，「取消」之后再点「新增」会带着上一条应用的值，
-         而两者的提交动词不同——这正是改造前那个 bug 的成因。 -->
+         ★与发布向导刻意分开：提交动词不同（POST vs PUT），复用向导还会让「取消」后
+         再点「新增」带着上一条应用的值。 -->
     <a-drawer v-model:visible="ed.open" :width="520" title="编辑应用" unmount-on-close :footer="false">
       <div class="bd-wz__body">
         <div class="bd-fld"><label>应用名称</label><a-input v-model="ed.f.name" /></div>
@@ -313,10 +309,8 @@ const filtered = computed(() => {
 const MODES = [
   { key: 'tunnel', label: '隧道应用（C/S）', desc: 'SSH / RDP / 数据库等 C/S 业务，走 SSL 访问隧道', icon: 'IconCode', bg: '#F5E8FF', color: '#722ED1' },
   { key: 'web', label: 'WEB 应用（B/S）', desc: '浏览器直达的 B/S 业务，免客户端，走 HTTPS 代理', icon: 'IconCommon', bg: '#F2F7FF', color: '#165DFF' },
-  // ★这一项原名「WEB 全网资源」，与上面两条真链路平级摆着，管理员合理推断它是
-  // 「已发布并受控」。实际上它**不经网关、不受任何访问控制**，对全体登录用户可见——
-  // 剖面与门户都直接给 Accessible: true。泛域名代理（证书签发 + 正文改写）是 L 级工程，
-  // 本版本不做，所以按它真实的样子命名（wave8 行动 14）。
+  // ★这一项的名字必须直说它不经网关：它**不受任何访问控制**，剖面与门户一律给
+  // Accessible: true，对全体登录用户可见。取个与上面两条真链路平级的名字会被读成「已受控」。
   { key: 'global', label: '直连书签（不经隧道）', desc: '门户里的一个链接：不经网关、不受访问控制、对全体登录用户可见', icon: 'IconPublic', bg: '#E8FFEA', color: '#00B42A' }
 ] as const;
 function modeMeta(m: string) { return MODES.find((x) => x.key === m) ?? MODES[1]; }
@@ -335,8 +329,8 @@ function authTitle(a: App) {
 }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
-// 向导只收集会真正提交后端的字段——收集了却静默丢弃的控件比没有更糟（见 CLAUDE.md 静默失效缺陷族）。
-// DLP / 水印 / 浏览器管控 / XFF / 负载均衡等依赖七层代理，网关当前是 L4 隧道，暂无执行方，故不提供入口。
+// ★向导只收集会真正提交后端的字段：收集了却静默丢弃的控件比没有更糟。
+// DLP / 水印 / 浏览器管控 / 负载均衡等暂无执行方，故不提供入口，别在这里加回来。
 const STEPS = ['发布模式', '基础配置', '确认发布'];
 const wz = reactive({
   open: false, step: 0, mode: '' as '' | 'tunnel' | 'web' | 'global',
@@ -350,8 +344,8 @@ function openWizard() {
   wz.open = true; wz.step = 0; wz.mode = '';
   wz.f.name = ''; wz.f.addr = ''; wz.f.resourceId = '';
   wz.f.webScheme = 'http'; wz.f.webEntry = '';
-  // 默认选第一个真实分类。★不再写死 'office'：分类可增删之后，写死一个 key 意味着
-  // 管理员删掉它以后每次发布都会 400，而错误来自一个界面上根本没显示的默认值。
+  // ★默认选第一个真实分类，不许写死某个 key：分类可增删，那个 key 一旦被删掉，
+  // 每次发布都会 400，而错误来自一个界面上根本没显示的默认值。
   wz.f.cat = pickableCats.value[0]?.key ?? '';
 }
 const canNext = computed(() => {
@@ -413,9 +407,7 @@ async function next() {
   }
 }
 
-/* ── 编辑 / 下架已发布应用（FR-APP-01 的另外两件，wave8 行动 14）──
-   改造前「编辑」走的是 openWizard → POST /apps：点一次多出一条同名应用，
-   比一个点了没反应的死按钮更坏（后者只是缺功能，前者会静默把数据搞乱）。 */
+/* ── 编辑 / 下架已发布应用（FR-APP-01）── */
 const ed = reactive({
   open: false, busy: false,
   f: { id: '', name: '', addr: '', mode: 'web' as App['mode'], category: '', resourceId: '', status: 'running' as App['status'] }
@@ -467,10 +459,9 @@ function confirmDelete(a: App) {
   });
 }
 
-/* ── 分类维护（增删改 + 排序）──
-   分类此前是编译进后端二进制的两个常量，管理员既加不了也改不了；这里是唯一维护入口。
-   每次操作立刻落库（不做本地暂存 + 批量保存）：批量提交要维护一份差异集，
-   而任何一条失败都会让页面上的状态与库里分家，那种分家在这一屏上看不出来。 */
+/* ── 分类维护（增删改 + 排序）：分类字典的唯一维护入口。
+   每次操作立刻落库，不做本地暂存 + 批量保存——批量提交要维护差异集，任何一条失败都会让
+   页面状态与库里分家，而那种分家在这一屏上看不出来。 */
 const mgr = reactive({
   open: false, loaded: false, busy: false, err: '',
   list: [] as AppCategoryDef[],

@@ -15,11 +15,12 @@
 </template>
 
 <script setup lang="ts">
-import { computed, watch } from 'vue';
+import { computed, onMounted, watch } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { IconLink, IconApps, IconUser } from '@arco-design/web-vue/es/icon';
 import { session } from '@/lib/store';
+import { adoptRunningTunnel } from '@/lib/vpn';
 
 const route = useRoute();
 const router = useRouter();
@@ -27,6 +28,11 @@ const router = useRouter();
 // 隧道被抢占 / 被系统回收 / 引擎停机（vpn.ts 的监视写入 session.dropReason）：
 // 挂在根组件上弹，是因为中断可能发生在用户停在「应用」「我的」页的时候——那时 Connect.vue 根本没挂载。
 watch(() => session.dropReason, (r) => { if (r) Message.error({ content: '接入已中断：' + r, duration: 6000 }); });
+
+// webview 重载 / Activity 被系统重建后，原生 VPN 仍在跑而 session.connected 从 false 起算：
+// 挂载时读一次原生真实运行态把它认领回来（读不到就什么都不做）。放在根组件上是因为
+// 重建后落在哪一页取决于路由，而隧道是全局的。
+onMounted(() => { adoptRunningTunnel(); });
 const isFull = computed(() => route.meta.full === true);
 
 const tabs = [

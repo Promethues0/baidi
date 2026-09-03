@@ -17,6 +17,17 @@ interface NativeBridge {
   platform?: string;
   startTunnel?: (token: string, cfg?: unknown) => Promise<{ ok: boolean; detail?: string }>;
   stopTunnel?: () => Promise<void>;
+  /**
+   * ★**同名不同契约，别顺手互换**：这里的 `tunnelStatus` 是**异步**的
+   * `{ running, pid, log, endpoint }`——那是 `clients/desktop` 源码经 Tauri
+   * `invoke('tunnel_status')` 用的形状（鸿蒙壳复用的正是那套 UI）。
+   * 移动端（`clients/mobile/src/lib/vpn.ts`）在**同一个** `window.__BAIDI_NATIVE__` 上
+   * 挂的是**同步**的 `{ stage, reason }`（安卓 `MainActivity.BRIDGE_JS` 注入）。
+   * 两条契约各自只被对应的 UI 包消费：鸿蒙壳装 desktop 的 dist、安卓壳装 mobile 的 dist，
+   * **壳与 UI 必须成对**。装错一半不会报错，只会让接入态判定整段失真
+   * （`{stage:'up'}` 在这条契约里 `running` 恒为假 → 永远显示未接入；反向则 `stage` 恒 undefined
+   * → 移动端监视永远判"未知阶段"= 活着，被抢占也看不见）。见 docs/ARCHITECTURE.md 第七节。
+   */
   tunnelStatus?: () => Promise<{ running: boolean; pid?: string; log?: string; endpoint?: string }>;
   openUrl?: (url: string) => Promise<void>;
   quit?: () => Promise<void>;

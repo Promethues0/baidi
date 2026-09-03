@@ -63,9 +63,8 @@
           </div>
 
           <a-form :model="form" layout="vertical" @submit.prevent>
-            <!-- 认证域（wave8 行动 12）：只有配了 ≥2 个外部认证源时才出现。
-                 ★它不是"多一个可选项"——不选的话后端会拒绝登录，因为挨个去问
-                 等于把你的明文口令投递给每一个排在前面的目录服务器。 -->
+            <!-- 认证域：只有配了 ≥2 个外部认证源时才出现。★它不是"多一个可选项"——不选
+                 的话后端会拒绝登录，因为挨个去问等于把明文口令投递给每一台目录服务器。 -->
             <a-form-item v-if="authDomains.length" field="directory" hide-label>
               <a-select v-model="form.directory" size="large" placeholder="选择你所属的认证域">
                 <template #prefix><icon-apps /></template>
@@ -109,8 +108,7 @@
             登录
           </a-button>
 
-          <!-- 企业身份（OIDC）入口：按 auth_sources 真实行渲染，没有已启用的源就整段不出现。
-               此前这里是 config-only 的教科书案例：协议客户端与配置页都真，唯独没有入口。 -->
+          <!-- 企业身份（OIDC）入口：按 auth_sources 真实行渲染，没有已启用的源就整段不出现。 -->
           <template v-if="oidcProviders.length">
             <div class="bd-oidc__sep"><span>或使用企业身份登录</span></div>
             <a-button v-for="pv in oidcProviders" :key="pv.id" long class="bd-oidc__btn"
@@ -247,11 +245,9 @@
           </a-button>
         </template>
 
-        <!-- 步骤二（legacy）：未配置 WebAuthn 且账号未注册 TOTP 时的演示验证码回落。
-             ★不写「短信」——系统从不发送任何短信，后端收的是编译进二进制的演示码
-             （webauthn.go 的 legacyDemoCode=123456，其值在门户「我的安全」里公开可见）。
-             写成短信会让用户一直等一条永远不会到的短信。这只在裸 IP 演示站
-             （WebAuthn 需可注册域名、TOTP 未注册）上可达，故文案直接点明它是演示码。 -->
+        <!-- 步骤二（legacy）：未配置 WebAuthn 且账号未注册 TOTP 时的演示验证码回落，只在裸 IP
+             演示站可达。★文案不许写「短信」：系统从不发送任何短信，后端收的是编译进二进制的
+             演示码（webauthn.go 的 legacyDemoCode），写成短信会让用户干等一条永远不来的短信。 -->
         <template v-else>
           <h2 class="bd-card__h">二次认证</h2>
           <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 输入演示验证码</p>
@@ -328,9 +324,8 @@ const pwMsg = ref('');
 
 const form = reactive({ username: '', password: '', mfaCode: '', directory: '' });
 
-/* ── 认证域（wave8 行动 12）──
-   只有配了 ≥2 个外部认证源时后端才回非空列表；单目录部署下这个下拉不出现，
-   登录体验与改造前逐字一致。 */
+/* ── 认证域 ──
+   只有配了 ≥2 个外部认证源时后端才回非空列表；单目录部署下这个下拉不出现。 */
 const authDomains = ref<AuthDomainOption[]>([]);
 async function loadAuthDomains() {
   try {
@@ -344,7 +339,7 @@ async function loadAuthDomains() {
 }
 const pwForm = reactive({ pw: '', pw2: '' });
 
-/* ── OIDC 登录（wave7 行动 1）── */
+/* ── OIDC 登录 ── */
 interface OidcProvider { id: string; name: string }
 const oidcProviders = ref<OidcProvider[]>([]);
 
@@ -569,8 +564,8 @@ async function submitTotp() {
     mfaReason.value = resp.reason || '验证码不正确，请重试。';
   } catch (e) {
     // 401 = mfaTicket 过期/失效（那张票只有短时效）；其余一律是这一轮验证码本身的问题。
-    // 判状态码而不是判 message 里有没有「票据」二字：后端换一句文案这条分支就静默失效，
-    // 表现为"认证超时"被说成"验证码不正确"，用户会一直重输一个永远不可能对的码。
+    // ★判状态码而不是判 message 里有没有「票据」二字——后端换一句文案这条分支就静默失效，
+    // 表现为把「认证超时」说成「验证码不正确」，用户会一直重输一个永远不可能对的码。
     if (failStatus(e) === 401) {
       // 票据过期（3min）→ 退回口令步骤重来
       errMsg.value = '认证超时，请重新登录。';

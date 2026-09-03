@@ -13,10 +13,8 @@
       <template #extra>
         <a-space>
           <a-tag v-if="leafTitle" color="arcoblue" bordered>{{ groupTitle }} · {{ leafTitle }}</a-tag>
-          <!-- ★出口按钮此前指向 '/posture/dashboard'——一条**不存在的路由**：
-               它会落回 `:pathMatch(.*)*` 通配，也就是这一页自己。而这一页同时是
-               管理台的 404 兜底页，于是"页面找不到 → 点唯一的按钮 → 还是这一页"。
-               现在用 nav.ts 的 FIRST_PATH（导航的真实首页），改导航不会让它再次失效。 -->
+          <!-- ★出口按钮必须走 nav.ts 的 FIRST_PATH：这一页同时是 404 兜底，写死一条
+               路径一旦失效就会落回通配、也就是这一页自己，点了等于原地打转。 -->
           <a-button type="primary" @click="router.push(FIRST_PATH)">回到安全概览</a-button>
           <a-button @click="router.back()">返回上一页</a-button>
         </a-space>

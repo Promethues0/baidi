@@ -18,10 +18,8 @@
           <icon-lock />
           <span>账号 {{ username }} 正在使用初始口令，须修改后才能进入管理台</span>
         </div>
-        <!-- ★占位文案必须与后端判据一致。这里此前写「至少 8 位」，而后端
-             auth.PasswordWeakness 要求「≥10 位且含三类字符，或 ≥16 位长口令」——
-             而 BAIDI_SEED_MUST_CHANGE 默认是开的，也就是**每一次标准部署的第一个动作**
-             就走这条路：照提示输 8 位 → 前端放行 → 后端 400 → 页面说"受限令牌可能已过期"。 -->
+        <!-- ★占位文案必须与后端 auth.PasswordWeakness 的判据一致。BAIDI_SEED_MUST_CHANGE
+             默认开着，这条路是每套标准部署的第一个动作，说错要求等于第一步就走不通。 -->
         <a-input-password v-model="newPw" size="large" :placeholder="`新口令（${PW_HINT}）`" class="bd-login__inp" @keyup.enter="submitChangePw">
           <template #prefix><icon-lock /></template>
         </a-input-password>
@@ -198,8 +196,8 @@ async function submitTotp() {
     pkMsg.value = r.reason || '验证码不正确，请重试';
   } catch (e) {
     // 401 = mfaTicket 过期/失效（那张票只有短时效）；其余一律是这一轮验证码本身的问题。
-    // 判状态码而不是判 message 里有没有「票据」二字：后端换一句文案这条分支就静默失效，
-    // 表现为"认证超时"被说成"验证码不正确"，用户会一直重输一个永远不可能对的码。
+    // ★判状态码而不是判 message 里有没有「票据」二字——后端换一句文案这条分支就静默失效，
+    // 表现为把「认证超时」说成「验证码不正确」，用户会一直重输一个永远不可能对的码。
     if (failStatus(e) === 401) {
       err.value = '认证超时，请重新登录';
       step.value = 'login'; ticket.value = '';
@@ -246,9 +244,8 @@ async function submitChangePw() {
     step.value = 'login';
     await submit();
   } catch (e) {
-    // ★后端在这条路上会说得很具体（「新口令强度不足：命中常见弱口令表。要求：…」、
-    //   「口令中包含账号名」、「新口令不得与旧口令相同」）。整句换成"受限令牌可能已过期"
-    //   是一个方向完全相反的归因：用户会去刷新、去重登，而口令本身一次都没换成。
+    // ★必须原样转述后端那句（命中弱口令表 / 含账号名 / 与旧口令相同），换成自己编的
+    // 归因会把用户支去刷新重登，而口令一次都没换成。
     err.value = failReason(e);
   } finally {
     loading.value = false;

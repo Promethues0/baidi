@@ -361,9 +361,8 @@ const tickerLoop = computed<AuditEntry[]>(() => {
   return a.length >= 6 ? [...a, ...a] : a;
 });
 
-/* 接入网关分布。★按 s.gateway 分组，不按地域：白帝没有 GeoIP 库，会话的 location
- * 对每条真实数据恒为 "—"，那样这块面板会永远只有一根标着「—」的柱子，
- * 却顶着一个"我们知道用户从哪接入"的标题。网关是上报里真实存在的一维。 */
+/* 接入网关分布。★分组维度只能是网关：白帝没有 GeoIP 库，会话的 location 对每条真实
+ * 记录恒为 "—"，按地域分组的面板永远只有一根标着「—」的柱子。 */
 const topRegions = computed(() => {
   const m = new Map<string, number>();
   sessions.value.forEach((s) => {
@@ -378,11 +377,9 @@ const regionMax = computed(() => Math.max(...topRegions.value.map((r) => r.count
 /**
  * 三路取数各自独立成败。
  *
- * ★**只要有任何一路拿到了真数据，就绝不让另一路的演示数据同屏**——真假混排比整屏假
- * 更难识别，而大屏正是给人「现在有没有事」这个判断用的。三路全挂才保留整屏演示态
- * （无后端的离线演示，本就没有真数据可混淆）。
- * `live` 要求三路全成，缺哪一路在徽标上点名：/audit 归 PermAudit，
- * 安全/系统管理员打开大屏拿到的就是 403，那一路空着不等于"没有事件"。
+ * ★只要有任何一路拿到真数据，就绝不让另一路的演示数据同屏——真假混在一块 NOC 大屏上
+ * 比整屏假更难识别；三路全挂才保留整屏演示态（那时没有真数据可混淆）。`live` 要求三路
+ * 全成，缺哪一路在徽标上点名。/audit 归 PermAudit，安全/系统管理员打开这页拿到的是 403。
  */
 async function load() {
   const [o, on, au] = await Promise.all([

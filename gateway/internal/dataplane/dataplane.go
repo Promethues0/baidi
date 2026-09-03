@@ -298,7 +298,8 @@ const (
 // · ★terr 必须排在 err **之前**：parseHealth 对 err 取的是 `err=` 之后到行尾的全部（值是含空格与中文标点
 // 的自由文本，slog 可能加引号也可能不加），排在后面会被旧 TS 当成 err 值的一部分吞掉。
 // `terr=` 前面是字母 t 不是空白，不会被 `(?:^|\s)err=` 误配。
-// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS 消费 terr 留给下一轮。
+// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS **已消费** terr
+// （`TunHealth.terr` 三态：键缺席=不可判定 / `-`=隧道类无失败 / 非空=仍挂着），用它判隧道类失败是否真恢复。
 const healthPrefix = "数据面健康"
 
 // logHealth 打一行结构固定的健康状态，供客户端解析真实接入态。

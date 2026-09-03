@@ -193,6 +193,13 @@ func TestGatewayAccess_入口拒绝必然连不通的地址(t *testing.T) {
 		{"127.0.0.1", "回环地址只有网关本机连得上"},
 		{"::1", "IPv6 回环同理"},
 		{"0.0.0.0", "通配监听地址不是客户端能连的地址"},
+		// ★以下四条是 silent-2 / security-2 补的：改造前它们全都 200 OK 存了下来，
+		// 而客户端与浏览器都会把它们解析到回环——剖面照发、门户「访问」按钮照亮，
+		// 只有七层入口那一处（判据里多认了 localhost）说不可达，同一份配置两种结论。
+		{"localhost", "localhost 就是回环，只是 net.ParseIP 认不出来"},
+		{"localhost.", "带根点的 FQDN 写法是同一个名字"},
+		{"127.1", "inet_aton 短写，浏览器与 C 库会展开成 127.0.0.1"},
+		{"2130706433", "同上的整数写法"},
 		{"gw.example.com:18201", "端口的权威来源是网关自报的监听地址，不能有第二份"},
 		{"https://gw.example.com", "只填主机名或 IP"},
 		{"gw example.com", "含空格"},
@@ -207,6 +214,21 @@ func TestGatewayAccess_入口拒绝必然连不通的地址(t *testing.T) {
 		if code, out := setAccess(t, f, "gw-1", "", ok); code != http.StatusOK {
 			t.Fatalf("%q 应被接受，实得 http %d: %v", ok, code, out)
 		}
+	}
+}
+
+// 剖面告警②的判据也得认出 localhost（silent-2）：网关自报 `-spa localhost:18201` 时
+// 落点就是 localhost，它和 127.0.0.1 一样只有本机连得上。
+// 把 endpointWarnings 的判据改回 net.ParseIP().IsLoopback()，这条会红（一条告警都不报）。
+func TestGatewayAccess_落点是localhost也要报回环(t *testing.T) {
+	f := newIsoFixture(t)
+	regGatewayHB(t, f, "gw-1", "localhost:18201")
+	hosts, _, warns := profileEndpoints(t, f)
+	if len(hosts) == 0 || hosts[0] != "localhost" {
+		t.Fatalf("前提变了：网关显式 bind localhost 时落点应沿用自报 host，实得 %v", hosts)
+	}
+	if !strings.Contains(strings.Join(warns, " | "), "回环") {
+		t.Fatalf("★落点是 localhost 时必须与 127.0.0.1 同样报回环告警，实得 %v", warns)
 	}
 }
 

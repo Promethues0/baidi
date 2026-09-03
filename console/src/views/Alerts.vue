@@ -178,11 +178,8 @@
                 </template>
                 <span v-else class="bd-al__o">—</span>
               </td>
-              <!-- ★通知通道此前**没有任何入口**：后端 handleSaveAlertRule 为 rule.Channels
-                   写了引用校验、notifyAlert 按它精确投递、GET /alerts/rules 也把候选清单
-                   下发下来了——而页面只拿这份清单数了个数（「可用通道 N 条」）。
-                   更糟的是后端下发的说明原话就写着「点名则只发这几条」，
-                   页面把这句话原样显示出来，却没有任何控件能点名。 -->
+              <!-- 通知通道多选：留空 = 发给全部启用通道，点名 = 只发这几条
+                   （与后端 notifyAlert 的语义逐字一致）。 -->
               <td>
                 <a-select
                   :model-value="r.channels ?? []" multiple allow-clear size="mini"
@@ -325,9 +322,8 @@ async function saveRule(r: AlertRule, patch: Partial<AlertRule>) {
     Message.success(`规则「${body.name}」已保存`);
     await loadRules();
   } catch (e) {
-    // ★`msg.startsWith('403')` 是**死分支**：api() 抛的是后端中文原文（errText 已把
-    //   {"error":{"message":…}} 解出来），永远不以状态码开头。于是每一次失败都掉进
-    //   "请检查后端连接"那一支——包括「点名了不存在的通道」这种与连接无关的校验拒绝。
+    // ★必须转述后端原话：api() 抛的是后端中文原文（不以状态码开头，别去匹配 '403'），
+    //   而失败多半是「点名了不存在的通道」这类校验拒绝，与后端连接无关。
     Message.error(`规则保存失败：${failReason(e)}`);
     await loadRules(); // 回读，避免界面上留着一个其实没保存成功的值
   }

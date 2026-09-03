@@ -17,8 +17,9 @@
 #               安装器是 **perMachine**（装 Program Files、需管理员）：缺省的 currentUser
 #               会把随后被 UAC 提权加载的 wintun.dll / baidi-tun.exe 放进用户可写目录。
 #               产物**未签名**（没有证书），Windows 侧没有第二道完整性兜底。
-#               装完之后仍**只是"应该能用"**：UAC 提权、建卡、NRPT 分离式 DNS 全部
-#               **未在真实 Windows 上跑过**，产物照旧打 UNVERIFIED 标记并附说明，
+#               装完之后仍只是**部分验证**：ARM64 一台真机跑通了 UAC 提权与建卡（阶段 B），
+#               而 NRPT 分离式 DNS 与隧道端到端（阶段 C）**未在真实 Windows 上跑通**、
+#               x64 全部未实机，产物照旧打 UNVERIFIED 标记并附说明，
 #               **刻意不进下载中心 manifest**。
 #               ★DLL 必须与 **baidi-tun.exe 同目录**（wintun 用 LoadLibraryEx 只看
 #               「发起加载的进程自身 exe 目录」与 System32），落错地方的症状是包照样
@@ -49,8 +50,11 @@
 #   matrix.target 是 `universal-apple-darwin`（Tauri 的合成打包目标，不是真三元组），
 #   build-sidecars.sh 如实报「未适配的三元组」并 exit 1。--target 只该给 Windows。
 #
-# ★仍然不能说的：包能出 ≠ 装了能用。Linux 与 Windows 的**实机验证一次都没做过**，
-#   产物照旧标 UNVERIFIED、不进下载中心。macOS 那份本机装起来跑过（进程存活、
+# ★仍然不能说的：包能出 ≠ 装了能用。**Linux 的实机验证一次都没做过**；**Windows 只有一台
+#   ARM64 真机跑过阶段 A（打包落位）与阶段 B（UAC 提权 + 建虚拟网卡），阶段 C（完整链路：
+#   敲门 → 隧道 → 业务地址 → NRPT 分离式 DNS 及其回收）未完，x64 那一份全部未实机**
+#   —— 与下方 matrix 的 label、随包的 README-windows.txt 同口径，三处改一处就得同时改。
+#   两个平台的产物照旧标 UNVERIFIED、不进下载中心。macOS 那份本机装起来跑过（进程存活、
 #   sidecar 齐、dmg 挂载正常），但也仅此而已 —— 隧道链路不在这条流水线的验证范围里。
 
 name: 客户端安装包
@@ -879,8 +883,10 @@ jobs:
             请只从可信渠道取包，并自行核对下面的构建溯源。
 
           但请仍按「部分验证的代码」对待。截至 2026-08-21，只有一台 Windows 11 ARM64
-          真机跑过：打包落位（阶段 A）与 UAC 提权 + 建虚拟网卡（阶段 B）已通过，
-          完整链路（阶段 C）走到过 UAC → 拉起 baidi-tun → 换到敲门令牌 → 建卡，但尚未完整通过。
+          真机跑过：打包落位（阶段 A）已 7/7 通过，建虚拟网卡（阶段 B）已通过；
+          UAC 提权是在完整链路（阶段 C）里得到验证的——阶段 B 是从一个已提权的
+          PowerShell 里直接拉进程，不经过客户端自己的提权路径。阶段 C 走到过
+          UAC → 拉起 baidi-tun → 换到敲门令牌 → 建卡，但尚未完整通过。
           仍然**没有实机证据**的是：
             1) NRPT 分离式 DNS 的下发与清理；
             2) 隧道端到端（业务流量真经隧道送达）；

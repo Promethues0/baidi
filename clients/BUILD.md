@@ -549,6 +549,14 @@ UAC → 拉起 baidi-tun → 换到敲门令牌 → 建卡，但**尚未完整�
 （本章开头此前写的是「至今从未在真实 Windows 上跑过」，那是 2026-08-18 之前的事实；
 下文各小节按时间记录了它是怎么一步步不再成立的。）
 
+★**「阶段 B 已跑通」这句要按仓内证据读**：本仓归档过的 `-Stage B` 报告**只有 08-18 首跑那份，
+结论是 `B2 FAIL`**（原因全在脚本自己身上，见 10.3c；四条当天就修了）。修完之后那次 B 全绿的
+报告**没有归档进本仓**，所以这句的证据强度低于阶段 A 的 7/7（10.3b 有逐条报告）。另外要分清：
+**阶段 B 走的不是客户端自己的 UAC 提权路径**——脚本是从一个已提权的 PowerShell 里
+`Start-Process -FilePath baidi-tun.exe` 直接拉进程的（见 `Invoke-StageB`），所以它既证明不了
+`elevate.rs` 那条链路，也不受 10.3g 那个 BOM 缺陷影响（两者的时间先后因此不构成矛盾，详见
+10.3g 末尾）。B1 那条判定项的**真实名字是「wintun.dll 可被加载」而不是「UAC 提权」**。
+
 `clients/verify-windows.ps1` 就是用来把这些逐条变成「已验证」或「确认坏了」的。
 **它不修任何东西，只观察并如实报告**，最后写一份纯文本报告（不含任何凭据，
 只有路径、架构与状态），回传即可。
@@ -595,7 +603,9 @@ A1 验的是安装目录是否在 Program Files。若落在 `%LOCALAPPDATA%`，�
 `installMode: perMachine` 没生效——那个目录普通用户可写，而里面的 exe/dll
 随后会被 UAC 提权加载，是一条本地提权路径。
 
-**阶段 B｜提权与建卡**（需要管理员，会真的建网卡，跑完自动清理）
+**阶段 B｜建卡**（要从**已提权**的 PowerShell 里跑，会真的建网卡，跑完自动清理；
+**它不验客户端自己的 UAC 提权路径**——脚本直接 `Start-Process` 拉进程，绕过 `elevate.rs`
+生成的 launcher，提权那条链路只有阶段 C 的 C1 验得到）
 
 ```powershell
 # 右键「以管理员身份运行」PowerShell
@@ -607,9 +617,25 @@ B1 刻意用一个必然连不通的网关地址（`127.0.0.1:1`），只让它�
 
 **阶段 C｜完整链路**（需要可达的 baidi-control 与 baidi-gateway）
 
-目前只能人工走：用客户端登录并点「接入」，然后
-`Get-DnsClientNrptRule` 看分流规则在不在，断开后再看是否回收。
-脚本会把这几步列成待办，不会假装自动验过。
+```powershell
+powershell -ExecutionPolicy Bypass -File .\clients\verify-windows.ps1 `
+  -Stage C -Control https://<控制面地址> -Probe <业务 host:port>
+```
+
+**「接入」这一步刻意由人在客户端里点，脚本自己不去拉 `baidi-tun`**：从一个已提权的
+PowerShell 里直接拉进程会绕过客户端自己的 UAC 提权路径（`elevate.rs` 的
+`Start-Process -Verb RunAs`），而那正是最该验的一项——脚本替用户提权就永远验不到它。
+脚本负责的是**判定系统状态**，七个判定项与 `Invoke-StageC` 里的 `Add-Result` 编号逐字一致：
+
+| Id | 判定项 | 说明 |
+|---|---|---|
+| C0 | 完整链路 | 未给 `-Control` 时整段 SKIP |
+| C1 | 客户端自行提权并建卡 | 弹 UAC → `baidi-tun` 起来 → `baidi0` 建出。FAIL 时脚本去 `%TEMP%\baidi\` 查进程与两份日志再下结论，**不猜「提权坏了」**（08-21 两次 C1 FAIL 都不是提权问题，一次是终端合规判 block、一次是 posture 上报时序竞态） |
+| C2 | 受保护网段已接管 | 真实业务网段指向 `baidi0`，排除阶段 B 那个假网段。网卡在而路由不在 = 「显示已接入、什么都访问不了」，本项目点名过的最迷惑形态 |
+| C3 | 业务地址可达 | **唯一的端到端证据**，需 `-Probe host:port`，不给则 SKIP |
+| C4 | 分离式 DNS（NRPT） | 剖面 `dns` 段为空（演示站就是）时如实 SKIP——不算通过也不算失败 |
+| C5 | 断开后网卡已回收 | |
+| C6 | 断开后 NRPT 已回收 | 接入时就没有规则则 SKIP |
 
 ### 10.3 结果怎么用
 
@@ -834,6 +860,21 @@ UTF-8 BOM」的检查，注释里连「pwsh 7 无 BOM 也按 UTF-8 读，所以�
 **stdout**（`.out.log`）——排障时会把人引去看一个多半是空的文件。现在两个都指，
 并写明「两个文件都不存在 = baidi-tun 根本没被拉起来，问题在提权脚本本身」，
 以及 stderr 为什么结构上取不回来。
+
+**这条与「阶段 B 已跑通」的时间关系**（不说清会读成自相矛盾：10.3g 断言中文安装路径下
+数据面 100% 起不来，而 545 行说阶段 B 建出过 baidi0）：
+
+| 事实 | 出处 |
+|---|---|
+| 那台真机的安装目录确实**含中文**：`C:\Program Files\白帝安全接入客户端\` | 10.3b，08-18 阶段 A 实测 |
+| 受 BOM 影响的是**运行期生成的提权 launcher**，它由 `powershell.exe`（Windows PowerShell 5.1）执行 | `elevate.rs::platform_shell` |
+| **阶段 B 从不经过那个 launcher**：脚本在一个已提权的 PowerShell 里直接 `Start-Process -FilePath $tun` | `verify-windows.ps1 Invoke-StageB` |
+| 操作者那侧跑脚本用的也是 Windows PowerShell 5.1 | 10.3c 缺陷④是 5.1 专有行为（`Where-Object` 命中一条返回标量） |
+
+即：**BOM 缺陷结构上碰不到阶段 B**，两句话可以同时为真，先后顺序不影响结论。
+**但「BOM 修复（08-19，`c54a5fa`）之后是否重跑过阶段 B」——仓内查不到任何记录**，
+别把它写成「修复后已复验」。修复后有实机证据的是阶段 C 那一侧：08-21 两次 C 跑里
+UAC 弹了、`baidi-tun` 被拉起来了（`697c9fb` 正文），这间接说明 launcher 在中文路径下能被读进去执行了。
 
 ### 10.4 脚本随包走（不用去仓库里找）
 

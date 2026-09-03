@@ -160,6 +160,20 @@ for (const file of walk(SRC)) {
         `两处写法变了，守卫读不到——改守卫的正则，别让它静默通过。`
     );
   }
+  // ★第二道自检：解析出的叶子数必须等于 nav.ts 里 `done: true` 的出现次数。
+  //   上面那道只拦「一个都取不到」，而 leafRe 要求 **path 与 done 在同一行、且 path 在 done 之前**——
+  //   把某个叶子拆成两行写、或把 path 挪到 done 后面，正则就漏掉它一个，而其余 20 个仍在，
+  //   `doneLeaves.length` 非零、循环照跑、脚本照绿：**守卫对那一项彻底失明**，
+  //   而它恰恰是新加/刚改过的那一项——最需要被守的那个。计数比对让「部分失明」也说得出话来。
+  //   计数用剥过注释的 navText，与 leafRe 同源；否则注释掉的示例会让两边天然对不上。
+  const doneMarks = (navText.match(/\bdone:\s*true\b/g) || []).length;
+  if (doneMarks !== doneLeaves.length) {
+    errors.push(
+      `src/nav.ts 有 ${doneMarks} 个 \`done: true\`，但规则四只解析出 ${doneLeaves.length} 个叶子：` +
+        `差的 ${doneMarks - doneLeaves.length} 个守卫读不懂（正则要求 path 与 done 写在同一行、且 path 在前），` +
+        `它们的 BUILT 映射不会被检查——把那几项写回单行形式，或同时改守卫的正则。`
+    );
+  }
   for (const p of doneLeaves) {
     if (!built.has(p)) {
       errors.push(

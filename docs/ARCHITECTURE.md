@@ -265,7 +265,8 @@ src/views/Apps.vue       ★应用中心：真实打开 VIP 地址
 src/                     移动优先 Vue UI（登录 / 接入 / 应用 / 我的），浏览器视口实测
 src/lib/vpn.ts           原生桥 window.__BAIDI_NATIVE__（无桥时退化为经 knock-agent 真敲门）
 native/android/          VpnService 壳：可在 CI 出 debug APK（clients-mobile.yml），未装机
-native/ios/              仅 PacketTunnelProvider.swift 参考源码，无 Xcode 工程
+native/ios/              参考源码（PacketTunnelProvider.swift / RouteSpec.swift）+ swiftc 自检脚本
+                         test-routespec.sh，无 Xcode 工程
 native/harmony/          仅 VpnExtAbility.ets 骨架，NAPI 桥未实现
 ```
 
@@ -878,8 +879,8 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 ### ✅ 桌面端接入态判据 = 数据面健康行（真实事件；启动日志只是回落）
 
 **判据来源只有一条**：`baidi-tun` 在敲门包真发出 / 隧道真拨通 / 最近一次失败三种**事件**发生时打一行
-`数据面健康 knock= tunnel= terr= err=`（`dataplane.logHealth`，只在状态变化时打；`terr=` 是 wave10 起多带的
-隧道类失败键，刻意排在 `err=` 之前），Rust 壳从**整份日志**里捞最后
+`数据面健康 knock= tunnel= terr= err=`（`dataplane.logHealth`，只在状态变化时打；`terr=` 是 wave10 新增的隧道类
+错误键，**必须排在 `err=` 之前**，否则会被旧 TS 的 `err=(.*)$` 整段吞掉），Rust 壳从**整份日志**里捞最后
 一条回传（`main.rs last_health_line` → `TunStatus.health`），TS 侧 `tunnel.ts parseTunStatus` 按它判：
 `keepalive = knock`；**`ready = knock ∧ err 为空`——`tunnel` 位刻意不参与**：Go 侧 `markTunnel()` 全仓只有
 `tunneler.tunnel()` 里拨通业务流那一个调用点，`Run()` 启动期只敲门不预拨，一次完全正常的接入在用户打开第一个
@@ -1020,8 +1021,9 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   `preflight_start` 也只查存在性与 PE machine 码，一个同架构的恶意 DLL 两项都过。
   改成 perMachine 是把「改写那个目录」抬到管理员门槛之上，**不是**完整性校验 ——
   而且 NSIS 允许用户在安装向导里把目录改到一个可写位置，那条路仍然敞着。
-- **posture 采集的 Windows 分支同样未实机**（见上一节），**网关侧 Windows 的系统指标五项全部
-  不可判定**（见后面「网关设备状态采集」一节）—— 三处的 Windows 支持都停在同一道线上。
+- **posture 采集的 Windows 分支只有 `disk_encrypted` 一项有真机旁证**（见上一节：2026-08-19/21 那台 ARM64
+  真机的上报被 `bl-admission` 基线判 block），其余五项无真机证据；**网关侧 Windows 的系统指标五项全部
+  不可判定**（见后面「网关设备状态采集」一节）。
 - 因此 **CI 产物标 `UNVERIFIED`，刻意不进下载中心 manifest**。下载页的 Windows 占位文案照实说
   「ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机…请联系管理员」，两处文案
   （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。
@@ -1083,6 +1085,16 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   按当前 Go API 手写的 baidimobile 桩」编译与 JVM 断言（CI `testDebugUnitTest` 是 JUnit 用例的唯一执行方）；
   iOS 侧 `native/ios/test-routespec.sh` 用 swiftc 真跑断言，`PacketTunnelProvider.swift` 对着过期 xcframework
   做 `-typecheck`（`pin`/`resmapJSON` 两处是产物过期的既有报错）。**两端都没有装到真机上过。**
+- **iOS 的 `RouteSpec` 断言在 CI 里有执行方了**（`clients-mobile.yml` 的 `ios-routespec` job，macos runner
+  上跑 `test-routespec.sh`）。加它之前 CI 里**一个执行方都没有**——那条 fail-closed 的多网段解析只靠开发机上
+  有人记得手工跑，而没人跑它也不会有任何提示。**这条腿的边界要一起写清**：它只证明「解析逻辑没回归」，
+  **不出包、不签名、不碰 Network Extension**（那需要 Apple 付费账号，见 `clients-mobile.yml` 文件头），
+  更不证明 iOS 壳能装能连；`PacketTunnelProvider.swift` 本身在这条腿上编不了（要 Baidimobile.xcframework
+  + iOS SDK）。**鸿蒙壳仍然没有任何 CI 执行方**（镜像里没有 DevEco/HarmonyOS SDK）。
+- **安卓 gradle wrapper 未钉发行版哈希**（`gradle-wrapper.properties` 缺 `distributionSha256Sum`，非本波引入）：
+  CI 上两次 `./gradlew` 复用的是同一条**未经校验**的 `gradle-*-bin.zip` 下载链。**未修**——补它要求哈希从
+  Gradle 官方 release-checksums 页面**人工逐字符抄来**（与 `fetch-wintun.sh` 同一条纪律：把下载到的文件算一遍
+  填上等于给任何一次投毒盖章），本轮没有可信来源就不填，缺口与正确补法写在那个文件与 CI 步骤的注释里。
 
 ### ✅ 消息通道 SMTP / Webhook（真，但「短信」就是 webhook，别当短信网关用）
 

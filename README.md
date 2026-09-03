@@ -35,7 +35,7 @@
 | 🩺 | **运维诊断** | `/diag` 15 项**真实**自检（控制面 / 存储与审计链 / 数据面 / 内核态隐身回执 / 自动备份与温备 / 认证源 / 终端合规 / 密钥…）+ 健康分；不可判定与确定失败分开计 |
 | 📇 | **真实审计** | 每个管理写操作落库留痕（HMAC 链），放行与拒绝都留痕，审计中心实时呈现 |
 | 🩹 | **终端 posture + 风险引擎** | 桌面客户端真实采集（FileVault/SIP/防火墙/EDR）60s 上报，控制面按**可编辑安全基线**集中评估；不合规 → 拒发敲门令牌 + 自动撤窗断隧道（持续验证闭环）。采集三态（探不到报 unknown，不塌缩） |
-| 🖥 | **多端客户端** | 桌面 Tauri（macOS 端到端已验；Windows ARM64 部分实机、x64 未实机；Linux 未实机）· 鸿蒙桌面壳（ArkWeb 复用桌面 UI，真机跑通，**数据面未实现**）· 安卓 APK（CI 出包未装机）· iOS 仅 `PacketTunnelProvider` 参考源码、无工程 |
+| 🖥 | **多端客户端** | 桌面 Tauri（macOS 端到端已验；Windows ARM64 部分实机、x64 未实机；Linux 未实机）· 鸿蒙桌面壳（ArkWeb 复用桌面 UI，真机跑通，**数据面未实现**）· 安卓 APK（CI 出包未装机）· iOS 仅参考源码（`PacketTunnelProvider.swift` / `RouteSpec.swift`）+ swiftc 自检脚本 `test-routespec.sh`、无工程 |
 
 ## 🏗 架构
 

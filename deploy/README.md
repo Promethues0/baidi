@@ -23,7 +23,9 @@ etc/keys/               ★control 身份私钥（0700）：jwt-ed25519.pem 签�
                           jwt-ed25519-knock.pem 只签敲门令牌、jwt-ed25519-web.pem 只签七层 Web 代理票据。
                           首启自动生成，公钥写同名 .pub（网关 SPA 口只装 knock 公钥、L7 口只装 web 公钥）
 etc/pki/                ★内部 CA（0700，标准 X.509/P-256）：签发网关 mTLS 客户端证书
-etc/gwcerts/            网关身份材料（仅 WITH_GATEWAY=1）：gw.crt/key.pem + ca.crt.pem + knock.pub
+etc/gwcerts/            网关身份材料（仅 WITH_GATEWAY=1）：gw.crt/key.pem + ca.crt.pem + knock.pub + web.pub
+                          （两把公钥分口装：SPA 敲门口只装 knock.pub、L7 七层 Web 口只装 web.pub——
+                           拿错票据在对面连签名都验不过，见 install-remote.sh 的 BAIDI_GW_JWT_PUBKEY / BAIDI_GW_WEB_JWT_PUBKEY）
 etc/baidi-gateway.env   网关专属 env（0640）——只有验证材料，没有任何签发能力
 etc/tls/server.{crt,key} TLS（首装自签，生产换正式证书）
 downloads/              客户端安装包 + manifest.json（先跑 clients/build-artifacts.sh 汇集到 deploy/artifacts/downloads，build.sh 携带进 _out）

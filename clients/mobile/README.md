@@ -84,9 +84,16 @@ webview 重载 / Activity 被系统重建后原生 VPN 仍在跑，App.vue 挂�
 详见 docs/ARCHITECTURE.md 第七节。`npm test` 跑判定、接线与桥（`node:vm` 里真跑 BRIDGE_JS）的单测。
 鸿蒙 `VpnExtAbility.ets` 仍是单切回落 /24，本轮未改（无 DevEco，连语法都验不到），见 docs/ARCHITECTURE.md 第七节。
 
-**iOS 与鸿蒙不在 CI 上，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +
+**iOS 与鸿蒙都不出包，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +
 Network Extension 授权，鸿蒙的 DevEco 工具链根本不在 runner 镜像里；而且这两端目前
-只有单文件参考源码，还没有壳工程。理由与下载中心的占位文案见 `../BUILD.md` 第九节。
+只有参考源码，还没有壳工程。理由与下载中心的占位文案见 `../BUILD.md` 第九节。
+
+**但 iOS 的纯 Swift 断言在 CI 上有执行方**：`clients-mobile.yml` 的 `ios-routespec` job
+（macos runner）跑 `native/ios/test-routespec.sh`——`RouteSpec.swift` 只用标准库，
+不碰 Network Extension，几十秒。加它之前那条 fail-closed 的多网段解析在 CI 里
+**一个执行方都没有**，只靠开发机上有人记得手工跑。**它只证明解析逻辑没回归**，
+不出包、不签名，更不证明 iOS 壳能装能连（`PacketTunnelProvider.swift` 在这条腿上
+根本编不了，它要 `Baidimobile.xcframework` + iOS SDK）。**鸿蒙侧仍然没有任何 CI 执行方。**
 
 ### 落地路线
 1. ✅ 移动优先 UI + 后端链路（浏览器实测）

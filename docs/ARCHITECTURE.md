@@ -265,7 +265,8 @@ src/views/Apps.vue       ★应用中心：真实打开 VIP 地址
 src/                     移动优先 Vue UI（登录 / 接入 / 应用 / 我的），浏览器视口实测
 src/lib/vpn.ts           原生桥 window.__BAIDI_NATIVE__（无桥时退化为经 knock-agent 真敲门）
 native/android/          VpnService 壳：可在 CI 出 debug APK（clients-mobile.yml），未装机
-native/ios/              仅 PacketTunnelProvider.swift 参考源码，无 Xcode 工程
+native/ios/              参考源码（PacketTunnelProvider.swift / RouteSpec.swift）+ swiftc 自检脚本
+                         test-routespec.sh，无 Xcode 工程
 native/harmony/          仅 VpnExtAbility.ets 骨架，NAPI 桥未实现
 ```
 
@@ -845,11 +846,12 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 ### ✅ 桌面端接入态判据 = 数据面健康行（真实事件；启动日志只是回落）
 
 **判据来源只有一条**：`baidi-tun` 在敲门包真发出 / 隧道真拨通 / 最近一次失败三种**事件**发生时打一行
-`数据面健康 knock= tunnel= err=`（`dataplane.logHealth`，只在状态变化时打），Rust 壳从**整份日志**里捞最后
+`数据面健康 knock= tunnel= terr= err=`（`dataplane.logHealth`，只在状态变化时打；`terr=` 是 wave10 新增的隧道类
+错误键，**必须排在 `err=` 之前**，否则会被旧 TS 的 `err=(.*)$` 整段吞掉），Rust 壳从**整份日志**里捞最后
 一条回传（`main.rs last_health_line` → `TunStatus.health`），TS 侧 `tunnel.ts parseTunStatus` 按它判：
 `keepalive = knock`；**`ready = knock ∧ err 为空`——`tunnel` 位刻意不参与**：Go 侧 `markTunnel()` 全仓只有
 `tunneler.tunnel()` 里拨通业务流那一个调用点，`Run()` 启动期只敲门不预拨，一次完全正常的接入在用户打开第一个
-应用之前健康行恒为 `knock=true tunnel=false err=-`。复核时抓到过把它当必要条件的版本：接入停在「接入中」、
+应用之前健康行恒为 `knock=true tunnel=false terr=- err=-`。复核时抓到过把它当必要条件的版本：接入停在「接入中」、
 25s 后报一句猜的归因、`session.connected` 恒 false → 应用页拒绝「访问」→ 永远产生不出第一条流，死锁。
 `tunnel` 位现在只做展示（`TunView.tunnelUsed` 三态，接入信息角标「已就绪 · 尚无业务流量 / 隧道活动」，
 老壳无健康行时为 null 不猜）。运行中 `error = err` 原样上屏，接入超时那句也优先用它而不是猜「网关没起」；
@@ -857,10 +859,11 @@ PRD ch9 的 FR-EP-10/12/13/14/15 此前在库表 / API / 页面三层全为零�
 才回落到判「数据面就绪」「敲门保活」两行启动日志，且回落路径逐字保留改造前的行为。
 
 **运行中的失败怎么到界面**（Connect.vue「数据面报告」提示条，状态由纯函数 `tunnel.ts nextDataplaneNotice` 推进）：
-Go 侧 `markKnock()` 与 `markTunnel()` 都不分类别地清空 `lastErr`，而保活敲门每 15s 成功一次——于是「网关证书指纹
-不匹配（疑似中间人）」这类**隧道拨号失败**在健康行里最多挂 15s 就被一次与它无关的敲门成功擦掉，TS 从同一行
-`knock=true tunnel=x err=-` 分不出「被敲门清掉」与「被拨通清掉」。按 err 直接渲染的话，一个持续性的中间人告警在界面上
-只是闪一下。所以提示条**不跟 ready 一起清**，按失败类别处置：knock 类（Go 侧固定前缀 `取敲门令牌失败：` /
+`err=` 键**逐字保留旧语义**——最近一次被触碰的那一类的当前错误，任何一次成功（含每 15s 的保活敲门）都清空它
+（`dataplane.currentErrLocked`；拆分成 `knockErr`/`tunnelErr` **之前**只有一个 `lastErr`，`markKnock` 与 `markTunnel`
+都不分类别地清它，那正是这条语义的由来）。于是「网关证书指纹不匹配（疑似中间人）」这类**隧道拨号失败**写进 `err=`
+之后最多挂 15s 就被一次与它无关的敲门成功擦掉，只看 `err` 的话从同一行 `knock=true tunnel=x err=-` 分不出
+「被敲门清掉」与「被拨通清掉」，一个持续性的中间人告警在界面上只是闪一下。所以提示条**不跟 ready 一起清**，按失败类别处置：knock 类（Go 侧固定前缀 `取敲门令牌失败：` /
 `SPA 拨号失败：`）err 清空即真恢复 → 收起；tunnel 类（其余一切，认不出的前缀也算）**粘住**，只有观察到 `tunnel` 位
 false→true（失败时还没拨通过、之后拨通了）才自动收起，否则等用户手动关掉。它只是提示，不改 `ready`/`stage`。
 
@@ -873,11 +876,12 @@ false→true（失败时还没拨通过、之后拨通了）才自动收起，�
 **边界**：① `knock`/`tunnel` 是"**曾**成功过"的粘性位，`err` 是最近一次失败——判「此刻通不通」靠的是 `err`，
 而任何一次成功（含每 15s 的保活敲门）都会清掉它，隧道持续拨不通而敲门正常时 `ready` 会随之抖动（**这是 `err=` 键的语义，
 wave10 刻意保留**——旧 TS 就靠它判 `ready`，让隧道类失败在里面粘住会把应用页的「访问」闸卡死）；TS 侧的粘性提示条是对这件事的**兜底而非根治**——失败时 `tunnel` 位已是 true 的情形本机分不出
-「之后恢复了」与「之后没人再访问」，只能等用户关；持续性告警要能自己稳定在界面上，得 Go 侧把 `lastErr` 按 knock/tunnel
-拆成两个字段、健康行多带一个键（`parseHealth` 已容忍未知键，届时 TS 兼容缺席即可）。别把「这三类故障现在能到界面」
-读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。**Go 侧已按 knock/tunnel 分类记错并多带 `terr=` 键（wave10，
-`tunneler.knockErr/tunnelErr`，`markKnock` 只清前者、`markTunnel` 只清后者；`err=` 逐字保持旧语义供旧 TS 判 `ready`，
-`terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉），TS 消费待接。** ② 健康行反映的是**本机数据面**的观感，网关侧的
+「之后恢复了」与「之后没人再访问」，只能等用户关。别把「这三类故障现在能到界面」
+读成「能一直挂在界面上」：前者成立，后者靠提示条粘住 + 用户复测。**持续性告警要能自己稳定在健康行里的那一半 Go 侧已经做了**
+（wave10：`tunneler.knockErr/tunnelErr` 分类记错，`markKnock` 只清前者、`markTunnel` 只清后者，健康行多带一个
+`terr=` 键；`err=` 逐字保持旧语义供旧 TS 判 `ready`，`terr=` 排在 `err=` 之前以免被旧 TS 的 `err=(.*)$` 吞掉，
+`parseHealth` 容忍未知键故新旧壳双向兼容）——**TS 侧对 `terr` 的消费情况以 `clients/desktop/src/lib/tunnel.ts` 为准**，
+本节不复述该端状态。② 健康行反映的是**本机数据面**的观感，网关侧的
 `resource.Authorize` 拒绝表现为「隧道拨通、业务不通」，它不在这一行里；③ 单测只覆盖纯函数（`parseTunStatus` /
 `parseHealth` / `nextDataplaneNotice`，诊断页的 `judgeTunnel` / `judgeKnock`），Connect.vue 的渲染未做组件测试；④ 提交 e5a7bff 说明里「ready = knock ∧ tunnel ∧ err 为空」
 那句已不成立，以本节为准；⑤ 鸿蒙壳（`clients/harmony/webui/shim/core.ts`）的 `tunnel_status` 桥尚未回传 `health`，该端接入态
@@ -965,8 +969,9 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   `preflight_start` 也只查存在性与 PE machine 码，一个同架构的恶意 DLL 两项都过。
   改成 perMachine 是把「改写那个目录」抬到管理员门槛之上，**不是**完整性校验 ——
   而且 NSIS 允许用户在安装向导里把目录改到一个可写位置，那条路仍然敞着。
-- **posture 采集的 Windows 分支同样未实机**（见上一节），**网关侧 Windows 的系统指标五项全部
-  不可判定**（见后面「网关设备状态采集」一节）—— 三处的 Windows 支持都停在同一道线上。
+- **posture 采集的 Windows 分支只有 `disk_encrypted` 一项有真机旁证**（见上一节：2026-08-19/21 那台 ARM64
+  真机的上报被 `bl-admission` 基线判 block），其余五项无真机证据；**网关侧 Windows 的系统指标五项全部
+  不可判定**（见后面「网关设备状态采集」一节）。
 - 因此 **CI 产物标 `UNVERIFIED`，刻意不进下载中心 manifest**。下载页的 Windows 占位文案照实说
   「ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机…请联系管理员」，两处文案
   （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。

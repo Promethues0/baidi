@@ -30,6 +30,8 @@
 baidi-gateway -spa :18201 -proxy :18443 -backend 127.0.0.1:9999 -ttl 30s \
               -jwt-pubkey <control 的 jwt-ed25519-knock.pem.pub>
 # 网关只持 control 的敲门公钥验证令牌，自身不具备签发能力；会话令牌在此从密码学上验不过
+# -backend 只是 -allow-no-preamble（默认关）那条兜底路径的落点：正常路径按隧道里的 CONNECT 前导查资源表
+# 逐资源路由并做 Authorize/DenyUsers 鉴权，兜底路径**跳过全部鉴权**，仅作兼容老客户端的过渡逃生舱
 baidi-knock   -spa 127.0.0.1:18201 -token <会话 JWT> -control http://127.0.0.1:8090
 # -control 必填：网关默认 strict，只认 control 签发的 use=knock 短时效一次性令牌
 ```
@@ -89,4 +91,5 @@ SPA 敲门放行   src=127.0.0.1 user=li.ming role=user ttl=30s
 - **控制面**：网关只装控制面下发的 Ed25519 **公钥**验令牌（SPA 口 knock 公钥、L7 口 web 公钥），凭 mTLS 客户端证书注册心跳、拉取访问策略（按用户/资源细粒度放行，而非仅源 IP）；`BAIDI_JWT_SECRET` 只剩 HS256 逃生舱用途（默认关）。
 - **客户端**：桌面 Tauri sidecar 已打包 `baidi-knock` 接真实敲门；`baidi-tun` 进一步用 utun 接管系统流量进隧道（真引流，非 UX 动画）。
 - **已落地**：✅ 国密 TLCP 隧道（`-gm`，SM2 双证书）；✅ 防火墙层 DROP 隐身（`-pf`，nftables/pf）——**默认不开，`armed` 态未在 Linux root 实机验证**，以网关页实测回执为准；✅ utun 身份引流（`baidi-tun`，gVisor 网络栈，macOS 端到端实测）。
-- **生产化待续**：① 正式 SM2 证书（CA 签发，非自签）；② 网关按 `dst` 多资源路由（utun 多目标需客户端送目标地址前缀，当前演示单 VIP→固定后端）；③ Linux/Windows 端 utun/wintun 客户端；④ 远端部署到云网关并开安全组。
+- **生产化待续**：① 正式 SM2 证书（CA 签发，非自签）；② Linux / Windows 客户端的**实机验证**（源码完整、CI 有产物，但 Linux 一次都没在真机上跑过，Windows 只有一台 ARM64 真机跑过阶段 A/B，见 `clients/BUILD.md`）；③ `-pf` 内核态隐身 `armed` 态的 Linux root 实机验证；④ 与 strongSwan 等第三方 IKEv2 实现的互通验证（`baidi-ipsec` 目前只白帝↔白帝）。
+  - ★上面这四条之外，曾长期挂在这里的三项**早已落地**，别再当待办：网关按目的**多资源路由**是正常路径（`-backend` 只在 `-allow-no-preamble` 兜底路径下可达，见下一条；`gateway/e2e.sh` 第 ⑦ 步真的逐资源 `CONNECT` 并校验落到各自后端）；Linux/Windows 客户端**有源码有产物**（缺的只是实机，即 ②）；远端云网关部署也已成事实（在线演示站就是公网全栈）。

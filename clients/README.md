@@ -77,4 +77,4 @@ npm install && npm run dev             # :5295，vite /api→control:8090、/kno
 | 三端原生壳脚手架（读 UI 下传 cfg） | ✅ 参考源码；安卓壳已能在 CI 上编出 APK，iOS 仍无壳工程 |
 | 安卓 debug APK（CI 出包） | ⚠ 流水线已在 GitHub Actions 上真实跑通；出的包 debug 签名、**未装机** |
 | 鸿蒙 | ⚠ 桌面壳工程 [`harmony/`](harmony/) 已在真机（MateBook 14，鸿蒙 PC）跑通 UI 与控制面通信；**数据面未实现**，`startTunnel` 如实报失败 |
-| iOS `.ipa` | ❌ 无工程，只有 `PacketTunnelProvider.swift` 参考源码；出包需付费账号签名 + NE 授权，见 [`BUILD.md`](BUILD.md) 第九节 |
+| iOS `.ipa` | ❌ 无工程，只有参考源码（`PacketTunnelProvider.swift` / `RouteSpec.swift`）+ swiftc 自检脚本 `test-routespec.sh`；出包需付费账号签名 + NE 授权，见 [`BUILD.md`](BUILD.md) 第九节 |

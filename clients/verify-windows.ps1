@@ -20,16 +20,27 @@
         A4 wintun 许可文件是否随包分发（许可义务）
         A5 sidecar 命名是否是运行期真正会去找的那几个名字
 
-      阶段 B｜提权与建卡（需要管理员账号，会弹 UAC，会真的建网卡）
-        B1 UAC 提权能否拉起 baidi-tun.exe
+      阶段 B｜建卡（要从**已提权**的 PowerShell 里跑，会真的建网卡，跑完自动清理）
+        ★这一段**不验客户端自己的 UAC 提权路径**：脚本是直接
+          `Start-Process -FilePath baidi-tun.exe`，绕过了 elevate.rs 生成的提权 launcher。
+          提权那条链路只有阶段 C 的 C1 验得到。编号与 Invoke-StageB 里的 Add-Result 逐字一致：
+        B1 wintun.dll 可被加载（唯一能给 PASS 的路径是网卡真建出来了；日志为空一律 UNKNOWN）
         B2 虚拟网卡 baidi0 是否真的建出来
         B3 路由是否按 -route 落进路由表
-        B4 停止后网卡与路由是否被清理干净
+        B4 退出后网卡是否被回收
 
       阶段 C｜完整链路（需要可达的 baidi-control 与 baidi-gateway）
-        C1 SPA 敲门 → 隧道建立
-        C2 分离式 DNS（NRPT 规则）是否生效
-        C3 断开后 NRPT 规则是否回收
+        ★这一段刻意**由人操作产品、由脚本判定系统状态**：脚本自己不去拉 baidi-tun，
+          否则就绕过了客户端自己的 UAC 提权路径（elevate.rs 的 Start-Process -Verb RunAs），
+          而那正是最该验的一项。下面的编号与 Invoke-StageC 里 Add-Result 的第一个参数
+          **逐字一致**（改脚本判定项时这份清单要同步改，否则报告里的编号对不上说明）：
+        C0 未给 -Control 时整段 SKIP（有 -Control 时不出现这一条）
+        C1 客户端自行提权并建卡（弹 UAC → baidi-tun 起来 → baidi0 建出）
+        C2 受保护网段已接管（真实业务网段指向 baidi0，不是阶段 B 那个假网段）
+        C3 业务地址可达（唯一的端到端证据，需 -Probe host:port，不给则 SKIP）
+        C4 分离式 DNS（NRPT 规则）是否生效（剖面无 dns 段时如实 SKIP，不算过也不算败）
+        C5 断开后网卡是否回收
+        C6 断开后 NRPT 规则是否回收（接入时就没有规则则 SKIP）
 
 .PARAMETER Stage
     A / B / C / All。默认 A（最安全，不改动系统任何状态）。

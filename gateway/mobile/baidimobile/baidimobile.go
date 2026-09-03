@@ -42,6 +42,16 @@ type Config struct {
 	// 在移动端结构性不存在，ARCHITECTURE 第七节那张表却把它列为已实现且不带限定。
 	Pin string
 
+	// ControlCaPEM 控制中心 HTTPS 的信任锚（PEM 公证书，部署期分发）。
+	//
+	// ★**空 = 用系统信任库，不是跳过校验**——与上面那个 CaPEM 语义恰好相反（那个空且 Gm 时
+	// 确实会 InsecureSkipVerify），两个字段挨着放，照抄的概率很高，所以两边都写死了这句话。
+	// 参考部署给控制面签的是自签证书，系统信任库当然不认它：2026-09-03 安卓真机上，
+	// 引擎起着而取敲门令牌恒失败于 `x509: certificate signed by unknown authority`。
+	// 解析失败一律报错，绝不静默回落成"系统信任库"——那会让一份配错的锚表现为
+	// 「配了却不生效」，而现场与"根本没配"完全同形。构建细节见 controltrust.go。
+	ControlCaPEM string
+
 	// ResmapJSON 目的地址 → 资源 id 的映射表，JSON 对象字符串（如 {"10.99.0.36:8080":"oa"}）。
 	//
 	// ★gomobile 不能导出 map，故用 JSON 串；解析失败**不静默忽略**，Start 直接报错——
@@ -140,6 +150,12 @@ func Start(tunFd int, c *Config) (*Session, error) {
 		}
 	}
 
+	// 控制面信任材料也排在建 TUN 之前（同上那条纪律）：配错要在动系统状态之前失败。
+	ctlTLS, err := controlTLSConfig(c.ControlCaPEM)
+	if err != nil {
+		return nil, err
+	}
+
 	// 平台给的 TUN fd → tun.Device。**建卡入口按平台分文件**（tundev_android.go /
 	// tundev_other.go）：安卓必须走不碰 netlink 的 CreateUnmonitoredTUNFromFD，
 	// 否则被 SELinux 拒在 netlink 绑定那一步、整条数据面起不来（详见那两个文件的注释）。
@@ -151,7 +167,7 @@ func Start(tunFd int, c *Config) (*Session, error) {
 	health := dataplane.NewHealthState()
 	cfg := &dataplane.Config{
 		SpaAddr: c.SpaAddr, ProxyAddr: c.ProxyAddr, Token: c.Token, Control: c.Control,
-		Gm: c.Gm, TLCPConfig: tlcpCfg, DefaultRes: c.DefaultResource,
+		Gm: c.Gm, TLCPConfig: tlcpCfg, ControlTLS: ctlTLS, DefaultRes: c.DefaultResource,
 		TunnelPin: c.Pin, Resmap: resmap,
 		Reknock: 15 * time.Second, MTU: mtu,
 		Health: health,

@@ -951,6 +951,52 @@ webview `tunnelwatch.ts` / `vpn.ts` / `Connect.vue`。
 **不能声称**：iOS 与鸿蒙壳**没有**这套（`Session.Health()` 在绑定层已就绪，但那两端的壳没有读端，
 接入后的中断与未就绪在那两端一律不可判定）。文档里一律写「安卓已收口」，不许写「移动端已收口」。
 
+### ✅ 控制中心信任锚：一份材料喂两条链路（wave10；**安卓已收口**）
+
+**这一跳此前根本没有信任材料的入口。** `knock.FetchToken` 用的是一个包级 `http.Client`，没有任何 TLS 定制口，
+于是「客户端 → 控制面 HTTPS」只能走系统信任库；而参考部署 `deploy/install-remote.sh` 给控制面签的是**自签证书**，
+系统信任库当然不认它。后果是两处**长得完全不一样**的失败，看起来像两个不相干的 bug：
+
+| 链路 | 谁在校验 | 改前的症状 |
+|---|---|---|
+| WebView（登录 / 拉剖面 / `api.ts` 的每一次 fetch） | Chromium 的信任库 | `ERR_CERT_AUTHORITY_INVALID`，页面直接打不开 |
+| Go 数据面（取敲门令牌） | Go 的 `crypto/x509` | `x509: certificate signed by unknown authority`，**引擎起着而门永远敲不开** |
+
+**修法是分发信任锚，不是关掉校验**（同 JWT 公钥「部署期文件分发、刻意不做 JWKS 端点」那条：
+在线端点若自身即信任根会构成循环论证——控制面自己的锚**不能**由控制面下发）：
+
+- 材料只存在**一处**：`res/raw/baidi_control_ca.pem`，由 `build.gradle.kts` 在构建期从
+  `-PbaidiControlCa=<PEM 路径>` 生成。同一份字节喂两半——WebView 经生成的
+  `network_security_config.xml`，Go 数据面经 `baidimobile.Config.ControlCaPEM`。
+  **只接一半就会造出「网页登录得进去而隧道连不上」（或反过来）**，两边都不报错。
+- NSC 的 `<domain>` 从 `-PbaidiApiBase` 的 host 推，**不另开入参**：两个入参就是两个真相来源，
+  而它们不一致时的现场是「证书装了却不生效」。**裸 IP 也认**——2026-09-03 OPPO PKU110 带反例实测
+  （把 domain 改成另一个 IP，同一次 fetch 必然失败，说明起作用的确实是这条 domain 匹配）。
+- `BuildConfig` 里**只放 SHA-256、不放 PEM 正文**：运行期 `readControlAnchor` 读 res/raw 再比对，
+  于是「NSC 用的那份」与「Go 用的那份」是否同源成为一件**可执行**的事，而不是靠约定。
+  对不上 **fail-closed 拒绝接入**——拿一份来路不明的锚去信任控制面比不信任更坏，
+  它会把一个中间人变成"受信任的控制中心"。
+- **空 = 用系统信任库，不是跳过校验。** 这句话在三处写死（`baidimobile.Config.ControlCaPEM`、
+  `controlTLSConfig`、`dataplane.Config.ControlTLS`），因为同一个结构体上方就是语义**相反**的
+  `CaPEM`（国密 TLCP 的 CA，空且 `Gm` 时确实 `InsecureSkipVerify`），照抄的概率很高。
+- **信任池是「系统池 ∪ 锚」而不是替换。** 部署方哪天换成受信证书（生产姿态），从零起池会让
+  所有带锚的终端在同一刻集体连不上，而换证书的人完全预料不到——现场是「换了张更好的证书、
+  客户端反而全挂了」。守卫在 `controltrust_test.go`：能数张数时数（Linux/CI），
+  数不出来时（macOS 的 `SystemCertPool().Subjects()` 恒空）退到源码断言，**绝不静默跳过**。
+- 控制面错误在**产生点**翻成人话（`knock.ClassifyControlErr` / `ClassifyControlStatus`，
+  一律 `errors.As` 不匹配字符串），因为从 wave10 起这句话会经健康行第一次上到用户界面。
+
+**边界（不许多说一个字）**：
+- **只有安卓有这套**。桌面端（Tauri webview 没有 NSC 等价物）仍走「把证书导进本机信任库」，
+  见 clients/BUILD.md 10.3e；iOS 的绑定层已具备 `ControlCaPEM` 但**壳没有写值方**，本波不接；
+  鸿蒙壳同理。`dataplane.Config.ControlTLS` 为 nil 时行为与改造前逐字一致，`baidi-tun` 一个字没改。
+- **锚是那张自签证书本身**，而 `install-remote.sh` 只在首次安装时签（`[ ! -f ]` 守卫），
+  所以换控制面证书 = 一次全端换包事件。要让轮换不牵动终端，得把部署侧改成
+  「本地 Web CA + 短效叶子、锚 = CA 公证书」——**本波未做**，记在这里。
+- 这张证书带 `basicConstraints CA:TRUE`（`openssl req -x509` 的产物），把它装进**系统**信任库
+  等于信任它今后签发的任意证书；本方案把它限定在 NSC 的单 host `domain-config` 与 Go 的
+  单一 `RootCAs` 里，正是为了不让它有那么大的权。`install-remote.sh` 的收尾告警里对这条有交代。
+
 **为什么要单独记一条**：提交 796ac0f 的说明写着「运行中的失败现在也能显示」「拿不到健康行（旧壳）时退回旧判据」，
 但它只做了 Go/Rust 半边——`TunStatusRaw` 没有 `health` 字段、`parseHealth` 定义后零调用、`ready` 仍判
 `/数据面就绪/`、`error` 仍是 `!running && …`。于是那两句在 TS 侧**都不成立**：指纹钉扎失败（数据面自判"疑似中间人"）、

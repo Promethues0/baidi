@@ -681,3 +681,47 @@ test('源码守卫：路由必须有兜底，否则登录过的用户下次打�
       `catch-all 必须排在 ${p} 之后——vue-router 按声明顺序匹配，放前面会把真实路由全吞掉`);
   }
 });
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 控制中心信任锚的**接线**守卫（wave10）。
+ *
+ * 材料只存在一处（res/raw/baidi_control_ca.pem，由 build.gradle.kts 从 -PbaidiControlCa 生成），
+ * 却要同时喂给两条互不相干的链路：WebView 走 network_security_config，Go 数据面走
+ * baidimobile.Config.controlCaPEM。**只接一半就会造出「网页登录得进去而隧道连不上」
+ * （或反过来）——两边都不报错**，正是本仓反复批判的静默失效。这条用例把两半的接线钉住。
+ *
+ * 真机 A/B 已验（2026-09-03 OPPO PKU110 / 演示站 101.43.125.131 自签证书）：
+ * 带锚的包 WebView 登录成功、数据面取到敲门令牌、业务流穿过隧道（healthTunnel=true、
+ * 设备侧 nc 退出码 0）；同一套代码不带锚构建，同一次 fetch 在 TLS 那步失败。
+ * ────────────────────────────────────────────────────────────────────────── */
+test('接线守卫：控制中心信任锚必须同时接上 WebView（NSC）与数据面（controlCaPEM）', () => {
+  const gradle = src('native/android/app/build.gradle.kts');
+  const manifest = codeOnly(src('native/android/app/src/main/AndroidManifest.xml'));
+  // ★必须剥注释：否则把接线整行注释掉、守卫照样绿（实测过，这是本文件里第二次踩同一个坑，
+  //   第一次是 gateway 侧那条并集断言被自己的文档注释绊倒）。
+  const svc = codeOnly(src('native/android/app/src/main/java/dev/baidi/mobile/BaidiVpnService.kt'));
+
+  // ① 构建期从同一个入参生成两份产物
+  assert.match(gradle, /baidiControlCa/, 'build.gradle.kts 缺少 -PbaidiControlCa 入参');
+  assert.match(gradle, /network_security_config\.xml/, '构建期必须生成 NSC（WebView 那一半）');
+  assert.match(gradle, /baidi_control_ca\.pem/, '构建期必须写出 res/raw 里的锚（数据面那一半的来源）');
+
+  // ② WebView 那一半真的挂上了
+  assert.match(manifest, /android:networkSecurityConfig="@xml\/network_security_config"/,
+    'AndroidManifest 没有引用 NSC —— 生成了却没人用，WebView 那一半等于没做');
+
+  // ③ 数据面那一半真的接上了
+  assert.match(svc, /controlCaPEM\s*=/, 'BaidiVpnService 没把锚交给 baidimobile.Config.controlCaPEM');
+  assert.match(svc, /readControlAnchor\(/, '锚必须经 readControlAnchor 读（它带指纹自证）');
+
+  // ④ BuildConfig 里只放摘要、不放正文 —— 这是「两半同源」可执行的前提
+  assert.match(gradle, /BAIDI_CONTROL_CA_SHA256/, 'BuildConfig 要带构建期摘要供运行期自证');
+  assert.ok(!/buildConfigField\([^)]*BAIDI_CONTROL_CA_PEM/.test(gradle),
+    'BuildConfig 里不许放 PEM 正文：只放摘要、运行期各自读 res/raw 再比对，' +
+    '「NSC 用的那份」与「Go 用的那份」是否同源才是一件可执行的事，而不是靠约定');
+
+  // ⑤ NSC 的域名从 apiBase 推，不另开入参（两个入参 = 两个真相来源，
+  //    而它们不一致时的现场是「证书装了却不生效」）
+  assert.ok(!/baidiControlHost|baidiNscDomain/.test(gradle),
+    'NSC 的域名必须从 baidiApiBase 的 host 推，不许另开一个入参');
+});

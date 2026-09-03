@@ -1052,12 +1052,53 @@ SELinux 策略，`//go:build android` 那份在这里连编译都不参与，运
 
 12.1 修好之后，链路往前推进了一大截，但**隧道端到端仍未跑通**，卡点换成了两条：
 
-1. **取敲门令牌失败（演示站证书）**。Go 侧日志原文：
-   `WARN 取短时效敲门令牌失败 … x509: certificate signed by unknown authority`。
-   `baidimobile.Config` 没有跳过校验的开关（刻意），而演示站是自签证书——与上午 WebView
-   登录栽的是同一处（12.3 第一条）。要在真机走通，得让控制面有受信证书，或给 debug 包
-   配一个只在 debug 生效的信任配置。**不要**给绑定层加 `-insecure`：那是给数据面开一个
-   默认关不掉的口子。
+1. ~~**取敲门令牌失败（演示站证书）**~~ —— **已修复，端到端跑通**。
+
+   改前形态：`WARN 取短时效敲门令牌失败 … x509: certificate signed by unknown authority`。
+   同一堵墙也挡着 WebView 登录（12.3 第一条），两处失败长得完全不一样，看起来像两个不相干的 bug。
+
+   修法：**构建期注入控制中心信任锚**，一份材料喂两条链路（详见 docs/ARCHITECTURE.md 第七节
+   「控制中心信任锚」）。**没有**给绑定层加 `-insecure`——`baidimobile.Config.ControlCaPEM`
+   空值语义是「用系统信任库」，不是跳过校验。
+
+   ```bash
+   # 取部署方的控制面公证书（自签部署下就是 install-remote.sh 生成的那张）
+   scp root@<控制面>:/opt/baidi/etc/tls/server.crt ./control-ca.pem
+   # 逐字符核对指纹后再用（照抄一个没核过的值等于给任意中间人盖章）
+   openssl x509 -in control-ca.pem -noout -fingerprint -sha256
+
+   cd clients/mobile && npm run build
+   SRC=dist DST=native/android/app/src/main/assets   # dist 必须**平铺**进 assets 根
+   rm -rf $DST && mkdir -p $DST && cp -R $SRC/. $DST/
+   cd native/android
+   ./gradlew assembleDebug \
+     -PbaidiApiBase=https://101.43.125.131 \
+     -PbaidiControlCa=$PWD/../../control-ca.pem
+   ```
+   不传 `-PbaidiControlCa` 照样能构建，构建日志会当面说明「只信系统信任库，自签部署下
+   WebView 登录与数据面取令牌都会失败——这是**如实的**姿态，不是 bug」。
+
+   **2026-09-03 真机端到端验收（OPPO PKU110 / Android 16 / 演示站证书一个字节没动）**：
+
+   | 环节 | 证据 |
+   |---|---|
+   | WebView 登录 | 表单填 `liu.yang` → 跳 `/connect`；改前恒 `ERR_CERT_AUTHORITY_INVALID` |
+   | 拉接入剖面 | 网关落点 + 5 个受保护网段 + 4 条资源映射 + `tunnelPin` 全部下发 |
+   | 建 TUN | `tun0 inet 10.99.0.2/32` MTU 1420；系统 `VPN CONNECTED extra: VPN:dev.baidi.mobile` |
+   | **多网段接管** | VPN 路由表 1567 里 5 条全部 `dev tun0`（`10.0.0.17` / `10.20.1.10` / `10.99.0.0/24` / `10.99.0.36` / `10.99.0.218`） |
+   | 取敲门令牌 | `ready:true healthKnock:true healthKnockErr:""` |
+   | **业务流穿隧道** | 设备侧 `nc 10.99.0.36 8080` 退出码 0，健康态翻成 `healthTunnel:true` |
+
+   ★**反例对照**（本仓纪律：不带对照的成功不算证据）：同一套代码**不带** `-PbaidiControlCa`
+   构建、装到同一台手机，同一次 `fetch('https://101.43.125.131/…')` 在 TLS 那步失败。
+   另有一次 NSC 判定实验也带对照：把生成的 `<domain>` 改成 `101.43.125.132`（证书原样保留），
+   对 `.131` 的 fetch 必然失败——**这才证明起作用的确实是那条 domain 匹配**，
+   而不是别的什么东西凑巧让它通了（2026-09-03 隐身端口那次正是少了这道对照，
+   把中间层伪造的握手成功读成了「敲门后可连」）。
+
+   ★同一轮还验到控制面的**策略闸是真的**：换 `li.fang` 登录时，取令牌被 403 拒，
+   原因原样上到界面——`接入被拒：终端环境不合规：磁盘已加密 未通过`（该账号名下有一份
+   判 block 的 posture 报告）。这不是缺陷，是五道门里的第三道在按账号维度工作。
 
 2. ~~**UI 判据仍停在「启动成功即算接入」**~~ —— **已修复，并在同一台真机上验收通过**。
 

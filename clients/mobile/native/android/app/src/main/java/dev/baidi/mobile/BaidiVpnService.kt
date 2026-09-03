@@ -74,13 +74,22 @@ class BaidiVpnService : VpnService() {
         }
 
         // 2) 配置并启动 Go 引擎（fd 交给 baidimobile，Service 内不再碰包）
+        // 控制中心信任锚：与 WebView 那半边（network_security_config）**同一份字节**。
+        // 排在建 TUN 之后、起引擎之前——它是引擎的入参；对不上就不该起引擎（fail-closed）。
+        val anchor = readControlAnchor(this)
+        if (anchor.why.isNotEmpty()) {
+            TunnelState.markFailed(anchor.why)
+            return START_NOT_STICKY
+        }
+
         val cfg = Config().apply {
             spaAddr = "$gateway:$spaPort"
             proxyAddr = "$gateway:$proxyPort"
             this.token = token
             control = ctl                 // 非空=短时效一次性令牌+保活
             gm = gmOn
-            caPEM = intent.getStringExtra("caPEM") ?: ""
+            caPEM = intent.getStringExtra("caPEM") ?: ""   // ★这是**国密隧道**的 CA，与下面那个语义相反（空=跳过校验）
+            controlCaPEM = anchor.pem                      // ★空 = 用系统信任库，**不是**跳过校验
             serverName = "baidi-gateway"
             mtu = 1420L
             pin = pinHex              // 证书指纹钉扎（与桌面端同一份判据）

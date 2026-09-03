@@ -80,6 +80,17 @@ type Config struct {
 	// DNSRecords FQDN（小写、不带尾点）→ IPv4。由控制面剖面下发，客户端只负责照答。
 	DNSRecords map[string]string
 
+	// ControlTLS 调控制面（取敲门令牌）用的 TLS 配置，由**调用方预构建**（同 TLCPConfig 的范式）。
+	//
+	// ★nil = 用系统信任库，**不是跳过校验**。参考部署给控制面签的是自签证书，
+	// 而系统信任库当然不认它——2026-09-03 安卓真机上这一跳报的正是
+	// `x509: certificate signed by unknown authority`，隧道引擎起着而门永远敲不开。
+	// 客户端持部署期分发的信任锚来认控制面（移动端经 baidimobile.Config.ControlCaPEM 下发，
+	// 构建成「系统池 ∪ 那一张锚」），与网关用 -mtls-ca 认控制面同构。
+	// 本包不提供、也永远不要提供 InsecureSkipVerify 的入口：那是给零信任的第一跳开一个
+	// 默认关不掉的口子，且一旦加上就再也拆不掉。
+	ControlTLS *tls.Config
+
 	// Device 终端硬件指纹，随每次取敲门令牌上报给控制面（授信终端准入闸的判据）。
 	// ★必须与 posture 上报用的是**同一个值**（桌面客户端的 collectPosture().device）：
 	// 两处不一致的话，管理员在设备台账里批准的那台机器与敲门时自报的那台对不上，
@@ -262,6 +273,7 @@ type tunneler struct {
 	pick     *picker    // 网关落点选择器（多活 + 故障转移，见 failover.go）
 	deny     chan error // control 定性拒绝（403：强制下线/账号禁用）单次上报，供 Run 停机
 	denyOnce sync.Once
+	fetch    *knock.Fetcher // 取敲门令牌（携带 cfg.ControlTLS 的信任材料；nil 配置=系统信任库）
 
 	// ── 真实健康状态（供客户端展示与移动端绑定层读取）──
 	// 状态本体搬去 health.go 的 HealthState（那里有完整的来龙去脉）。这里用**内嵌指针**，
@@ -282,7 +294,10 @@ func newTunneler(cfg *Config) *tunneler {
 	if h == nil {
 		h = NewHealthState()
 	}
-	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1), HealthState: h}
+	// 取令牌客户端在这里建一次（而不是每轮 knock 现建）：它内部有连接池，
+	// 每次新建会让保活敲门每 15s 重做一次 TLS 完全握手。cfg.ControlTLS 为 nil 即系统信任库。
+	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1),
+		HealthState: h, fetch: knock.NewFetcher(cfg.ControlTLS)}
 }
 
 // knock 向**全部**落点各发一次 SPA 敲门：逐个向 control 换取短时效一次性令牌
@@ -319,7 +334,7 @@ func (t *tunneler) knock() {
 
 // knockOne 敲一个落点。返回 true 表示遇到了控制面的定性拒绝（**账号级**判定，与落点无关）。
 func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
-	tok, err := knock.FetchToken(t.cfg.Control, t.cfg.Token, t.cfg.Device)
+	tok, err := t.fetch.Fetch(t.cfg.Control, t.cfg.Token, t.cfg.Device)
 	switch {
 	case err == nil:
 	case errors.Is(err, knock.ErrDenied):
@@ -501,6 +516,7 @@ func tlsClientConfig(pin string) *tls.Config {
 //   - 控制面经接入剖面把它下发到客户端；
 //   - 而 dialEndpoint 的 gm 分支不读 ep.Pin（注释说"走 CA 链校验"），
 //     桌面客户端又在 gm 时无条件附加 -insecure（把那条链校验也关掉）。
+//
 // 三处注释各自看着都合理，合起来是「谁都没在做校验」——而 gm 是**默认开**的，
 // 也就是参考部署下隧道服务端身份零校验，中间人可直接冒充网关。
 // ★判据只写一遍，两条路径各自套一层签名适配：crypto/tls 与 gotlcp 的

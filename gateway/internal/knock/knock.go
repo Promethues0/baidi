@@ -13,6 +13,7 @@ package knock
 import (
 	"bytes"
 	"crypto/rand"
+	"crypto/tls"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,9 +30,35 @@ import (
 // 绝不回退会话令牌继续重试——回退只会让被封禁的客户端徒劳空转。
 var ErrDenied = errors.New("接入被拒")
 
-// fetchClient 取令牌用的 HTTP 客户端。必须带超时：strict 模式下这是数据面保活的热路径
-// （每 reknock 一次），control 慢响应若无上界会把整轮保活拖过网关放行窗口而静默断连。
-var fetchClient = &http.Client{Timeout: 5 * time.Second}
+// fetchTimeout 取令牌的超时。**必须有**：strict 模式下这是数据面保活的热路径（每 reknock 一次），
+// control 慢响应若无上界会把整轮保活拖过网关放行窗口而静默断连。
+const fetchTimeout = 5 * time.Second
+
+// Fetcher 取敲门令牌的客户端，携带**调用方指定的 TLS 信任材料**。
+//
+// ★为什么需要它：参考部署（deploy/install-remote.sh）给控制面签的是自签证书，
+// 而此前这里是一个包级 http.Client，没有任何 TLS 定制口——于是「客户端 → 控制面 HTTPS」
+// 这一跳只能走系统信任库，自签部署下必然 x509 失败（2026-09-03 安卓真机实测）。
+// 客户端持部署期分发的信任锚来认控制面，与 internal/cplane 里网关用 -mtls-ca 认控制面同构。
+//
+// ★这**不是**跳过校验的开关：NewFetcher(nil) 走系统信任库，传进来的 *tls.Config 由调用方
+// 构建（移动端是「系统池 ∪ 那一张锚」），本包不提供也永远不要提供 InsecureSkipVerify 的入口。
+type Fetcher struct{ httpc *http.Client }
+
+// NewFetcher 造一个取令牌客户端。tlsCfg 为 nil = **用系统信任库**（不是跳过校验）。
+func NewFetcher(tlsCfg *tls.Config) *Fetcher {
+	tr, _ := http.DefaultTransport.(*http.Transport)
+	if tr != nil {
+		tr = tr.Clone() // 克隆：直接改 DefaultTransport 会把信任材料装到全进程所有 HTTP 上
+	} else {
+		tr = &http.Transport{}
+	}
+	tr.TLSClientConfig = tlsCfg
+	return &Fetcher{httpc: &http.Client{Timeout: fetchTimeout, Transport: tr}}
+}
+
+// defaultFetcher 是 FetchToken 这条包级快捷方式用的客户端（系统信任库）。
+var defaultFetcher = NewFetcher(nil)
 
 // FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti + use=knock）。
 // 遇 403 返回包裹 ErrDenied 的错误并带出服务端原因；其余非 200 视为瞬时错误。
@@ -42,6 +69,11 @@ var fetchClient = &http.Client{Timeout: 5 * time.Second}
 // 因此这里不校验也不兜底猜一个值。猜一个（比如拿主机名 hash）会让管理员在设备台账里
 // 看到一台与 posture 上报对不上的幽灵设备，而两处本该是同一台机器。
 func FetchToken(control, sessionToken, device string) (string, error) {
+	return defaultFetcher.Fetch(control, sessionToken, device)
+}
+
+// Fetch 同 FetchToken，但用本 Fetcher 的信任材料。
+func (f *Fetcher) Fetch(control, sessionToken, device string) (string, error) {
 	body, err := json.Marshal(map[string]string{"device": device})
 	if err != nil {
 		return "", err
@@ -52,7 +84,7 @@ func FetchToken(control, sessionToken, device string) (string, error) {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
-	resp, err := fetchClient.Do(req)
+	resp, err := f.httpc.Do(req)
 	if err != nil {
 		// ★这条错误会经数据面健康行一路走到用户界面上（移动端 wave10 起直接展示），
 		// 故在**唯一的产生点**上就翻成人话，而不是让每个消费方各翻一遍——

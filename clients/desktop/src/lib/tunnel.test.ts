@@ -133,19 +133,19 @@ describe('parseTunStatus · 无健康行时回落旧判据（逐字不变）', (
 
 describe('parseHealth · 格式容错', () => {
   it('标准 slog 行', () => {
-    expect(parseHealth(SLOG + 'knock=true tunnel=false err=-')).toEqual({ knock: true, tunnel: false, err: '' });
+    expect(parseHealth(SLOG + 'knock=true tunnel=false err=-')).toEqual({ knock: true, tunnel: false, terr: null, err: '' });
   });
 
   it('多余空白与字段乱序', () => {
-    expect(parseHealth('  tunnel=true   knock=false\terr=x  ')).toEqual({ knock: false, tunnel: true, err: 'x' });
+    expect(parseHealth('  tunnel=true   knock=false\terr=x  ')).toEqual({ knock: false, tunnel: true, terr: null, err: 'x' });
   });
 
   it('缺 err 字段 → 无错误', () => {
-    expect(parseHealth('knock=true tunnel=true')).toEqual({ knock: true, tunnel: true, err: '' });
+    expect(parseHealth('knock=true tunnel=true')).toEqual({ knock: true, tunnel: true, terr: null, err: '' });
   });
 
   it('未知键不影响解析', () => {
-    expect(parseHealth(SLOG + 'gateway=gw-a knock=true tunnel=true rtt=3ms err=-')).toEqual({ knock: true, tunnel: true, err: '' });
+    expect(parseHealth(SLOG + 'gateway=gw-a knock=true tunnel=true rtt=3ms err=-')).toEqual({ knock: true, tunnel: true, terr: null, err: '' });
   });
 
   it('slog 引号包起来的 err 会被还原，内部转义引号也还原', () => {
@@ -196,22 +196,70 @@ function view(over: Partial<TunView>): TunView {
 
 const PIN_ERR = '网关证书指纹不匹配（疑似中间人）：期望 abc 实得 def';
 
-describe('parseHealth · 与 Go 侧 wave10 起多带的 terr= 键兼容', () => {
+describe('parseHealth · Go 侧 wave10 起多带的 terr= 键', () => {
   // Go 侧（gateway/internal/dataplane/dataplane.go logHealth）从 wave10 起把失败按 knock/tunnel 分记，
   // 健康行形如 `knock=true tunnel=false terr=- err="…"`，terr 刻意排在 err 之前。
-  // TS 侧还没消费 terr（待接），但 err 的取值绝不能被 terr= 里的文本污染——
-  // 键名整词匹配 + 取行尾自由文本这两条规则合在一起才保证这一点，这里把两者的交点钉住。
+  // TS 侧现已消费 terr（三态：缺席=null 不可判定 / '' 无失败 / 非空 仍挂着），
+  // 且 err 的取值绝不能被 terr= 里的文本污染——这里把两件事都钉住。
   it('terr= 排在 err= 前：err 仍取 err= 之后的自由文本，且还原 Go 引号', () => {
     const h = parseHealth('knock=true tunnel=false terr=- err="SPA 拨号失败：网络不可达"');
-    expect(h).toEqual({ knock: true, tunnel: false, err: 'SPA 拨号失败：网络不可达' });
+    expect(h).toEqual({ knock: true, tunnel: false, terr: '', err: 'SPA 拨号失败：网络不可达' });
   });
   it('terr= 有值而 err=- 时：err 为空（不把隧道类历史失败当成当前错误）', () => {
     const h = parseHealth('knock=true tunnel=true terr=网关证书指纹不匹配 err=-');
-    expect(h).toEqual({ knock: true, tunnel: true, err: '' });
+    expect(h).toEqual({ knock: true, tunnel: true, terr: '网关证书指纹不匹配', err: '' });
   });
   it('terr= 带引号含空格也不影响 err 的定位', () => {
     const h = parseHealth('knock=true tunnel=false terr="拨号超时 5s" err="取敲门令牌失败：403"');
     expect(h?.err).toBe('取敲门令牌失败：403');
+    expect(h?.terr).toBe('拨号超时 5s');
+  });
+
+  it('terr= 缺席 → terr 为 null（不可判定），不是空字符串', () => {
+    // 老数据面（wave10 之前）不打这个键。压成 '' 会让上层把「不可判定」读成「隧道类没有失败」，
+    // 于是每 15s 宣告一次隧道已恢复——把粘性提示条存在的意义抹掉，方向与 fail-closed 相反。
+    expect(parseHealth(SLOG + 'knock=true tunnel=false err=-')?.terr).toBeNull();
+  });
+});
+
+describe('parseHealth · 取值按引号语义分词（值里的 key= 子串不得污染邻键）', () => {
+  // ★这一组是主防线。改造前 err 用 `/(?:^|\s)err=(.*)$/` 取「第一个 ` err=` 到行尾」，
+  // 完全不理会 slog 的引号语义：只要 terr 的值里出现过一个 ` err=` 子串（后端错误原文里很常见），
+  // 正则就命中引号**内部**那处，err 被解析成一段跨了两个键的拼接文本，而它看起来仍像一条正常错误。
+  it('terr 的值里含 " err=" 子串 → 不污染 err（改造前 err 会被解析成 terr 的尾巴）', () => {
+    const line = SLOG + 'knock=true tunnel=false terr="拨号失败：upstream said err=connection refused" err="真正的当前错误"';
+    const h = parseHealth(line);
+    expect(h?.err).toBe('真正的当前错误');
+    expect(h?.terr).toBe('拨号失败：upstream said err=connection refused');
+  });
+
+  it('err 带引号含空格：整段还原，且不吞掉后面的键', () => {
+    const h = parseHealth(SLOG + 'knock=true tunnel=false terr=- err="SPA 拨号失败：dial udp 10.0.0.1:18201 i/o timeout" rtt=3ms');
+    expect(h?.err).toBe('SPA 拨号失败：dial udp 10.0.0.1:18201 i/o timeout');
+    expect(h?.terr).toBe('');
+  });
+
+  it('terr 带引号含空格：整段还原，err 独立取值', () => {
+    const h = parseHealth(SLOG + 'knock=true tunnel=true terr="网关证书指纹不匹配（疑似中间人）：期望 abc 实得 def" err=-');
+    expect(h?.terr).toBe('网关证书指纹不匹配（疑似中间人）：期望 abc 实得 def');
+    expect(h?.err).toBe('');
+  });
+
+  it('terr 的值里含 " knock=false" 子串 → 不污染 knock（错在这一侧的是 ready，不只是文案）', () => {
+    // ★键序刻意打乱把 terr 排在 knock 之前：parseHealth 的契约明写「字段顺序不影响」，
+    // 而按行内第一个匹配取值的正则实现在这一序下会命中引号**内部**那个 knock=false，
+    // 把一台健康的终端判成「没敲门成功」→ ready 恒 false → 应用页「访问」闸锁死。
+    // 真实 Go 健康行 knock 排在最前，正好把这个洞盖住，故必须用乱序才测得出来。
+    const h = parseHealth(SLOG + 'terr="握手失败：peer said knock=false" tunnel=false knock=true err=-');
+    expect(h?.knock).toBe(true);
+    expect(h?.terr).toBe('握手失败：peer said knock=false');
+    expect(h?.err).toBe('');
+  });
+
+  it('引号内的转义引号不算闭合：err 不会被从值中间截断', () => {
+    const h = parseHealth(SLOG + 'knock=true tunnel=false terr="Get \\"http://gw/ err=1\\" 失败" err="当前错误"');
+    expect(h?.terr).toBe('Get "http://gw/ err=1" 失败');
+    expect(h?.err).toBe('当前错误');
   });
 });
 
@@ -269,5 +317,42 @@ describe('nextDataplaneNotice · 隧道类失败不被保活敲门擦掉', () =>
 
   it('无失败且无历史 → null', () => {
     expect(nextDataplaneNotice(null, view({}), 1)).toBeNull();
+  });
+});
+
+describe('nextDataplaneNotice · terr 可判定时按它判隧道类真恢复（比 tunnel 位准）', () => {
+  it('terr=- 且 tunnel 早已为 true → 提示条清掉（改前这一格永远只能靠用户手动关）', () => {
+    // tunnel 是「**曾**拨通」的粘性位：失败当时它已是 true 时它永远不会再翻转，
+    // 改前的 false→true 判据在这一格完全失效。terr 由 markTunnel（真拨通）清空，没有这个盲区。
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: true, tunnelErr: PIN_ERR }), 1000);
+    expect(n0?.text).toBe(PIN_ERR);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true, tunnelErr: '' }), 20000)).toBeNull();
+  });
+
+  it('err 被保活敲门清空但 terr 仍非空 → 粘住（这正是 terr 存在的理由）', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: true, tunnelErr: PIN_ERR }), 1000);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true, tunnelErr: PIN_ERR }), 16000)).toBe(n0);
+  });
+
+  it('terr 非空时 tunnel 位翻转也不清（terr 说了算，不回落到旧判据）', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false, tunnelErr: PIN_ERR }), 1000);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true, tunnelErr: PIN_ERR }), 5000)).toBe(n0);
+  });
+
+  it('knock 类不受影响：err 清空即真恢复，与 terr 无关', () => {
+    const n0 = nextDataplaneNotice(null, view({ error: '取敲门令牌失败：403', tunnelUsed: false, tunnelErr: PIN_ERR }), 1000);
+    expect(n0?.cls).toBe('knock');
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: false, tunnelErr: PIN_ERR }), 16000)).toBeNull();
+  });
+
+  it('健康行无 terr 键（老数据面）→ 行为与接 terr 之前逐字一致：只看 tunnel 位翻转', () => {
+    // 同时是「缺席不得按空处理」的反例守卫：把 null 当成 '' 的话，下面第二次调用会返回 null。
+    const stale = view({ error: PIN_ERR, tunnelUsed: true });
+    expect(stale.tunnelErr).toBeNull();
+    const n0 = nextDataplaneNotice(null, stale, 1000);
+    expect(nextDataplaneNotice(n0, view({ error: '', tunnelUsed: true }), 60000)).toBe(n0);
+    // false→true 仍是老判据下唯一的自动收起条件
+    const n1 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false }), 1000);
+    expect(nextDataplaneNotice(n1, view({ error: '', tunnelUsed: true }), 5000)).toBeNull();
   });
 });

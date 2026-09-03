@@ -302,7 +302,8 @@ const (
 // · ★值域由 `sanitizeReason` 统一消毒（wave10）：失败原因里**结构性地不可能**出现
 // `<空白><名字>=`——否则 terr 值里塞一个 ` err=` 就能把旧 TS 的字段起点抢到自己身上，
 // 而那段文本可以是对端可控的（见 sanitizeReason 上方的实测说明）。
-// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS 消费 terr 留给下一轮。
+// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS **已消费** terr
+// （`TunHealth.terr` 三态：键缺席=不可判定 / `-`=隧道类无失败 / 非空=仍挂着），用它判隧道类失败是否真恢复。
 const healthPrefix = "数据面健康"
 
 // logHealth 打一行结构固定的健康状态，供客户端解析真实接入态。

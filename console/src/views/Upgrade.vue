@@ -145,10 +145,8 @@
           </table>
           <button type="button" class="bd-link" style="margin-top: 8px" @click="openGray()"><icon-plus />新增灰度计划</button>
 
-          <!-- ★现场实际版本分布（FR-UPG-19 AC-12 的验收依据）。
-               灰度只决定「告诉谁有新版」，不决定任何人**实际**装了什么——
-               客户端不自动下载、不自动安装。放开比例前要看的是这一份，
-               改造前它根本不存在，AC-12「先小范围验证再放开」在真机上无从验证。 -->
+          <!-- ★现场实际版本分布。灰度只决定「告诉谁有新版」，不决定任何人**实际**装了什么
+               （客户端不自动下载、不自动安装）——放开比例前要看的是这一份。 -->
           <div class="bd-vers__sub">现场终端版本分布</div>
           <div class="bd-hint">
             来自终端 posture 上报（每台设备最新一份），是「谁在跑哪个版本」的唯一权威事实。
@@ -214,9 +212,9 @@
         <div class="bd-fld"><label>定向账号（无视比例，逗号分隔）</label>
           <a-input v-model="gr.accounts" placeholder="qa.liu, dev.wang" class="bd-mono" />
         </div>
-        <!-- ★用户组定向：改造前这个多选**根本不存在**，而保存请求体里写死 groups: []。
-             于是管理员只要在页面上改一下比例，经 API 配好的用户组定向就被整体清空——
-             接口回 200、页面看不出差别，灰度对象从「测试组」变成「全体 N% 随机分桶」。
+        <!-- ★用户组定向必须随保存原样带回：SaveGrayPlan 是整条覆盖式保存，这里漏发
+             就等于把经 API 配好的定向清空——接口回 200、页面看不出差别，灰度对象
+             会从「测试组」变成「全体 N% 随机分桶」。
              SaveGrayPlan 是整条覆盖式保存，前端漏一个字段就是一次静默的配置丢失。 -->
         <div class="bd-fld"><label>定向用户组（无视比例）</label>
           <a-select v-model="gr.groups" multiple allow-clear placeholder="不按用户组定向">

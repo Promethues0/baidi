@@ -174,7 +174,7 @@
 
       <!-- 如实声明 -->
       <div class="bd-card bd-unimpl">
-        <div class="bd-unimpl__h"><icon-info-circle />本版本未实现（此前这里是一整套不生效的继承编辑器，已摘除）</div>
+        <div class="bd-unimpl__h"><icon-info-circle />本版本未实现</div>
         <div v-for="n in ACCESS_UNIMPL" :key="n.label" class="bd-unimpl__row">
           <b>{{ n.label }}</b><span>{{ n.why }}</span>
         </div>
@@ -196,7 +196,7 @@
                「禁止用户通过浏览器登录」尤其不能加——控制面关不掉网关的 -web 监听，
                那条免客户端接入路照常敞着，而它会被当成一项已生效的安全措施。 -->
           <div v-if="g.notes.length" class="bd-unimpl">
-            <div class="bd-unimpl__h"><icon-info-circle />本版本未实现（此前这里是几个不生效的演示开关，已摘除）</div>
+            <div class="bd-unimpl__h"><icon-info-circle />本版本未实现</div>
             <div v-for="n in g.notes" :key="n.label" class="bd-unimpl__row">
               <b>{{ n.label }}</b><span>{{ n.why }}</span>
             </div>

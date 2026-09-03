@@ -73,10 +73,9 @@
         <div class="bd-pwform__f"><label>确认新口令</label>
           <a-input-password v-model="newPw2" placeholder="再输入一次" @keyup.enter="doChangePw" />
         </div>
-        <!-- ★口令要求必须与后端逐字一致。此前这里写「至少 6 位」，而后端
-             auth.PasswordWeakness 要求「≥10 位且含三类字符，或 ≥16 位长口令」：
-             管理员按提示输 6 位 → 前端放行 → 后端 400 → 页面弹「请检查网络或重新登录」。
-             首登强制改密默认是开的，也就是**每一次标准部署的第一个动作**踩的就是这条。 -->
+        <!-- ★口令要求必须与后端 auth.PasswordWeakness 逐字一致（≥10 位含三类字符，或 ≥16 位长口令）：
+             写松了，管理员按提示输入会被后端 400 拒掉；而首登强制改密默认开启，
+             这是每一次标准部署的第一个动作。 -->
         <div class="bd-pwform__rule">{{ PW_HINT }}；口令中不得包含账号名，也不得是常见弱口令</div>
         <div v-if="pwErr" class="bd-pwform__err"><icon-exclamation-circle-fill />{{ pwErr }}</div>
         <div class="bd-pwform__foot">
@@ -207,10 +206,8 @@ async function doChangePw() {
     if (r.ok) { Message.success('登录口令已修改'); pwOpen.value = false; resetPwForm(); }
     else pwErr.value = r.reason || '修改失败';
   } catch (e) {
-    // ★后端把失败原因写得很具体（「新口令强度不足：命中常见弱口令表。要求：…」、
-    //   「旧口令不正确」、「尝试过于频繁，请稍后再试」），api() 的 errText 也已经
-    //   把它取出来了。此前这里 catch 掉之后一律换成「请检查网络或重新登录」——
-    //   一句**错误的归因**：管理员会去查网络、去重登，而真正的原因就在被丢掉的那个字符串里。
+    // ★原样转述后端的失败原因（「新口令强度不足…」「旧口令不正确」「尝试过于频繁」）。
+    //   换成「请检查网络或重新登录」是一句错误的归因：真正的原因就在被丢掉的那个字符串里。
     pwErr.value = e instanceof Error ? e.message : '修改失败';
   } finally { changing.value = false; }
 }

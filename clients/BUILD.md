@@ -1046,7 +1046,18 @@ SELinux 策略，`//go:build android` 那份在这里连编译都不参与，运
   `window.__BAIDI_NATIVE__.startTunnel(token, cfgObject)`。
   ★`cfg` 必须传**对象**：注入的包装函数自己会 `JSON.stringify(cfg)`，传字符串会被二次编码，
   Kotlin 侧 `JSONObject` 解析后所有字段取缺省值，症状是「缺少控制中心地址」这类**误导性**报错。
-  令牌用 `curl` 从控制面 `/api/v1/portal/login` 取一个真的即可。
+  令牌用 `curl` 从控制面 `/api/v1/portal/login` 取一个真的即可（请求体是
+  `{"username":…,"password":…}`，不是 `account`）。
+- **另外三条会浪费时间的环境事实**（2026-09-03 逐个踩到）：
+  · CDP 的 WebSocket **必须抑制 Origin 头**（python `websocket-client` 传
+    `suppress_origin=True`），否则 Chrome 直接回 `403 … Rejected an incoming WebSocket
+    connection from the http://127.0.0.1:9222 origin`；
+  · `adb forward` 的目标 socket 名带 **WebView 进程 pid**，应用一重启就失效，而此时
+    `curl http://127.0.0.1:9222/json` 是**挂住不返回**而不是报错——看起来像脚本卡死。
+    每次 force-stop / 重装之后都要重新取 `webview_devtools_remote_<pid>` 再 forward；
+  · `adb shell pm clear dev.baidi.mobile` **清不掉 WebView 的 localStorage**（实测：清完
+    重启，`baidi_m_token` 还在，人还是登录态）。要换账号验证得经 CDP
+    `localStorage.clear()` 再 reload。
 
 ### 12.4 仍未验证：链路在建卡之后、敲门这一步断开
 

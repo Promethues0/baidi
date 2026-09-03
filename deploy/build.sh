@@ -50,6 +50,11 @@ echo "==> 交叉编译控制面温备节点 baidi-standby（linux/amd64）"
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-standby" ./cmd/baidi-standby )
 
 echo "==> 携带部署脚本/模板"
+# 隐身规则集脚本随包走（WITH_STEALTH=1 时 install-remote.sh 会装到 $BD_PREFIX/bin）。
+# ★用仓库里那一份而不是在部署脚本里重抄一遍规则：抄一遍就有第二个真相来源，
+#   而两份规则不一致时的症状是「网关页说 armed、实际保护的是别的端口」。
+mkdir -p "$OUT/firewall"
+cp "$ROOT/gateway/firewall/baidi-nft.sh" "$OUT/firewall/baidi-nft.sh"
 cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" \
       "$HERE/promote-standby.sh" "$OUT/"
 

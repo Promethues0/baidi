@@ -1,0 +1,30 @@
+[Unit]
+# 白帝内核态隐身规则集（NFR-SEC-01）：未经 SPA 授权的源 IP，其发往隧道口的报文在内核被 DROP，
+# 扫描器看到的是 filtered（无响应、无 RST），而不是「完成三次握手再被应用层断开」的 open。
+#
+# ★这个单元存在的唯一理由是**让规则集与网关的 -pf 绑在一起**。它们分开时会出现一个
+#   比不开隐身更坏的状态：规则集装着（隧道口对所有人 DROP）、而网关没带 -pf（放行集合
+#   永远没人写）——于是**每一个合法用户都连不上**，同时敲门成功、控制台显示网关在线、
+#   客户端只是拨号超时。这个状态在 2026-09-03 的一次部署里真实出现过：install-remote.sh
+#   重写了网关单元、把手工加的 -pf 与 User=root 抹掉，而手工装的规则集还留在内核里。
+#
+# Before= 保证规则集先于网关就位；PartOf= 保证停/重启网关时规则集跟着走——
+# 否则 `systemctl stop baidi-gateway` 会留下一张「谁也进不来」的规则集在内核里。
+Description=白帝内核态隐身规则集（nftables）
+Documentation=file://@BD_PREFIX@/bin/baidi-nft.sh
+After=network-pre.target nftables.service
+Before=baidi-gateway.service
+PartOf=baidi-gateway.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+# 端口必须与网关实际监听一致：规则集保护的端口与 -proxy 不同，等于「规则装了、
+# 保护的是别人」，而网关页的八态回执会如实报 port-mismatch（不是 armed）。
+Environment=PROXY_PORT=18443
+Environment=SPA_PORT=18201
+ExecStart=/usr/bin/env bash @BD_PREFIX@/bin/baidi-nft.sh setup
+ExecStop=/usr/bin/env bash @BD_PREFIX@/bin/baidi-nft.sh teardown
+
+[Install]
+WantedBy=multi-user.target

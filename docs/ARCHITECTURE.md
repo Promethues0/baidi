@@ -1358,6 +1358,19 @@ Android 10 起禁止 `untrusted_app` 绑 netlink 路由套接字，**AOSP 既定
 
 1. **`GuardedPort == nil` 落进 `default` 判成 `armed`**。这正是本行动要消灭的假绿，而且比原来的写死更坏——它带着「规则集实测在位，未授权源的报文在内核被丢弃」的措辞。`GuardedPort==nil` 的语义恰恰是「找不到那条 DROP 规则」= **没有任何东西在丢包**。`parseNftDropPort` 注释里那句「绝不猜默认端口」，在消费端被 default 分支原样破坏了一遍。现在它是独立的一态 `no-drop-rule`（计入 fail）。
 2. **网关启动期空指针 panic**：同一形态下 `slog.Info(..., "保护端口", *st.GuardedPort)` 无条件解引用 nil（slog 的参数在调用点求值，日志级别过滤救不了）。落在监听拉起之前 + systemd `Restart=on-failure` = 崩溃重启循环，SPA 与隧道口全不监听。
+★**2026-09-03 起隐身收口成一个开关**：`deploy/config.env` 的 `WITH_STEALTH`（默认 0）同时派生
+规则集（`baidi-stealth.service`，`Before=`/`PartOf=` 网关，随网关起停、开机自动装）、网关 `-pf`
+与 `User=root`（写 nft 集合要 CAP_NET_ADMIN，而 `Probe` 还要求 `euid==0` 才读得到规则集）。
+**三者不再允许分别设置**——它们分开正是 `orphan-ruleset` 的来源，而那一次真实事故是：手工加的
+`-pf` 与 `User=root` 被 `install-remote.sh` 重写覆盖，手工装的规则集却留在内核里，于是全员连不上
+而控制台、审计、客户端三处都显示正常。关掉开关时脚本会把上一次装的规则集**拆干净**，不留半成品。
+
+★**外部实测必须带对照**（同日的另一个教训）：在开发机上直接用 `nc -z` 测 18443，得到的
+「未敲门超时、敲门后连上」曾被当成隐身生效的证据；后来对同机一个**没人监听**的端口做对照，
+发现它也「连上」——那条链路上有设备替所有端口完成握手，前面的结论全部作废。正确做法是先探
+无人监听的端口：它立即被 RST 拒绝、而隧道口超时，才说明 DROP 生效。在一条干净的蜂窝链路上
+按此复测，得到「未敲门 8s 无响应 → 敲门后 0s 连上 → TTL 过期后又 8s 无响应」，闭环才算确证。
+
 3. **`orphan-ruleset` 在它真正高发的部署形态里是死判据**：非 root 时 `Ruleset` 恒为 nil，而 `!Wanted` 那支只有 `Ruleset==true` 才判 orphan，否则**直接断言** `off` + 「端口 open」。运维照提示跑了 `baidi-nft.sh setup` 却没给 service 加 `-pf`（仍以 `baidi` 用户运行 —— 参考部署的默认 User），真实状态是全员拨号超时，而回执说的是「未启用隐身、端口开着」，方向与后果两句全反。现在「探不到」优先于一切确定结论，并把两种相反的可能都写出来。
 4. **`/diag` 汇总把 unknown/unreported 并进「未启用、端口 open」**：一台真正 armed 但以非 root 跑的网关会被当面说成没隐身。改成三个桶。
 5. 前端漏了 `orphan-ruleset`（显示成英文 key + 灰色，而灰色在本项目专表「我们不知道」，后端却判 fail）；`unreported` 的 `wanted/root` 零值被渲染成确定结论「-pf 未开启 · 非 root」，与同卡片上「控制面无从判断」直接打架——两者改为指针三态。

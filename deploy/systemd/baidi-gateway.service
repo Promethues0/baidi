@@ -1,13 +1,21 @@
 [Unit]
 # 白帝数据面网关（可选）：SPA 单包授权 + 国密 TLCP 隧道代理。
-# 注意：默认不开 -pf（内核态隐身用 nftables，该机 strongSwan-gm 也用 nft，需先评审 ruleset 再开，避免互相覆盖）。
-# 启用前需在腾讯云安全组放行 18443/tcp + 18201/udp，并先跑一次 baidi-gmca 生成 @BD_PREFIX@/etc/gmcerts。
+# 启用前需在云安全组放行 18443/tcp + 18201/udp，并先跑一次 baidi-gmca 生成 @BD_PREFIX@/etc/gmcerts。
+#
+# ★内核态隐身（-pf + User=root + nftables 规则集）由 config.env 的 WITH_STEALTH 一个开关派生，
+#   三者**不允许**分别设置：只装规则集而网关没有 -pf，隧道口就对所有人 DROP 而放行集合没人写，
+#   结果是全体合法用户连不上、而各处显示一切正常。规则集由 baidi-stealth.service 管，
+#   它 Before= 本单元、PartOf= 本单元，随本单元一起起停。
 Description=白帝数据面网关 baidi-gateway
 After=network.target
+@GW_STEALTH_DEP@Wants=baidi-stealth.service
+@GW_STEALTH_DEP@After=baidi-stealth.service
 
 [Service]
 Type=simple
-User=@BD_USER@
+# ★WITH_STEALTH=1 时必须是 root：写 nft 放行集合要 CAP_NET_ADMIN，而网关页那份八态回执
+#   还要求 euid==0 才读得到规则集（非 root 一律报「不可判定」，拿不到 armed）。
+User=@GW_USER@
 WorkingDirectory=@BD_PREFIX@
 # 网关专属配置：只含公钥与自己的 mTLS 证书路径，**不含任何签发能力**。
 # （无 - 前缀：缺该文件即启动失败，绝不静默降级）
@@ -17,7 +25,7 @@ EnvironmentFile=@BD_PREFIX@/etc/baidi-gateway.env
 # -control 必须配：网关据此注册并周期拉策略——**强制下线/账号禁用/终端不合规的撤销名单
 # 就是经这条通道下发的**，不配等于数据面永远收不到处置指令。走 mTLS 独立端口。
 # 身份材料（客户端证书 + CA + 敲门公钥）由 baidi-control -issue-gateway-cert 离线签发。
-ExecStart=@BD_PREFIX@/bin/baidi-gateway -gm -certdir @BD_PREFIX@/etc/gmcerts \
+ExecStart=@BD_PREFIX@/bin/baidi-gateway @GW_PF@-gm -certdir @BD_PREFIX@/etc/gmcerts \
   -spa :18201 -proxy :18443 -backend 127.0.0.1:@CONTROL_PORT@ -ttl 30s \
   -control https://127.0.0.1:@MTLS_PORT@ -gwid @GW_ID@
 Restart=on-failure

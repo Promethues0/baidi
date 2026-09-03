@@ -356,7 +356,36 @@ GW_ID="${GW_ID:-gw-1}"           # 本机网关 id（= mTLS 客户端证书 CN�
 IPSEC_GW_ID="${IPSEC_GW_ID:-ipsec-$GW_ID}"
 IKE_PORT="${IKE_PORT:-500}"      # IKE 监听（<1024，靠 CAP_NET_BIND_SERVICE 绑）
 NATT_PORT="${NATT_PORT:-4500}"   # NAT-T / ESP-in-UDP 监听
+# 内核态隐身（NFR-SEC-01）：三项由这一个开关派生，**不允许分别设置**。
+#
+# ★为什么收成一个开关：规则集、-pf、User=root 少任何一项都会落进一个比不开隐身更坏的
+#   状态——规则集装着而网关没带 -pf，隧道口对所有人 DROP 而放行集合永远没人写，于是
+#   每一个合法用户都连不上，同时敲门成功、控制台显示网关在线、客户端只是拨号超时。
+#   2026-09-03 的一次部署真实踩到过：手工加的 -pf / User=root 被本脚本重写覆盖，
+#   而手工装的 nft 规则集还留在内核里。分成三个旋钮就必然还会有人只拧其中一个。
+#
+# 默认 0：本机可能跑着别的 nft 使用者（如 strongSwan-gm），两套 ruleset 需先评审。
+# 开启后需在云安全组放行 18443/tcp 与 18201/udp——只放 UDP 的话敲门会成功而隧道连不上。
+if [ "${WITH_STEALTH:-0}" = "1" ]; then
+  if [ "${WITH_GATEWAY:-0}" != "1" ]; then
+    echo "✗ WITH_STEALTH=1 但 WITH_GATEWAY=0：隐身规则集保护的是网关的隧道口，"
+    echo "  没有网关就只会在内核里留下一张谁也进不来的规则集。请一并设 WITH_GATEWAY=1。"
+    exit 1
+  fi
+  [ -f "$HERE/firewall/baidi-nft.sh" ] || {
+    echo "✗ WITH_STEALTH=1 但部署包里没有 firewall/baidi-nft.sh（构建脚本没带上它？）。"
+    echo "  中止而不是继续：继续的结果是网关带着 -pf 起来、却没有规则集可写，"
+    echo "  网关页会报 no-ruleset，而端口对扫描器仍是 open。"
+    exit 1
+  }
+  GW_USER=root; GW_PF="-pf "; GW_STEALTH_DEP=""
+else
+  GW_USER="$BD_USER"; GW_PF=""; GW_STEALTH_DEP="#"
+fi
+
 render() { sed -e "s#@BD_PREFIX@#$BD_PREFIX#g" -e "s#@BD_USER@#$BD_USER#g" \
+               -e "s#@GW_USER@#$GW_USER#g" -e "s#@GW_PF@#$GW_PF#g" \
+               -e "s|@GW_STEALTH_DEP@|$GW_STEALTH_DEP|g" \
                -e "s#@CONTROL_PORT@#$CONTROL_PORT#g" -e "s#@PUBLIC_ORIGIN@#$PUBLIC_ORIGIN#g" \
                -e "s#@BD_HTTPS_PORT@#$BD_HTTPS_PORT#g" -e "s#@PUBLIC_HOST@#$PUBLIC_HOST#g" \
                -e "s#@MTLS_PORT@#$MTLS_PORT#g" -e "s#@GW_ID@#$GW_ID#g" \
@@ -488,6 +517,25 @@ GWENV
   chmod 0640 "$BD_PREFIX/etc/baidi-gateway.env"
   chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX/etc/gmcerts" "$BD_PREFIX/etc/gwcerts" \
     "$BD_PREFIX/etc/baidi-gateway.env" "$BD_PREFIX/bin"
+  # 隐身规则集：脚本随包分发（与仓库 gateway/firewall/baidi-nft.sh 同一份），
+  # 由 baidi-stealth.service 在网关之前装载、随网关一起停——**规则集不再是手工状态**，
+  # 机器重启与下一次部署都会自动回到同一姿态。
+  if [ "${WITH_STEALTH:-0}" = "1" ]; then
+    install -m 0755 "$HERE/firewall/baidi-nft.sh" "$BD_PREFIX/bin/baidi-nft.sh"
+    render "$HERE/systemd/baidi-stealth.service" > /etc/systemd/system/baidi-stealth.service
+    systemctl daemon-reload
+    systemctl enable baidi-stealth >/dev/null 2>&1 || true
+    systemctl restart baidi-stealth
+  else
+    # 关掉时要把上一次装的规则集**拆干净**：留着它而网关不带 -pf，正是那个
+    # 「谁也进不来、却处处显示正常」的状态。
+    if systemctl list-unit-files 2>/dev/null | grep -q '^baidi-stealth\.service'; then
+      systemctl disable --now baidi-stealth >/dev/null 2>&1 || true
+      rm -f /etc/systemd/system/baidi-stealth.service
+      systemctl daemon-reload
+    fi
+  fi
+
   render "$HERE/systemd/baidi-gateway.service" > /etc/systemd/system/baidi-gateway.service
   systemctl daemon-reload
   systemctl enable --now baidi-gateway
@@ -598,19 +646,26 @@ echo "  需在腾讯云安全组放行 TCP ${BD_HTTPS_PORT}（如要公网客户
 if [ "${WITH_IPSEC:-0}" = "1" ]; then
   echo "  站点组网还需放行 UDP ${IKE_PORT} + UDP ${NATT_PORT}（IKE 与 NAT-T，缺一不可）"
 fi
-# ★内核态隐身（NFR-SEC-01）当面交代：不装就不装，但不能让人以为装了。
-# 未开 -pf 时未敲门的 TCP 连接会先完成三次握手再被用户态断开（proxy.go 的
-# accept-then-close），nmap 判 open——与「端口在网络层不存在」是两种安全等级。
-# 网关页与 /diag 现在会逐台如实标出这一点，这里同步说一遍，免得部署完就忘。
+# ★内核态隐身（NFR-SEC-01）当面交代：开没开都要说清，且说的必须是这台机此刻的真实姿态。
 if [ "${WITH_GATEWAY:-0}" = "1" ]; then
-  echo ""
-  echo "  ⚠ 内核态隐身（SPA 真隐身）**未启用**：本脚本不装 nftables 规则集，网关也不带 -pf。"
-  echo "    现状：未敲门的 TCP 连接会先完成三次握手再被立即断开，端口对扫描器表现为 open 而非 filtered。"
-  echo "    业务仍然接入不了（无 SPA 授权即断连），但网关本身并未隐身。"
-  echo "    不默认启用的原因：该机 strongSwan-gm 也用 nft，两套 ruleset 需先评审避免互相覆盖。"
-  echo "    要启用： sudo PROXY_PORT=18443 SPA_PORT=18201 gateway/firewall/baidi-nft.sh setup"
-  echo "             然后给 baidi-gateway.service 的启动参数加 -pf 并以 root 运行（重启后规则集需重新装）。"
-  echo "    生效与否可在「网关与隐身」页逐台核对（回执来自网关实测，不是配置回显）。"
+  echo
+  if [ "${WITH_STEALTH:-0}" = "1" ]; then
+    echo "  ✓ 内核态隐身**已启用**（config.env: WITH_STEALTH=1）"
+    echo "    规则集由 baidi-stealth.service 装载（随网关起停、开机自动装），网关以 root 带 -pf 运行。"
+    echo "    未敲门的 TCP 报文在内核被 DROP：扫描器看到 filtered（无响应、无 RST），不是 open。"
+    echo "    ★仍建议从**外网侧**实测一次，且要带对照——同一条链路上先探一个没人监听的端口："
+    echo "      它若也「连上」，说明中间有设备替所有端口完成握手，那条链路上的探测结论一律作废；"
+    echo "      它若立即被拒（RST）而隧道口超时，才说明 DROP 真的生效。"
+    echo "    页面判据：「网关与隐身」页逐台看八态回执，只有 armed 算数（回执来自网关实测，不是配置回显）。"
+  else
+    echo "  ⚠ 内核态隐身（SPA 真隐身）**未启用**：不装 nftables 规则集，网关也不带 -pf。"
+    echo "    现状：未敲门的 TCP 连接会先完成三次握手再被立即断开，端口对扫描器表现为 open 而非 filtered。"
+    echo "    业务仍然接入不了（无 SPA 授权即断连），但网关本身并未隐身。"
+    echo "    默认不开的原因：本机可能跑着别的 nft 使用者（如 strongSwan-gm），两套 ruleset 需先评审。"
+    echo "    要启用：在 deploy/config.env 里设 WITH_STEALTH=1 后重新部署——**不要**手工去加 -pf 或装规则集，"
+    echo "            那会留下「规则集装着、放行集合没人写」的半成品状态（全员连不上，而各处显示正常）。"
+    echo "    生效与否可在「网关与隐身」页逐台核对（回执来自网关实测，不是配置回显）。"
+  fi
 fi
 # 首登口令姿态：**关掉时必须醒目告警**（wave8 行动 16）。
 # ★这条告警的意义在于「关掉」是一次有意识的取舍——种子口令 baidi@123 是公开的

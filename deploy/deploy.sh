@@ -14,6 +14,9 @@ source "$HERE/config.env"
 # config.env 里的值不会自动过去——漏转的症状是「config.env 里写了 WITH_IPSEC=1，
 # 部署成功，机器上却根本没有 baidi-ipsec」，且全程无报错。
 : "${WITH_IPSEC:=0}"; : "${IPSEC_GW_ID:=}"; : "${IKE_PORT:=}"; : "${NATT_PORT:=}"
+# 内核态隐身（默认关）。同样必须显式转发——漏转的症状是 config.env 里写了 WITH_STEALTH=1、
+# 部署"成功"，而机器上既没有规则集、网关也没带 -pf，且部署输出还照着"未启用"那段念。
+: "${WITH_STEALTH:=0}"
 # 首登强制改密：**默认 1**（wave8 行动 16）。同样必须显式转发，否则 config.env 里写了也悄悄不生效。
 #
 # ★为什么默认翻成 1：NFR-SEC-05 是 P0，验收词就是「默认安全开局：首登强制改密、
@@ -48,6 +51,6 @@ fi
 : "${BD_FORCE:=}" "${BD_MIN_CPU:=}" "${BD_MIN_MEM_MB:=}" "${BD_MIN_DISK_MB:=}" "${BD_DNS_PROBE_HOST:=}"
 
 echo "==> 远程安装（sudo；独立端口 ${BD_HTTPS_PORT}）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

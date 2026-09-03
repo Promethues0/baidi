@@ -1052,6 +1052,29 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   `stopTunnel` 清掉原生残留（判定口径见 `src/lib/tunnelwatch.ts`，`node --test` 钉住）。**读不到状态一律不可
   判定、不判中断**：误判成断开会让 UI 去 `stopTunnel` 把一条好隧道真的断掉；故 iOS / 鸿蒙壳（桥上没有
   `tunnelStatus`）与 dev 浏览器在接入后的中断**仍然不可见**——这是那两端的边界，不是安卓那条的回归。
+- **「不可判定」必须一路传到底，桥不许代为下结论**：`MainActivity.BRIDGE_JS` 里 `tunnelStatus` 的 catch 此前
+  合成 `{ stage:'failed', reason:'读取隧道状态失败' }`——把"读不到"塌缩成"确定失败"，于是上面那条
+  「读不到不判中断」的纪律**结构上永远走不到**（桥永远给得出 failed），监视会据此翻未接入、写 dropReason、
+  并主动 `stopTunnel` 把隧道真的断掉。现在 catch 回 **null**，启动期那段 400ms 轮询对 null **继续等**
+  （授权对话框还开着时读不到是常态，判失败会让一次正常接入在用户点「允许」之前就被判死），超时文案也只报
+  观测到的事实（「30 秒内读不到原生运行态」/「最后读到的阶段：starting」），**不再猜「是否未授予 VPN 权限」**
+  ——那个成因现在由 `onActivityResult` 当场 `markFailed` 给出真话。BRIDGE_JS 是嵌在 .kt 里的 JS、长期没有
+  执行方，现由 `tests/tunnelwatch.test.ts` 把常量原文抠出来在 `node:vm` 里**真跑**（含"读不到→继续等→随后
+  up 成功"这条时序）。
+- **挂载时要认领仍在跑的隧道**：`session.connected` 不持久化、每次从 false 起算，而原生 VPN 是进程外的前台
+  服务——webview 重载 / Activity 被系统重建后它照常在跑。改造前 `startTunnelWatch()` 唯一的调用点在
+  `startTunnel` 的成功分支，于是重建后页面显示「未接入」而流量正走隧道，**且此后再没有任何人读
+  `tunnelStatus`**（上一条那道监视等于没有）。现在 App.vue 的 `onMounted` 调 `vpn.adoptRunningTunnel()`：
+  `up` → 翻已接入并重新开始监视；`failed` 且带原因 → 写进 `dropReason` 当面显示；**其余（null 读不到 / idle /
+  starting）一律不动任何状态**。
+- **`window.__BAIDI_NATIVE__.tunnelStatus` 在仓内有两份不兼容契约，刻意不改名**：移动端是**同步**的
+  `{ stage, reason }`（安卓 `MainActivity.BRIDGE_JS` ↔ `clients/mobile/src/lib/vpn.ts`），鸿蒙壳是**异步**的
+  `{ running, pid, log, endpoint }`（`clients/harmony/entry/…/Index.ets` ↔ `clients/harmony/webui/shim/core.ts`，
+  因为鸿蒙壳复用的是 `clients/desktop` 那套 UI，经 shim 翻成 Tauri 的 `invoke('tunnel_status')`）。两条契约各自
+  只被对应的 UI 包消费，**壳与 UI 必须成对，不得互换**——装错一半不会报错，只会让接入态判定整段失真
+  （`{stage:'up'}` 在鸿蒙契约里 `running` 恒假 = 永远显示未接入；反向则 `stage` 恒 undefined = 移动端监视永远
+  判"未知阶段"= 活着，被抢占也看不见）。选**两处类型注释各写清边界**而不是给移动端改方法名：本波没有能力
+  实测任何一个壳（无 DevEco、无安卓真机），改名要同时动 Kotlin 与 TS、且 iOS/鸿蒙壳将来都得跟，风险大于收益。
 - **iOS fd 类型**：`tunnelFD()` 返回 `Int32`，而 gomobile 头文件里 `BaidimobileStart(long tunFd, …)` 在 Swift
   侧是 `Int`——对着 xcframework `-typecheck` 直接报类型不匹配，现改为 `Int(fd)`。没有工程就没有编译，
   类型错才能留到今天；Swift 侧 `BaidimobileConfig` 的字段名已逐个对过 Go 侧 `Config`。

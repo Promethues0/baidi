@@ -9,7 +9,7 @@
     "build": "vite build",
     "preview": "vite preview --port 4295",
     "type-check": "vue-tsc --noEmit",
-    "test": "node --experimental-strip-types --test tests/*.test.ts"
+    "test": "node --experimental-strip-types --import ./tests/register.mjs --test tests/*.test.ts"
   },
   "dependencies": {
     "@arco-design/web-vue": "^2.57.0",

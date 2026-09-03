@@ -76,7 +76,12 @@ webview 页面必须**平铺**进 `app/src/main/assets/`（漏了会开机白屏
 iOS 壳里逐条解析、任一条非法即整体拒绝并点名（`RouteSpec.kt` / `RouteSpec.swift`），不再静默回落 /24（源码级 + JVM/swiftc 断言，未实机）。
 接入后 webview 每 2s 读一次桥的 `tunnelStatus`（`src/lib/vpn.ts startTunnelWatch`）：被其它 VPN 抢占 / 被系统
 回收 / 引擎因下线或合规阻断停机时，UI 翻回未接入并当面显示原因——**只有安卓桥实现了 `tunnelStatus`**，iOS /
-鸿蒙壳接入后的中断目前仍不可见（读不到状态不判中断，见 `tunnelwatch.ts`）。`npm test` 跑判定与接线的单测。
+鸿蒙壳接入后的中断目前仍不可见（读不到状态不判中断，见 `tunnelwatch.ts`）。**读不到 ≠ 已断开**：桥的解析失败
+回 `null` 而不是合成一个 failed（合成的话监视会把一条好隧道真的断掉），启动期轮询对 `null` 继续等。
+webview 重载 / Activity 被系统重建后原生 VPN 仍在跑，App.vue 挂载时 `adoptRunningTunnel()` 读一次真实运行态
+把它认领回来（读不到就什么都不做）。**`window.__BAIDI_NATIVE__.tunnelStatus` 与鸿蒙壳上那个同名方法契约不同**
+（这里同步 `{stage,reason}`，那里异步 `{running,pid,…}`，服务的是 desktop 那套 UI）——壳与 UI 必须成对，
+详见 docs/ARCHITECTURE.md 第七节。`npm test` 跑判定、接线与桥（`node:vm` 里真跑 BRIDGE_JS）的单测。
 鸿蒙 `VpnExtAbility.ets` 仍是单切回落 /24，本轮未改（无 DevEco，连语法都验不到），见 docs/ARCHITECTURE.md 第七节。
 
 **iOS 与鸿蒙不在 CI 上，也不打算加占位 job**：iOS 要 Apple 付费账号签名 +

@@ -69,8 +69,21 @@ interface NativeBridge {
   apiBase?: string;
   startTunnel?: (token: string, cfg?: TunnelConfig) => Promise<{ ok: boolean; detail?: string }>;
   stopTunnel?: () => Promise<void>;
-  /** 原生真实运行态（目前只有安卓壳实现；iOS / 鸿蒙壳没有 → 接入后的中断在那两端不可判定）。 */
-  tunnelStatus?: () => TunnelStatus;
+  /**
+   * 原生真实运行态（目前只有安卓壳实现；iOS / 鸿蒙壳没有 → 接入后的中断在那两端不可判定）。
+   *
+   * ★返回 **null = 这一刻读不到**（桥抛错 / 状态不是合法 JSON），不是「已断开」。安卓桥的
+   *   catch 分支必须回 null 而不是合成 { stage:'failed' }：合成的话，下面 startTunnelWatch
+   *   会据此判中断、写 dropReason、并主动 stopTunnel 把一条好隧道真的断掉。
+   *
+   * ★**同名不同契约**：鸿蒙壳（`clients/harmony/entry/…/Index.ets`）注入的
+   *   `window.__BAIDI_NATIVE__.tunnelStatus` 是**异步**的 `{ running, pid, log, endpoint }`
+   *   ——那座桥服务的是 `clients/desktop` 那套 UI（经 `clients/harmony/webui/shim/core.ts`
+   *   翻成 Tauri 的 `invoke('tunnel_status')`），与这里的同步 `{ stage, reason }` 毫无关系。
+   *   两条契约各自只被对应的 UI 包消费，**壳与 UI 必须成对，不得互换**（把移动端 dist 装进
+   *   鸿蒙壳、或反过来，接入态判定会整段错而两边都不报错）。见 docs/ARCHITECTURE.md 第七节。
+   */
+  tunnelStatus?: () => TunnelStatus | null;
 }
 
 function native(): NativeBridge | undefined {
@@ -196,4 +209,30 @@ export function startTunnelWatch(): void {
 export function stopTunnelWatch(): void {
   watch?.stop();
   watch = null;
+}
+
+/**
+ * webview 挂载时把**原生仍在跑的隧道**认领回 UI 状态。App.vue 的 onMounted 是唯一调用点。
+ *
+ * ★为什么必需：`session.connected` 不持久化、每次从 false 起算，而原生 VPN 是进程外的前台
+ *   服务——webview 重载、Activity 被系统重建、用户从最近任务切回来，隧道都照常在跑。改造前
+ *   `startTunnelWatch()` 唯一的调用点在 `startTunnel` 的成功分支上，于是重建之后：页面显示
+ *   「未接入」而流量正走着隧道（用户会再点一次接入），**且此后再没有任何人读 tunnelStatus**——
+ *   被其它 VPN 抢占、引擎因下线/合规阻断停机，原生侧留下的原因一个读者都没有。
+ *
+ * 三种处置严格对应三种事实：
+ *   · up     —— 确实在跑：翻成已接入，并重新开始监视（认领了却不监视 = 把上面那个洞留一半）；
+ *   · failed —— 上一段接入不是用户断的、原因还留着：写进 dropReason 让 UI 当面显示；
+ *   · 其它   —— **什么都不做**。null=读不到（不可判定，见上）、idle=本就没在接入、
+ *              starting=几秒钟的过渡窗口（认领它需要监视器额外具备"翻成已接入"的语义，本波不做）。
+ */
+export function adoptRunningTunnel(): void {
+  const s = tunnelStatus();
+  if (!s) return; // 读不到 ≠ 断了，也 ≠ 在跑：不下任何结论
+  if (s.stage === 'up') {
+    session.connected = true;
+    startTunnelWatch(); // 注意顺序：它会清 dropReason，代表"新的一段接入从此刻起算"
+    return;
+  }
+  if (s.stage === 'failed' && s.reason?.trim()) session.dropReason = s.reason.trim();
 }

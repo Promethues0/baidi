@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/url"
@@ -185,7 +186,7 @@ func (s *Server) resolveWebApp(r *http.Request, appID string) (store.App, store.
 //  1. 该资源自己的 WebEntry 覆盖（管理员为这个应用配的专属域名）；
 //  2. BAIDI_WEB_ENTRY_BASE（整站统一的对外入口，通常是前置 nginx 的地址）；
 //  3. 在线且开了七层的网关上，**管理员登记的对外接入地址**（网关页那两栏，与客户端
-//     剖面同一处取数 gatewayAccessMap；内网栏优先，与剖面「内网在前」同序）；
+//     剖面同一处取数 gatewayAccessMap）——**只登记了一栏时**才用它；
 //  4. 该网关**自报的**七层监听地址里的 host（空/通配时退 SPA 监听的 host，再退
 //     BAIDI_CLIENT_GW_HOST）。
 //
@@ -200,6 +201,16 @@ func (s *Server) resolveWebApp(r *http.Request, appID string) (store.App, store.
 // 而不是发一张指向 127.0.0.1 的票：webProxyStatus 与 handleWebTicket 都经这一个函数，
 // 门户按钮置灰的原因与取票被拒的原因是同一句话。第 1/2 档是管理员的显式配置，不受此判
 // （本机 e2e 正是靠 BAIDI_WEB_ENTRY_BASE=http://127.0.0.1:… 跑起来的）。
+//
+// ★**两栏都登记且不是同一个值时，第 3 档判不出来**——如实报错，不猜。网关页那两栏
+// （局域网/互联网访问地址）是 PRD FR-SCEN-17 要求分开填的，剖面把两个都下发给终端、由
+// 数据面逐落点试拨，而浏览器只会收到**一个** 302：控制面无从知道此刻这位用户在内网还是
+// 外网。第一版写死"内网栏优先"，于是「网关通配监听 + 两栏都登记 + 未配统一入口」这套
+// 完全合法的配置下，外网用户在门户看到「访问」按钮亮着、点下去跳到内网主机名、浏览器
+// 一直转圈，而控制面审计记着「签发 Web 访问票据」、网关侧连一个请求都没收到——与本轮
+// 消灭的「指向 127.0.0.1 的票」是同一种形态，只是错得更隐蔽（对一半用户是通的）。
+// 出路有三条，拒绝文案里逐条写出：配 BAIDI_WEB_ENTRY_BASE / 配资源级 webEntry /
+// 两栏填同一个内外网统一的域名（FR-SCEN-09 的分区 DNS，剖面注释里也是这个解）。
 //
 // ★网关自报的七层监听 host **显式绑回环**（`-web 127.0.0.1:18444`）时，第 3 档也**不成立**：
 // 登记地址 gw.example.com:18444 上没有任何东西在听，「登记 host + 自报端口」只对
@@ -240,23 +251,46 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	// 管理员，而他登记过、再登记一遍也不会好。读不到就说读不到，把原因带出来。
 	accessMap, err := s.gatewayAccessMapErr()
 	if err != nil {
-		return "", "", fmt.Errorf("%s网关接入地址读取失败（%v）", webEntryUnresolvedPrefix, err)
+		// ★用户面只给固定一句：这个 note 会随 /portal/apps 下发给**任何登录用户**，
+		// 而 err 是 store 层原文（SQLite 报错会带库文件路径、锁状态等内部细节）。
+		// 与 api 包对 store 失败一律固定文案是同一条纪律；真实原因进服务端日志。
+		slog.Error("七层入口：网关接入地址读取失败", "gateway", gw.ID, "err", err.Error())
+		return "", "", errors.New(webEntryUnresolvedPrefix + "网关接入地址读取失败（原因见控制面服务端日志）")
 	}
 	access := accessMap[gw.ID]
-	if webListenLoopback(reportedHost) {
+	switch store.ClassifyHost(reportedHost) {
+	case store.HostLoopback:
 		// ★显式绑回环：登记地址与自报端口组合不出一个有人监听的地址，别往下走第 3/4 档。
 		// 这一判必须排在第 3 档**之前**——排在后面就是第一版的形态：登记了就报就绪。
 		registered := ""
 		if access.Configured() {
-			registered = fmt.Sprintf("，登记地址 %s 上并没有该端口的服务", orDefault(access.LANHost, access.WANHost))
+			registered = fmt.Sprintf("，登记地址 %s 上并没有该端口的服务", accessHostsNote(access))
 		}
 		return "", "", fmt.Errorf("%s网关 %s 的七层只监听回环 %s%s；经前置 nginx 终结 HTTPS 的部署请配置 "+
 			"BAIDI_WEB_ENTRY_BASE（或资源级 webEntry）指向前置入口，或把 -web 改成对外可达的监听地址",
 			webEntryUnresolvedPrefix, gw.ID, strings.TrimSpace(gw.Web), registered)
+	case store.HostMalformed:
+		// 形似 IP 的非标准写法（`-web 127.1:18444` / `[::1%lo0]:18444`）：控制面判不出它
+		// 绑在哪，而它多半正是回环。**判不出来就不组合登记地址**——猜错的那一半正好是
+		// 上面那条已经修过的静默失效（登记地址报就绪、票签出去、网关上什么都没在听）。
+		return "", "", fmt.Errorf("%s网关 %s 自报的七层监听地址 %s 的主机部分不是标准写法，"+
+			"控制面判不出它绑在哪个地址上（%q 这类短写会被系统按 inet_aton 展开）；"+
+			"请把 -web 写成标准的 host:port，或配置 BAIDI_WEB_ENTRY_BASE（或资源级 webEntry）指向前置入口",
+			webEntryUnresolvedPrefix, gw.ID, strings.TrimSpace(gw.Web), reportedHost)
 	}
 	host, source := "", ""
 	if access.Configured() {
-		host, source = orDefault(access.LANHost, access.WANHost), "管理员登记的接入地址"
+		lan, wan := strings.TrimSpace(access.LANHost), strings.TrimSpace(access.WANHost)
+		if lan != "" && wan != "" && !strings.EqualFold(lan, wan) {
+			// ★两栏都登记 = 内外网各有一个入口，而浏览器只会收到一个 302：判不出来就说判不出来。
+			// 取内网栏（第一版的做法）对外网用户是一张必然打不开的票，且门户按钮照亮。
+			return "", "", fmt.Errorf("%s网关 %s 的局域网与互联网访问地址都已登记（%s / %s），"+
+				"而浏览器入口只能是其中一个——控制面无从知道访问者此刻在哪一侧（客户端隧道会两个都试，浏览器不会）。"+
+				"请配置 BAIDI_WEB_ENTRY_BASE 或该资源的 webEntry 指定七层对外入口；"+
+				"若内外网可用同一个域名（分区 DNS），把两栏填成同一个值即可",
+				webEntryUnresolvedPrefix, gw.ID, lan, wan)
+		}
+		host, source = orDefault(lan, wan), "管理员登记的接入地址"
 	} else {
 		// 第 4 档：网关自报的监听地址。":18444" / "0.0.0.0:18444" 这类通配对浏览器没有意义，
 		// 回退到与客户端剖面同一个对外主机名配置，口径一致。
@@ -272,7 +306,8 @@ func (s *Server) webEntryBase(res store.Resource) (string, string, error) {
 	if webHostUnroutable(host) {
 		// ★宁可不发票，也不发一张浏览器打不开的票。文案第一句固定（门户与取票共用），
 		// 括号里说清此刻算出来的是什么、从哪来——否则管理员无从知道该去改哪一项。
-		return "", "", fmt.Errorf("%s（网关 %s 当前只能推导出 %q，来源：%s；浏览器无法到达回环或通配地址）",
+		return "", "", fmt.Errorf("%s（网关 %s 当前只能推导出 %q，来源：%s；浏览器到不了回环/通配地址，"+
+			"形似 IP 的非标准写法控制面也判不出它指向哪里）",
 			webEntryUnresolvedMsg, gw.ID, host, source)
 	}
 	scheme := "http"
@@ -308,39 +343,35 @@ const webEntryUnresolvedPrefix = "七层入口地址无法确定："
 // webEntryUnresolvedMsg 第 3/4 档推导出回环/通配/空时的整句：两条补救路径都真能救。
 const webEntryUnresolvedMsg = webEntryUnresolvedPrefix + "请在网关页登记对外接入地址，或配置 BAIDI_WEB_ENTRY_BASE"
 
-// webListenLoopback 判网关自报的七层监听 host 是否**显式绑在回环**（127.x / ::1 / localhost）。
-//
-// 与 webHostUnroutable 的区别：这里**不含**空与通配——`:18444` / `0.0.0.0:18444` 是「所有
-// 接口都听」，登记的对外地址 + 自报端口确实可达；`127.0.0.1:18444` 是「只有本机能到」，
-// 任何对外地址都到不了那个端口。两者在 webEntryBase 里走的分支相反，判据必须分开写。
-func webListenLoopback(host string) bool {
-	h := strings.TrimSpace(host)
-	if h == "" {
-		return false
+// accessHostsNote 把登记的两栏拼成一句人话（两栏都有就都写出来）。
+// 只登记一栏时写那一栏——拒绝文案里说"登记地址 X"，X 必须真是管理员填过的值。
+func accessHostsNote(a store.GatewayAccess) string {
+	lan, wan := strings.TrimSpace(a.LANHost), strings.TrimSpace(a.WANHost)
+	switch {
+	case lan != "" && wan != "" && !strings.EqualFold(lan, wan):
+		return lan + " / " + wan
+	case lan != "":
+		return lan
+	default:
+		return wan
 	}
-	if strings.EqualFold(h, "localhost") {
-		return true
-	}
-	ip := net.ParseIP(h)
-	return ip != nil && ip.IsLoopback()
 }
 
-// webHostUnroutable 判一个推导出来的入口主机名是否**必然**到不了浏览器：
-// 空 / 通配（0.0.0.0、::）/ 回环（127.x、::1、localhost）。
+// ★网关自报的七层监听 host 走的是 webEntryBase 里那个 store.ClassifyHost 三路 switch，
+// 不再另包一个 webListenLoopback 判据：那里要区分「是回环」（必然不通，文案点名回环）与
+// 「判不出来」（非标准写法，文案点名写法），而 webHostUnroutable 把两者合成一个 bool。
+// 与 webHostUnroutable 的分工不变：`:18444` / `0.0.0.0:18444` 是「所有接口都听」，登记的
+// 对外地址 + 自报端口确实可达，**不能**当成不可达；`127.0.0.1:18444` 是「只有本机能到」，
+// 任何对外地址都到不了那个端口。两者走的分支相反，判据必须分开。
+
+// webHostUnroutable 判一个推导出来的入口主机名是否**必然**到不了浏览器（或判不出来）：
+// 空 / 通配（0.0.0.0、::）/ 回环（127.x、::1、localhost）/ 形似 IP 的非标准写法。
 //
 // 这是 webEntryBase 第 3/4 档的唯一判据，webProxyStatus 与 handleWebTicket 都经它。
 // 只判「必然不通」的形态，不判「可能不通」（内网 IP 对外网浏览器也不通，但控制面无从知道
-// 浏览器在哪一侧，那属于登记地址那一节写明的边界）。
-func webHostUnroutable(host string) bool {
-	h := strings.TrimSpace(host)
-	if h == "" || strings.EqualFold(h, "localhost") {
-		return true
-	}
-	if ip := net.ParseIP(h); ip != nil {
-		return ip.IsLoopback() || ip.IsUnspecified()
-	}
-	return false
-}
+// 浏览器在哪一侧——那条边界写在 docs/ARCHITECTURE.md 第七节七层小节，与「两栏都登记就
+// 报判不出来」是同一件事的两半：一栏时只能用它，两栏时不许挑）。
+func webHostUnroutable(host string) bool { return store.IsUnroutableHost(host) }
 
 // gatewayBindNote 审计里描述这张票绑没绑网关（措辞只说已发生的事实）。
 func gatewayBindNote(gwID string) string {

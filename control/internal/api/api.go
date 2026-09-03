@@ -867,6 +867,20 @@ type PortalTile struct {
 	// 早于窗口提交会被 ErrDuplicateRequest 拒，按钮就不该亮着——两处各写一遍的话，
 	// 用户会点到一个必然 409 的按钮，而那正是本项目反复消灭的形态。
 	Renewable bool `json:"renewable,omitempty"`
+	// Web 七层入口对**这一个**磁贴的就绪判定（只在 mode=web 的磁贴上出现，其余为 nil）。
+	//
+	// ★为什么必须逐磁贴给：入口地址的第 1 档是**资源级** WebEntry，只有拿着那个资源才判得出来。
+	// 全局那份 webProxy 是用空资源算的（webProxyStatus），第 1 档在它那里永远不可达——于是
+	// 「参考部署（网关 -web 绑回环）+ 管理员按 503 提示给某个资源配了 webEntry」这套配置下，
+	// 取票接口签得出票，门户却仍把该磁贴置灰、显示同一句「请配置 …（或资源级 webEntry）」：
+	// 照着提示做了也点不动。用指针是为了让「旧后端不下发」与「本磁贴不就绪」在前端分得开。
+	Web *PortalWebEntry `json:"web,omitempty"`
+}
+
+// PortalWebEntry 七层入口对某一个 Web 磁贴的就绪结论（与取票 503 同一个判据、同一句话）。
+type PortalWebEntry struct {
+	Ready bool   `json:"ready"`
+	Note  string `json:"note,omitempty"`
 }
 
 // handlePortalApps 返回当前用户可见的应用门户。
@@ -920,6 +934,22 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 	// 终端风险降权：高敏磁贴一律标不可访问，且**JIT 授予也翻不回来**——与网关侧
 	// DenyUsers 先于允许集合判定同构，否则门户显示"可访问"而隧道那边照拒。
 	degraded, _ := s.degradeStateOf(r.Context(), user)
+	// 七层入口此刻能不能用，如实随磁贴一起下发：Web 磁贴的「访问」按钮要不要给点、
+	// 点不动时该说什么，都靠它。不下发的话用户只会拿到一个一闪而过的 503。
+	//
+	// ★全局那份（webProxy 字段）留给旧控制台，磁贴上的结论**逐个算**：只有资源级
+	// WebEntry 会让某个磁贴的结论与全局不同（那是 webEntryBase 的第 1 档），其余磁贴
+	// 与全局逐字相同——所以这里只多做「配了 webEntry 的资源」那几次判定，不会逐磁贴查库。
+	webReady, webNote := s.webProxyStatus()
+	webEntryOf := func(res store.Resource) *PortalWebEntry {
+		if strings.TrimSpace(res.WebEntry) == "" {
+			return &PortalWebEntry{Ready: webReady, Note: webNote}
+		}
+		if _, _, err := s.webEntryBase(res); err != nil {
+			return &PortalWebEntry{Ready: false, Note: err.Error()}
+		}
+		return &PortalWebEntry{Ready: true}
+	}
 	tiles := []PortalTile{}
 	for _, a := range b.Apps {
 		if a.Status != "running" {
@@ -929,6 +959,9 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		tile := PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
 			Sensitivity: st.Sensitivity, Accessible: st.Accessible, ResourceID: a.ResourceID,
 			Degraded: st.Degraded, Unavailable: st.Unavailable, UnavailableReason: st.Reason}
+		if a.Mode == "web" {
+			tile.Web = webEntryOf(byRes[a.ResourceID])
+		}
 		if exp := grantExpires[a.ResourceID]; exp > 0 {
 			tile.GrantExpiresAt = exp
 			// 与 store.CreateAccessRequest 的放行判据**同源**：早于窗口提交会被
@@ -937,9 +970,7 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		}
 		tiles = append(tiles, tile)
 	}
-	// 七层入口此刻能不能用，如实随磁贴一起下发：Web 磁贴的「访问」按钮要不要给点、
-	// 点不动时该说什么，都靠它。不下发的话用户只会拿到一个一闪而过的 503。
-	webReady, webNote := s.webProxyStatus()
+	// 全局那份保留：旧控制台只读它（新控制台按磁贴上的 web 字段判，见 PortalTile.Web）。
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"apps": tiles, "webProxy": map[string]any{"ready": webReady, "note": webNote}})
 }

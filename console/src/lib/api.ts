@@ -1175,7 +1175,15 @@ export interface PortalTile {
    *  store.CreateAccessRequest 的放行条件同源——早于窗口提交必然 409，
    *  前端自己算一遍就会给出一个点了必然失败的按钮。 */
   renewable?: boolean;
+  /** 七层入口对**这一个**磁贴的就绪结论（只有 mode=web 的磁贴有；旧后端不下发）。
+   *  ★必须逐磁贴判：入口地址的第一档是**资源级** webEntry，而全局那份 webProxy 是
+   *  服务端用空资源算的，第一档在它那里永远不可达。用全局那份判会把「管理员按 503
+   *  提示给某个资源单配了 webEntry」的应用也一起置灰——取票其实签得出来，
+   *  照着提示做了却点不动。 */
+  web?: PortalWebEntry;
 }
+/** 某个 Web 磁贴的七层入口状态：note 与取票 503 是同一句话（服务端同一个判据）。 */
+export interface PortalWebEntry { ready: boolean; note?: string }
 /** 七层 Web 代理入口此刻能不能用。ready=false 时 note 说明原因（网关没开 -web / 没有网关在线 /
  *  入口地址推导出回环或通配——如网关只监听 127.0.0.1 又没配整站入口或登记接入地址）。
  *  ★门户据此把 Web 磁贴的「访问」按钮置灰并显示原因，而不是让人点了才拿到一个一闪而过的 503。 */

@@ -452,13 +452,58 @@ func TestWebEntryUsesRegisteredGatewayAccess(t *testing.T) {
 		t.Fatalf("登记接入地址后门户应报七层入口就绪，得 %v", apps["webProxy"])
 	}
 
-	// 两栏都登记：内网栏优先，与剖面「内网在前」同序（顺序不确定会让入口主机名在两栏之间乱跳）。
+	// 两栏填**同一个值**（内外网统一域名 / 分区 DNS，FR-SCEN-09）时没有歧义，照样就绪。
+	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+		map[string]any{"lanHost": "gw.example.com", "wanHost": "gw.example.com"}); code != http.StatusOK {
+		t.Fatalf("登记两栏同值 http %d: %v", code, out)
+	}
+	if code, entry, out := webTicketURL(t, h); code != http.StatusOK ||
+		!strings.HasPrefix(entry, "http://gw.example.com:18444"+webEntryPath) {
+		t.Fatalf("两栏同值时不存在歧义，应照常签票，得 %d %q %v", code, entry, out)
+	}
+}
+
+// 反例（silent-1）：两栏登记了**不同**的地址 → 七层判不出浏览器在哪一侧，不就绪、不签票。
+//
+// 缺陷原样：第 3 档写死 `orDefault(access.LANHost, access.WANHost)`（内网栏优先）。网关页那
+// 两栏是 PRD FR-SCEN-17 要求分开填的，剖面把两个都下发给终端逐个试拨，而浏览器只会收到一个
+// 302。于是「网关通配监听 + 两栏都登记 + 未配 BAIDI_WEB_ENTRY_BASE」这套合法配置下，**外网
+// 用户**在门户看到「访问」按钮亮着、点下去跳到内网主机名、浏览器一直转圈，而控制面审计记着
+// 「签发 Web 访问票据」、网关侧一个请求都没收到——两侧都不报错，且对内网用户是通的（错得更隐蔽）。
+// 撤掉 webEntryBase 里那道两栏判定（改回 orDefault），这条会红：会签出 gw.corp.internal 的票。
+func TestWebEntryBothAccessColumnsUndecidable(t *testing.T) {
+	h := newTestServer(t)
+	registerWildcardWebGateway(t, h, "gw-1")
 	if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
 		map[string]any{"lanHost": "gw.corp.internal", "wanHost": "gw.example.com"}); code != http.StatusOK {
 		t.Fatalf("登记两栏 http %d: %v", code, out)
 	}
-	if _, entry, _ := webTicketURL(t, h); !strings.HasPrefix(entry, "http://gw.corp.internal:18444"+webEntryPath) {
-		t.Fatalf("两栏都登记时应取内网栏（与剖面同序），得 %q", entry)
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusServiceUnavailable {
+		t.Fatalf("★两栏都登记时控制面判不出浏览器在哪一侧，不得挑一个签票（拿到的是 %q），得 %d %v", entry, code, out)
+	}
+	errObj, _ := out["error"].(map[string]any)
+	msg, _ := errObj["message"].(string)
+	if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) {
+		t.Fatalf("拒绝文案应以固定开头起，得 %q", msg)
+	}
+	// 拒绝要说得出**为什么判不了**（两个地址都写出来）与**三条真能救的出路**。
+	for _, want := range []string{"gw-1", "gw.corp.internal", "gw.example.com", "BAIDI_WEB_ENTRY_BASE", "webEntry", "同一个值"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("★拒绝原因缺 %q，管理员无从知道该改哪一项：%q", want, msg)
+		}
+	}
+	// 门户同源：磁贴置灰的话与取票 503 是同一句。
+	_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+	wp, _ := apps["webProxy"].(map[string]any)
+	if wp == nil || wp["ready"] != false || wp["note"] != msg {
+		t.Fatalf("门户状态应与取票 503 同一句话（ready=false），得 %v", apps["webProxy"])
+	}
+	// 出路①：配了统一入口就恢复（第 2 档压过第 3 档，与两栏登记无关）。
+	t.Setenv("BAIDI_WEB_ENTRY_BASE", "https://portal.example.com")
+	if code, entry, out := webTicketURL(t, h); code != http.StatusOK ||
+		!strings.HasPrefix(entry, "https://portal.example.com"+webEntryPath) {
+		t.Fatalf("配了 BAIDI_WEB_ENTRY_BASE 后应恢复签票，得 %d %q %v", code, entry, out)
 	}
 }
 
@@ -514,7 +559,7 @@ func TestWebEntryLoopbackIsNotReady(t *testing.T) {
 // 第一版第 3 档只看「登记地址是否存在」：参考部署 `BAIDI_GW_WEB=127.0.0.1:18444` 的管理员为了让
 // C/S 客户端连得上去网关页登记了 gw.example.com 之后，webEntryBase 算出 http://gw.example.com:18444、
 // 门户报就绪、审计记「签发 Web 访问票据」——而网关的 L7 只 bind 在 127.0.0.1，那个地址上什么都
-// 没在听。撤掉 webEntryBase 里 webListenLoopback 那道闸，这条会红（签出票、状态报 ready）。
+// 没在听。撤掉 webEntryBase 里 store.HostLoopback 那道闸，这条会红（签出票、状态报 ready）。
 func TestWebEntryLoopbackListenerRejectsRegisteredAccess(t *testing.T) {
 	h := newTestServer(t)
 	registerLoopbackWebGateway(t, h, "gw-1")
@@ -593,8 +638,8 @@ func TestWebListenLoopback(t *testing.T) {
 		"": false, "  ": false, "0.0.0.0": false, "::": false,
 		"10.0.0.5": false, "gw.example.com": false,
 	} {
-		if got := webListenLoopback(host); got != want {
-			t.Errorf("webListenLoopback(%q)=%v, want %v", host, got, want)
+		if got := store.IsLoopbackHost(host); got != want {
+			t.Errorf("store.IsLoopbackHost(%q)=%v, want %v", host, got, want)
 		}
 	}
 }
@@ -659,10 +704,15 @@ func (f failingGwAccess) SetGatewayAccess(_ context.Context, a store.GatewayAcce
 	return a, f.err
 }
 
-// 用例：网关接入地址**读库失败**时，七层入口必须说「读取失败（原因）」，而不是把空表当
+// 用例：网关接入地址**读库失败**时，七层入口必须说「读取失败」，而不是把空表当
 // 「未登记」走到第 4 档、回一句「请在网关页登记对外接入地址」——管理员登记过，照着提示
 // 再登记一遍也不会好，真正的原因只在服务端日志里出现过一次。
 // 撤掉 webEntryBase 里对 gatewayAccessMapErr 错误的判定（改回 gatewayAccessMap），这条会红。
+//
+// ★用户面**不带 store 层错误原文**（security-3）：这个 note 会随 /portal/apps 下发给任何
+// 登录用户，而 SQLite 的报错会带库文件路径与锁状态。与 api 包对 store 失败一律固定文案
+// 同一条纪律；原因进服务端日志。第 3/4 档那种点名网关与来源的文案不受影响——那是控制面
+// 自己算出来的配置结论，没有任何内部细节。
 func TestWebEntryReportsAccessReadFailure(t *testing.T) {
 	h, s := newTestServerWithSrv(t)
 	registerWildcardWebGateway(t, h, "gw-1")
@@ -674,8 +724,11 @@ func TestWebEntryReportsAccessReadFailure(t *testing.T) {
 	}
 	errObj, _ := out["error"].(map[string]any)
 	msg, _ := errObj["message"].(string)
-	if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) || !strings.Contains(msg, "读取失败") || !strings.Contains(msg, "database is locked") {
-		t.Fatalf("★503 文案要说清是读库失败并带原因，得 %q", msg)
+	if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) || !strings.Contains(msg, "读取失败") {
+		t.Fatalf("★503 文案要说清是读库失败（而不是让人去登记地址），得 %q", msg)
+	}
+	if strings.Contains(msg, "database is locked") {
+		t.Fatalf("★store 层错误原文不得下发给普通用户（它会带库路径/锁状态），得 %q", msg)
 	}
 	if strings.Contains(msg, "请在网关页登记") {
 		t.Fatalf("★读库失败不该把责任推给管理员去登记地址（登记过也没用）：%q", msg)
@@ -694,5 +747,102 @@ func TestWebEntryReportsAccessReadFailure(t *testing.T) {
 	}
 	if gws, _ := prof["gateways"].([]any); len(gws) == 0 {
 		t.Fatalf("剖面在接入地址读失败时仍应下发落点（fail-open），得 %v", prof["gateways"])
+	}
+}
+
+// ── 监听地址写法与门户逐磁贴就绪（wave10 复核收尾）──
+
+// 判据的写法边界（security-2）：net.ParseIP 认不出、却真能监听/解析到回环的几种写法。
+// `127.1` / `2130706433` 归"非标准写法"（不可判定）而不是"回环"——控制面不实现 inet_aton，
+// 判不出来就当面说判不出来，两个方向的处置都是不就绪。
+func TestListenHostClassification(t *testing.T) {
+	for host, wantLoop := range map[string]bool{
+		"::1%lo0": true, "localhost.": true, "LocalHost.": true, "[::1]": true,
+		"127.1": false, "2130706433": false, "gw.example.com": false, "": false,
+	} {
+		if got := store.IsLoopbackHost(host); got != wantLoop {
+			t.Errorf("store.IsLoopbackHost(%q)=%v, want %v", host, got, wantLoop)
+		}
+	}
+	// 不可达（含判不出来）：回环的三种写法 + inet_aton 短写/整数写法都不许拿去签票。
+	for _, host := range []string{"::1%lo0", "localhost.", "127.1", "2130706433", "0x7f.1"} {
+		if !webHostUnroutable(host) {
+			t.Errorf("★%q 会被浏览器/C 库解析到回环，或判不出指向哪里，不得当成可达入口", host)
+		}
+	}
+}
+
+// 反例：网关自报的七层监听 host 是**非标准 IP 写法**（`-web 127.1:18444`）时，
+// 登记地址那一档也不成立——判不出它绑在哪，而它多半正是回环。
+// 撤掉 webEntryBase 里的 HostMalformed 分支，这条会红（拿登记地址 + 自报端口签出票、报就绪）。
+func TestWebEntryNonStandardListenHostIsUndecidable(t *testing.T) {
+	for _, web := range []string{"127.1:18444", "[::1%lo0]:18444"} {
+		t.Run(web, func(t *testing.T) {
+			h := newTestServer(t)
+			registerWebGatewayListening(t, h, "gw-1", web)
+			if code, out := doJSON(t, h, "PUT", "/api/v1/gateway/gw-1/access", adminToken(),
+				map[string]any{"wanHost": "gw.example.com"}); code != http.StatusOK {
+				t.Fatalf("登记接入地址 http %d: %v", code, out)
+			}
+			code, entry, out := webTicketURL(t, h)
+			if code != http.StatusServiceUnavailable {
+				t.Fatalf("★%s 判不出/正是回环，不得与登记地址组合签票（拿到的是 %q），得 %d %v", web, entry, code, out)
+			}
+			errObj, _ := out["error"].(map[string]any)
+			msg, _ := errObj["message"].(string)
+			if !strings.HasPrefix(msg, webEntryUnresolvedPrefix) || !strings.Contains(msg, "gw-1") {
+				t.Fatalf("拒绝文案应以固定开头起并点名网关，得 %q", msg)
+			}
+		})
+	}
+}
+
+// 逐磁贴就绪（interplay-1）：给某个资源单配了 webEntry，那一个磁贴就该能点——
+// 而不是跟着"全局判定"一起置灰。
+//
+// 缺陷原样：webProxyStatus 用 `s.webEntryBase(store.Resource{})` 算全局结论，第 1 档
+// （资源级 WebEntry）在它那里**永远不可达**；handleWebTicket 却拿真实资源判。于是参考部署
+// （-web 绑回环、未配 BAIDI_WEB_ENTRY_BASE）下管理员照着 503 文案「（或资源级 webEntry）」
+// 给某个资源配好之后，取票接口签得出票，门户仍把该磁贴置灰、显示同一句拒绝——照着提示做了
+// 也点不动。撤掉 handlePortalApps 里的 webEntryOf（磁贴不带 web 字段），这条会红。
+func TestPortalTileWebEntryIsPerResource(t *testing.T) {
+	h := newTestServer(t)
+	registerLoopbackWebGateway(t, h, "gw-1") // 全局那档：七层绑回环 → 不就绪
+	if code, out := doJSON(t, h, "POST", "/api/v1/resources", adminToken(), map[string]any{
+		"id": "oa", "name": "OA 协同办公", "backend": "10.20.1.10:8080",
+		"allowRoles": []string{"admin", "user"}, "webEntry": "https://oa.corp.example",
+	}); code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("给资源配 webEntry http %d: %v", code, out)
+	}
+	// 取票这一侧是通的（第 1 档命中）——门户必须与它同真同假。
+	code, entry, out := webTicketURL(t, h)
+	if code != http.StatusOK || !strings.HasPrefix(entry, "https://oa.corp.example"+webEntryPath) {
+		t.Fatalf("配了资源级 webEntry 就该签得出票，得 %d %q %v", code, entry, out)
+	}
+	_, apps := doJSON(t, h, "GET", "/api/v1/portal/apps", userToken("li.fang"), nil)
+	tiles, _ := apps["apps"].([]any)
+	webOf := func(id string) map[string]any {
+		for _, raw := range tiles {
+			m, _ := raw.(map[string]any)
+			if m["id"] == id {
+				w, _ := m["web"].(map[string]any)
+				return w
+			}
+		}
+		t.Fatalf("门户里找不到磁贴 %q", id)
+		return nil
+	}
+	if w := webOf("a1"); w == nil || w["ready"] != true {
+		t.Fatalf("★配了资源级 webEntry 的磁贴必须报就绪（取票已经签得出来），得 %v", w)
+	}
+	// 同一屏上没配 webEntry 的 Web 磁贴仍不就绪，且原因就是全局那句。
+	wp, _ := apps["webProxy"].(map[string]any)
+	w2 := webOf("a2")
+	if w2 == nil || w2["ready"] != false || w2["note"] != wp["note"] {
+		t.Fatalf("★没有资源级覆盖的磁贴应沿用全局结论与同一句原因，得 %v（全局 %v）", w2, wp)
+	}
+	// 兼容位保留：旧控制台只读 webProxy，那份仍是全局（空资源）结论。
+	if wp["ready"] != false {
+		t.Fatalf("全局那份是空资源算的，应仍不就绪，得 %v", wp)
 	}
 }

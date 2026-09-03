@@ -85,8 +85,8 @@
               <button
                 v-if="app.accessible"
                 class="bd-tile__btn"
-                :disabled="opening === app.id || (browserOpenable(app) && !webProxy.ready)"
-                :title="browserOpenable(app) && !webProxy.ready ? webProxy.note : ''"
+                :disabled="opening === app.id || webBlocked(app)"
+                :title="webBlocked(app) ? webBlockNote(app) : ''"
                 @click="openApp(app)"
               ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
               <!-- 续期（PRD FR-AUTH-03/04）。★只在**服务端说可以续**时出现：
@@ -124,8 +124,8 @@
                 <icon-clock-circle />临时授权剩余 {{ remainText(app.grantExpiresAt) }}
               </div>
               <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
-              <div v-if="app.accessible && browserOpenable(app) && !webProxy.ready" class="bd-tile__warn">
-                <icon-exclamation-circle-fill />{{ webProxy.note }}
+              <div v-if="app.accessible && webBlocked(app)" class="bd-tile__warn">
+                <icon-exclamation-circle-fill />{{ webBlockNote(app) }}
               </div>
             </div>
           </div>
@@ -228,6 +228,19 @@ function logout() {
  *  - global：**直连书签**，地址是完整 URL 时直接开新标签（它本来就不经白帝任何通道）；
  *  - tunnel：浏览器没有载体，要桌面客户端。 */
 function browserOpenable(app: PortalTile) { return app.mode === 'web'; }
+/** 这个磁贴的七层入口此刻能不能点。
+ *  ★逐磁贴判而不是看全局那份：资源级 webEntry 只对它自己生效，而服务端的全局结论是用
+ *  空资源算的（那一档在它那里永远不可达）。用全局判会把「管理员按提示给某个资源配了
+ *  webEntry」的应用一起置灰——取票接口其实签得出票，用户照着提示做了却点不动。
+ *  旧后端不下发 app.web → 回落到全局字段，行为与改造前逐字一致。 */
+function webBlocked(app: PortalTile) {
+  if (!browserOpenable(app)) return false;
+  return app.web ? !app.web.ready : !webProxy.value.ready;
+}
+/** 点不动的原因：逐磁贴那句优先（它才是这个应用真正会撞上的那句）。 */
+function webBlockNote(app: PortalTile) {
+  return (app.web ? app.web.note : webProxy.value.note) || '七层 Web 代理入口不可用';
+}
 /** 按钮文案要与点下去真正会发生的事一致：
  *  web=经七层代理访问 / global=直接开新标签（或只显示地址）/ tunnel=要客户端。 */
 function openLabel(app: PortalTile) {
@@ -266,7 +279,7 @@ async function openApp(app: PortalTile) {
     Message.info(`「${app.name}」是 ${modeMeta[app.mode].label}，浏览器无法直达，请用桌面客户端接入后访问 ${app.addr}`);
     return;
   }
-  if (!webProxy.value.ready) { Message.warning(webProxy.value.note || '七层 Web 代理入口不可用'); return; }
+  if (webBlocked(app)) { Message.warning(webBlockNote(app)); return; }
   opening.value = app.id;
   try {
     const t = await api<WebTicketResp>('/portal/web-ticket', {

@@ -797,9 +797,14 @@ func endpointWarnings(eps []gwEndpoint) []string {
 			strings.Join(guessed, "、")))
 	}
 	// ② 回环地址：只有网关本机连得上。单独说，因为它比①更确定地不通。
+	//
+	// ★判据用 store.IsLoopbackHost 而不是 net.ParseIP().IsLoopback()：后者认不出
+	// `localhost` / `localhost.` / `::1%lo0`（`localhost` 此前还能在登记接口存进来），
+	// 于是落点是 localhost 时这条告警一个字都不报，而七层入口那边判它不可达——
+	// 同一份配置两条接入路给出相反结论。三处判据现共用同一个函数。
 	var loop []string
 	for _, ep := range eps {
-		if ip := net.ParseIP(ep.Host); ip != nil && ip.IsLoopback() {
+		if store.IsLoopbackHost(ep.Host) {
 			loop = append(loop, gatewayLabel(ep.ProfileGateway))
 		}
 	}

@@ -981,7 +981,7 @@ cd clients/desktop && ./src-tauri/build-sidecars.sh && npm run tauri:build
 设备：OPPO PKU110（ColorOS），**Android 16 / API 36**，arm64-v8a。开发者模式 + USB 调试。
 这是白帝安卓端**第一次**进入真实设备——此前全部证据止于「CI 能出包」。
 
-### 12.1 结论先写：数据面在 Android 上**必然起不来**（已定位、未修）
+### 12.1 数据面在 Android 上必然起不来 —— 已定位并**已修复、已在真机验证**
 
 点接入后 UI 报 **「数据面引擎启动失败：permission denied」**，隧道永远建不起来。
 根因不是推测，是设备内核的 SELinux 审计原文（`adb logcat`，按应用 pid 过滤）：
@@ -1000,9 +1000,21 @@ avc: denied { bind } for scontext=u:r:untrusted_app:s0:c223,c257,c512,c768
 Android 10 起禁止 `untrusted_app` 绑 `netlink_route_socket`（AOSP 既定策略，**不是 ColorOS 定制**，
 `b/155595000` 就是这条限制的编号），因此**任何 Android 10+ 设备都是同一结果**，与机型无关。
 
-修法：安卓侧改用同库的 `tun.CreateUnmonitoredTUNFromFD(fd)`（只 SetNonblock，不建 netlink 套接字，
-wireguard-android 官方走的就是它）。代价是拿不到链路事件，而 VpnService 的 fd 由系统托管、
-MTU 在 `Builder.setMtu` 已定，这些事件在本项目无消费方。iOS/darwin 维持 `CreateTUNFromFile`。
+修法（**已实施**）：安卓侧改用同库的 `tun.CreateUnmonitoredTUNFromFD(fd)`（只 SetNonblock，不建
+netlink 套接字，wireguard-android 官方走的就是它）。代价是拿不到链路事件，而 VpnService 的 fd 由
+系统托管、MTU 在 `Builder.setMtu` 已定，这些事件在本项目无消费方（dataplane 只用
+Read/Write/Close/BatchSize）。iOS/darwin 维持 `CreateTUNFromFile`——那一侧没有此限制，
+换一条没在 iOS 上跑过的路径只会给一个从未验证过的平台再加一个变量。
+两侧收在 `gateway/mobile/baidimobile/tundev_{android,other}.go` 两个 build tag 文件里，
+调用点统一为 `newTunDevice`；`tundev_guard_test.go` 用源码文本断言钉住（本机跑不出安卓的
+SELinux 策略，`//go:build android` 那份在这里连编译都不参与，运行期用例覆盖不到它）。
+
+**2026-09-03 同机复测通过**（OPPO PKU110 / Android 16 / 蜂窝）：`startTunnel` 回
+`{"ok":true,"detail":"数据面已就绪"}`，且设备侧有实证——
+`ip addr` 见 `tun1 inet 10.99.0.2/32`、`ip route` 见 `10.99.0.0/24 dev tun1`、
+系统 `dumpsys connectivity` 报 `VPN CONNECTED extra: VPN:dev.baidi.mobile`（承载 CELLULAR、MTU 1420、
+会话名「白帝安全接入」）；Go 侧日志 `数据面就绪：TUN→netstack→隧道 proxy=… gm=true`。
+`stopTunnel` 后 `tun1` 回收干净。
 
 ### 12.2 同一轮验到的（都是首次）
 
@@ -1036,7 +1048,20 @@ MTU 在 `Builder.setMtu` 已定，这些事件在本项目无消费方。iOS/dar
   Kotlin 侧 `JSONObject` 解析后所有字段取缺省值，症状是「缺少控制中心地址」这类**误导性**报错。
   令牌用 `curl` 从控制面 `/api/v1/portal/login` 取一个真的即可。
 
-### 12.4 仍未验证
+### 12.4 仍未验证：链路在建卡之后、敲门这一步断开
 
-隧道端到端（敲门 → 国密隧道 → 业务流量）在 Android 上**一次都没跑通过**，
-因为 12.1 那条把链路截断在建卡这一步。修掉 `CreateUnmonitoredTUNFromFD` 之后要重跑本节。
+12.1 修好之后，链路往前推进了一大截，但**隧道端到端仍未跑通**，卡点换成了两条：
+
+1. **取敲门令牌失败（演示站证书）**。Go 侧日志原文：
+   `WARN 取短时效敲门令牌失败 … x509: certificate signed by unknown authority`。
+   `baidimobile.Config` 没有跳过校验的开关（刻意），而演示站是自签证书——与上午 WebView
+   登录栽的是同一处（12.3 第一条）。要在真机走通，得让控制面有受信证书，或给 debug 包
+   配一个只在 debug 生效的信任配置。**不要**给绑定层加 `-insecure`：那是给数据面开一个
+   默认关不掉的口子。
+
+2. **UI 判据仍停在「启动成功即算接入」**（本轮新发现，未修）。同一时刻：
+   桥 `tunnelStatus()` 回 `{"stage":"up"}`、`startTunnel` 回「数据面已就绪」，
+   而健康行是 `knock=false tunnel=false err="取敲门令牌失败：…"`——**引擎起来了、门没敲开，
+   界面却显示已接入**。两处都没说谎，是判据取错了层。桌面端在 wave10 已把接入态改判健康行
+   （见 ARCHITECTURE 第七节「桌面端接入态判据」），移动端这条还没跟上：`TunnelState.markUp`
+   在 `Baidimobile.start` 返回即置 up，没有读 `Session.Running()/Reason()` 与健康行。

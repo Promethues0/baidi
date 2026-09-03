@@ -1038,14 +1038,21 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
 ### ⚠️ 移动端原生壳（安卓 VpnService / iOS PacketTunnelProvider：源码级修复，两端均未实机）
 
 
-**★2026-09-03 安卓真机首测：数据面在 Android 上必然起不来（已定位、未修）。**
+**★2026-09-03 安卓真机：数据面建卡曾在 Android 上必然失败，当日已修并真机复验。**
 OPPO PKU110 / Android 16 / arm64。UI 报「数据面引擎启动失败：permission denied」，
 设备内核 SELinux 审计原文：`avc: denied { bind } … tclass=netlink_route_socket
 permissive=0 bug=b/155595000`。`tun.CreateTUNFromFile` 里 `createNetlinkSocket()` 排在
 `setMTU` 之前，故一被拒即 return（审计当初预判的 `failed to set MTU` 方向对、落点更靠前）。
 Android 10 起禁止 `untrusted_app` 绑 netlink 路由套接字，**AOSP 既定策略而非厂商定制**，
-任何 10+ 设备同此。修法是安卓侧改用 `tun.CreateUnmonitoredTUNFromFD`（wireguard-android 官方路径）。
-**在它修好之前，「移动端数据面可用」这句话在任何文档里都不能出现**——那是移动端唯一的建卡入口。
+任何 10+ 设备同此。**已改**：安卓侧走 `tun.CreateUnmonitoredTUNFromFD`（wireguard-android 官方路径，
+不建 netlink、不设 MTU——两者本项目都无消费方），iOS/darwin 维持原路径，两侧收在
+`tundev_{android,other}.go` 两个 build tag 文件里，源码文本守卫钉住不许改回去。
+同机复验：`tun1 inet 10.99.0.2/32` 真建出、`10.99.0.0/24 dev tun1` 真接管、系统报
+`VPN CONNECTED extra: VPN:dev.baidi.mobile`（承载 CELLULAR）。
+★但**「移动端数据面可用」仍不能写**：链路现在断在下一环——取敲门令牌因演示站自签证书失败
+（`x509: certificate signed by unknown authority`），且移动端 UI 判据仍停在「引擎启动成功即算接入」
+（同一时刻桥报 `stage:up` 而健康行是 `knock=false`），桌面端已改判健康行、移动端未跟上。
+两条与卡点见 `clients/BUILD.md` 12.4。
 同轮首次验到的（含 `assembleDebug`、真 gradle 跑 9 条 JVM 单测、白屏陷阱已避开、
 `establish()` 本身成功）与三条环境陷阱（自签证书拒登录 / adb 授不了 VPN 权限 / CDP 调桥须传对象），
 逐条见 `clients/BUILD.md` 第十二节。

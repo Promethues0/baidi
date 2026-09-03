@@ -104,15 +104,18 @@
           <div v-if="err2" class="ck-err2"><icon-exclamation-circle-fill /> {{ err2 }}</div>
           <!--
             数据面运行中的失败（指纹不匹配 / 全部落点拨不通 / 取不到敲门令牌…）。
-            ★独立于 err2 且**不随 ready 翻回 true 自动消失**：隧道类失败在健康行里最多挂 15s 就会被
-            一次无关的保活敲门擦掉（Go 侧 markKnock 不分类别清 lastErr），跟着擦掉的话一个持续性的
-            中间人告警只会闪一下。何时自动收起由 nextDataplaneNotice 决定，其余靠用户手动关。
+            ★独立于 err2 且**不随 ready 翻回 true 自动消失**：健康行 `err=` 里的隧道类失败最多挂 15s
+            就会被一次无关的保活敲门擦掉（那是 `err=` 刻意保留的旧语义——旧 TS 靠它判 ready），
+            跟着擦掉的话一个持续性的中间人告警只会闪一下。Go 侧 wave10 起把失败按 knock/tunnel 分记并
+            多带一个 `terr=` 键（只被隧道真拨通清掉），TS 已消费：`terr` 可判定时按它判隧道类是否真恢复，
+            老数据面不报该键时回落到看 tunnel 位翻转。何时自动收起由 nextDataplaneNotice 决定，
+            其余靠用户手动关。
           -->
           <div v-if="dpNotice" class="ck-dp">
             <icon-exclamation-circle-fill class="ck-dp__ic" />
             <div class="ck-dp__b">
               <div class="ck-dp__t">数据面报告（{{ dpAt }}）：{{ dpNotice.text }}</div>
-              <div v-if="dpNotice.cls === 'tunnel'" class="ck-dp__h">此后敲门保活仍正常；隧道是否已恢复本机判不了——再访问一次应用可复测，确认无误后可关掉此条。</div>
+              <div v-if="dpNotice.cls === 'tunnel'" class="ck-dp__h">{{ dpHint }}</div>
             </div>
             <button class="ck-dp__x" title="关掉此条" @click="dpNotice = null">×</button>
           </div>
@@ -410,12 +413,24 @@ const stage = ref<'idle' | 'connecting' | 'connected'>('idle');
 const step = ref(0);
 const err2 = ref('');
 const showLog = ref(false);
-const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', tunnelUsed: null, denied: false, deniedReason: '', stale: false, staleReason: '', endpointIndex: 1, endpointTotal: 1, endpointId: '', endpointReason: '', lines: [] };
+const EMPTY_TUN: TunView = { running: false, ready: false, dev: '', vip: '', route: '', gateway: '', cipher: '', keepalive: false, error: '', tunnelUsed: null, tunnelErr: null, denied: false, deniedReason: '', stale: false, staleReason: '', endpointIndex: 1, endpointTotal: 1, endpointId: '', endpointReason: '', lines: [] };
 const tun = ref<TunView>({ ...EMPTY_TUN });
 const stageLabel = computed(() => (stage.value === 'connected' ? '已接入' : stage.value === 'connecting' ? '接入中' : '待接入'));
 // 数据面运行中的失败提示（见模板处说明与 tunnel.ts nextDataplaneNotice）。
 const dpNotice = ref<DataplaneNotice | null>(null);
 const dpAt = computed(() => (dpNotice.value ? new Date(dpNotice.value.at).toLocaleTimeString() : ''));
+/**
+ * 隧道类提示条的副标题。**两句话对应两种确定性，别合并**：
+ *  - 数据面报了 `terr=`（三态里的"可判定"）且它仍非空：隧道类失败此刻确实还挂着，本机是判得出来的，
+ *    再说「判不了」就是把一条已知结论说成未知，用户会以为再点一次应用就好了；
+ *  - `terr` 缺席（老数据面 / 老壳，tun.tunnelErr === null）：只能靠 tunnel 位翻转，确实判不了，
+ *    保留改造前那句原文。
+ */
+const dpHint = computed(() =>
+  tun.value.tunnelErr
+    ? '此后敲门保活仍正常，但数据面报告隧道类失败此刻仍未解除（健康行 terr= 仍非空）——真拨通一次隧道后本条会自动收起。'
+    : '此后敲门保活仍正常；隧道是否已恢复本机判不了——再访问一次应用可复测，确认无误后可关掉此条。'
+);
 // 接入信息角标：ready 但隧道还没拨通过 = 健康的空闲态，不是异常——tunnel 位只在第一条业务流拨通时才置位。
 const liveText = computed(() => {
   if (!tun.value.ready) return '● 隧道异常';

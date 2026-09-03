@@ -192,13 +192,9 @@
       <div class="bd-card bd-gbody">
         <div v-for="g in globalSecs" v-show="gsec === g.key" :key="g.key">
           <div class="bd-sec__h plain">{{ g.label }}</div>
-          <!--
-            这里原先有六个纯前端开关（图形校验码 / 弱网优化 / 0RTT / 禁止浏览器登录 /
-            强制安装客户端 / 强制升级 / 开机自启），保存时根本不提交、后端一处消费都没有。
-            按「界面上任何一个勾都必须真能生效」的纪律整批摘除，改为如实列出未实现项。
-            其中「禁止用户通过浏览器登录」尤其危险：它看起来能关掉七层 Web 代理这条
-            免客户端接入路径，而实际上那条路照常敞着——一个会被当成已生效的安全措施。
-          -->
+          <!-- ★这一栏只列未实现项，不放开关：界面上任何一个勾都必须真能生效。
+               「禁止用户通过浏览器登录」尤其不能加——控制面关不掉网关的 -web 监听，
+               那条免客户端接入路照常敞着，而它会被当成一项已生效的安全措施。 -->
           <div v-if="g.notes.length" class="bd-unimpl">
             <div class="bd-unimpl__h"><icon-info-circle />本版本未实现（此前这里是几个不生效的演示开关，已摘除）</div>
             <div v-for="n in g.notes" :key="n.label" class="bd-unimpl__row">
@@ -257,7 +253,7 @@ const resp = reactive<{ onlineWindowSec: number; storeReady: boolean; idleReady:
 });
 const sessions = ref<DeviceSessionRow[]>([]);
 
-/** 摘除的那套编辑器里，每一项在这里都要有交代——不写的话，下一波审计会把它当"漏做"再实现一遍。 */
+/** ★未实现项必须逐条列出并说明理由，否则下一次审计会把它当"漏做"再实现一遍。 */
 const ACCESS_UNIMPL: { label: string; why: string }[] = [
   { label: '按组织/用户组分级的策略继承（FR-POLICY-02~05）', why: '不做：接入策略当前是全局的。此前那棵继承树上的 8 个设置项落库后全仓零消费方，摘除而不是保留一个能点开却不生效的编辑器' },
   { label: '专用 DNS 下发 / 虚拟专线隔离（FR-POLICY-26/27）', why: '不做：分离式 DNS 由客户端接入剖面下发（已实现，但不经这一页配置）；虚拟专线需要终端侧全局路由接管 + 白名单，现架构未做' },
@@ -310,8 +306,7 @@ async function save() {
 
 /* ── 全局策略（复刻设计稿开关行）── */
 const gsec = ref('brute');
-// ★防暴力破解的两个「锁定」开关不在这里：它们已接到真实后端（见 lockCfg），
-// 不再是纯前端摆设。此处只剩尚无后端的演示行。
+// ★这份清单只放**尚无执行方**的条目；防暴力破解的两个锁定开关走真实后端，见下方 lockCfg。
 const globalSecs = reactive([
   { key: 'brute', label: '防暴力破解', notes: [
     { label: '图形校验码', why: '不做：账号锁跨 IP 计数、IP 锁按 /64 聚合，两道闸已覆盖撞库；验证码补的那道缝（分布式喷洒）它自己也挡不住，而自研抗 OCR 的验证码做不好等于没做' }
@@ -399,7 +394,7 @@ onMounted(async () => {
 .bd-gnav.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 600; }
 .bd-gbody { flex: 1; min-width: 0; padding: 8px 24px 14px; }
 
-/* ── 接入策略页专属样式（wave8 行动 13-①）── */
+/* ── 接入策略页专属样式 ── */
 .bd-acc { display: flex; flex-direction: column; gap: 16px; }
 .bd-note, .bd-warn { display: flex; gap: 10px; align-items: flex-start; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2); }
 .bd-note :deep(svg) { color: var(--bd-primary); margin-top: 3px; flex: none; }

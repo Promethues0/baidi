@@ -59,9 +59,8 @@
                 @change="(v: string | number | boolean) => cur && (cur.status = v ? 'enabled' : 'disabled')"
               />
               <a-button type="primary" size="small" :loading="saving" @click="saveBaseline">保存</a-button>
-              <!-- ★同一页的「终端退役」有 popconfirm，删基线却是点中即删——
-                   而基线是**风险引擎的判据**：删掉一条 block 基线，一批本该被拦的
-                   终端下一轮就直接放行了，且页面上不会有任何提示。 -->
+              <!-- ★删基线必须二次确认：基线是风险引擎的判据，删掉一条 block 基线，
+                   一批本该被拦的终端下一轮就直接放行，页面上不会有任何提示。 -->
               <a-popconfirm
                 :content="`删除基线「${cur?.name ?? ''}」？风险引擎下一次评估起即不再应用这条规则——原本被它判为「${cur ? disposalText(cur.disposal) : '—'}」的终端会按剩余基线重新判定。此操作不可撤销。`"
                 type="warning" ok-text="确认删除" cancel-text="取消" @ok="removeBaseline"
@@ -70,9 +69,8 @@
               </a-popconfirm>
             </div>
           </div>
-          <!-- ★适用范围是**真判据**：上报 posture 的账号不在范围内，这条基线就不参与他的判定。
-               判定点在控制面 api.baselinesInScope，与资源授权、认证策略共用同一次组织子树展开。
-               两栏都不选 = 对全体生效（与改造前自由文本时代的实际行为一致）。 -->
+          <!-- ★适用范围是**真判据**：账号不在范围内，这条基线就不参与他的判定。判定点是控制面
+               api.baselinesInScope，与资源授权、认证策略共用同一次子树展开。两栏都不选 = 对全体生效。 -->
           <div class="bd-kv bd-kv--scope">
             <span>适用范围</span>
             <b>
@@ -291,10 +289,9 @@ const MOCK_BASELINES: BaselinePolicy[] = [
     ]
   }
 ];
-// ★这里原来还有一份 MOCK_SPA（G3 / 已隐身 / 敲门正常 / 6 个受保护端口）与页面上的
-// 「SPA 服务隐身」页签，两者都已删除：控制面既不实测端口可见性，也不代数据面宣布
-// 敲门是否正常，那张卡片是在替一台可能压根没配防火墙规则的网关打包票。
-// 真实版本在「安全防护 → 网关与隐身 → SPA 服务隐身」，每一项都来自网关注册心跳。
+// ★这一页刻意不展示 SPA 隐身状态：控制面既不实测端口可见性、也不代数据面宣布敲门是否正常，
+// 在这里放那张卡等于替一台可能压根没配防火墙规则的网关打包票。
+// 真实版本在「安全防护 → 网关与隐身」，每一项都来自网关注册心跳。
 
 const baselines = ref<BaselinePolicy[]>(MOCK_BASELINES);
 /** 采集器可上报的检查项目录（后端下发，未连库时为空——此时只能删不能加，见 addCheck）。 */
@@ -350,8 +347,8 @@ function scopeDetail(b: BaselinePolicy) {
     ...(b.scopeOrgs ?? []).map((id) => orgOpts.value.find((o) => o.id === id)?.name || id),
     ...(b.scopeGroups ?? []).map((id) => groupOpts.value.find((g) => g.id === id)?.name || id)
   ];
-  // ★展开为 0 人时当面说出来。限定了范围却一个人都不在里面 = 这条基线**对谁都不生效**，
-  // 而它在列表上仍显示「已启用 · 阻断」——正是这次要消灭的那种"看着在管、实际不管"。
+  // ★展开为 0 人时当面说出来：限定了范围却一个人都不在里面 = 这条基线对谁都不生效，
+  // 而它在列表上仍显示「已启用 · 阻断」。
   const n = scopeAccounts(b);
   return names.join('、') + (n ? `　·　展开 ${n} 个账号` : '　·　展开后 0 个账号，这条基线当前对谁都不生效');
 }
@@ -365,8 +362,8 @@ async function saveBaseline() {
     await api('/security/baselines', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cur.value) });
     Message.success('基线已保存，风险引擎即时生效');
   } catch (e) {
-    // 后端对基线有八类具体校验（引用了不存在的组织/用户组、检查项 key 不认识…），
-    // 每一条都点名了该改哪里；笼统的"需管理员登录"把它们全盖掉了。
+    // ★必须原样转述后端：基线保存有八类具体校验（引用了不存在的组织/用户组、
+    // 检查项 key 不认识…），每一条都点名了该改哪里，自拟归因会把它们全盖掉。
     Message.error(`基线保存失败：${failReason(e)}`);
   } finally { saving.value = false; }
 }
@@ -394,13 +391,10 @@ async function removeBaseline() {
   } catch (e) { Message.error(`基线删除失败：${failReason(e)}`); }
 }
 /**
- * 可添加的检测项 = 采集器目录 − 本基线已配的 key。
- *
- * ★不能让管理员自由填 key。采集器不上报的 key，风险引擎按「缺失即不合规」判该项失败
- * （那是防选择性上报的正确设计），于是这条基线对该平台**全体终端**永远违规——
- * 而接入准入基线的默认处置是 block，等于一键给所有人拒发敲门令牌 + 撤窗断隧道，
- * 保存那一刻零报错。此前这个按钮 100% 产出这种 key（写死 'c-' + Date.now()）。
- * 目录由后端随 /security 下发，与入口校验读同一份，前端不另抄一份。
+ * 可添加的检测项 = 采集器目录 − 本基线已配的 key。目录由后端随 /security 下发，与入口校验同源。
+ * ★绝不能让管理员自由填 key：采集器不上报的 key 被风险引擎按「缺失即不合规」判失败，
+ * 这条基线于是对该平台全体终端永远违规，而准入基线默认处置是 block（全员拒发敲门令牌 +
+ * 撤窗断隧道），保存那一刻零报错。
  */
 const addableChecks = computed(() =>
   catalog.value.filter((s) => !(cur.value?.checks ?? []).some((c) => c.key === s.key)));
@@ -463,8 +457,8 @@ onMounted(async () => {
     baselines.value = b.baselines.map((x) => ({ ...x, scopeOrgs: x.scopeOrgs ?? [], scopeGroups: x.scopeGroups ?? [] }));
     orgOpts.value = b.orgs ?? [];
     groupOpts.value = b.groups ?? [];
-    // 目录取不到就给空数组——宁可「加不了检测项」，也不能回退成自由填 key：
-    // 那正是这次要消灭的、会把全平台终端判违规的入口。
+    // ★目录取不到就给空数组：宁可「加不了检测项」，也不能回退成自由填 key
+    // （那会把全平台终端判违规，见 addableChecks）。
     catalog.value = b.checkCatalog ?? [];
     if (b.baselines.length) selected.value = b.baselines[0].id;
     live.value = true;

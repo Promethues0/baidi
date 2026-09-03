@@ -22,12 +22,10 @@
       <div class="bd-srctoolbar">
         <div class="bd-srctoolbar__sub">
           已接入 <b>{{ recs.length }}</b> 个身份源<!--
-            ★聚合拿不到时整条不渲染，而不是显示 0：「0 个绑定账号」与「我没拿到计数」
-               是两回事，后者不该长成前者的样子。
+            ★聚合拿不到时整条不渲染而不是显示 0：「0 个绑定账号」与「没拿到计数」是两回事。
           --><template v-if="sources.length"> · 外部目录已绑定 <b>{{ totalBoundExternal }}</b> 个账号</template>
-          <!-- ★"已绑定账号"= auth_source_bindings 里的真实条数（外部用户登录过一次即建绑定），
-               **不是**目录纳管用户数：后者要全量遍历 LDAP 才数得出来，白帝没有那个能力，
-               原实现里的「AD 域 1160 用户」是凭空写的。 -->
+          <!-- "已绑定账号"= auth_source_bindings 的真实条数（外部用户登录过一次即建绑定），
+               不是目录纳管用户数——后者要全量遍历 LDAP，白帝没有那个能力。 -->
           <span class="bd-srchint">登录按「本地目录 → 外部源（按优先级）」依次询问</span>
         </div>
         <button class="bd-btn" @click="openSrcCreate"><icon-plus />接入认证源</button>
@@ -52,7 +50,7 @@
             </span>
           </div>
 
-          <!-- 探测结果：这个按钮此前是纯装饰，现在真的去连目录 / 拉发现文档 -->
+          <!-- 探测结果：真去连目录 / 拉发现文档 -->
           <div v-if="probeOf(s.id)" class="bd-probe" :class="probeOf(s.id)!.ok ? 'ok' : 'bad'">
             <component :is="probeOf(s.id)!.ok ? 'icon-check-circle-fill' : 'icon-close-circle-fill'" />
             <span>{{ probeOf(s.id)!.detail }}</span>
@@ -85,9 +83,8 @@
         <div v-if="!recs.length" class="bd-srcempty">尚未接入任何认证源</div>
       </div>
 
-      <!-- ── 待批准入（wave8 行动 10）──
-           ★没有这一块，「需管理员批准」那档就是个死路：闸挡住了人，
-           而管理员在界面上没有任何地方能批。 -->
+      <!-- 待批外部身份准入。★它是「需管理员批准」那档唯一的批复入口，
+           删掉这块等于把闸挡住的人永远挡在外面。 -->
       <div v-if="admissions.length" class="bd-admit">
         <div class="bd-section-title">
           待批外部身份准入
@@ -191,7 +188,7 @@
             <span v-else class="bd-tg bd-tg--warnbox">未绑定适用范围，不会命中任何账号</span>
           </div>
 
-          <!-- 二次认证方式（PC/移动端两栏已合并：两端走同一个 /portal/login，请求里没有端标识） -->
+          <!-- 二次认证方式。不分 PC/移动端：三端走同一个 /portal/login，请求里没有端标识 -->
           <div class="bd-plat">
             <div class="bd-plat__row">
               <span class="bd-plat__k">可接受的二次认证方式</span>
@@ -210,10 +207,8 @@
             <span v-for="e in enhanceChips(p)" :key="'en-' + e" class="bd-mtg bd-mtg--warn"><icon-exclamation-circle />{{ e }}</span>
             <span v-if="!hasAdaptive(p)" class="bd-plat__none">未启用自适应</span>
           </div>
-          <!-- ★同时开了「豁免」与「风险增强」时必须说清谁赢。
-               此前两串标签只是并排列出，而绿色的「免二次」在视觉上更像结论，
-               管理员合理预期是「弱口令增强」更强——真实语义恰恰相反地被理解了。
-               现在按 FR-AUTH-21 的真实行为写：风险条件命中时豁免不生效。 -->
+          <!-- ★同时开了「豁免」与「风险增强」时必须写出谁赢：风险条件命中时豁免不生效。
+               只并排列标签的话，绿色的「免二次」在视觉上像结论，语义会被读反。 -->
           <div v-if="exemptVsRisk(p)" class="bd-pcard__note">
             <icon-info-circle /> {{ exemptVsRisk(p) }}
           </div>
@@ -282,14 +277,9 @@
         </template>
         <div v-else class="bd-form__hint">默认策略覆盖该用户目录的全体账号，无需绑定组织/用户组。</div>
 
-        <!-- 两端认证方式。
-             ★这里曾经有「主认证」下拉（local/ad/ldap/radius/oauth/sms/cert 七项）。
-             已整体摘除（wave8 行动 13-②）——它在本策略模型里是**同义反复**而不是
-             "还没接线"：策略匹配的第一步就是按目录筛，一条策略只作用于已经被该目录
-             认出来的人；对它说"主认证用证书"不可能生效，那个人已经拿口令进来了。
-             而摘除前保存回 200、卡片明晃晃写着证书认证，口令登录一次不落照常成功。
-             同批合并了 PC / 移动端两栏：三端走的是**同一个** /portal/login，请求里没有
-             任何端标识，两栏并排会让人以为"移动端可以配得更严"。 -->
+        <!-- ★别在这里加回「主认证方式」下拉：策略匹配第一步就按目录筛，一条策略只作用于
+             已被该目录认出来的人，对他说"主认证用证书"不可能生效（同义反复，不是没接线）。
+             也别按 PC / 移动端分栏：三端走同一个 /portal/login，请求里没有端标识。 -->
         <div class="bd-form__hint" style="margin-bottom: 10px">
           主认证方式由<b>认证源配置</b>与登录时的<b>认证域路由</b>决定（命中即只问该源），
           不在这里配。<b>PC 与移动端也不分栏</b>——三端走同一个 /portal/login，请求里没有端标识。
@@ -515,8 +505,7 @@
               {{ k.label }}<template v-if="!supported.includes(k.v)">（本版本未实现）</template>
             </a-option>
           </a-select>
-          <!-- ★未实现的类型在这里就置灰。此前它们看起来可选，但后端从来没有实现过——
-               「界面上能选、后端静默不生效」是这个项目反复吃亏的形态。 -->
+          <!-- ★未实现的类型必须在这里就置灰：能选而后端拒收，等于把人引向一条不通的路。 -->
           <div class="bd-srcform__hint">RADIUS / 短信网关 / 商密证书三类本版本未实现，已置灰</div>
         </div>
 
@@ -621,10 +610,8 @@
           </div>
         </template>
 
-        <!-- ── 外部身份准入（wave8 行动 10）──
-             ★这一段是真判定，不是提示：改造前认证通过即自动建号，
-             而自动建号的账号落进「外部目录」单元，其父是根组织——
-             把资源授权给根组织就把这批人全覆盖了。 -->
+        <!-- 外部身份准入。★这一段是真判定不是提示：自动建号的账号落进「外部目录」单元，
+             其父是根组织——把资源授权给根组织就把这批人全覆盖了。 -->
         <template v-if="srcForm.kind !== 'local'">
           <div class="bd-srcform__sec">外部身份准入</div>
           <div class="bd-srcform__row"><label>未导入用户</label>
@@ -656,8 +643,8 @@
             <label>{{ srcForm.kind === 'oidc' ? 'Client Secret' : 'Bind 口令' }}</label>
             <a-input-password v-model="srcSecret" allow-clear
               :placeholder="srcForm.hasSecret ? '已配置（指纹 ' + (srcForm.secretFingerprint || '••••') + '）；留空则不改' : '未配置'" />
-            <!-- ★只写不读：没有任何端点能把它读回去。回显原文没有操作价值（配错了重设即可），
-                 只有泄露面。空口令在 LDAP 上会退化成匿名 bind 并"看起来成功"，后端会拒。 -->
+            <!-- ★只写不读：没有任何端点能把凭据读回去，回显只有泄露面。
+                 空口令在 LDAP 上会退化成匿名 bind 并"看起来成功"，后端会拒。 -->
             <div class="bd-srcform__hint">加密落库，永不回显。留空表示保持原有凭据不变</div>
           </div>
         </template>
@@ -684,9 +671,8 @@ import {
   type LdapConfig, type OidcConfig, type AdmitConfig, type ExtAdmission
 } from '@/lib/api';
 
-/** 目录/源类型的图标与配色键。★页面本地定义，刻意不再从 API 类型推导：
- *  这套映射要覆盖「认证策略」里存量策略引用的历史目录名（radius/oauth/sms/cert），
- *  而那几类后端从未实现、也不会出现在真实的认证源列表里。 */
+/** 目录/源类型的图标与配色键。★页面本地定义、不从 API 类型推导：这套映射还要覆盖
+ *  存量策略引用的历史目录名（radius/oauth/sms/cert），那几类不会出现在认证源列表里。 */
 type SrcType = 'local' | 'ad' | 'ldap' | 'radius' | 'oauth' | 'sms' | 'cert';
 type CondField = RuleCond['field'];
 type Action = AdaptiveRule['action'];
@@ -694,14 +680,9 @@ type Action = AdaptiveRule['action'];
 const tab = ref<'source' | 'policy' | 'rule'>('source');
 const live = ref(false);
 
-/* ★这里曾经有一份 MOCK_SOURCES：7 条编造的认证源（「总部 AD 域 1846 用户」
- * 「OpenLDAP 目录 524 用户」…），与后端那份同样编造的种子互相印证，看起来毫无破绽。
- * 已整体删除——认证源列表现在只来自 GET /api/v1/authsrc/sources 与 /authsrc 聚合，
- * 两者读的都是 auth_sources 真实行。拉不到就是空列表，不回落演示数据。
- *
- * 下面的 MOCK_RULES 保留，但它服务的是「自适应认证规则」页签那个**明确标注为
- * 交互沙盘**的编排器（改动不落库、不参与登录判定，页面上有醒目提示）。
- * 真正在登录链路生效的自适应认证是「认证策略」页签（authpolicy 实时求值）。 */
+/* MOCK_RULES 只服务「自适应认证规则」页签那个**交互沙盘**：改动不落库、不参与登录判定，
+ * 页面上有醒目提示。★真正在登录链路生效的自适应认证在「认证策略」页签（authpolicy 实时
+ * 求值），别把这份种子挪去那里，也别给认证源列表配任何演示回落。 */
 const MOCK_RULES: AdaptiveRule[] = [
   {
     id: 'r1', name: '弱口令 + 异地登录 → 阻断', enabled: true, logic: 'AND', action: 'block', priority: 1,
@@ -737,12 +718,7 @@ const sources = ref<AuthSource[]>([]);
 /** 沙盘规则（本地推演，见上）。 */
 const rules = ref<AdaptiveRule[]>(MOCK_RULES);
 
-/* ══════════ 认证源：真落库的那一套 ══════════
- *
- * 上面的 MOCK_SOURCES 只保留给「自适应规则」两个 tab 的降级演示用。
- * 认证源 tab 已经完全走真实端点——它此前是一整页内存种子，
- * 连「AD 域 1160 用户」这个数字都是凭空写的，「同步」按钮背后什么都没有。
- */
+/* ══════════ 认证源：整套走真实端点（/authsrc/sources 与 /authsrc 聚合）══════════ */
 const recs = ref<AuthSourceRec[]>([]);
 const supported = ref<string[]>(['local', 'ldap', 'ad', 'oidc']);
 const probes = ref<Record<string, ProbeResp>>({});
@@ -788,7 +764,7 @@ const srcForm = reactive<{
 }>({ id: '', name: '', kind: 'ldap', enabled: true, priority: 10, hasSecret: false });
 const ldap = reactive<LdapConfig>({ host: '', port: 0, tlsMode: 'ldaps', baseDn: '' });
 const oidc = reactive<OidcConfig>({ issuer: '', clientId: '', redirectUri: '', useUserInfo: false });
-/* 准入设置（两类源共用）。默认 auto = 与改造前行为一致，升级不把人挡在门外。 */
+/* 准入设置（两类源共用）。默认 auto：存量配置没有这一项，缺省成 approval 会把人挡在门外。 */
 const admit = reactive<AdmitConfig>({ admitPolicy: 'auto' });
 const statusDisabledValues = ref<string[]>([]);
 
@@ -835,9 +811,7 @@ function openSrcEdit(r: AuthSourceRec) {
     const cfg = JSON.parse(r.config || '{}');
     if (r.kind === 'oidc') Object.assign(oidc, cfg);
     else Object.assign(ldap, cfg);
-    // 准入设置回填。★缺省 'auto' 而不是留空：存量配置没有这一项，
-    // 留空会让下拉显示为未选中，管理员随手一保存就把它写成空串——
-    // 后端归一回 auto 是对的，但页面上那一刻显示的是"没配"，与实际不符。
+    // ★准入设置缺省 'auto' 而不是留空：留空会让下拉显示未选中，与后端归一后的实际值不符。
     admit.admitPolicy = cfg.admitPolicy === 'approval' ? 'approval' : 'auto';
     statusDisabledValues.value = Array.isArray(cfg.statusDisabledValues) ? cfg.statusDisabledValues : [];
     admitDomains.value = Array.isArray(cfg.allowedDomains) ? cfg.allowedDomains : [];
@@ -892,8 +866,7 @@ async function loadSources() {
     recs.value = r.sources ?? [];
     if (r.supportedKinds?.length) supported.value = r.supportedKinds;
   } catch {
-    // 认证源是真数据，拿不到就明确留空并提示，**不降级到假数据**——
-    // 这一页的历史问题恰恰就是"看起来有数据其实是编的"。
+    // ★认证源是真数据，拿不到就留空，不降级到演示数据。
     recs.value = [];
   }
 }
@@ -943,7 +916,7 @@ async function saveSource() {
   }
 }
 
-/** 真实连通性探测。此前这个按钮是纯装饰。 */
+/** 真实连通性探测（真去连目录 / 拉发现文档）。 */
 async function probe(r: AuthSourceRec) {
   probing.value = r.id;
   try {
@@ -977,8 +950,7 @@ function removeSource(r: AuthSourceRec) {
 }
 
 /** 源 id → 归属该源的账号数（外部源 = 已绑定条数；本地目录 = 无外部绑定的账号数）。
- *  ★这不是"目录纳管用户数"：后者要遍历整个 LDAP 才数得出来，白帝没有那个能力，
- *  原实现里的 1160 就是凭空写的。拿不到聚合时返回 undefined，卡片显示 — 而不是 0。 */
+ *  ★这不是"目录纳管用户数"，后者要遍历整个 LDAP。拿不到聚合返回 undefined，卡片显示 — 不是 0。 */
 const boundBySource = computed<Record<string, number>>(() => {
   const m: Record<string, number> = {};
   for (const s of sources.value) m[s.key] = s.boundAccounts;
@@ -1009,9 +981,8 @@ function srcIconStyle(t: SrcType) {
   const c = TYPE_COLOR[t];
   return { color: c, background: c + '14' };
 }
-// ★statusColor/statusLabel（在线/告警/离线）随 AuthSource.status 一起删除：
-// 那个状态恒为 online，是在替一台可能早已宕掉的目录打包票。认证源可达性只有
-// 「测试连接」（probe）那一刻才知道，结果就地渲染在卡片上。
+// ★卡片上刻意没有常驻的在线/离线状态灯：认证源可达性只有「测试连接」那一刻才知道，
+// 常驻灯等于替一台可能早已宕掉的目录打包票。探测结果就地渲染在卡片上。
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 /* ── 规则：动作 ── */
@@ -1073,13 +1044,9 @@ const SECONDARY_OPTS: { value: SecondaryMethod; label: string }[] = [
 const SECONDARY_LABEL: Record<string, string> = Object.fromEntries(SECONDARY_OPTS.map((o) => [o.value, o.label]));
 function secondaryLabel(m: string) { return SECONDARY_LABEL[m] ?? m; }
 
-/* 可作为「用户目录」被策略绑定的取值：**由后端下发**（GET /authpolicy 的 directories）。
- *
- * ★这里此前接的是 GET /authsrc 的演示种子（恒定只有 local 与 ad），而登录链路把
- * directory 置成真实认证源的 kind（local|ldap|ad|oidc）。于是管理员真配一个
- * LDAP/OIDC 源之后，那批人登录时 Match 按目录先筛一刀就把全部策略筛掉（连默认策略
- * 都没有）→ 永不二次认证；而策略页上根本选不出 "ldap"，管理员无从修。
- * 与 capabilities 同一条纪律：前端能选的，后端就得能存。 */
+/* 可作为「用户目录」被策略绑定的取值由后端下发（GET /authpolicy 的 directories）。
+ * ★不许在前端写死一份：登录链路把 directory 置成真实认证源的 kind，前端少一个值，
+ * 那个源的用户就在 Match 的第一刀里被筛光（永不二次认证），且页面上选不出、无从修。 */
 const directories = ref<AuthDirectory[]>([]);
 /** 目录 key → 友好名（后端下发的目录名优先；拿不到时回退到类型名或 key） */
 function dirName(dir: string) {
@@ -1100,12 +1067,9 @@ const directorySources = computed(() =>
 );
 
 /** 按目录分组，组内按优先级升序（小者先匹配，默认策略优先级 100 自然沉底） */
-/* ★分组以**后端下发的目录清单**为准，不是只遍历已有策略。
-   改造前是 `for (const p of policies)` 建 map —— 一个已接入认证源、却一条策略都没有的
-   目录**根本不会出现在这一页上**，管理员看到的与接入前一模一样。而那种目录的用户
-   登录时 authpolicy.Match 找不到 → Evaluate 返回零值 → 二次认证要求为零，
-   且 secondFactor 在零值分支一条审计都不写：三处都无异常，只有把 auth_policies 表
-   和登录链路的 Directory 取值放在一起看才能发现（FR-AUTH-10）。 */
+/* ★分组以**后端下发的目录清单**为准，不能只遍历已有策略：已接入认证源却零策略的目录
+   会整个从页面上消失，而那种目录的用户登录时 Match 找不到策略 → 二次认证要求为零，
+   且零值分支一条审计都不写，三处都看不出异常（FR-AUTH-10）。 */
 const grouped = computed(() => {
   const map = new Map<string, AuthPolicy[]>();
   for (const p of policies.value) {

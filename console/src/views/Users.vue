@@ -24,9 +24,8 @@
       </span>
     </div>
 
-    <!-- 外部目录说明卡。★这里原来是一张"上次同步 5 分钟前 · 共 1160 用户、在线 1096"
-         的同步状态卡，连同「立即同步 / 同步日志」两个点不动的链接——白帝**不做目录
-         周期同步**，那张卡片描述的是一个不存在的同步任务。改成如实说明账号是怎么来的。 -->
+    <!-- 外部目录说明卡。★白帝不做目录周期同步，这里不许出现同步时间/进度/日志一类的字样：
+         外部账号是首次登录时按 subject 绑定建号的。 -->
     <div v-if="curDir && curDir.type !== 'local'" class="bd-sync">
       <icon-info-circle class="bd-sync__ic" />
       <span>
@@ -54,10 +53,8 @@
             @click="mode = 'group'">用户组</button>
         </div>
 
-        <!-- 常驻操作条：作用于当前选中的节点。
-             增删改此前只挂在 .bd-onode-row:hover 上——触屏与键盘用户完全够不着，
-             鼠标用户也得靠猜。这条不依赖 hover 的入口才是这三个操作的主暴露面，
-             行内按钮降级为熟手的快捷方式。 -->
+        <!-- 常驻操作条：作用于当前选中的节点。★它是增删改的主暴露面，行内按钮只是熟手快捷方式——
+             把入口收回 hover 上，触屏与键盘用户就完全够不着这三个操作。 -->
         <div class="bd-otree__bar">
           <span class="bd-otree__cur" :title="scopeTitle">{{ scopeTitle }}</span>
           <template v-if="mode === 'org'">
@@ -216,11 +213,9 @@
             —— 由用户展示角色决定，改下面的「展示角色」才会变。
           </div>
         </div>
-        <!-- ★展示角色是「按角色派生」用户组**唯一**的成员来源。
-             此前全仓没有任何写入路径（建号恒发 []、CSV 导入写死 []、也没有 PUT /users/{id}），
-             于是那类组永远 0 人且不可能变成非 0，而建组弹窗还写着「只能改角色」——
-             把管理员指向一条死路。用它授权的后果：资源侧空展开会下发 DenyAllSubject 哨兵，
-             那条资源对**所有人**拒绝；策略/基线侧则永不命中（fail-open）。 -->
+        <!-- ★展示角色是「按角色派生」用户组**唯一**的成员写入路径，别把这一项去掉：
+             那类组一旦恒为 0 人，用它授权的资源会因空展开下发 DenyAllSubject 而对所有人拒绝，
+             策略/基线侧则永不命中（fail-open）。 -->
         <div class="bd-uform__f"><label>展示角色（决定「按角色派生」用户组的成员）</label>
           <a-input-tag v-model="memberForm.roles" placeholder="回车添加，如：研发 / 销售 / 组长" allow-clear />
           <div class="bd-uform__hint" style="margin: 6px 0 0">
@@ -251,16 +246,14 @@
           <button v-if="sel.status === 'disabled'" class="bd-btn" @click="setStatus('active', '已启用账号')"><icon-check />启用账号</button>
           <button class="bd-btn bd-btn--ghost" @click="openReset"><icon-lock />重置密码</button>
           <button class="bd-btn bd-btn--ghost" @click="askResetMfa('totp')"><icon-mobile />重置 TOTP</button>
-          <!-- ★passkey 此前**没有任何管理员出口**，而它比 TOTP 更需要一个：
-               passkey 没有恢复码、本人删不掉最后一个（那道守卫是为"别把自己锁在门外"设的）、
-               而 secondFactor 又规定「已注册 passkey 即无条件强制断言」——
-               三条合起来的后果是认证器一丢账号就永久登不进来，唯一出路是运维删库。 -->
+          <!-- ★passkey 必须留一个管理员出口：它没有恢复码、本人删不掉最后一个，而
+               secondFactor 规定「已注册 passkey 即无条件强制断言」——去掉这个按钮，
+               认证器一丢账号就永久登不进来，唯一出路是运维删库。 -->
           <button class="bd-btn bd-btn--ghost" @click="askResetMfa('passkey')"><icon-safe />重置 passkey</button>
           <button class="bd-btn bd-btn--ghost" @click="openEditProfile"><icon-edit />编辑资料</button>
           <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
-          <!-- ★删除是 License 席位的**唯一**释放路径：席位满时后端 409 文案与闲置治理
-               弹窗都指向「删除闲置账号释放席位」，而在此之前这条路根本不存在。
-               点之前先问一次影响面（哪些资源还按账号名点着他）。 -->
+          <!-- ★删除是 License 席位的**唯一**释放路径（席位满时后端 409 文案与闲置治理弹窗
+               都指向它）。点之前先问一次影响面：哪些资源还按账号名点着他。 -->
           <button class="bd-btn bd-btn--ghost bd-btn--danger" @click="openDeleteUser"><icon-delete />删除账号</button>
         </div>
       </div>
@@ -335,13 +328,9 @@
             <a-option v-for="g in staticGroups" :key="g.id" :value="g.id">{{ g.name }}</a-option>
           </a-select>
         </div>
-        <!-- ★这里此前是一个「认证方式」下拉（密码 / 密码+短信 / 密码+UKey / SAML SSO），
-             四项里有三项白帝从未实现（短信、UKey、SAML 一个都没有），而它落库的是一列
-             **零消费方**的自由文本：选什么都不影响这个账号真实怎么登录，却会在用户详情里
-             被当作事实展示。现在整项摘除——认证方式改为由后端**按实算**下发
-             （本地口令 / 外部目录，加上真正注册过的 passkey / TOTP）。
-             要改一个人的认证要求，去「认证源接入 → 认证策略」；要加第二因子，
-             由用户本人在门户「我的安全」注册。 -->
+        <!-- ★别在建号表单里加「认证方式」选项：认证方式由后端按实算下发（口令来源 +
+             真注册过的 passkey / TOTP），在这里选只会落成一列零消费方的自由文本，
+             却在用户详情里被当作事实展示。改认证要求去「认证策略」，加第二因子由本人注册。 -->
         <div class="bd-uform__note">
           <icon-info-circle />
           <span>
@@ -407,19 +396,16 @@
       </div>
     </a-modal>
 
-    <!-- 闲置账号治理（wave7 行动 8②）：按 last_login 识别 + 批量锁定。
-         判据是真实登录记录；「无记录」按建号时间估算并单独标注，绝不混同「从未登录」。 -->
+    <!-- 闲置账号治理：按 last_login 识别 + 批量锁定。判据是真实登录记录；
+         ★「无记录」按建号时间估算并单独标注，绝不混同「从未登录」。 -->
     <a-modal v-model:visible="idleOpen" title="闲置账号治理" :width="640" :footer="false">
       <div class="bd-uform">
         <div class="bd-uform__hint">
           按最后登录时间识别闲置账号（仅 active 状态）。僵尸账号是最便宜的攻击面；
           锁定后可随时在用户详情里解锁，license 席位则需删除账号才释放。
         </div>
-        <!-- ★闲置治理**策略**（PRD FR-MON-19：阈值 + 是否自动锁定）。
-             此前这一页只有下面那个"超过 N 天"的输入框，而它只是一个 URL 查询参数：
-             管理员调过的值不落库，刷新一次就回到 90；`autoLockEnabled` 这一项
-             压根不存在，于是 PRD 那句「若开启自动锁定，Then 该账号被自动锁定」
-             没有任何执行方——治理必须有人记得点进这一页手工做，而页面上看不出来。 -->
+        <!-- 闲置治理**策略**（阈值 + 是否自动锁定）会落库并长期生效。
+             ★它与下面那个"超过 N 天"的预览输入框是两回事：后者只影响这一次识别。 -->
         <div class="bd-idlepol">
           <div class="bd-idlepol__h"><icon-settings />闲置治理策略<span>（保存后长期生效）</span></div>
           <div class="bd-idlepol__row">
@@ -491,9 +477,8 @@
       </div>
     </a-modal>
 
-    <!-- 批量导入（wave7 行动 14）：CSV → 逐行建普通用户。
-         ★这里必须把两条边界说在人点「开始导入」之前：① 只能建普通用户（含角色列整份拒收）；
-         ② 有行数与文件大小上限。不说的话，管理员会拿一份带「角色」列的花名册反复试。 -->
+    <!-- 批量导入：CSV → 逐行建普通用户。★两条边界必须说在人点「开始导入」之前：
+         ① 只能建普通用户（含角色列的文件整份拒收）；② 有行数与文件大小上限。 -->
     <a-modal v-model:visible="impOpen" title="批量导入用户" :width="680" :footer="false">
       <div class="bd-uform">
         <div class="bd-uform__hint">
@@ -625,15 +610,9 @@ const scopeTitle = computed(() => {
  *  否则那个入口落到的是一张未筛选的全量目录——它存在的意义正是省掉手抄账号名。 */
 const kw = ref(String(useRoute().query.q ?? '').trim());
 /**
- * 当前身份源下的账号。
- *
- * ★选项卡此前只写了一个 `dir` 变量、没有任何消费方：卡上写着「总部 AD 域 3」，
- * 点进去表头却是全量表，本地账号与各外部目录的账号混在一起——
- * PRD FR-USER-01 的「目录间相互独立、以选项卡形式分目录管理」在界面上完全不成立。
- * 而它的存在会让人相信自己正在看某一个目录。
- *
- * 旧后端不下发 `sourceId` → undefined → **不过滤**（宁可多显示，也不让升级那一刻
- * 每个选项卡都变成空表）。
+ * 当前身份源下的账号。★选项卡必须真过滤：本地与各外部目录的账号混在一张表里，
+ * 会让人相信自己正在看某一个目录（FR-USER-01「目录间相互独立」）。
+ * 旧后端不下发 `sourceId` → undefined → **不过滤**，否则升级那一刻每个选项卡都是空表。
  */
 const inDir = computed(() =>
   users.value.filter((u) => u.sourceId === undefined || u.sourceId === dir.value));
@@ -676,7 +655,7 @@ function editCurMembers() { if (curGroup.value?.kind === 'static') openMembers(c
 function editCurGroup() { if (curGroup.value) openGroup(curGroup.value); }
 function removeCurGroup() { if (curGroup.value) askRemoveGroup(curGroup.value); }
 
-// 顶部四个聚合数跟随当前身份源——此前恒为全库口径，与刚点中的那个目录无关。
+// ★顶部四个聚合数跟随当前身份源：用全库口径的话，它与刚点中的那个目录对不上。
 const agg = computed(() => {
   const u = inDir.value;
   return [
@@ -697,10 +676,8 @@ function statusMeta(s: string) {
 const AV = ['#165DFF', '#722ED1', '#00B42A', '#FF7D00', '#0FC6C2'];
 function avBg(u: DirUser) { return AV[(u.account.charCodeAt(0) + u.account.length) % AV.length]; }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
-/** ★unknown 必须单列成灰色的「不可判定」，绝不落进 else 那一支。
- *  改造前这两个函数的兜底是绿色的「正常」，于是一个**从未上报过终端环境**的账号
- *  会显示成一句正向的安全断言——而 observe 准入模式下这种账号照样能接入，
- *  它恰恰是管理员打开这一页最该找出来的那一类。灰色在本项目里专表"我们不知道"。 */
+/** ★unknown 必须单列成灰色的「不可判定」，绝不落进绿色的 else 那一支：从未上报过终端环境的
+ *  账号在 observe 模式下照样能接入，把它显示成「正常」是替一台完全未知的机器打包票。 */
 function riskColor(r: string) {
   return r === 'high' ? '#F53F3F' : r === 'low' ? '#FF7D00' : r === 'unknown' ? '#86909C' : '#00B42A';
 }
@@ -770,7 +747,7 @@ async function saveOrg() {
   } catch (e) { Message.error(`保存组织失败：${failReason(e)}`); }
   finally { orgSaving.value = false; }
 }
-// 删除入口现在常驻可见（不再要求先 hover），误触的代价比以前高，所以补一道确认。
+// 删除入口常驻可见，误触代价高，故必须有这道确认。
 function askRemoveOrg(key: string, title: string) {
   Modal.confirm({
     title: '删除组织',
@@ -891,9 +868,8 @@ async function setStatus(status: string, label: string) {
     drawer.value = false;
     await load();
   } catch (e) {
-    // ★这里丢掉的是两道**防自锁 / 越权**守卫的原话：「最后一名可登录的超级管理员
-    //   不可禁用」「角色「安全管理员」无权处置其他管理员（需要权限：admins）」。
-    //   换成"请检查权限"之后，管理员既不知道自己撞的是哪一条，也不知道该找谁。
+    // ★必须原样转述后端：这里回的是防自锁与越权两道守卫的原话（如「最后一名可登录的
+    //   超级管理员不可禁用」），换成自拟归因就看不出撞的是哪一条、该找谁。
     Message.error(`操作失败：${failReason(e)}`);
   }
 }
@@ -1018,19 +994,15 @@ async function doDeleteUser() {
   } finally { del.busy = false; }
 }
 
-/* ── 闲置账号治理（wave7 行动 8②）── */
+/* ── 闲置账号治理 ── */
 interface IdleAccount { id: string; name: string; account: string; lastLogin: string; idleDays: number; neverRecorded: boolean; isAdmin: boolean }
 const idleOpen = ref(false);
 const idleDays = ref(90);
 /** 编辑中的闲置治理策略（PRD FR-MON-19）。与上面那个"预览天数"是两回事：
  *  预览只影响这一次识别，策略才是后台自动锁定真正读的那份。 */
 const idlePolicy = reactive({ thresholdDays: 90, autoLock: false });
-/** **服务端上已落库**的那一份。
- *
- *  ★必须与编辑草稿分开存：只有一份的话，管理员刚在输入框里敲下 30、还没点保存，
- *  页面就会说「落库的策略阈值是 30 天——自动锁定按后者执行」。那句话把一个
- *  还没提交的数字说成了正在生效的事实，而它恰恰是这一屏最该说准的一句
- *  （另一半是"后台会不会自己动手锁人"）。 */
+/** **服务端上已落库**的那一份。★必须与编辑草稿分开存：合成一份的话，输入框里刚敲下的、
+ *  还没保存的数字会被页面说成"正在生效的阈值"，而这一屏最该说准的正是这句。 */
 const idleSaved = reactive({ thresholdDays: 90, autoLock: false });
 /** 有未保存的改动（页面据此提示"改了还没保存"）。 */
 const idleDirty = computed(() =>
@@ -1127,9 +1099,8 @@ async function lockIdle() {
   finally { idleLocking.value = false; }
 }
 
-/* ── 批量导入导出（wave7 行动 14）──
- *
- * 导出走原生 fetch 拿 blob：后端回的是 CSV 附件，api() 封装只吃 JSON（与 Audit.vue 同款）。
+/* ── 批量导入导出 ──
+ * 导出走原生 fetch 拿 blob：后端回的是 CSV 附件，而 api() 封装只吃 JSON（与 Audit.vue 同款）。
  * 导入把文件读成文本直接 POST（请求体就是 CSV 原文），响应是逐行结果 JSON，可以走 api()。
  */
 const DEFAULT_PW = 'baidi@123';
@@ -1229,8 +1200,8 @@ const MFA_KINDS = {
   passkey: { label: 'passkey', path: 'passkeys', note: '该用户已注册的**全部** passkey 都会被清除。' }
 } as const;
 
-/** ★清二因子是**削弱**目标账号防护的方向，且不可撤销（认证器绑定没了就得重新注册）。
- *  同一屏的「禁用账号」都要确认，这两个更该确认——而它们此前是点中即执行的裸按钮。 */
+/** ★清二因子是**削弱**目标账号防护的方向，且不可撤销（绑定没了就得本人重新注册），
+ *  必须二次确认——同一屏的「禁用账号」都要确认，这两个更该。 */
 function askResetMfa(kind: keyof typeof MFA_KINDS) {
   if (!sel.value) return;
   const k = MFA_KINDS[kind];

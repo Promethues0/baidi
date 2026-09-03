@@ -6,26 +6,19 @@
         <div class="bd-page__sub">全链路留痕 · HMAC-SM3 防篡改链 · CSV 合规出口</div>
       </div>
       <div class="bd-head__right">
-        <!-- 「降级演示」这个说法已经删掉：这一页现在没有演示数据可降级，
-             拉不到就是拉不到，原因写在下面那条红条里。 -->
+        <!-- 本页没有演示数据可降级：拉不到就是拉不到，原因写在下面那条红条里。 -->
         <a-tag :color="live ? 'green' : 'red'" bordered>{{ live ? '已连 baidi-control' : '数据未读取' }}</a-tag>
         <button class="bd-btn" :disabled="!!loadErr" :title="loadErr ? '审计数据未读取，导出走的是同一道权限闸' : ''"
                 :style="{ opacity: loadErr ? 0.5 : 1 }" @click="openExport"><icon-download />导出 CSV</button>
-        <!-- 这里原先是一个「日志配置」弹窗：四个类别留痕开关 + 保留天数 + 「合规出口（Syslog 转发）」，
-             全部是**显示层假配置**——后端既没有按类别开关留痕的能力，保留天数由
-             BAIDI_AUDIT_RETENTION_DAYS 决定，Syslog 那一格更是压根没有实现。
-             本轮把外送做成了真的（RFC 5424 over TCP/TLS + HTTP JSON，持久化队列 + 重试），
-             配置在系统管理页，这个按钮直接指过去；剩下那几个假开关删掉而不是搬家。 -->
+        <!-- 审计外送的配置在系统管理页（保留天数由 BAIDI_AUDIT_RETENTION_DAYS 决定），
+             这个按钮只负责指过去。本页不放任何外送开关。 -->
         <button class="bd-btn bd-btn--ghost" @click="gotoForward"><icon-export />日志外送</button>
       </div>
     </div>
 
-    <!-- ★拉不到审计就**什么都不画**。
-         这一页此前的初值是一整块 mock（18.4 万条访问决策 + 十条署名到人的流水），
-         `/audit` 一失败就原样保留，右上角挂个「降级演示」——而 /audit 归 PermAudit，
-         安全/系统管理员打开它拿到的是 403，页面却把权限拒绝说成"后端没起"，
-         再配一屏看起来完全正常的审计。同仓「设备状态」「业务告警」两页已立这条例外，
-         审计中心比那两页更该守它：编造的审计记录与真实留痕在页面上无法区分。 -->
+    <!-- ★拉不到审计就**什么都不画**：编造的审计记录与真实留痕在页面上无法区分。
+         /audit 归 PermAudit，安全/系统管理员打开它拿到的是 403，
+         这条红条必须原样转述后端那句话，不能笼统说成"后端没起"。 -->
     <div v-if="loadErr" class="bd-auditerr">
       <icon-exclamation-circle-fill class="bd-auditerr__ic" />
       <div>
@@ -41,10 +34,9 @@
     <template v-else>
 
 
-    <!-- 审计写入失败（wave8 行动 6）：控制面没能把审计写进库。
-         ★这条红条只在真出事时出现（后端零失败即整段不下发），常态零噪声。
-         文案里必须说清"链校验查不出它们"——否则管理员看到防篡改链全绿会以为没事，
-         而链重算的是**已存在行**的连续性，压根没写进去的行不在链上。 -->
+    <!-- 审计写入失败：控制面没能把审计写进库（后端零失败即整段不下发，常态零噪声）。
+         ★文案必须说清"链校验查不出它们"——链重算的是**已存在行**的连续性，
+         压根没写进去的行不在链上，而防篡改链全绿会被读成"没事"。 -->
     <div v-if="bundle?.writeHealth" class="bd-auditwarn">
       <icon-close-circle-fill />
       <span>
@@ -78,10 +70,9 @@
         <div class="bd-mcard__sub">条 · 今日累计</div>
       </div>
 
-      <!-- 审计库占用卡。★主数是**审计库自己**有多大，不是文件系统占用率——
-           在审计页上画一个「88%」，读到的人会以为是审计日志吃掉的，
-           而这台机器上审计库只有 1.7 MB，那 88% 全是别的东西。
-           两者的处置动作完全不同：前者缩留存，后者清磁盘。 -->
+      <!-- 审计库占用卡。★主数是**审计库自己**有多大，不是文件系统占用率：
+           在审计页上把磁盘水位当主数，会被读成"审计日志吃掉的"，
+           而两者的处置动作相反——前者缩留存，后者清磁盘。 -->
       <div class="bd-card bd-mcard bd-disk">
         <div class="bd-mcard__top">
           <icon-storage class="bd-mcard__ic" />
@@ -103,7 +94,7 @@
     <div class="bd-tablecard">
       <div class="bd-toolbar">
         <!-- 类别筛选 pill：已连控制面时是**服务端检索条件**（全表 WHERE），
-             不再只是对最近 200 条的前端过滤 -->
+             未连时退回对最近 200 条快照的前端过滤 -->
         <div class="bd-pillrow">
           <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch(true)">{{ f.label }}</span>
         </div>
@@ -111,15 +102,12 @@
         <!-- 检索：账号精确（查证据链要精确，模糊会把 li 匹配到 alice）+ 事件关键词 -->
         <a-input v-model="q.actor" size="small" style="width: 140px" placeholder="账号（精确）"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
-        <!-- ★源 IP 维度：后端 SearchAudit 一直支持 srcIp，页面却没有入口。
-             而 wave8 行动 8 专门修过一处「数据面事件的 src_ip 此前一律记成网关自己的地址，
-             按 src_ip 检索审计永远找不到攻击者」——修好了那一半，检索这一半没接上，
-             于是"按攻击源查"这件事在控制台上依然做不到。 -->
+        <!-- 源 IP 精确检索：数据面事件记的是网关报来的攻击者地址，「按攻击源查」靠这一维。 -->
         <a-input v-model="q.srcIp" size="small" style="width: 150px" placeholder="源 IP（精确）"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <a-input v-model="q.kw" size="small" style="width: 170px" placeholder="事件关键词 / 回车检索"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
-        <!-- 时间快选 pill：此前是装饰件（没接进任何过滤逻辑），现为服务端时间窗 -->
+        <!-- 时间快选 pill：服务端时间窗（按服务器时间解释，见 sinceOf） -->
         <div class="bd-pillrow">
           <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch(true)">{{ t.label }}</span>
         </div>
@@ -152,9 +140,8 @@
       </div>
     </div>
 
-    <!-- 导出（真实调用 GET /api/v1/audit/export，流式 CSV 附件）。
-         只暴露后端真支持的条件：类别 + 时间范围——此前向导里的设备多选 / 四元组 /
-         日志类型（系统服务/监控/扫描）后端并不存在，留着只是假象，已删。 -->
+    <!-- 导出（GET /api/v1/audit/export，流式 CSV 附件）。
+         只暴露后端真支持的条件：类别 + 账号 + 源 IP + 关键词 + 时间范围。 -->
     <a-modal v-model:visible="exp.open" :width="520" :footer="false" title="导出审计日志（CSV）" unmount-on-close>
       <div class="bd-wbody bd-wbody--slim">
         <div class="bd-wdesc">按条件从 baidi-control 导出全量审计日志（不限于页面上最近 200 条）。</div>
@@ -171,9 +158,9 @@
             <a-option value="system">系统运维</a-option>
           </a-select>
         </div>
-        <!-- ★账号 / 源 IP / 关键词三维此前**导不出来**（后端只认类别+时间），
-             而页面上刚筛过的正是这几维：筛出 12 条、导出 8 万条，管理员却以为
-             这份 CSV 就是屏幕上那些行。现在两侧同一份 store.AuditQuery。 -->
+        <!-- ★账号 / 源 IP / 关键词三维必须与列表检索同维同义（两侧共用后端
+             store.AuditQuery）：少一维就会出现「筛出 12 条、导出 8 万条」，
+             而拿到 CSV 的人会以为它就是屏幕上那些行。 -->
         <div class="bd-field">
           <label>行为人账号（精确，留空 = 不限）</label>
           <a-input v-model="exp.actor" placeholder="如 li.fang" allow-clear />
@@ -225,28 +212,13 @@ const router = useRouter();
 const route = useRoute();
 
 /** 「日志外送」指到系统管理页的真配置区（syslog / SIEM 出口 + 队列积压 + 丢弃计数）。
- *  这一页上不再放任何外送开关：本地一个假开关、真配置在另一页，是最容易骗到人的形态。 */
+ *  ★这一页上不放任何外送开关：本地一个开关、真配置在另一页，是最容易骗到人的形态。 */
 function gotoForward() { void router.push({ path: '/system/manage', query: { tab: 'forward' } }); }
 
 /**
- * ★这里原先是一整块 MOCK：18.4 万条「访问决策」、9.6 万条「登录认证」、
- * 十条署着真人姓名与内网 IP 的审计流水（「访问内部应用「OA 协同」」「检测到异常端口扫描行为」…），
- * 而 bundle 的初值就是它——`/audit` 一失败就整页保留这份编造数据，
- * 右上角挂一个「降级演示」的橙色标签了事。
- *
- * 两个理由让这块 mock 必须消失，而不是换个说法：
- *
- *  ① **审计页编造记录是所有假数据里最坏的一种**。它编的正是"谁在什么时候做了什么"——
- *     这一页存在的全部意义。同一个仓库里「设备状态」与「业务告警」两页已经立了这条例外
- *     （见 CLAUDE.md：连不上就说连不上，不画假曲线、不编假告警），审计中心却漏在外面，
- *     而它比那两页更该守这条。
- *
- *  ② 「降级演示」这个标签**说错了原因**。/audit 归 PermAudit，安全管理员与系统管理员
- *     打开这一页拿到的是 403；页面把一次**权限拒绝**说成"后端没起"，还配上一屏
- *     看起来完全正常的审计流水。管理员据此得出的结论会是"审计功能是好的"。
- *
- * 现在：拉不到就 bundle=null，整页只显示一条如实的错误（后端原话由 failReason 转述），
- * 一行编造的记录都不画。
+ * ★本页**没有任何演示数据**：拉不到就 bundle=null，整页只显示一条如实的错误
+ * （后端原话由 failReason 转述），一行编造的记录都不画。审计页编的正是
+ * "谁在什么时候做了什么"，与真实留痕在页面上无法区分。
  */
 const bundle = ref<AuditBundle | null>(null);
 const loadErr = ref('');
@@ -294,10 +266,8 @@ const diskLabel = computed(() => {
 });
 
 /* ── 日志表筛选 ── */
-/** 类别筛选条。★必须与**后端支持的类别**逐项对齐：dataplane（数据面回执）此前漏了，
- *  后端 SearchAudit 支持它、本页的导出下拉里也列着它，唯独列表筛不到——
- *  于是网关报上来的隧道放行/拒绝在这一页的筛选条上等于不存在，
- *  而 FR-AUDIT-05 要查的正是这一类。 */
+/** 类别筛选条。★必须与后端支持的类别、以及导出下拉逐项对齐：漏一类，
+ *  那一类事件（如 dataplane 的隧道放行/拒绝）在这一页的筛选条上等于不存在。 */
 const catFilters = [
   { key: 'all', label: '全部' }, { key: 'access', label: '访问' }, { key: 'auth', label: '认证' },
   { key: 'admin', label: '管理' }, { key: 'policy', label: '策略' }, { key: 'security', label: '安全' },
@@ -307,8 +277,7 @@ const timeFilters = [{ key: 'today', label: '今天' }, { key: '7d', label: '7 �
 const catSel = ref('all');
 const timeSel = ref('today');
 /* 服务端检索态：results 非 null 时表格显示它（全表 WHERE 的结果），
- * 否则回落到首屏快照（最近 200 条）的前端过滤。未连控制面时永远走后者——
- * mock 数据上装一个"全表检索"是在演示假能力。 */
+ * 否则回落到首屏快照（最近 200 条）的前端过滤。未连控制面时永远走后者。 */
 const q = reactive({ actor: '', srcIp: '', kw: '' });
 const searchResults = ref<AuditEntry[] | null>(null);
 const searchTotal = ref(-1);
@@ -321,15 +290,11 @@ const shownLogs = computed<AuditEntry[]>(() => {
 /**
  * 时间快选的起始日（YYYY-MM-DD）。
  *
- * ★这里原来是 `d.toISOString().slice(0, 10)`——toISOString 先转 **UTC** 再取日期，
- * 而后端 parseAuditTime 走的是 `time.ParseInLocation(..., time.Local)`，按**服务器本地时间**解释。
- * 在 UTC+8 上，每天 00:00–07:59 这八个小时里 ISO 日期还停在前一天：
- * 选「今天」实际查的是**昨天到现在**，选「近 7 天」窗口整体前移一天。
- * 页面不会有任何异常表现——多出来的那些行看起来就是正常的审计记录。
- *
- * 改成按本地日期拼字符串。注意这里的"本地"是**浏览器所在时区**，而后端按服务器时区解释；
- * 两者不同区时窗口会差几小时——这是跨时区部署固有的，不是这个函数能消掉的，
- * 页面上的时间范围文案说的也是"按服务器时间"。
+ * ★必须按本地日期逐段拼字符串，不能用 `toISOString().slice(0,10)`：那是先转 UTC
+ * 再取日期，在 UTC+8 上每天 00:00–07:59 会把「今天」查成昨天到现在，而多出来的行
+ * 看起来就是正常的审计记录，页面零异常。
+ * 这里的"本地"是浏览器时区，后端按服务器时区解释——跨时区部署时窗口会差几小时，
+ * 故页面文案说的是"按服务器时间"。
  */
 function sinceOf(key: string): string {
   const d = new Date();
@@ -340,9 +305,8 @@ function sinceOf(key: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
 }
 
-/** 每页条数。★后端 SearchAudit 一直支持 limit/offset 并回 total，页面却写死
- *  `limit=200` 且**从不发 offset**——于是命中 5000 条时页脚如实写着「全表命中 5000
- *  条」，而第 201 条之后没有任何入口能翻到。审计的用途就是查那一条，查不到等于没有。 */
+/** 每页条数。★分页必须真发 offset：只发 limit 的话，页脚写着「全表命中 5000 条」
+ *  而第 201 条之后没有任何入口能翻到——审计的用途就是查那一条。 */
 const PAGE_SIZE = 200;
 const page = ref(0);
 const pageCount = computed(() => Math.max(1, Math.ceil(Math.max(searchTotal.value, 0) / PAGE_SIZE)));
@@ -410,18 +374,13 @@ const exp = reactive({
   range: [] as string[],
   busy: false
 });
-/** ★类别中文名走 catMeta（与列表、类别卡同一份），不再手抄一张表——
- *  手抄那份漏了 dataplane/policy/system，选中它们时确认行的类别是空白的。 */
+/** ★类别中文名走 catMeta（与列表、类别卡同一份），不另抄一张表：
+ *  抄漏一项时，选中它确认行的类别就是空白的。 */
 const expCatLabel = computed(() => exp.category === 'all' ? '全部类别' : catMeta(exp.category as AuditEntry['category']).label);
 
 /**
- * 打开导出弹窗。
- *
- * ★**继承屏幕上刚筛好的条件**，而不是清空重来。改造前这里把三项一律复位，
- * 于是管理员筛到某个账号的十几条记录、点「导出 CSV」，拿到的是**全表八万条**——
- * 而他会以为这份 CSV 就是刚才屏幕上那些行，直接拿去交差。
- * （后端那一半同批修好：导出此前只认 category/from/to，账号与源 IP 两维
- *   压根传不进去，见 store.auditWhere 的注释。）
+ * 打开导出弹窗。★**继承屏幕上刚筛好的条件**，不清空重来：清空会让筛到十几条的人
+ * 导出到全表，而他会以为这份 CSV 就是刚才屏幕上那些行，直接拿去交差。
  */
 function openExport() {
   exp.open = true;

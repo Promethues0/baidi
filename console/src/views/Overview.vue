@@ -193,8 +193,7 @@ const ov = ref<Overview>(MOCK);
 const live = ref(false);
 const loading = ref(false);
 
-/* hours 态势统计的时间窗。默认 24h——与改造前"攻击源 24h"那一半口径一致，
-   页面不会在升级那一刻突然换语义。 */
+/* hours 态势统计的时间窗（默认 24h，钳制在后端 store.ClampOverviewWindow 一处）。 */
 const hours = ref(24);
 /* scopeText 窗口标签文案（跟随 hours，不写死）。 */
 const scopeText = computed(() =>

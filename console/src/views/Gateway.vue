@@ -7,9 +7,8 @@
       </div>
       <div class="bd-head__right">
         <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '后端未连接' }}</a-tag>
-        <!-- ★「最后心跳 N 秒前」是相对时间，此前定格在渲染那一刻：页面开着不动，
-             一台刚掉线的网关会一直显示「12 秒前」。现在每 15s 自动重拉（与网关心跳同频），
-             并把数据时间写出来——不写的话，自动刷新与卡死在页面上仍然分不出来。 -->
+        <!-- ★「最后心跳 N 秒前」是相对时间，靠每 15s 自动重拉（与网关心跳同频）保持真实；
+             数据时间必须写在屏上，否则「自动刷新」与「卡死」在页面上分不出来。 -->
         <span v-if="fetchedAt" class="bd-gwts">数据时间 {{ fetchedAt }} · 每 15s 自动刷新</span>
         <a-button @click="load"><template #icon><icon-refresh /></template>刷新</a-button>
       </div>
@@ -23,8 +22,7 @@
       <span class="bd-tab" :class="{ on: tab === 'cert' }" @click="tab = 'cert'; loadCerts()">机器身份 · mTLS 证书</span>
     </div>
 
-    <!-- 空态：一台网关都没注册。整页不画任何拓扑——
-         此前这里会渲染「华东/华南出口」四台编造节点，运维对着不存在的拓扑排查不了任何问题。
+    <!-- 空态：一台网关都没注册时整页不画任何拓扑（对着不存在的拓扑排查不了任何问题）。
          ★证书页不受这道空态影响：**先签证书、后起网关**，没有网关恰恰是最需要签证书的时候。 -->
     <div v-if="!nodes.length && tab !== 'cert'" class="bd-card bd-empty">
       <icon-exclamation-circle-fill class="bd-empty__ic" />
@@ -132,9 +130,8 @@
                 </span>
               </div>
               <!-- ★这段注记不是免责声明，是口径说明：控制面只转述网关上报的事实，
-                   "端口在公网上到底可不可见"要从外部实测，白帝没有做这件事。
-                   原实现里那个恒为 true 的「已隐身」开关就是在替一台可能压根没配
-                   防火墙规则的网关打包票。 -->
+                   "端口在公网上到底可不可见"要从外部实测，白帝不做这件事。
+                   任何恒为真的「已隐身」标记都是在替一台可能没配防火墙规则的网关打包票。 -->
               <div class="bd-spa__note">
                 控制面不从外部实测端口可见性：以上为网关自报的监听地址。
                 <b>但「内核规则集装没装、保护的是哪个端口」网关自己知道</b>，已随心跳上报，见下方逐台回执。
@@ -143,7 +140,7 @@
             </div>
           </div>
 
-          <!-- 隐身实测回执（wave8 行动 7）。文案全部由后端下发：这是安全结论，
+          <!-- 隐身实测回执。★文案全部由后端下发：这是安全结论，
                前端自己编就会与后端实际判定脱节（与 Nat.vue 的 warnings 同纪律）。 -->
           <div class="bd-section-title" style="margin-top: 22px">
             内核态隐身 · 逐台实测回执
@@ -173,7 +170,7 @@
           <div class="bd-cmp">
             <div class="bd-card bd-cmp__c bd-cmp__c--bad">
               <div class="bd-cmp__h"><icon-close-circle-fill class="bd-cmp__ic bad" />未装专属客户端</div>
-              <!-- ★这四条此前是写死的断言。它们只有在**内核态隐身实测生效**时才成立；
+              <!-- ★这四条只有在**内核态隐身实测生效**（allArmed）时才成立，绝不能写死。
                    参考部署默认不开 -pf，那时未敲门的连接会先完成 TCP 三次握手再被
                    用户态断开（proxy.go 的 accept-then-close），nmap 判 open——
                    「握手后被断开」与「等同于不存在」是两种安全等级，不能用同一段文案。 -->
@@ -274,9 +271,8 @@
     </template>
 
     <!-- ============ 机器身份 · mTLS 证书 ============
-         ★后端三个端点（签发 / 清单 / 吊销）一直都在，控制台此前**一个入口都没有**：
-         网关的机器身份只能用 curl 管，而"吊销"是一台网关失陷时唯一的即刻处置手段
-         （指纹白名单是执行点，且吊销会把它从下发给终端的落点清单里一并摘掉）。 -->
+         ★吊销是一台网关失陷时唯一的即刻处置手段（指纹白名单是执行点），
+         且会把它从下发给终端的落点清单里一并摘掉。 -->
     <div v-show="tab === 'cert'">
       <div class="bd-card bd-certnote">
         <icon-info-circle class="bd-certnote__ic" />
@@ -462,35 +458,25 @@
 /**
  * 网关与隐身页。
  *
- * ★整页数据来自 GET /api/v1/gateway，而该端点读的是 mTLS 注册心跳的在线登记
+ * ★整页数据来自 GET /api/v1/gateway，该端点读的是 mTLS 注册心跳的在线登记
  * （与 GET /api/v1/gateways、诊断页的「数据面网关在线 / SPA 服务隐身」同一份）。
+ * 本页**没有任何内置演示数据**：拉不到就说拉不到，没网关就是空态。
  *
- * 此前这里有一份 MOCK_ZONES：三个区域、六台带主备角色与负载百分比的节点，
- * 全是编的，而且后端种子也是编的——两边都假，看起来严丝合缝。现在页面**没有
- * 任何内置演示数据**：拉不到就说拉不到，没网关就是空态。
- *
- * 去掉的维度与理由：
- *  - 区域：白帝没有区域概念（apps.node 里那列区域名没有任何消费方），
- *    做成网关自报字段既不可验证也不参与任何判定，那是又一个 config-only；
- *  - 主/备角色：没有选主机制；
- *  - 负载百分比：不采集网关负载（宿主机指标另有「设备状态」页，走 metrics 时序）。
+ * 不呈现区域 / 主备角色 / 负载百分比——白帝没有区域概念，也没有选主机制，
+ * 宿主机指标在「设备状态」页（走 metrics 时序）。
  */
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, failReason, type GatewayBundle, type GwNode, type GatewayCert, type GatewayCertsResp, type GatewayCertIssued } from '@/lib/api';
 
 const tab = ref<'topo' | 'spa' | 'node' | 'cert'>('topo');
-/* ── 机器身份 · mTLS 证书 ───────────────────────────────────────────────
+/* ── 机器身份 · mTLS 证书（POST/GET /pki/gateway-certs、POST …/{fp}/revoke）──
  *
- * 三个端点后端一直都有（POST/GET /pki/gateway-certs、POST …/{fp}/revoke），
- * 控制台此前一个入口都没有。补上时有两条不能含糊的地方：
- *
- *  ① **私钥只回一次**。签发应答里的 keyPem 不落控制面的库，弹窗一关就没了。
- *     这句话必须排在结果的最前面，而不是页脚的一行小字——不然管理员点掉窗口，
- *     手里只剩一张查得到指纹、却装不上任何机器的证书。
- *  ② **吊销的影响面要说全**。它不只切断"网关→控制面"，还会把这台网关从
- *     下发给终端的落点清单里摘掉（后端 handleRevokeGatewayCert 专门做了这件事）。
- *     只说"吊销证书"的话，管理员不会预期到客户端会跟着故障转移。
+ * 两条不能含糊的地方：
+ *  ★① **私钥只回一次**（keyPem 不落控制面的库，弹窗一关就没了），这句话必须排在
+ *     结果最前面而不是页脚小字，否则关窗后手里只剩一张装不上任何机器的证书。
+ *   ② **吊销的影响面要说全**：它还会把这台网关从下发给终端的落点清单里摘掉，
+ *     只说"吊销证书"的话，管理员不会预期到客户端跟着故障转移。
  */
 const certs = ref<GatewayCertsResp>({ certs: [], caEnabled: true });
 const certErr = ref('');
@@ -613,7 +599,7 @@ const bundle = ref<GatewayBundle>(EMPTY);
 const nodes = computed<GwNode[]>(() => bundle.value.nodes ?? []);
 const totalTunnels = computed(() => nodes.value.filter((n) => n.online).reduce((s, n) => s + n.tunnels, 0));
 
-/* ── 内核态隐身回执（wave8 行动 7）── */
+/* ── 内核态隐身回执 ── */
 
 /* allArmed 是否**全部**在线网关都实测生效。
  * ★零台在线时为 false：那时没有任何事实支撑「攻击面 = 0」，
@@ -621,12 +607,11 @@ const totalTunnels = computed(() => nodes.value.filter((n) => n.online).reduce((
 const allArmed = computed(() => {
   const rs = bundle.value.stealth ?? [];
   if (rs.length === 0 || !rs.every((r) => r.status === 'armed')) return false;
-  // ★第二个前提：**没有敞着的七层 Web 代理口**。
-  //   L7 监听不受 SPA 隐身保护（CLAUDE.md 端口表逐字写着；发布向导与网关启动日志
-  //   都告警过）——内核态隐身只护住敲门口与隧道口，L7 是一个对全世界敞着的 TCP 端口。
-  //   少了这一条，一台开着 `-web` 且 nft 规则装好的网关会让这一页同时显示
-  //   「端口扫描全程超时，无任何端口可探测」与「攻击面 = 0」，而 nmap 对着
-  //   18444 一扫一个准。这是整页唯一一句**正向安全断言**，它必须把已知敞着的口算进去。
+  // ★第二个前提：**没有敞着的七层 Web 代理口**。内核态隐身只护住敲门口与隧道口，
+  //   L7 监听不受 SPA 隐身保护，是一个对全世界敞着的 TCP 端口。少了这一条，
+  //   一台开着 `-web` 且 nft 规则装好的网关会同时显示「无任何端口可探测」与
+  //   「攻击面 = 0」，而 nmap 对着 18444 一扫一个准。
+  //   这是整页唯一一句**正向安全断言**，必须把已知敞着的口算进去。
   return (bundle.value.webExposed ?? 0) === 0;
 });
 
@@ -634,10 +619,10 @@ const allArmed = computed(() => {
  *  但下面那条说明照样出——不知道有没有敞口时，同样不该说"攻击面 = 0"）。 */
 const webExposed = computed(() => bundle.value.webExposed ?? 0);
 
-/* 后端 stealth.go 的**七态**必须在这里全部有名字。漏一个的后果不是报错，
-   是那一态在页面上显示成生英文 key + 走兜底的灰色样式——而灰色在本项目里
-   专表「我们不知道」。orphan-ruleset 就漏过一次：它在后端是 fail（全员连不上），
-   在页面上却与「不可判定」同色同形。 */
+/* ★后端 stealth.go 的每一种状态都必须在这里有名字。漏一个的后果不是报错，
+   而是那一态显示成生英文 key + 走兜底的灰色样式——灰色在本项目里专表
+   「我们不知道」，于是一个 fail 态（如 orphan-ruleset：全员连不上）
+   会与「不可判定」同色同形。 */
 const STEALTH_ZH: Record<string, string> = {
   armed: '内核态生效',
   off: '未启用（端口可见）',
@@ -663,7 +648,7 @@ function stealthTagClass(st: string) {
 }
 
 /* triText 三态布尔渲染：undefined = 网关没说过这件事，显示「不可判定」。
-   ★用三元式 `rc.wanted ? 'A' : 'B'` 会把「没上报」渲染成确定结论 B——
+   ★不能写成三元式 `v ? 'A' : 'B'`——那会把「没上报」渲染成确定结论 B，
    同一张卡片上标签写着「网关未上报」，meta 行却并排给出「-pf 未开启 · 非 root」。 */
 function triText(v: boolean | undefined, yes: string, no: string) {
   return v === undefined || v === null ? '不可判定' : v ? yes : no;
@@ -712,7 +697,7 @@ async function load(): Promise<void> {
   }
 }
 
-/* ── 对外接入地址（wave8 行动 4）── */
+/* ── 对外接入地址 ── */
 const acc = reactive({ open: false, busy: false, id: '', lan: '', wan: '', err: '' });
 function openAccess(n: GwNode) {
   Object.assign(acc, { open: true, busy: false, id: n.id, lan: n.lanHost ?? '', wan: n.wanHost ?? '', err: '' });

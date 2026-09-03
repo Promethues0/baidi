@@ -101,7 +101,12 @@ class BaidiVpnService : VpnService() {
             TunnelState.markFailed("数据面引擎未能启动（未返回会话句柄）")
             return START_NOT_STICKY
         }
-        TunnelState.markUp(s)
+        // ★只报「引擎已起」，不报「已接入」。Start 返回只说明 netstack 装起来了、fd 收下了；
+        //   SPA 敲门是引擎起来之后异步做的，可能 403、可能连不上控制面、可能证书不受信任
+        //   （2026-09-03 真机上就是最后这一种：x509 unknown authority）。真正的接入态由
+        //   TunnelState.snapshot() 下发的 ready 位回答，判据在 judgeReady。
+        //   改造前这里调的是 markUp，桥据 stage=='up' 直接回「数据面已就绪」——门没敲开也绿。
+        TunnelState.markEngineUp(s)
         return START_STICKY
     }
 

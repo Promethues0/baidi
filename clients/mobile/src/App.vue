@@ -29,6 +29,15 @@ const router = useRouter();
 // 挂在根组件上弹，是因为中断可能发生在用户停在「应用」「我的」页的时候——那时 Connect.vue 根本没挂载。
 watch(() => session.dropReason, (r) => { if (r) Message.error({ content: '接入已中断：' + r, duration: 6000 }); });
 
+// 「引擎在跑、门没敲开」：**刻意不复用上面那条**——对一次从来没有建立起来的接入弹
+// 「接入已中断」是错的（用户会去找"是谁把我断了"，而其实它一次都没通过）。措辞、颜色、
+// 下一步动作三样都不同：这条是可恢复的中间态（敲门每 15s 自动重试），故用 warning 不用 error。
+// 只在**从空翻成非空**那一次弹：健康行原文每轮改写，逐轮弹会把屏幕刷满，
+// 而常驻的那份在「接入」页上（弹窗一闪而过不算「看见」）。
+watch(() => session.notReady, (r, old) => {
+  if (r && !old) Message.warning({ content: '隧道未就绪：' + r, duration: 6000 });
+});
+
 // webview 重载 / Activity 被系统重建后，原生 VPN 仍在跑而 session.connected 从 false 起算：
 // 挂载时读一次原生真实运行态把它认领回来（读不到就什么都不做）。放在根组件上是因为
 // 重建后落在哪一页取决于路由，而隧道是全局的。

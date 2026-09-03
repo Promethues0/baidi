@@ -24,13 +24,49 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** 控制中心连通性探测（命中 /healthz，免认证）。 */
+/** 连通性探测打的端点。**必须是一条真实的免认证 API**（GET /api/v1/auth/domains：
+ *  控制面 api.go 的免认证白名单里有它，登录页在登录之前就要拿它，回 200 + JSON）。 */
+export const PING_PATH = '/api/v1/auth/domains';
+
+/** 探测超时。见 ping() 里第三条：`location /api/` 的 proxy_read_timeout 是 3600s。 */
+export const PING_TIMEOUT_MS = 5000;
+
+/**
+ * 控制中心连通性探测。
+ *
+ * ★改造前打的是 `origin() + '/healthz'`，在**当时的参考部署上恒为真**：deploy/nginx/baidi.conf
+ *   只有六个 location（`/`、三条登录端点、`/api/`、`/downloads/`），`/healthz` 一条都不匹配，
+ *   于是落进 `location /` 的 `try_files $uri $uri/ /index.html` —— nginx 把 SPA 的 index.html
+ *   回给它，200 OK，`res.ok` 恒 true。**后果：控制面整个停掉，「我的」页照样显示
+ *   「控制中心 连通」**，而那一行正是用户排障时第一眼看的地方。
+ *
+ * ★所以两道判据缺一不可：`res.ok` 挡不住那张 200 的 HTML，故还要**核对 content-type 是 JSON**
+ *   （控制面的 httpx.JSON 一律发 `application/json; charset=utf-8`，SPA 回退发 text/html）。
+ *   这道判据**不因反向代理被修好而多余**：客户端装在别人的网里，前面可能是任何一台
+ *   没跟着改的 nginx / 网关 / 门户回退，而「探测恒绿」这种错法在现场看不出来。
+ *   把结论押在运维配置上，等于把判据交给一个我们既看不见也改不动的地方。
+ *
+ * ★打 auth/domains 而不是 `/healthz`：它免认证（未登录也能探）、无副作用，且走
+ *   `location /api/`——探的是**业务请求真正走的那条路**。代价是那条 location 的
+ *   proxy_read_timeout 是 3600s（管理 API 要长连接），控制面「进程活着但卡死」时
+ *   请求会一直挂着，界面停在「检测中…」——那和假阳性一样坏（用户看不出区别）。
+ *   故这里自带 5s 超时：判不出来就报不可达，绝不无限期地挂着不给结论。
+ */
 export async function ping(): Promise<boolean> {
+  // 用 AbortController 而不是 AbortSignal.timeout：后者在旧安卓 WebView / 老 iOS 上没有，
+  // 而探测失败在那些机器上会变成"永远检测中"，正是这段要消灭的形态。
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
   try {
-    const res = await fetch(origin() + '/healthz', { headers: { Accept: 'application/json' } });
-    return res.ok;
+    const res = await fetch(origin() + PING_PATH, {
+      headers: { Accept: 'application/json' }, signal: ac.signal
+    });
+    if (!res.ok) return false;
+    return (res.headers.get('content-type') || '').toLowerCase().includes('application/json');
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

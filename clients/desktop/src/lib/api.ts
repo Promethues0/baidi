@@ -23,13 +23,43 @@ export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   return (await res.json()) as T;
 }
 
-/** 控制中心连通性探测（真实命中 baidi-control /healthz，开放免认证）。 */
+/** 连通性探测打的端点：一条真实的免认证 API（控制面 api.go 的免认证白名单里有它）。 */
+export const PING_PATH = '/api/v1/auth/domains';
+/** 探测超时。理由见 ping() 第三条：`location /api/` 的 proxy_read_timeout 是 3600s。 */
+export const PING_TIMEOUT_MS = 5000;
+
+/**
+ * 控制中心连通性探测。
+ *
+ * ★改造前打的是 `origin() + '/healthz'` 且**只看 res.ok**，在参考部署上恒为真：
+ *   deploy/nginx/baidi.conf 此前只有六个 location（`/`、三条登录端点、`/api/`、`/downloads/`），
+ *   `/healthz` 一条都不匹配 → 落进 `location /` 的 `try_files … /index.html` → 拿到 200 + SPA 的
+ *   HTML → `res.ok` 为真。**后果：把 baidi-control 停掉，「一键诊断」第一格「控制中心可达」
+ *   照样是绿的**，而那正是排障时第一眼看的地方。移动端 wave10 已修，桌面端当时漏了——
+ *   本仓最高频的那种「纪律只做了一半」。
+ *
+ * ★两道判据缺一不可：`res.ok` 挡不住那张 200 的 HTML，故还要**核对 content-type 是 JSON**。
+ *   这道判据**不因 nginx 被修好而多余**：客户端装在别人的网里，前面可能是任何一台没跟着
+ *   更新的反代（含此刻的在线演示站——它跑的还是没有 /healthz location 的那份配置），
+ *   而"探测恒绿"这种错法在现场看不出来。把结论押在运维配置上，等于把判据交给一个
+ *   我们既看不见也改不动的地方。
+ *
+ * ★自带 5s 超时：`location /api/` 的 proxy_read_timeout 是 3600s（管理 API 要长连接），
+ *   控制面「进程活着但卡死」时请求会一直挂着，诊断页停在「检测中…」——那和假阳性一样坏。
+ */
 export async function ping(): Promise<boolean> {
+  const ac = new AbortController();
+  const timer = setTimeout(() => ac.abort(), PING_TIMEOUT_MS);
   try {
-    const res = await fetch(origin() + '/healthz', { headers: { Accept: 'application/json' } });
-    return res.ok;
+    const res = await fetch(origin() + PING_PATH, {
+      headers: { Accept: 'application/json' }, signal: ac.signal
+    });
+    if (!res.ok) return false;
+    return (res.headers.get('content-type') || '').toLowerCase().includes('application/json');
   } catch {
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

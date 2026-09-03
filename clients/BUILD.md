@@ -1059,9 +1059,50 @@ SELinux 策略，`//go:build android` 那份在这里连编译都不参与，运
    配一个只在 debug 生效的信任配置。**不要**给绑定层加 `-insecure`：那是给数据面开一个
    默认关不掉的口子。
 
-2. **UI 判据仍停在「启动成功即算接入」**（本轮新发现，未修）。同一时刻：
-   桥 `tunnelStatus()` 回 `{"stage":"up"}`、`startTunnel` 回「数据面已就绪」，
+2. ~~**UI 判据仍停在「启动成功即算接入」**~~ —— **已修复，并在同一台真机上验收通过**。
+
+   改前形态：桥 `tunnelStatus()` 回 `{"stage":"up"}`、`startTunnel` 回「数据面已就绪」，
    而健康行是 `knock=false tunnel=false err="取敲门令牌失败：…"`——**引擎起来了、门没敲开，
-   界面却显示已接入**。两处都没说谎，是判据取错了层。桌面端在 wave10 已把接入态改判健康行
-   （见 ARCHITECTURE 第七节「桌面端接入态判据」），移动端这条还没跟上：`TunnelState.markUp`
-   在 `Baidimobile.start` 返回即置 up，没有读 `Session.Running()/Reason()` 与健康行。
+   界面却显示已接入**。两处都没说谎，是判据取错了层：`stage` 说的是「引擎进程在不在跑」，
+   它对「门敲没敲开」一个字都没说，而用户关心的恰恰是后者。
+
+   修法见 docs/ARCHITECTURE.md 第七节「移动端接入态判据」。要点：`stage` 值域**一字不改**，
+   新事实用一个并列的 `ready` 表达（加第五个 stage 值会被 `tunnelwatch.judgeTunnelStatus`
+   顺手并进 failed/idle，进而 `stopTunnel` 把一条每 15s 自动重试、随时可能自愈的隧道真的断掉）。
+
+   **2026-09-03 同机验收（演示站一个字节都没动，仍是自签证书）**：
+   ```
+   stage:"up"  ready:false  healthObserved:true  healthKnock:false
+   healthKnockErr:"取敲门令牌失败：本机不信任控制中心的 HTTPS 证书（按部署脚本装出来的
+                   控制面用的是自签证书）。两条路：把该站点的根证书导入本机受信任的根证书
+                   颁发机构，或给控制中心换一张受信任的证书。不要绕过证书校验。"
+   startTunnel 回执 → {"ok":false,"detail":"接入超时：30 秒内原生侧未确认数据面就绪
+                        （最后读到的阶段：up）；数据面报告：…"}
+   ```
+   同一设备状态，改造前回的是 `{"ok":true,"detail":"数据面已就绪"}`。
+   顺带：那句英文 `x509: certificate signed by unknown authority` 由新增的
+   `knock.ClassifyControlErr` 在**产生点**翻成了说得出下一步的中文，真机上已验证逐字上屏。
+
+   完整 UI 路径同机复验（点大环，不是直接调桥）：大环「已下发 · 未就绪 / ◐ 未就绪 /
+   门未敲开 · 点击断开」，未就绪卡片与「SPA 敲门」那一行都原样转述上面那句话——
+   而那一行改造前是写死的 `<b class="ok">已完成 · 已开放行窗口</b>`。
+
+   ★**从「显示已接入」变成「接入中 → 超时并报原文」不是回退，是正确方向**——
+   但也要说清：判据修好**不代表链路通了**，第 1 条仍然拦着。两件事不许记成一件。
+
+   ★首次复验还量出一个体验缺口并当场修掉：原因要等满 **33 秒**才上屏（桥的启动期轮询
+   必须等满 30s——敲门每 15s 重试，30s 正好覆盖两次，提前判死就把「第二次敲成功」的自愈路堵了，
+   那 30s 不能缩），而数据面 t+1s 就已经把它写进健康行了。出路是接入中**提前转述**已知原因，
+   不改任何状态机：Connect 页在 connecting 窗口内跑一个 1s 的只读短轮询，把
+   `healthKnockErr` 显示在步骤条下面。复验：原因上屏 **t+2s**，大环仍在 t+32s 才转未就绪。
+
+3. **登录过一次之后，下次打开应用内容区是空的**（本轮验收顺带撞出来的**既有**缺陷，已修）。
+   路由用 `createWebHistory`，而壳加载的是 `https://appassets.local/index.html`
+   （`MainActivity.loadUrl` → `WebViewAssetLoader`），于是 vue-router 看到的路径是 `/index.html`，
+   五条路由一条都匹配不上。未登录时 `beforeEach` 会把它重定向去 `/login` 所以完全看不出来；
+   **登录过之后 `authed()` 为真 → 放行 → 解析到一条不存在的路由 → `<router-view>` 渲染空**。
+   真机实测：`location.pathname` = `/index.html`、`#app` 里只有外壳的 1203 字符、
+   `document.body.innerText` 只有「接入/应用/我的」三个 tab。手动点一下 tab 才会好（那是客户端跳转）。
+   影响面不止"少看一页"：`App.vue` 的 `adoptRunningTunnel` 照样跑，但用户看不到任何接入态——
+   一条正在运行的 VPN 在界面上完全不存在，他多半会再点一次接入。
+   修法：`router.ts` 末尾补一条 catch-all `{ path: '/:pathMatch(.*)*', redirect: '/connect' }`。

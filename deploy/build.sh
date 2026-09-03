@@ -80,6 +80,36 @@ for d in limit_req_zone limit_conn_zone 'zone=baidi_login' 'zone=baidi_api' 'lim
     echo "✗ 交付 nginx/baidi.conf 缺少限流指令「${d}」，构建中止（见 docs/charter/wave8.md 行动 16）"; exit 1
   fi
 done
+# 自检：存活探测通路必须在交付件里，且必须是**精确匹配**。
+#
+# ★这道检查就是那条 location 的执行方。没有它，`location = /healthz` 是一行谁删了都
+# 不会有人发现的配置——删掉之后 /healthz 静静地落回 `location /` 的 SPA 回退，
+# 恒回 200 HTML，客户端的「控制中心可达」变成一个**永远为真**的指示灯，
+# 而控制面是死是活在 HTTP 层面再也分不出来（2026-09-03 抓到的正是这个形态）。
+# 一并钉住 `=`：写成前缀匹配 `location /healthz` 语义就变了（/healthzXXX 也命中），
+# 而且更要命的是——SPA 那条也是前缀匹配，两条前缀规则的优先级不是一眼能看出来的东西。
+if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'location[[:space:]]*=[[:space:]]*/healthz'; then
+  echo "✗ 交付 nginx/baidi.conf 缺少精确匹配的 /healthz 反代通路，构建中止"
+  echo "  后果：/healthz 落进 SPA 回退恒回 200，客户端「控制中心可达」变成永真指示灯"
+  exit 1
+fi
+# 同一段里必须真的反代到 control：只有 location 壳子而没有 proxy_pass 的话，
+# nginx 会拿 root 下的静态文件去 try（找不到 → 404），照样与「控制面挂了」分不开。
+# ★必须**限定在该 location 的花括号块内**扫：先前写成「命中 location 后一路往下找
+# proxy_pass」时，它会越过块边界撞上下面 `location /api/` 里的那一行，于是把
+# 「/healthz 只剩个空壳子」判成通过——一道检查不出错误的检查比没有检查更坏
+# （变异检查当场抓到的就是这一条）。先剥注释，避免说明文字里的字样自证。
+if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | awk '
+       /location[[:space:]]*=[[:space:]]*\/healthz/ { f=1; next }
+       f && /^[[:space:]]*}/                        { f=0 }
+       f && /proxy_pass/                            { hit=1 }
+       END { exit !hit }'; then
+  echo "✗ 交付 nginx/baidi.conf 的 /healthz location 里没有 proxy_pass，构建中止"
+  echo "  后果：只有 location 壳子时 nginx 会去 root 下找静态文件，恒 404——"
+  echo "  与「控制面挂了」依旧分不开，只是把假阳性换成了假阴性"
+  exit 1
+fi
+
 # 片段文件必须随包发，且**不能**叫 .conf（conf.d/*.conf 会被 include 进 http{}，
 # 而它全是只能出现在 location 里的 proxy_* 指令 → 整台机器的 nginx 起不来）。
 [ -f "$OUT/nginx/baidi-proxy-api.inc" ] || { echo "✗ 交付件缺少 nginx/baidi-proxy-api.inc，构建中止"; exit 1; }

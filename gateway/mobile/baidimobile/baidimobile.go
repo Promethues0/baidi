@@ -52,11 +52,20 @@ type Config struct {
 
 // Session 运行中的隧道句柄。移动端 UI 轮询 Running()/Reason() 观察终态——
 // 引擎因强制下线/账号禁用而停机时，Reason() 带出可显示的原因（区别于用户主动 Stop）。
+//
+// ★Running() 只说明"引擎那个 goroutine 还在跑"，**不等于接入成功**：门没敲开时它照样为真。
+// 真实接入态看 Health()（见 health.go），那是本波修的那条缺口。
 type Session struct {
 	dev     tun.Device
 	mu      sync.Mutex
 	stopped bool
 	reason  string
+
+	// health 数据面真实健康态（敲门/隧道有没有成功过、最近一次失败是什么）。
+	// ★由 Start 在**引擎起来之前**建好再塞进 dataplane.Config——引擎自己造的话，
+	// 它活在 Run 内部，外面一个字都读不到，那正是「引擎起来了、门没敲开、界面显示已接入」的成因。
+	// 它在引擎停机后仍可读：终态原因不该随引擎一起消失。
+	health *dataplane.HealthState
 }
 
 // markStopped 记录引擎终止。err 非 nil（含被拒）→ 记原因；nil（正常关闭）→ 停机但无原因。
@@ -139,13 +148,15 @@ func Start(tunFd int, c *Config) (*Session, error) {
 		return nil, err
 	}
 
+	health := dataplane.NewHealthState()
 	cfg := &dataplane.Config{
 		SpaAddr: c.SpaAddr, ProxyAddr: c.ProxyAddr, Token: c.Token, Control: c.Control,
 		Gm: c.Gm, TLCPConfig: tlcpCfg, DefaultRes: c.DefaultResource,
 		TunnelPin: c.Pin, Resmap: resmap,
 		Reknock: 15 * time.Second, MTU: mtu,
+		Health: health,
 	}
-	sess := &Session{dev: dev}
+	sess := &Session{dev: dev, health: health}
 	go func() { sess.markStopped(dataplane.Run(dev, cfg)) }()
 	return sess, nil
 }

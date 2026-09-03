@@ -5,7 +5,18 @@
          （已授权的高敏资源直接可访问，未授权的普通资源同样进不去）。 -->
     <div class="m-page__sub">已发布的企业应用 · 未获授权的可提交访问申请</div>
 
-    <div v-if="!session.connected" class="ap__warn"><icon-info-circle /> 未接入企业内网，隧道类应用需先在「接入」开启</div>
+    <!-- 三种「进不去」在这里是两种成因，措辞必须分开：没开隧道要用户去开，
+         开了但门没敲开则开一百次也没用——那条要说清是**敲门失败**并给出原文。 -->
+    <div v-if="session.notReady" class="ap__warn ap__warn--bad">
+      <icon-exclamation-circle-fill /> 隧道已下发但未就绪（{{ session.notReady }}）：隧道类应用暂时访问不到，重开隧道无用
+    </div>
+    <div v-else-if="!session.connected" class="ap__warn"><icon-info-circle /> 未接入企业内网，隧道类应用需先在「接入」开启</div>
+    <!-- 门已敲开、但隧道拨号在失败：**不拦**（可能只是某一个后端不可达），但必须说出来——
+         否则用户点开应用只会看到一个转圈或超时，而真正的原因（指纹不匹配 / 网关没带 -pf /
+         gm 开关不一致）在健康行里躺着没人读。与上面两条互斥：那两条是"进不去"，这条是"进得去但可能拉不通"。 -->
+    <div v-else-if="session.tunnelNote" class="ap__warn ap__warn--bad">
+      <icon-exclamation-circle-fill /> 已接入，但隧道拨号在失败（{{ session.tunnelNote }}）：应用可能打不开，重试即会再拨一次
+    </div>
 
     <div class="ap__grid">
       <button v-for="a in apps" :key="a.id" class="ap__tile" :class="{ locked: !a.accessible }" @click="open(a)">
@@ -46,7 +57,16 @@ function open(a: PortalTile) {
   if (a.degraded) { Message.warning(`「${a.name}」因终端环境不合规已暂停访问，请先修复终端（此状态下申请审批无效）`); return; }
   if (a.unavailable) { Message.warning(`「${a.name}」无法访问，请联系管理员：${a.unavailableReason || '配置缺口'}`); return; }
   if (!a.accessible) { Message.warning(`「${a.name}」你当前未获授权，请到浏览器门户提交访问申请`); return; }
-  if (a.mode === 'tunnel' && !session.connected) { Message.warning('请先在「接入」开启企业内网隧道'); return; }
+  // 闸仍是 fail-closed（门没敲开确实过不去），但「进不去」的第三种成因要单独说：
+  // 隧道开着 ≠ 门敲开了。笼统地说「请先开启隧道」会让用户对着一条已经开着的隧道反复开关。
+  if (a.mode === 'tunnel' && !session.connected) {
+    if (session.notReady) {
+      Message.warning(`隧道已下发但未就绪：${session.notReady}。重开隧道无用，请到「接入」页查看详情`);
+      return;
+    }
+    Message.warning('请先在「接入」开启企业内网隧道');
+    return;
+  }
   // ★三处名字统一成「直连书签」（向导 / 门户 / 这里）：它不经网关、不受访问控制，
   // 叫「全网资源」会让人以为是一种受控发布形态（wave8 行动 14）。
   Message.success(`正在打开「${a.name}」（${a.mode === 'web' ? 'Web 代理' : a.mode === 'global' ? '直连书签 · 不经隧道' : '隧道访问'}）`);
@@ -64,6 +84,9 @@ onMounted(load);
 <style scoped>
 .ap__warn { display: flex; align-items: center; gap: 7px; margin: 14px 0 4px; padding: 10px 12px; font-size: 13px;
   color: var(--bd-warning); background: var(--bd-tag-gold-bg, #FFF7E8); border-radius: 10px; }
+/* 金 = 还有下一步可做（去「接入」开隧道）；红 = 此路不通，开一百次也没用（门没敲开）。
+   与磁贴徽标同一条配色约定。 */
+.ap__warn--bad { color: var(--bd-danger); background: var(--bd-tag-red-bg, #FFECE8); align-items: flex-start; line-height: 1.6; }
 .ap__grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 14px; }
 .ap__tile { position: relative; text-align: left; background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
   padding: 14px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; }

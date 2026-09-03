@@ -9,7 +9,13 @@
     </div>
 
     <div class="m-card pf__list">
-      <div class="pf__row"><span>接入状态</span><b :class="{ ok: session.connected }">{{ session.connected ? '已接入' : '未接入' }}</b></div>
+      <!-- 三态：已接入 / 已下发但未就绪 / 未接入。中间那态改造前显示成「已接入」——
+           而那正是真机上门没敲开、什么都访问不到的那一刻。 -->
+      <div class="pf__row"><span>接入状态</span>
+        <b :class="session.connected ? 'ok' : session.notReady ? 'warn' : ''">
+          {{ session.connected ? '已接入' : session.notReady ? '已下发 · 未就绪' : '未接入' }}
+        </b>
+      </div>
       <div class="pf__row"><span>控制中心</span><b :class="ctlOk === null ? '' : ctlOk ? 'ok' : 'bad'">{{ ctlOk === null ? '检测中…' : ctlOk ? '连通' : '不可达' }}</b></div>
       <div class="pf__row"><span>数据面</span><b>{{ platformLabel() }}</b></div>
       <!-- ★版本号来自构建期注入（package.json），不再手写。手写的字符串必然与真实
@@ -45,8 +51,14 @@
 
     <div class="m-card pf__diag">
       <div class="pf__diag-h"><icon-pulse /> 链路诊断</div>
+      <!-- ★三态而不是二值：探不到（本端壳不报数据面健康态）既不是通过也不是失败。
+           二值渲染只能在两种错法里挑一种——画成红叉会让用户去排查一个不存在的问题，
+           画成绿勾则是替一份根本没读到的健康行背书（本波要消灭的正是后者）。 -->
       <div v-for="d in results" :key="d.k" class="pf__d">
-        <component :is="d.ok ? IconCheckCircleFill : IconCloseCircleFill" :class="['pf__d-ic', d.ok ? 'ok' : 'bad']" />
+        <component
+          :is="d.state === 'na' ? IconQuestionCircleFill : d.state === 'ok' ? IconCheckCircleFill : IconCloseCircleFill"
+          :class="['pf__d-ic', d.state]"
+        />
         <span>{{ d.k }}</span><em>{{ d.v }}</em>
       </div>
       <button class="m-btn m-btn--ghost" :disabled="diaging" @click="diag">{{ diaging ? '检测中…' : '一键诊断' }}</button>
@@ -60,10 +72,10 @@
 import { ref, computed, reactive, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { IconCheckCircleFill, IconCloseCircleFill } from '@arco-design/web-vue/es/icon';
-import { ping, checkClientUpdate, appVersion, type ClientUpdateResp } from '@/lib/api';
+import { IconCheckCircleFill, IconCloseCircleFill, IconQuestionCircleFill } from '@arco-design/web-vue/es/icon';
+import { ping, checkClientUpdate, appVersion, PING_PATH, type ClientUpdateResp } from '@/lib/api';
 import { session, config, saveConfig, validateConfig, logout } from '@/lib/store';
-import { platformLabel, stopTunnel } from '@/lib/vpn';
+import { platformLabel, stopTunnel, tunnelStatus } from '@/lib/vpn';
 
 function onCfg() { saveConfig(); const e = validateConfig(); if (e) Message.warning(e); }
 
@@ -92,7 +104,9 @@ async function checkUpdate() {
   try { upd.value = await checkClientUpdate(plat, appVersion); } catch { /* 静默：见 upd 的注释 */ }
 }
 
-const results = reactive<{ k: string; v: string; ok: boolean }[]>([]);
+/** 自检项。state 三态：ok / bad / **na=不可判定**（不是"失败"，也不是"通过"）。 */
+type DiagState = 'ok' | 'bad' | 'na';
+const results = reactive<{ k: string; v: string; state: DiagState }[]>([]);
 const diaging = ref(false);
 
 async function checkCtl() { ctlOk.value = await ping(); }
@@ -100,9 +114,40 @@ async function checkCtl() { ctlOk.value = await ping(); }
 async function diag() {
   diaging.value = true; results.length = 0;
   const ok = await ping();
-  results.push({ k: '控制中心 /healthz', v: ok ? '连通' : '不可达', ok });
-  results.push({ k: '身份令牌', v: session.token ? '有效' : '缺失', ok: !!session.token });
-  results.push({ k: '隧道接入', v: session.connected ? '已建立' : '未接入', ok: session.connected });
+  results.push({ k: '控制中心 ' + PING_PATH, v: ok ? '连通（回 JSON）' : '不可达', state: ok ? 'ok' : 'bad' });
+  results.push({ k: '身份令牌', v: session.token ? '有效' : '缺失', state: session.token ? 'ok' : 'bad' });
+
+  // ★数据面的三行**必须现算**，不能读 session.connected：那是 UI 的结论，
+  //   而这一栏存在的意义正是"UI 的结论对不对"。真机上二者曾经相反（UI 说已接入、
+  //   健康行说 knock=false），只读 UI 结论的自检把那次错判整段掩盖掉了。
+  const s = tunnelStatus();
+  if (!s) {
+    results.push({ k: '数据面运行态', v: '不可判定（本端壳未提供运行态接口）', state: 'na' });
+  } else {
+    const running = s.stage === 'up' || s.stage === 'starting';
+    results.push({
+      k: '数据面运行态',
+      v: `stage=${s.stage}` + (s.reason?.trim() ? ` · ${s.reason.trim()}` : ''),
+      state: running ? 'ok' : 'bad'
+    });
+    const three = (v: unknown, okText: string, badText: string): { v: string; state: DiagState } =>
+      (s.healthObserved !== true || typeof v !== 'boolean')
+        ? { v: '不可判定（本端未报告数据面健康状态）', state: 'na' }
+        : v ? { v: okText, state: 'ok' } : { v: badText, state: 'bad' };
+    results.push({ k: 'SPA 敲门', ...three(s.healthKnock, '成功 · 放行窗口已开', '失败') });
+    // tunnel 是**粘性位**：用户打开第一个应用之前它恒 false，那是健康的空闲态而不是故障，
+    // 所以文案不能写「隧道不通」（桌面端在这上面踩过，见 ARCHITECTURE 第七节边界①）。
+    results.push({ k: '业务隧道', ...three(s.healthTunnel, '已拨通过业务连接', '尚无业务连接拨通（未必是故障：首次访问应用前恒为此值）') });
+    const err = (s.healthErr || '').trim();
+    const kerr = (s.healthKnockErr || '').trim();
+    const terr = (s.healthTunnelErr || '').trim();
+    if (s.healthObserved !== true) {
+      results.push({ k: '健康行错误', v: '不可判定（尚未读到健康回报）', state: 'na' });
+    } else {
+      const detail = [kerr && '敲门：' + kerr, terr && '隧道：' + terr, !kerr && !terr && err].filter(Boolean).join(' / ');
+      results.push({ k: '健康行错误', v: detail || '无', state: detail ? 'bad' : 'ok' });
+    }
+  }
   diaging.value = false;
 }
 
@@ -111,8 +156,24 @@ async function diag() {
    会话令牌保活续窗（-reknock 15s），网关按那个账号鉴权并写审计，而系统状态栏上
    那把 VPN 钥匙还亮着——下一个人登录后用的仍是前一个人的授权。
    断不开就**不登出**：否则回到"UI 说没登录、数据面还以他的身份在跑"。 */
+
+/**
+ * 「数据面此刻还在不在跑」——登出守卫的唯一判据。
+ *
+ * ★改造前守卫是 `if (session.connected)`，而 wave10 之后 connected 表达的是**门敲开没有**：
+ *   未就绪态下它是 false，于是登出会跳过 stopTunnel，把一条仍以上一个账号每 15s 保活续窗的
+ *   VpnService 留在系统里——正是上面那段注释要防的事，只是换成了"判据自己变了"这种发生法。
+ *
+ * ★读不到原生运行态时回落到 session.connected，并且两者取**或**：多断一次没有代价
+ *   （stopTunnel 幂等，原生侧本就没在跑时是空动作），少断一次的代价见上。
+ */
+function dataplaneRunning(): boolean {
+  const s = tunnelStatus();
+  return (!!s && (s.stage === 'starting' || s.stage === 'up')) || session.connected;
+}
+
 async function doLogout() {
-  if (session.connected) {
+  if (dataplaneRunning()) {
     try {
       await stopTunnel();
     } catch (e) {
@@ -146,6 +207,7 @@ onMounted(() => { void checkCtl(); void checkUpdate(); });
 .pf__row b { color: var(--bd-t1); font-weight: 600; }
 .pf__row b.ok { color: var(--bd-success); }
 .pf__row b.bad { color: var(--bd-danger); }
+.pf__row b.warn { color: var(--bd-warning); }
 .pf__cfg { margin-bottom: 14px; }
 .pf__cfg-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--bd-t1); margin-bottom: 12px; }
 .pf__f { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
@@ -155,9 +217,12 @@ onMounted(() => { void checkCtl(); void checkUpdate(); });
 .pf__cfg-note { font-size: 11px; color: var(--bd-t3); line-height: 1.6; margin-top: 2px; }
 .pf__diag { margin-bottom: 16px; }
 .pf__diag-h { display: flex; align-items: center; gap: 6px; font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
-.pf__d { display: flex; align-items: center; gap: 8px; padding: 7px 0; font-size: 13px; color: var(--bd-t2); }
-.pf__d em { font-style: normal; margin-left: auto; color: var(--bd-t3); }
-.pf__d-ic { font-size: 16px; }
+.pf__d { display: flex; align-items: flex-start; gap: 8px; padding: 7px 0; font-size: 13px; color: var(--bd-t2); line-height: 1.5; }
+.pf__d > span { flex: none; }
+.pf__d em { font-style: normal; margin-left: auto; color: var(--bd-t3); text-align: right; word-break: break-all; }
+.pf__d-ic { font-size: 16px; flex: none; margin-top: 1px; }
 .pf__d-ic.ok { color: var(--bd-success); }
 .pf__d-ic.bad { color: var(--bd-danger); }
+/* 不可判定用中性灰：颜色也是一种断言，探不到时不该表态（与 Connect 页 b.na 同一条约定）。 */
+.pf__d-ic.na { color: var(--bd-t3); }
 </style>

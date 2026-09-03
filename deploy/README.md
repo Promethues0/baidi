@@ -7,10 +7,17 @@ appliance 式单机部署：`baidi-control`（Go 单二进制，监听 127.0.0.1
 
 ```
 浏览器 ──HTTPS──> nginx(:443) ──┬─ /            → @PREFIX@/web（SPA：管理台 + /portal/*）
+                                ├─ /healthz     → 127.0.0.1:8090（存活探测，精确匹配、免认证）
                                 ├─ /api/        → 127.0.0.1:8090（baidi-control）
                                 │                      └─ SQLite @PREFIX@/data/baidi.db
                                 └─ /downloads/  → control 白名单分发客户端安装包（产物先跑 clients/build-artifacts.sh 汇集）
 ```
+
+★`/healthz` 这条必须是**精确匹配**（`location = /healthz`），而且必须真的 `proxy_pass` 到 control。
+少了它，`/healthz` 会落进第一条的 SPA history 回退恒回 200 HTML，于是「控制面整个停掉」与
+「控制面健康」在 HTTP 层面完全同形——客户端那格「控制中心可达」就成了永真指示灯。
+控制面不在时这条通路回 502（本站刻意不设 `error_page`，给它加 5xx 兜底会把这条改回恒 200）。
+`build.sh` 有构建期自检守着这两点，删掉任何一半都当场红。
 
 ## 产物布局（_out/ 与服务器 @PREFIX@）
 
@@ -187,7 +194,14 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 
 ## 生产化清单（上线前）
 
-- [ ] `etc/tls` 换正式证书（替换自签）
+- [ ] `etc/tls` 换正式证书（替换自签）——**自签不是"能凑合用"，是每个客户端第一次接入必然失败**：
+      桌面端登录在 TLS 握手阶段就断（拿不到 HTTP 状态码，界面显示成"网络错误"）、移动端 WebView 拒绝加载、
+      数据面报 `x509: certificate signed by unknown authority` 而隧道进程本身是起着的。
+      裸 IP 部署拿不到公共 CA 证书，只能走第二条路：把 `etc/tls/server.crt` 当信任锚分发给客户端，
+      代价是它带 `CA:TRUE`（导入系统信任库 = 信任它今后签发的任意证书）。指纹核对：
+      `openssl x509 -in <crt> -outform der | openssl dgst -sha256`。
+      ★这个指纹与**隧道钉扎**无关：那是网关自签的另一张证书，指纹由网关上报、经接入剖面自动下发，不需人工填。
+      `install-remote.sh` 每次部署都会当面把这段告警打出来（含 SAN 与本次 `PUBLIC_HOST` 是否一致）。
 - [ ] `etc/keys/` 与 `etc/pki/` 已生成且 0700；**私钥绝不下发给网关**（网关只拿 `knock.pub` / `web.pub` 两把公钥与自己的客户端证书）
 - [ ] 网关证书可随时吊销：`POST /api/v1/pki/gateway-certs/{fingerprint}/revoke`（指纹白名单是执行点，下次握手即被拒）
 - [ ] 备份 `etc/keys/` 与 `etc/pki/`：**丢了这两个目录，所有已分发公钥的网关会全部拒绝敲门**，且日志只显示「令牌无效」而非「密钥换了」

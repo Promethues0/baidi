@@ -23,7 +23,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unicode"
 
 	"gitee.com/Trisia/gotlcp/tlcp"
 	"github.com/emmansun/gmsm/smx509"
@@ -87,6 +86,15 @@ type Config struct {
 	// 严格模式下表现为"批了也连不上"，而两边日志都完全正常。
 	// 空 = 不上报指纹：观察模式照常放行并留痕，严格模式拒（fail-closed）。
 	Device string
+
+	// Health 健康状态载体（见 health.go）。**nil = 引擎自建**，调用方行为逐字不变。
+	//
+	// ★它存在的唯一理由：调用方要在 Run 之外读到「敲门有没有成功过、最近一次失败是什么」。
+	// 桌面端从日志行里捞（Rust 壳读 stdout 尾巴），移动端是同进程调用、根本没有那条管道，
+	// 于是此前只能靠"Start 返回了没有"判接入——2026-09-03 安卓真机上正是这样：
+	// 引擎起来了、门没敲开（控制面 HTTPS 证书不受信任），界面却显示「已接入」。
+	// 传进来的这份状态在 Run 结束后仍可读（终态原因不会随引擎一起消失）。
+	Health *HealthState
 }
 
 // Run 启动数据面，阻塞直到 dev 关闭/出错（关闭 dev 即可优雅停止）。
@@ -255,186 +263,26 @@ type tunneler struct {
 	deny     chan error // control 定性拒绝（403：强制下线/账号禁用）单次上报，供 Run 停机
 	denyOnce sync.Once
 
-	// ── 真实健康状态（供客户端展示，见 logHealth）──
-	//
-	// ★接入页此前把「已接入 / 数据面就绪」与「SPA 敲门保活」判成两行**启动日志**的存在
-	// （`/数据面就绪/.test(log)` 与 `/敲门保活/.test(log)`），而那两行分别打印于
-	// 任何一次 knock 与任何一次拨号**之前**——纯粹是"netstack 装好了""ticker 起来了"。
-	// 于是三类真实故障在界面上完全看不见：全部落点拨不通、gm 开关与网关不一致导致
-	// 握手 100% 失败、以及指纹钉扎失败（判定为"疑似中间人"）——界面一律绿色「已接入」。
-	// 现在改成按**真实事件**回报：敲门有没有成功过、隧道有没有拨通过、最近一次失败是什么。
-	//
-	// ★失败原因**按类别分记**（wave10）：此前只有一个 lastErr，markKnock 与 markTunnel 都不分类别地清空它，
-	// 而保活敲门每 15s 成功一次——「网关证书指纹不匹配（疑似中间人）」这类隧道拨号失败在健康行里最多挂 15s
-	// 就被一次与它无关的敲门成功擦掉，TS 侧只能靠粘性提示条兜底（见 docs/ARCHITECTURE.md 第七节
-	// 「桌面端接入态判据」边界①）。现在敲门成功只清 knockErr、隧道拨通只清 tunnelErr。
-	hmu        sync.Mutex
-	knockOK    bool      // 至少成功发出过一次 SPA 敲门包
-	tunnelOK   bool      // 至少成功拨通过一次隧道
-	knockErr   string    // 最近一次**敲门类**失败（取令牌 / SPA 拨号），敲门成功即清
-	tunnelErr  string    // 最近一次**隧道类**失败（落点拨不通 / 握手失败 / 指纹不匹配…），隧道拨通即清
-	lastClass  failClass // 最近一次被 mark* 触碰的类别（err= 键按它取值，见 logHealth）
-	lastHealth string    // 上一次打印的健康行，用于去重（每条流都打会把日志冲爆）
-}
-
-// failClass 是健康状态里失败原因的类别：敲门类 / 隧道类。
-type failClass uint8
-
-const (
-	classKnock  failClass = iota // 取敲门令牌 / SPA 拨号
-	classTunnel                  // 隧道落点拨号 / 握手 / 指纹钉扎
-)
-
-// 健康行的固定前缀。客户端（tunnel.ts）按它解析，改这里要同步改那边的正则。
-//
-// ★健康行契约（键序即契约，客户端 `tunnel.ts parseHealth` 按键名解析）：
-// `数据面健康 knock=<bool> tunnel=<bool> terr=<str> err=<str>`
-// · knock / tunnel：粘性位，「曾」成功过（tunnel 只在业务流真拨通时置位，Run 启动期不预拨）。
-// · err：**语义与拆分前逐字一致**——最近一次被触碰的那一类的当前错误：任何一次失败把它设成该原因，
-// 任何一次成功（含每 15s 的保活敲门）把它清成 `-`。旧 TS 按 `ready = knock ∧ err 为空` 判接入态，
-// 这个键必须保持这个语义：若让隧道类失败在 err 里粘住，旧 TS 会在一次瞬时拨号失败后把 `ready`
-// 卡成 false → 应用页拒绝「访问」→ 永远产生不出下一条流去清它（就是边界①里写过的那种死锁）。
-// · terr（wave10 新增）：**隧道类**最近一次失败，只被隧道拨通清掉、敲门成功碰不到它——持续性的
-// 「指纹不匹配 / 落点拨不通 / gm 开关不一致」告警靠它稳定在界面上。为空时同样写 `-`。
-// · ★terr 必须排在 err **之前**：parseHealth 对 err 取的是 `err=` 之后到行尾的全部（值是含空格与中文标点
-// 的自由文本，slog 可能加引号也可能不加），排在后面会被旧 TS 当成 err 值的一部分吞掉。
-// `terr=` 前面是字母 t 不是空白，不会被 `(?:^|\s)err=` 误配。
-// · ★值域由 `sanitizeReason` 统一消毒（wave10）：失败原因里**结构性地不可能**出现
-// `<空白><名字>=`——否则 terr 值里塞一个 ` err=` 就能把旧 TS 的字段起点抢到自己身上，
-// 而那段文本可以是对端可控的（见 sanitizeReason 上方的实测说明）。
-// TS 侧的 parseHealth 容忍未知键，故老壳/老 TS 读新行照旧只认 err；新 TS **已消费** terr
-// （`TunHealth.terr` 三态：键缺席=不可判定 / `-`=隧道类无失败 / 非空=仍挂着），用它判隧道类失败是否真恢复。
-const healthPrefix = "数据面健康"
-
-// logHealth 打一行结构固定的健康状态，供客户端解析真实接入态。
-//
-// ★与「网关落点」那行同一条纪律（见 tunnel.ts 对 endpoint 字段的说明）：只在**状态变化**时打，
-// 否则每条流一行会把 4000 字节的日志尾巴瞬间冲满，反而把该看的信息挤出窗口。
-//
-// ★状态字段必须在锁内**快照成局部变量**再打日志。此前 `slog.Info` 那行是在解锁之后
-// 直接读 `t.knockOK / t.tunnelOK / t.lastErr`——`knock()` 对每个落点各起一个 goroutine
-// 并发调 markKnock/markFail，于是 A 在锁外打日志时 B 正在锁内改字段，`-race` 报 data race
-// （CI 约 2/5 间歇红）。这不是授权/信任链上的竞态，只是日志行的撕裂读：去重比的是 `line`，
-// 真打出去的却可能是另一个更新的状态，两者对不上号。快照之后打出去的恒等于去重那一份。
-func (t *tunneler) logHealth() {
-	t.hmu.Lock()
-	knock, tunnel := t.knockOK, t.tunnelOK
-	terrStr, errStr := orNone(t.tunnelErr), orNone(t.currentErrLocked())
-	line := fmt.Sprintf("knock=%t tunnel=%t terr=%s err=%s", knock, tunnel, terrStr, errStr)
-	if line == t.lastHealth {
-		t.hmu.Unlock()
-		return
-	}
-	t.lastHealth = line
-	t.hmu.Unlock()
-	slog.Info(healthPrefix, "knock", knock, "tunnel", tunnel, "terr", terrStr, "err", errStr)
-}
-
-// currentErrLocked 是 `err=` 键的取值：最近一次被触碰的那一类的当前错误（须持 hmu）。
-// 这正好复现拆分前单个 lastErr 的语义——任何失败设成该原因、任何成功清空——
-// 而不必再留第三个字段（见 healthPrefix 上方的契约说明）。
-func (t *tunneler) currentErrLocked() string {
-	if t.lastClass == classTunnel {
-		return t.tunnelErr
-	}
-	return t.knockErr
-}
-
-func orNone(s string) string {
-	if s == "" {
-		return "-"
-	}
-	return s
-}
-
-// markKnock / markTunnel / markKnockFail / markTunnelFail 记录真实事件。
-// 成功只清掉**同类**上一次的错误——留着会让一次早已恢复的瞬时失败永远挂在界面上；
-// 清到别的类头上则会让一次与之无关的成功擦掉一条还在持续的告警（见 tunneler 字段注释）。
-func (t *tunneler) markKnock() {
-	t.hmu.Lock()
-	t.knockOK, t.knockErr, t.lastClass = true, "", classKnock
-	t.hmu.Unlock()
-	t.logHealth()
-}
-
-func (t *tunneler) markTunnel() {
-	t.hmu.Lock()
-	t.tunnelOK, t.tunnelErr, t.lastClass = true, "", classTunnel
-	t.hmu.Unlock()
-	t.logHealth()
-}
-
-func (t *tunneler) markKnockFail(reason string) {
-	reason = sanitizeReason(reason)
-	t.hmu.Lock()
-	t.knockErr, t.lastClass = reason, classKnock
-	t.hmu.Unlock()
-	t.logHealth()
-}
-
-func (t *tunneler) markTunnelFail(reason string) {
-	reason = sanitizeReason(reason)
-	t.hmu.Lock()
-	t.tunnelErr, t.lastClass = reason, classTunnel
-	t.hmu.Unlock()
-	t.logHealth()
-}
-
-// healthReasonMax 是健康行里单条失败原因的字符（rune）上限。
-// 对端可控文本同样可以很长，而健康行整条纪律就是别把 4000 字节的日志尾巴冲掉
-// （Rust 壳只从日志尾巴里捞最后一条健康行）。
-const healthReasonMax = 200
-
-// sanitizeReason 把失败原因折成「一行、无裸 `=`、有长度上限」的文本，是健康行值域的唯一消毒口。
-//
-// ★为什么必须有这道纵深：`markTunnelFail` 的 reason 直接来自 `dialEndpoint` 的 error，
-// 而那条 error 能带上**对端可控的原文**——中间人出示一张 SAN 里塞了
-// `http://a b err=网关一切正常` 的证书，crypto/tls 在 ParseCertificate 阶段就会把它拼进错误
-// （`x509: cannot parse URI %q: …`，Go 1.26 实测），一路进到 `terr=`。健康行是
-// `knock= tunnel= terr= err=`，而客户端 `tunnel.ts parseHealth` 用 `(?:^|\s)err=(.*)$` 取行尾：
-// **最左**那个 ` err=`——落在 terr 值里的那个——会被当成字段起点，于是界面上「失败原因」
-// 头几个字变成攻击者写的话（真实原因被推到后面）。它不会把 `ready` 翻绿（行尾还有真正的
-// `err=`，取到的值非空），但正被钉扎拦下的中间人能替我们给用户写提示语。
-// TS 侧的根治是带引号感知的分词，这里做的是数据面侧的纵深：**值里结构性地不可能出现
-// `<空白><名字>=` 这种字段起始形态**。
-//
-// 三条规则：
-//   - 所有空白（含换行/制表）折成单个 ASCII 空格并 trim——换行会让按行解析的消费方
-//     直接把一行劈成两行（TextHandler 会转义，但这个判据不该依赖谁挑了哪个 handler）；
-//   - ASCII `=` 一律换成全角 `＝`。**刻意不按键名清单匹配**：按清单写的话，下次给健康行加一个键
-//     就会静默地把洞开回来（本仓最常见的「纪律只做了一半」）。合法 reason 里本来就不含 `=`
-//     ——取令牌失败 / SPA 拨号失败 / 指纹不匹配三类都没有，故这条规则的实际代价是零。
-//   - 超过 healthReasonMax 个字符**可见地**截断（截断必须看得见，否则读的人不知道话没说完）。
-func sanitizeReason(reason string) string {
-	// ①折空白（行首行尾的直接吃掉，中间的折成一个 ASCII 空格）+ ②换裸 `=`
-	out := make([]rune, 0, len(reason))
-	space := false // 上一段是否吃掉过空白，且前面已经有内容
-	for _, r := range reason {
-		if unicode.IsSpace(r) {
-			space = len(out) > 0
-			continue
-		}
-		if space {
-			out = append(out, ' ')
-			space = false
-		}
-		if r == '=' {
-			r = '＝'
-		}
-		out = append(out, r)
-	}
-	// ③可见截断
-	if len(out) > healthReasonMax {
-		return string(out[:healthReasonMax]) + "…（原因过长已截断）"
-	}
-	return string(out)
+	// ── 真实健康状态（供客户端展示与移动端绑定层读取）──
+	// 状态本体搬去 health.go 的 HealthState（那里有完整的来龙去脉）。这里用**内嵌指针**，
+	// 于是 t.markKnock() / t.knockOK 这些既有写法一字不改地继续可用；而同一份状态又能
+	// 由调用方经 Config.Health 先建好、Run 之外读到（移动端接入态判据的唯一来源）。
+	*HealthState
 }
 
 // newTunneler 是构造 tunneler 的**唯一**入口：落点选择器必须随之建好。
 // 直接用结构体字面量构造的话，漏掉 pick 会在第一次敲门/拨号时空指针崩溃，
 // 而那是运行期才出现的路径（编译期一点提示都没有）。
 func newTunneler(cfg *Config) *tunneler {
-	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1)}
+	// ★cfg.Health 为 nil 时自建：baidi-tun 与既有调用方一个字都不用改，行为逐字不变
+	// （它们本来就只从日志行读健康态）。只有需要在 Run 之外读状态的调用方（移动端绑定层）
+	// 才自己 NewHealthState 再塞进来——那份指针必须**先于 Run 存在**，否则又回到
+	// 「引擎起来了但外面拿不到真实健康态」的老形态。
+	h := cfg.Health
+	if h == nil {
+		h = NewHealthState()
+	}
+	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1), HealthState: h}
 }
 
 // knock 向**全部**落点各发一次 SPA 敲门：逐个向 control 换取短时效一次性令牌

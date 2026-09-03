@@ -58,8 +58,12 @@ class MainActivity : Activity() {
             stopService(Intent(this@MainActivity, BaidiVpnService::class.java))
             TunnelState.markStopped()
         }
-        /** 当前**真实**运行态，JSON：{"stage":"idle|starting|up|failed","reason":"..."}。
-         *  UI 轮询它来判断接入是否成功——而不是像改造前那样在 600ms 后假定成功。 */
+        /** 当前**真实**运行态，JSON：
+         *  `{"stage":"idle|starting|up|failed","reason":"...", ready?, health*?}`。
+         *  UI 轮询它来判断接入是否成功——而不是像改造前那样在 600ms 后假定成功。
+         *
+         *  ★stage 只回答「引擎在不在跑」，`ready` 才回答「门敲没敲开」；后者**整组键在
+         *  不可判定时缺席**（键的完整清单与理由见 TunnelState.snapshot 的注释）。 */
         @JavascriptInterface fun tunnelStatus(): String = TunnelState.snapshot()
     }
 
@@ -91,6 +95,14 @@ class MainActivity : Activity() {
         //   直到引擎确认在跑（up）、或明确失败（failed）、或超时。
         //   改造前那种写法会让「用户拒绝 VPN 授权 / TUN 建不出 / 引擎起不来 / 网关连不上」
         //   全都显示成「已接入企业内网」——移动端最严重的一处静默失效。
+        // ★wave10：成功的判据从 `stage === 'up'` 换成 `ready === true`。
+        //   2026-09-03 安卓真机（OPPO PKU110 / Android 16）实测，同一时刻这里 resolve
+        //   「数据面已就绪」，而 Go 健康行是 knock=false err="取敲门令牌失败：… x509:
+        //   certificate signed by unknown authority"——**引擎起来了、门没敲开，界面显示已接入**。
+        //   stage=='up' 只证明 netstack 装起来了，它对敲门一个字都没说。
+        //   下面 `ready === undefined` 那一支是**旧壳回落**：健康态不可判定时（老 .aar /
+        //   iOS / 鸿蒙壳）逐字保留旧判据，行为一字不变——不这么写的话，任何一版拿不到
+        //   健康行的壳都会停在这里直到 30s 超时，而它们此前是能正常接入的。
         // ★tunnelStatus 解析不出来时回 **null（不可判定）**，绝不合成一个 stage=failed 的状态。
         //   改造前那句合成把「读不到状态」塌缩成「确定失败」，后果不是少显示一条信息而是**反向动作**：
         //   接入后 vpn.ts 每 2s 读一次同一个方法（startTunnelWatch），拿到 failed 就判成中断——
@@ -109,20 +121,34 @@ class MainActivity : Activity() {
                 return new Promise((resolve) => {
                   const t0 = Date.now();
                   let last = '';
+                  let lastWhy = '';
                   const tick = () => {
                     const s = window.__BAIDI_NATIVE__.tunnelStatus();
                     // s 为 null = 这一轮读不到：**继续等**。授权对话框还开着时读不到状态是常态，
                     // 判成失败会让一次正常接入在用户点「允许」之前就被判死。
                     if (s) {
                       last = s.stage;
-                      if (s.stage === 'up') return resolve({ ok: true, detail: '数据面已就绪' });
+                      // 原生已知的未就绪原因（健康行原文，例如那句 x509）。只记不判：
+                      // 门每 15s 自动重试，随时可能自愈，这一轮有原因不代表这次接入失败。
+                      lastWhy = s.healthKnockErr || s.healthErr || '';  // knockErr 优先：挡住门的就是它那一格，与 notReadyReason 同序
+                      if (s.ready === true) return resolve({ ok: true, detail: '数据面已就绪' });
+                      // 旧壳回落：ready 键**缺席**才走旧判据。必须判 undefined 而不是 falsy——
+                      // ready === false 是「引擎在跑、门没敲开」，它要继续等（等自愈或等超时把
+                      // 原因带出去），当成"没有这个键"就又变回了改造前那句无依据的「已就绪」。
+                      if (s.ready === undefined && s.stage === 'up')
+                        return resolve({ ok: true, detail: '数据面已就绪' });
                       if (s.stage === 'failed') return resolve({ ok: false, detail: s.reason || '接入失败' });
                     }
                     // 超时只报**观测到的事实**，不猜成因：授权被拒现在由 onActivityResult 当场
                     // markFailed（上面 failed 分支即刻拿到真实原因），这里再猜一句「是否未授权」只会误导。
+                    // ★带上 lastWhy 与这条纪律不冲突：**转述原生已经知道的原因 ≠ 替它猜一个成因**。
+                    //   猜的是「大概是没授权吧」这种本地推断；lastWhy 是数据面自己写下的那句话
+                    //   （「本机不信任控制中心的 HTTPS 证书…把根证书导入…」），而这一行就是它
+                    //   **第一次能上到界面**——改造前它只活在 logcat 里，用户面前只有「接入超时」。
                     if (Date.now() - t0 > 30000)
                       return resolve({ ok: false, detail: last
-                        ? '接入超时：30 秒内原生侧未确认隧道建立（最后读到的阶段：' + last + '）'
+                        ? '接入超时：30 秒内原生侧未确认数据面就绪（最后读到的阶段：' + last + '）'
+                          + (lastWhy ? '；数据面报告：' + lastWhy : '')
                         : '接入超时：30 秒内读不到原生运行态（桥返回的状态无法解析）' });
                     setTimeout(tick, 400);
                   };

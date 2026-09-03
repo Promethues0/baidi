@@ -702,6 +702,103 @@ if [ "${PUBLIC_ORIGIN:-*}" = "*" ]; then
 else
   echo "  ✓ CORS 白名单：$PUBLIC_ORIGIN"
 fi
+# ── 控制台 TLS 证书姿态：自签必须当面告警 ──
+#
+# 与内核态隐身 / 首登改密 / CORS 同一条纪律：默认值就是绝大多数部署的真实姿态，
+# 不能让它沉默地留在机器上。
+#
+# ★改造前这里一个字都没有——上面签发那段只说了一句「已生成自签 TLS 证书」，
+#   而「自签」这个词对没踩过的人不传达任何后果。真实后果是**每一个客户端第一次接入
+#   必然失败**，且三端的失败形态互不相同、报错文案毫无共同点，看起来像三个不相干的
+#   bug（2026-09-03 安卓真机那一次，最终落到「取敲门令牌失败：x509: certificate
+#   signed by unknown authority」，而隧道进程本身是起着的）。
+#
+# 判据用 subject == issuer：这只认得出**自签**。外部 CA 签发的会走 else 分支，但那句话
+# 只敢说「不是自签」，不敢说「客户端一定信任」——私有 CA 签的证书同样要分发信任锚。
+if [ -f "$BD_PREFIX/etc/tls/server.crt" ] && command -v openssl >/dev/null 2>&1; then
+  # ★每条命令替换都必须兜 `|| true`：本文件顶部是 `set -euo pipefail`，而这四条管道里
+  #   openssl 与 grep 都会在「正常但没东西可读」时返回非零（无 SAN 扩展的证书、不认 -ext 的
+  #   LibreSSL、证书不是 PEM…）。不兜的话赋值语句本身非零 → 脚本**当场静默退出 1**：
+  #   此刻服务其实已经装完并起来了，而下面的摘要、演示账号、回滚命令一行都打不出来，
+  #   deploy.sh 把一次成功的部署报成失败，operator 手上零线索。
+  #   同一个坑本文件此前已在第 255 / 644 行各踩过一次并留了注释，这是第三次。
+  crt_subj="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -subject 2>/dev/null | sed 's/^subject=[[:space:]]*//' || true)"
+  crt_iss="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -issuer  2>/dev/null | sed 's/^issuer=[[:space:]]*//' || true)"
+  # SAN 取值走两条路：`-ext` 是 OpenSSL 1.1+ 才有的选项，而不少机器（含 macOS 自带的
+  # LibreSSL）没有它——只用 `-ext` 的话 crt_san 会静默为空，下面那道 SAN 检查就**永远
+  # 不会触发**，而部署输出里看不出它没跑过。回退到 `-text` 解析同一段扩展。
+  crt_san="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -ext subjectAltName 2>/dev/null \
+             | grep -v 'X509v3' | tr -d ' \n' || true)"
+  if [ -z "$crt_san" ]; then
+    crt_san="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -text 2>/dev/null \
+               | grep -A1 'Subject Alternative Name' | tail -n1 | tr -d ' \n' || true)"
+  fi
+  if [ -n "$crt_subj" ] && [ "$crt_subj" = "$crt_iss" ]; then
+    echo ""
+    echo "  ⚠ 控制台 TLS 证书是**自签**的（subject = issuer = ${crt_subj}）"
+    echo "    这不是「先放着、以后再说」的事项：自签 = 每一个客户端第一次接入必然失败，"
+    echo "    而三端的失败形态互不相同，很容易被当成三个不相干的问题各查一轮："
+    echo "      · 桌面客户端：登录直接失败——fetch 在 TLS 握手阶段就断，拿不到任何 HTTP 状态码，"
+    echo "        界面上表现为「网络错误」而不是「证书不受信」"
+    echo "      · 移动端：WebView 拒绝加载控制台页面 / 拒绝发起 API 请求（安卓默认不给绕过入口）"
+    echo "      · 数据面：baidi-tun 取敲门令牌报 x509: certificate signed by unknown authority，"
+    echo "        而此刻隧道进程本身是起着的——「引擎在跑、门没敲开」正是最难自查的一种"
+    echo "    ★不要为此去找「跳过证书校验」的开关：白帝没有，也不会加。"
+    echo "      那等于把零信任的第一道链路信任交给攻击者，且一旦加上就再也拆不掉。"
+    echo "    两条出路，二选一："
+    echo "      ① 换受信证书（生产推荐）：把正式证书与私钥覆盖到"
+    echo "         ${BD_PREFIX}/etc/tls/server.crt 与 ${BD_PREFIX}/etc/tls/server.key（私钥须 0600），"
+    echo "         然后 nginx -t && systemctl reload nginx。需要一个真实域名——"
+    echo "         裸 IP 拿不到公共 CA 签发的证书，本机若是 IP 部署，这条路走不通。"
+    echo "      ② 把这张证书作为**信任锚**分发给客户端（内网 / 演示常用）："
+    echo "         分发 ${BD_PREFIX}/etc/tls/server.crt，逐端导入系统或应用的信任库。"
+    echo "         ★代价要说清：openssl req -x509 生成的这张证书带 basicConstraints CA:TRUE，"
+    echo "           把它装进系统信任库 = 信任它今后签发的**任意**证书。装进个人办公机前想清楚，"
+    echo "           这也是为什么 ① 才是生产姿态。"
+    echo "    证书指纹（分发前逐字符核对；照抄一个没核过的值等于给任意中间人盖章）："
+    echo "      openssl x509 -in ${BD_PREFIX}/etc/tls/server.crt -noout -fingerprint -sha256"
+    echo "      openssl x509 -in ${BD_PREFIX}/etc/tls/server.crt -outform der | openssl dgst -sha256"
+    echo "      （前者带冒号大写，后者是小写无冒号形态；两者是同一个值的两种写法）"
+    echo "    ★这个指纹**不要**填到隧道钉扎那里：那是另一张证书（网关启动期自签的隧道证书），"
+    echo "      它的指纹由网关随心跳上报、经客户端接入剖面自动下发，不需要人工填。"
+    echo "      两套信任材料互不通用，混填的症状是隧道永远握不上手而控制台一切正常。"
+    echo ""
+  else
+    echo "  ✓ 控制台 TLS 证书非自签（subject=${crt_subj:-?} / issuer=${crt_iss:-?}）"
+    echo "    ★仍需确认签发它的 CA 在各端受信：私有 CA 签的证书对客户端而言与自签同样不受信。"
+  fi
+  # ★SAN 与当前 PUBLIC_HOST 的一致性：证书**只在首次安装时生成**（上面那段有 `[ ! -f ]` 守卫）。
+  #   改了 config.env 里的 PUBLIC_HOST 再重装并不会重签，旧 SAN 原样留在证书里。
+  #   于是「换了新地址访问 + 信任锚已经导好了」照样握手失败，而报错是 SAN 不匹配、
+  #   不是不受信——最容易被读成「信任锚没导进去」，再白折腾一轮。
+  if [ "$PUBLIC_HOST" != "_" ] && [ -z "$crt_san" ]; then
+    # ★「读不到」与「读到了且匹配」必须分得开：两者在这里的处置完全不同，
+    #   而静默跳过会让人以为 SAN 已经核过了。这是本仓反复出现的一条纪律。
+    echo "  ⚠ 无法读出证书 SAN（本机 openssl 不支持 -ext 且 -text 解析也没拿到）："
+    echo "    请手工核对证书 SAN 是否含本次部署地址 ${PUBLIC_HOST}，否则客户端即使导入信任锚也连不上："
+    echo "      openssl x509 -in ${BD_PREFIX}/etc/tls/server.crt -noout -text | grep -A1 'Subject Alternative Name'"
+  elif [ "$PUBLIC_HOST" != "_" ] && [ -n "$crt_san" ]; then
+    san_ok=0
+    old_ifs="$IFS"; IFS=','
+    for item in $crt_san; do
+      case "$item" in
+        "DNS:$PUBLIC_HOST"|"IP:$PUBLIC_HOST"|"IPAddress:$PUBLIC_HOST") san_ok=1 ;;
+      esac
+    done
+    IFS="$old_ifs"
+    if [ "$san_ok" != "1" ]; then
+      echo ""
+      echo "  ⚠ 现有证书的 SAN 里没有本次部署的访问地址 ${PUBLIC_HOST}"
+      echo "    证书 SAN：${crt_san}"
+      echo "    证书只在首次安装时生成，改 PUBLIC_HOST 重装**不会**重签。后果是"
+      echo "    即使客户端已导入信任锚，握手仍会因 SAN 不匹配失败（报错与「不受信」不同，"
+      echo "    但同样是连不上），而部署输出此前不会提到这件事。"
+      echo "    重签：rm ${BD_PREFIX}/etc/tls/server.crt ${BD_PREFIX}/etc/tls/server.key 后重新部署，"
+      echo "    ★重签会换一张新证书 —— 已按旧指纹导入信任锚的客户端必须重新分发。"
+      echo ""
+    fi
+  fi
+fi
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
 echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi-proxy-api.inc /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
 systemctl --no-pager status baidi-control | head -5 || true

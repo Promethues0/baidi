@@ -15,7 +15,10 @@
  */
 import { config, session } from './store';
 import { api } from './api';
-import { createTunnelWatch, type TunnelStatus, type TunnelWatch } from './tunnelwatch';
+import {
+  createTunnelWatch, judgeReady, notReadyReason,
+  type TunnelStatus, type TunnelWatch
+} from './tunnelwatch';
 
 export interface TunnelResult { ok: boolean; detail?: string }
 
@@ -148,8 +151,20 @@ export async function startTunnel(token: string): Promise<TunnelResult> {
   if (nb?.startTunnel) {
     try {
       const r = await nb.startTunnel(token, tunnelConfig());
-      if (r.ok) startTunnelWatch();
-      return { ok: !!r.ok, detail: r.detail };
+      if (r.ok) { startTunnelWatch(); return { ok: true, detail: r.detail }; }
+      // ★失败**不等于**没在跑：桥现在会因「引擎起来了、门没敲开」而 resolve ok:false
+      //   （真机形态：stage=up + knock=false + x509 证书校验失败）。这种时候：
+      //     · 绝不 stopTunnel —— 敲门每 15s 自动重试，随时可能自愈（gateway/internal/dataplane
+      //       的 knockOne 对非 403 失败只 warn 后 return false，Run 继续阻塞，reknock ticker 重试）；
+      //     · 必须 startTunnelWatch —— 否则留下一条**无人监视**、仍以当前账号保活续窗的孤儿 VPN：
+      //       它此后被抢占 / 被回收 / 自愈成功，webview 一概不知道。
+      //   引擎没在跑（idle/failed/读不到）才是真失败，走原路返回，UI 照旧回 idle。
+      const s = tunnelStatus();
+      if (s && (s.stage === 'starting' || s.stage === 'up')) {
+        startTunnelWatch(); // 注意顺序：它会清 notReady/dropReason，代表"新一段接入从此刻起算"
+        session.notReady = (r.detail && r.detail.trim()) ? r.detail.trim() : notReadyReason(s);
+      }
+      return { ok: false, detail: r.detail };
     } catch (e) {
       return { ok: false, detail: String(e) };
     }
@@ -165,9 +180,13 @@ export async function startTunnel(token: string): Promise<TunnelResult> {
   }
 }
 
-/** 断开隧道（用户主动）。先停监视：主动断开不是中断，不该被判成一次「隧道已停止」。 */
+/** 断开隧道（用户主动）。先停监视：主动断开不是中断，不该被判成一次「隧道已停止」。
+ *  同时清掉未就绪原因——隧道都不在了，「门没敲开」这句话已经没有对象了；
+ *  dropReason 刻意不清（onDrop 正是先写它再调这里，清了等于把中断原因当场擦掉）。 */
 export async function stopTunnel(): Promise<void> {
   stopTunnelWatch();
+  session.notReady = '';
+  session.tunnelNote = '';
   const nb = native();
   if (nb?.stopTunnel) {
     try { await nb.stopTunnel(); } catch { /* ignore */ }
@@ -192,17 +211,38 @@ let watch: TunnelWatch | null = null;
  * 放在模块级而不是 Connect.vue 里：切到「应用」页 Connect 就卸载了，隧道却还在跑；
  * 监视的寿命要跟隧道走，不跟页面走。中断的处置只有三件事——把会话翻成未接入、
  * 把原因写进 session.dropReason（UI 各页自己读）、把原生侧的残留清掉（stopTunnel）。
+ *
+ * ★wave10 起它同时是**就绪态的读端**：接入态不再由「startTunnel 返回了成功」一锤定音
+ * （真机上那一锤正好敲反：引擎起来了、门没敲开），而是每轮跟着数据面健康行双向翻转。
  */
 export function startTunnelWatch(): void {
   stopTunnelWatch();
   if (!native()?.tunnelStatus) return; // 不可判定就不监视，也不假装监视
   session.dropReason = '';
-  watch = createTunnelWatch(tunnelStatus, (reason) => {
-    watch = null;
-    session.connected = false;
-    session.dropReason = reason;
-    // 原生侧可能还挂着一个引擎已死的服务，清掉它；这里的 stopTunnel 会再调一次 stopTunnelWatch，幂等。
-    void stopTunnel();
+  session.notReady = '';
+  watch = createTunnelWatch(tunnelStatus, {
+    onDrop: (reason) => {
+      watch = null;
+      session.connected = false;
+      session.dropReason = reason;
+      // 断了就不是"未就绪"了：两条横幅同时挂着会让用户以为出了两件事。
+      session.notReady = '';
+      session.tunnelNote = '';
+      // 原生侧可能还挂着一个引擎已死的服务，清掉它；这里的 stopTunnel 会再调一次 stopTunnelWatch，幂等。
+      void stopTunnel();
+    },
+    // ★null（本端壳不报健康态：iOS / 鸿蒙 / 旧安卓包）时**一个字段都不动**：
+    //   翻成 false 会让那几端在毫无依据的情况下集体显示「未就绪」，翻成 true 则是替
+    //   一份根本没读到的健康行背书。不可判定就保持调用方原来的判断。
+    onReady: (v, s) => {
+      // 隧道类当前失败与就绪判定**互不相干**，故在 v===null 之前就写：那几端读不到 ready，
+      // 但只要健康行里有 terr 就该把它显示出来。空串同样要写回去——它是"这一刻没有隧道类失败"，
+      // 不写就会让一条早已恢复的告警永远挂在界面上。
+      session.tunnelNote = (s?.healthTunnelErr || '').trim();
+      if (v === null) return;
+      session.connected = v;
+      session.notReady = v ? '' : notReadyReason(s);
+    }
   });
 }
 
@@ -220,18 +260,28 @@ export function stopTunnelWatch(): void {
  *   「未接入」而流量正走着隧道（用户会再点一次接入），**且此后再没有任何人读 tunnelStatus**——
  *   被其它 VPN 抢占、引擎因下线/合规阻断停机，原生侧留下的原因一个读者都没有。
  *
- * 三种处置严格对应三种事实：
- *   · up     —— 确实在跑：翻成已接入，并重新开始监视（认领了却不监视 = 把上面那个洞留一半）；
- *   · failed —— 上一段接入不是用户断的、原因还留着：写进 dropReason 让 UI 当面显示；
- *   · 其它   —— **什么都不做**。null=读不到（不可判定，见上）、idle=本就没在接入、
- *              starting=几秒钟的过渡窗口（认领它需要监视器额外具备"翻成已接入"的语义，本波不做）。
+ * 四种处置严格对应四种事实：
+ *   · up 且 ready 判真   —— 确实在跑、门也开着：翻成已接入并重新开始监视
+ *                          （认领了却不监视 = 把上面那个洞留一半）；
+ *   · up 且 ready 判假   —— 引擎在跑、门没敲开：**照样认领并监视**（它每 15s 自动重试、
+ *                          随时可能自愈，不监视就没人看见它自愈，也没人看见它被抢占），
+ *                          但接入态是「未就绪」而不是「已接入」，原因写进 notReady；
+ *   · failed             —— 上一段接入不是用户断的、原因还留着：写进 dropReason 让 UI 当面显示；
+ *   · 其它               —— **什么都不做**。null=读不到（不可判定，见上）、idle=本就没在接入、
+ *                          starting=几秒钟的过渡窗口。
+ *
+ * ★ready 不可判定（本端壳不报健康态）时回落成「已接入」：这是**认领**语义下唯一合理的方向——
+ *   改造前 iOS / 鸿蒙 / 旧安卓包在这里就是这么认的，一律翻成未就绪等于给那几端凭空造出
+ *   一个它们永远出不去的中间态。判据的收紧只发生在真报了 ready 的壳上。
  */
 export function adoptRunningTunnel(): void {
   const s = tunnelStatus();
   if (!s) return; // 读不到 ≠ 断了，也 ≠ 在跑：不下任何结论
   if (s.stage === 'up') {
-    session.connected = true;
-    startTunnelWatch(); // 注意顺序：它会清 dropReason，代表"新的一段接入从此刻起算"
+    const ready = judgeReady(s);
+    session.connected = ready !== false;
+    startTunnelWatch(); // 注意顺序：它会清 dropReason/notReady，代表"新的一段接入从此刻起算"
+    if (ready === false) session.notReady = notReadyReason(s);
     return;
   }
   if (s.stage === 'failed' && s.reason?.trim()) session.dropReason = s.reason.trim();

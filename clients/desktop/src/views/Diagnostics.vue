@@ -70,7 +70,7 @@ import {
 
 interface Chk { key: string; label: string; desc: string; state: DiagState; say?: string; detail?: string }
 const checks = reactive<Chk[]>([
-  { key: 'ctl', label: '控制中心可达', desc: 'baidi-control /healthz 真实探测', state: 'idle' },
+  { key: 'ctl', label: '控制中心可达', desc: '真实命中免认证 API（/api/v1/auth/domains）并核对回的是 JSON', state: 'idle' },
   { key: 'tun', label: 'SSL 访问隧道', desc: '数据面进程与隧道就绪状态', state: 'idle' },
   { key: 'spa', label: 'SPA 敲门保活', desc: '放行窗口是否在持续续期', state: 'idle' },
   { key: 'gw', label: '网关隧道口连通', desc: '真实拨测网关落点（不发任何字节）', state: 'idle' },

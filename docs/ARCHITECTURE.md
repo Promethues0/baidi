@@ -912,6 +912,45 @@ knock 类（Go 侧固定前缀 `取敲门令牌失败：` / `SPA 拨号失败：
 恰好把这条提示条存在的意义抹掉（`parseHealth` 的 `terr` 因此是 `string | null` 三态，有反例用例守着）。
 提示条只是提示，不改 `ready`/`stage`；副标题也随这两档分开写（判得出来时不许再说「本机判不了」）。
 
+### ✅ 移动端接入态判据 = 同一份健康态，但走类型化通道（wave10；**安卓已收口，iOS/鸿蒙没有**）
+
+移动端拿不到日志文件（Go 引擎与 UI 同进程，没有 Rust 壳去捞日志尾巴），所以不能照抄桌面端「解析健康行文本」那条路。
+改成把**同一份状态**从引擎里直接端出来：`dataplane.HealthState` 是这份状态的唯一存放处，`logHealth` 打的那行日志与
+`Snapshot()` 返回的结构体**是同一份锁内快照的两种渲染**——同源不是靠纪律，是靠结构；两条读路走散时两边都不报错，
+而排障人手里正好只有日志和界面这两样，互相印证是唯一的自证手段。`Config.Health` 为 nil 时引擎自建，`baidi-tun` 行为逐字不变。
+
+链路：`HealthState.Snapshot()` → `baidimobile.Session.Health()`（gomobile 绑定，**返回 nil = 不可判定**）→
+安卓壳 `EngineHandle.HealthLite` → `TunnelState.snapshot()` 产出**扁平九键 JSON** →
+webview `tunnelwatch.ts` / `vpn.ts` / `Connect.vue`。
+
+三条不许动的纪律：
+
+- **`stage` 值域一字不改（idle|starting|up|failed），新事实用并列的 `ready` 表达。** 新中间态是
+  `{stage:'up', ready:false}`——「引擎在跑、门没敲开」。给 `stage` 加第五个值会被三处立刻误判，最坏的一处是
+  `tunnelwatch.judgeTunnelStatus`：一旦有人图省事把新值并进 `failed`/`idle`，`vpn.ts` 就会去 `stopTunnel`，
+  **把一条每 15s 自动重试、随时可能自愈的隧道真的断掉**（`knockOne` 对非 403 失败只 warn 后 return false，
+  `Run` 继续阻塞，reknock ticker 重试）。保持值域不变的直接收益：`judgeTunnelStatus` 一字不改就天然正确。
+- **整组键在健康态不可判定时整体缺席**（不是 false、不是空串）。读不到与确定没问题的处置相反：前者要让桥
+  回落到旧判据（老 `.aar` / iOS / 鸿蒙壳照旧能接入），后者要把失败原文顶到界面上。回落**只在桥内做一处**
+  （原生壳知道自己这一版有没有健康行，webview 侧不知道，猜出来的就是一句没有依据的断言）。
+- **`ready = 引擎在跑 ∧ knock ∧ knockErr 为空`——用 `knockErr` 而不是合并后的 `err`，这是与桌面端唯一的、
+  刻意的分歧。** `err` 会被**每一条业务流的拨号失败**写脏、又被每 15s 的保活敲门擦掉，拿它当就绪判据，
+  隧道类的持续故障会让接入态以 15s 为周期反复翻，而每翻一次界面就弹一句「已接入企业内网」——正是这套改动
+  要消灭的那类无根据断言换了个触发条件（手机上 WiFi↔LTE 切换让这条路径成为常态）。桌面端能用 `err`
+  是因为它另有 `nextDataplaneNotice` 那套粘性状态机吸收震荡；而 `err` 之所以合并两类，是为了让**旧** TS
+  读新健康行时语义不变——那是日志行的向后兼容约束，对这条新开的类型化通道不成立。
+  隧道类失败改由 `healthTunnelErr` 单独承载并**常驻**显示（`session.tunnelNote`，Connect 与 Apps 两页各一条），
+  不参与「门敲没敲开」的判定。`tunnel` 位同桌面端一样只做展示、不进判据。
+
+跨轨守卫：这九个键是三种语言之间唯一的接头，而每一轨的测试原本只断言自己那一侧——复核实测过两次变异
+（`ready`→`isReady`、`healthKnockErr`→`healthKnockError`），每次都在一条轨道内部改得自洽而另一轨零感知，
+安卓 20/20 与 TS 26/26 全绿，其中一次的运行期后果就是真机那个 bug 原样回来。现在有一条源码级契约用例把
+`TunnelState.snapshot()` 发的键名与 `TunnelStatus` 声明的字段名逐一对齐；桥的 `ready` 三分支也在
+`bridgeSandbox` 里真跑（此前 `!s.ready` 那个最容易犯的改法不会让任何一条用例变红）。
+
+**不能声称**：iOS 与鸿蒙壳**没有**这套（`Session.Health()` 在绑定层已就绪，但那两端的壳没有读端，
+接入后的中断与未就绪在那两端一律不可判定）。文档里一律写「安卓已收口」，不许写「移动端已收口」。
+
 **为什么要单独记一条**：提交 796ac0f 的说明写着「运行中的失败现在也能显示」「拿不到健康行（旧壳）时退回旧判据」，
 但它只做了 Go/Rust 半边——`TunStatusRaw` 没有 `health` 字段、`parseHealth` 定义后零调用、`ready` 仍判
 `/数据面就绪/`、`error` 仍是 `!running && …`。于是那两句在 TS 侧**都不成立**：指纹钉扎失败（数据面自判"疑似中间人"）、

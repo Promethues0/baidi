@@ -9,7 +9,30 @@ export const session = reactive({
   connected: false,
   /** 最近一次**非用户主动**的隧道中断原因（被抢占 / 被系统回收 / 引擎停机），由 vpn.ts 的监视写入；
    *  下一次接入或用户主动断开时清空。非空即意味着「上一段接入不是你断的」，UI 必须当面显示。 */
-  dropReason: ''
+  dropReason: '',
+  /**
+   * 「引擎在跑、但数据面没就绪」的原因原文（典型：`取敲门令牌失败：… x509: certificate signed
+   * by unknown authority`），由 vpn.ts 的监视按健康行每轮改写；就绪或断开时清空。
+   *
+   * ★与 dropReason **刻意分开两个字段**：前者说「现在门没敲开」（隧道还在，每 15s 自动重试，
+   *   用户该做的是等一会儿或把 CA 装上），后者说「上一段接入不是你断的」（隧道已经没了，
+   *   要重新接入）。用户的下一步动作不同，合并成一个字段就只能给出一句必然误导一半人的话。
+   *   同理，未就绪**不写 dropReason**——App.vue 会照着它弹「接入已中断」，而这次接入
+   *   从来就没有建立过。
+   */
+  notReady: '',
+
+  /**
+   * 隧道类当前失败的原文（健康行 `terr=`；空 = 没有或不可判定）。
+   *
+   * ★为什么必须单独有它：wave10 把就绪判据从合并的 `err` 收紧成敲门类的 `knockErr` 之后，
+   *   一次**持续性**的隧道故障（指纹不匹配「疑似中间人」/ 网关装了隐身规则集却没带 -pf 导致
+   *   放行集合永远为空 / gm 开关与网关不一致）不再翻接入态——门确实敲开了。若不另立一格
+   *   常驻显示，界面就会安安静静地写着「已接入」，而这条隧道拉不起任何一条业务流：
+   *   那正好又是一种「配置齐全、零报错、不生效」。
+   *   它**不是**失败态，不参与大环状态，只作为一条常驻横幅（同桌面端 terr 那条）。
+   */
+  tunnelNote: ''
 });
 
 /**
@@ -62,6 +85,10 @@ export function logout(): void {
   session.user = '';
   session.connected = false;
   session.dropReason = '';
+  // 未就绪原因也必须清：它挂在 App.vue / Apps.vue / Connect.vue 上，
+  // 留着会让下一个登录进来的人看到上一个账号那次接入的失败原文。
+  session.notReady = '';
+  session.tunnelNote = '';
   ls.removeItem('baidi_m_token');
   ls.removeItem('baidi_m_user');
 }

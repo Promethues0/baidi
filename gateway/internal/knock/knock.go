@@ -54,13 +54,21 @@ func FetchToken(control, sessionToken, device string) (string, error) {
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
 	resp, err := fetchClient.Do(req)
 	if err != nil {
-		return "", err
+		// ★这条错误会经数据面健康行一路走到用户界面上（移动端 wave10 起直接展示），
+		// 故在**唯一的产生点**上就翻成人话，而不是让每个消费方各翻一遍——
+		// 各翻各的必然分家，且新加的消费方会安静地退回英文原文。认不出的原样返回。
+		return "", ClassifyControlErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
 		return "", fmt.Errorf("%w：%s", ErrDenied, decodeErrMsg(resp.Body))
 	}
 	if resp.StatusCode != http.StatusOK {
+		// 认得出的状态码翻成人话（同 ClassifyControlErr 的理由：这句会上到界面）；
+		// 认不出的保留状态码原样——泛泛兜底会把唯一的线索也抹掉。
+		if msg := ClassifyControlStatus(resp.StatusCode); msg != "" {
+			return "", fmt.Errorf("%s（HTTP %d）", msg, resp.StatusCode)
+		}
 		return "", fmt.Errorf("control 返回 %d", resp.StatusCode)
 	}
 	var r struct {

@@ -67,21 +67,32 @@ android {
         buildConfigField("String", "BAIDI_CONTROL_CA_SHA256", "\"$caSha\"")
 
         val host = Regex("^[a-zA-Z]+://([^/:]+)").find(apiBase)?.groupValues?.get(1) ?: ""
+        // ★锚给了却解不出 host = **锚在包里、WebView 那半边静默不匹配任何域**：
+        //   res/raw 有证书、BuildConfig 有摘要、数据面那一半照常工作，而登录仍旧
+        //   ERR_CERT_AUTHORITY_INVALID——"配置齐全、零报错、就是不生效"，本仓最忌讳的形态。
+        //   CI 的 -PbaidiApiBase 来自 workflow_dispatch 的自由输入，漏写 scheme 就会命中这里。
+        if (caSha.isNotEmpty() && host.isEmpty()) throw GradleException(
+            "-PbaidiControlCa 给了信任锚，但从 -PbaidiApiBase 解不出主机名：\"$apiBase\"。" +
+            "NSC 的 <domain> 会是空的 → 锚对 WebView 完全不生效，而数据面那一半照常工作，" +
+            "现场表现是「证书装了却只有隧道通、登录不通」。请写成 https://<主机名或IP> 的形式。")
         val anchors = if (caSha.isEmpty()) "" else
             """\n            <certificates src="@raw/baidi_control_ca" />"""
+        // host 为空时**整段 domain-config 都不发**：空 <domain> 匹配不到任何东西，
+        // 留着只会让人以为有一条按域的规则在生效。
+        val domainBlock = if (host.isEmpty()) "" else """
+    <domain-config>
+        <domain includeSubdomains="false">$host</domain>
+        <trust-anchors>
+            <certificates src="system" />$anchors
+        </trust-anchors>
+    </domain-config>"""
         File(xmlDir, "network_security_config.xml").writeText(
             """<?xml version="1.0" encoding="utf-8"?>
 <!-- 由 build.gradle.kts 从 -PbaidiControlCa 与 -PbaidiApiBase 生成，**不要手改**。 -->
 <network-security-config>
     <base-config cleartextTrafficPermitted="false">
         <trust-anchors><certificates src="system" /></trust-anchors>
-    </base-config>
-    <domain-config>
-        <domain includeSubdomains="false">$host</domain>
-        <trust-anchors>
-            <certificates src="system" />$anchors
-        </trust-anchors>
-    </domain-config>
+    </base-config>$domainBlock
 </network-security-config>
 """)
     }

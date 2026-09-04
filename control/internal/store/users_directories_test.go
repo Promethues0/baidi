@@ -116,8 +116,11 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 	if ov.Devices.Total != 0 || ov.Devices.Trusted != 0 || ov.Devices.Rate != 0 {
 		t.Fatalf("一台设备都没登记时设备统计应全 0，实得 %+v", ov.Devices)
 	}
-	if ov.Sessions != 0 {
-		t.Errorf("store 层不知道会话这回事，Sessions 应为 0（由 api 层按网关上报注入），实得 %d", ov.Sessions)
+	// ★store 层永远不填 Sessions（nil = 不可判定），由 api 层按网关上报注入。
+	// 原先断言的是 `== 0`——而 0 同时也是"确实没人接入"的确定答案，
+	// 那条断言在"把不可判定塌成 0"的实现上照样绿。
+	if ov.Sessions != nil {
+		t.Errorf("store 层不知道会话这回事，Sessions 应缺席（nil），实得 %d", *ov.Sessions)
 	}
 
 	// 登记 3 台：2 台自动授信 + 1 台待审批 → 台账口径逐项可数。

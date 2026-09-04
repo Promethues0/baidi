@@ -1,0 +1,1 @@
+time=2026-09-04T10:00:00.000+08:00 level=WARN msg=网关落点切换 endpoint=2/3 id=gw-b addr=10.0.0.2:18443 reason="首选落点拨号失败：dial tcp 10.0.0.1:18443: i/o timeout"

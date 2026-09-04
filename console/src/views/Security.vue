@@ -436,7 +436,12 @@ async function loadPosture() {
     postureTotal.value = pr.total ?? pr.reports.length;
     postureTruncated.value = !!pr.truncated;
     postureErr.value = '';
-  } catch { postureErr.value = '暂无法读取（需管理员登录 / 后端在线）'; }
+    // 同页其余读取早就按纪律转述后端原话，唯独这一处漏了：改造前是
+    // `catch { postureErr.value = '暂无法读取（需管理员登录 / 后端在线）' }`——
+    // 而 /posture 的 403 说的是「角色「系统管理员」无权执行该操作（需要权限：security）」。
+    // 把"缺哪个权限"换成"需管理员登录"，管理员会去重登（他本来就登着），
+    // 而这一格恰好是终端合规判定的唯一入口。
+  } catch (e) { postureErr.value = '终端环境判定读取失败：' + failReason(e); }
 }
 function verdictText(v: string) { return v === 'allow' ? '合规' : v === 'degrade' ? '降权' : v === 'gray' ? '灰度' : '阻断'; }
 function verdictColor(v: string) { return v === 'allow' ? '#00B42A' : v === 'degrade' ? '#FF7D00' : v === 'gray' ? '#86909C' : '#F53F3F'; }

@@ -68,7 +68,11 @@ func (s *SQLiteStore) UserStates(ctx context.Context) (UserStateBundle, error) {
 		}
 		items = append(items, UserStateItem{
 			ID: u.ID, User: u.Name, Account: u.Account, Org: u.Org, State: state, Risk: riskLv,
-			Online: hasRep && now-rep.TS <= 600, Reasons: reasons, LastEvent: lastEvent, LastSeen: lastSeen,
+			// ★Online 这里**不填**（留 nil = 不可判定），由 api.handleUserState 按
+			// 网关上报的真实会话现算。原先填的是 `hasRep && now-rep.TS <= 600`——
+			// 那是"采集器十分钟内还活着"，不是"此刻连着隧道"，两个意思在这一页上
+			// 并排出现过（挂着客户端上报 posture 的人在这页是绿点，在线用户页里查无此人）。
+			Reasons: reasons, LastEvent: lastEvent, LastSeen: lastSeen,
 		})
 	}
 	count := func(states ...string) int {

@@ -145,6 +145,8 @@ type SQLiteStore struct {
 	// fwdQueueMax 每个审计外送出口的队列上界，由 main 注入（SetAuditForwardQueueMax）。
 	// 与 auditRetainDays 同一条纪律：入队时判丢弃用的就是这一份，页面显示的也是它。
 	fwdQueueMax int
+	// auditCats 审计分类计数的增量缓存（派生自表、不落库，见 auditcat_sqlite.go 的文件头）。
+	auditCats auditCatCache
 }
 
 // OpenSQLite 打开/初始化数据库（建表 + 首次播种）。
@@ -407,6 +409,38 @@ CREATE TABLE IF NOT EXISTS audit_log (
   id INTEGER PRIMARY KEY AUTOINCREMENT, ts TEXT, category TEXT, actor TEXT, src_ip TEXT, event TEXT, verdict TEXT,
   seq INTEGER, mac TEXT
 );
+-- ★audit_log 的**唯一**索引：只按 ts，且刻意**不**给 category 建索引。
+--
+-- 改造前这张表一条索引都没有（全仓 15 条 CREATE INDEX 没有一条落在它上面），
+-- 而它是全系统写入最快的表：按「放行也留痕」的 5min/键节流，50 用户 × 4 资源
+-- ≈ 200 键 × 288 条/天 ≈ 5.8 万条/天，35 天就攒到 200 万行，180 天留存下是千万级。
+-- 后果只在数据攒了几周之后才显形——大屏每 15s 同时打 /overview + /online + /audit，
+-- 每一发都是全表扫。而本机开发库 520 KB、单测/e2e/演示各造几十行，
+-- **这一族成本仓里没有任何守卫测得出来**，这正是它能一路活到今天的原因。
+-- （同族的对照：gateway_metrics 同样是每 15s 一行，那张表建表时就带了 ts 索引。）
+--
+-- 200 万行实测（M1 Pro 开发机 + modernc SQLite；口径与复现命令见 audit_bench_test.go）：
+--   态势总览 窗口内 GROUP BY category                        229ms →  29ms
+--   审计页 今日总量                                          321ms →   2ms
+--   审计页 检索一个**旧**时间窗（取证最常做的事）              297ms → 0.2ms
+--   审计页 首屏一发（本轨道另配了分类计数增量，见 auditcat_sqlite.go） 1859ms → 22ms
+--   运营报表 7 天日聚合                                      484ms → 331ms
+-- 代价在写入：每行多维护一棵 B 树。裸 INSERT 慢约 19%，但 RecordAudit 一行一个事务，
+-- 成本由 commit 主导，端到端实测 97.9µs → 98.5µs（+0.7%，在噪声里）。
+-- ts 单调递增 → 新键恒落最右叶子，这是索引维护里最便宜的一种形态。
+--
+-- ★为什么**不能**再给 category 建索引（实测过，反直觉，加索引反而更慢）：
+-- 有了 idx_audit_log_category 之后，SQLite 会拿它去跑「WHERE ts>=? GROUP BY category」
+-- ——按 category 有序扫索引可以省掉 GROUP BY 的临时 B 树排序，代价却是扫完
+-- 全部 200 万条索引项、每条再回表取 ts。那条查询从 229ms 退化到 **1.5s**，
+-- 而且**同时存在 ts 索引也救不回来**（planner 仍选 category 索引，实测 1.49s）。
+-- 「加了索引反而更慢」在页面上与「本来就慢」完全同形，所以 audit_index_test.go
+-- 用 EXPLAIN QUERY PLAN 把计划钉住：谁再加一条 category 打头的索引，那个测试立刻红。
+--
+-- ★这条索引与 SearchAudit 的「ORDER BY ts DESC, id DESC」是**一对**，不能只留一个：
+-- 索引项即 (ts, rowid)，那个排序恰好是它的逆序，于是"取一页"= 从索引尾部倒读 100 条。
+-- 只改排序不建索引的话是全表扫 + 临时 B 树排序（实测 1.7s），比改造前还差。
+CREATE INDEX IF NOT EXISTS idx_audit_log_ts ON audit_log(ts);
 -- audit_meta 审计子系统的键值元数据。目前只存留存轮转后的链锚点
 -- （被清理段末行的 seq/mac），verify 从锚点起算——否则轮转会把链打断。
 CREATE TABLE IF NOT EXISTS audit_meta (
@@ -862,6 +896,13 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 	if err := s.seedAlertRules(context.Background()); err != nil {
 		return err
 	}
+
+	// 阈值区间是本波新加的，只校验写入侧；库里已经落了 0 的行（旧版输入框清空的产物）
+	// 会让那条规则在控制台上改不动也关不掉——必须一次性夹回默认值并留痕。
+	if err := s.clampAlertThresholds(context.Background()); err != nil {
+		return err
+	}
+
 	return s.seedLocalAuthSource()
 }
 
@@ -1386,7 +1427,11 @@ func (s *SQLiteStore) insertUser(u DirUser) error {
 	}
 	_, err := s.db.Exec(`INSERT INTO users(id,name,account,org,org_key,device,ip,auth,last_login,online,status,risk,roles,created_at,pass_hash,role,must_change_pw,org_id,pw_strength,admin_role,email)
 VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, b2i(u.Online), u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength, u.AdminRole, u.Email)
+		// users.online 是**死列**：只有这条 INSERT 写过它，全仓没有一处 UPDATE
+		// （`grep "SET online"` 零命中），读回来的必然是建号那一刻的值。
+		// 建号那一刻没有人在线，如实落 0；真实在线态由 api.enrichDirUsers 现算
+		// （列保留是为了不动既有库的表结构）。
+		u.ID, u.Name, u.Account, u.Org, u.OrgKey, u.Device, u.IP, u.Auth, u.LastLogin, 0, u.Status, u.Risk, string(roles), nowStr(), u.PassHash, u.Role, b2i(u.MustChangePw), u.OrgID, u.PwStrength, u.AdminRole, u.Email)
 	return err
 }
 
@@ -1477,7 +1522,12 @@ FROM users u LEFT JOIN org_units o ON o.id = u.org_id ORDER BY u.created_at`)
 		if u.SourceID == "" {
 			u.SourceID = DirectoryLocal
 		}
-		u.Online = online == 1
+		// ★在线态**刻意不从库里读**：u.Online 留 nil（=不可判定），由 api.enrichDirUsers
+		// 按网关上报的真实会话现算。这里若写 `u.Online = online == 1`，读到的是建号
+		// 那一刻的死值（见 insertUser 的注释）——而 enrich 在"没有任何在线网关"时
+		// 正是要保持"不可判定"，一个从库里带上来的 false 会把它变成确定结论。
+		// online 仍要 Scan（列在 SELECT 里），扫完丢弃。
+		_ = online
 		// 认证方式**按实算**，不发库里那一列。
 		//
 		// ★users.auth 是一列自由文本，全仓零消费方（判定不看它），而种子给它填的是

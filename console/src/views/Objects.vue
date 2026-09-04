@@ -232,7 +232,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp, failReason } from '@/lib/api';
+import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp, failReason, failStatus } from '@/lib/api';
 
 type Kind = 'addr' | 'service' | 'time';
 
@@ -392,11 +392,17 @@ async function del(k: Kind, id: string) {
     Message.success(`${kindLabel[k]}已删除`);
     await load();
   } catch (e) {
-    /* 兜底：后端 409 表示并发出现了新引用 */
-    if (e instanceof Error && e.message.includes('409')) {
-      Modal.warning({ title: '对象被引用，无法删除', content: '该对象已被引用，无法删除；请先在引用方解除引用' });
+    /* 兜底：后端 409 表示在前端那道引用检查之后、DELETE 之前又出现了新引用。
+       ★判状态码必须用 failStatus：`e.message.includes('409')` 是死分支——api() 抛的
+         message 是后端中文原文，永远不含状态码数字。于是真正的 409 一直落进 else，
+         被说成「删除失败，请检查权限或后端连接」：管理员去查网络、去重登，
+         而后端说的是"它还被谁引用着"，那才是唯一能指导下一步动作的信息。
+       弹窗标题保留（它决定用哪种呈现方式），正文一律用后端原话——后端点得出
+       具体引用方，前端这份手抄的泛泛描述点不出来。 */
+    if (failStatus(e) === 409) {
+      Modal.warning({ title: '对象被引用，无法删除', content: failReason(e) });
     } else {
-      Message.error('删除失败，请检查权限或后端连接');
+      Message.error(`删除失败：${failReason(e)}`);
     }
   }
 }

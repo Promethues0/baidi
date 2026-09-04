@@ -700,7 +700,7 @@ import { ref, reactive, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
-  getToken,
+  getToken, failReason, failStatus,
   api, type SystemBundle, type AdminRole, type AdminAccount, type ClusterInfo,
   type NotifyChannel, type NotifyChannelsResp, type NotifyEventSpec, type NotifyTestResp, type SaveNotifyChannelResp,
   type SmtpChannelConfig, type WebhookChannelConfig,
@@ -835,12 +835,20 @@ async function importLicense() {
       body: licPaste.value
     });
     const out = await res.json();
-    if (!res.ok) throw new Error(out?.error ?? `${res.status}`);
+    // ★`out.error` 是**对象**（httpx.Error 发的是 {"error":{"message":…}}），
+    //   改造前写的是 `new Error(out?.error ?? …)`：Error 构造函数把它 String() 成
+    //   `"[object Object]"`，于是 License 导入**任何**失败都恒显示「导入失败：[object Object]」。
+    //   被吞掉的是这一页上最需要照做的几句话：400「未配置 License 发行公钥
+    //   （BAIDI_LICENSE_PUBKEY）：…公钥由发行方 baidi-license -genkey 产出，经部署期配置分发」、
+    //   400「该 license 已于 YYYY-MM-DD 过期，拒绝导入」、以及验签器返回的具体原因。
+    //   这里没走 api()（license 必须原文直发，不能重新序列化），所以要自己解一次 body——
+    //   解法与 api.ts 的 errText 逐字同构，别在这里另立一套。
+    if (!res.ok) throw new Error(out?.error?.message || `${res.status} ${res.statusText}`);
     Message.success(`已导入：${out.manifest?.licensee ?? ''}（到期 ${out.manifest?.expiresAt ?? '—'}）`);
     licPaste.value = '';
     void loadLicense();
   } catch (e) {
-    Message.error(`导入失败：${e instanceof Error ? e.message : e}`);
+    Message.error(`导入失败：${failReason(e)}`);
   } finally {
     saving.value = false;
   }
@@ -869,11 +877,13 @@ async function loadNotify(toast = false) {
     if (toast) Message.success('已刷新');
   } catch (e) {
     channels.value = [];
-    const msg = e instanceof Error ? e.message : String(e);
-    notifyErr.value = msg.includes('403')
-      ? '当前角色无权查看消息通道（该页归系统管理员一权）'
-      : '未连控制中心，消息通道不可用：' + msg;
-    if (toast) Message.error('刷新失败');
+    // ★判状态码只能用 failStatus：`msg.includes('403')` 是死分支——api() 抛的 message
+    //   是后端中文原文，永远不含状态码数字，于是"无权查看"那句从来没显示过，
+    //   403 一律被渲染成「未连控制中心，消息通道不可用」，把一次权限拒绝说成了断网。
+    notifyErr.value = failStatus(e) === 403
+      ? failReason(e) + '（消息通道归系统管理员一权）'
+      : '消息通道读取失败：' + failReason(e);
+    if (toast) Message.error('刷新失败：' + failReason(e));
   }
 }
 function reloadNotify() { void loadNotify(true); }
@@ -1027,11 +1037,28 @@ function removeChannel(c: NotifyChannel) {
 }
 
 /* ── 写操作 ── */
-function opError(e: unknown, fallback: string) {
-  const msg = e instanceof Error ? e.message : String(e);
-  if (msg.includes('409')) { Message.warning('操作被拒：系统必须保留至少一名超级管理员，或该角色仍有成员'); return; }
-  if (msg.includes('403')) { Message.warning('当前角色无权执行该操作（分配管理员权限仅超级管理员持有）'); return; }
-  Message.error(fallback);
+/**
+ * 写操作失败的统一出口：**原样转述后端那句话**，前面只加一个"在做什么"的动作名。
+ *
+ * ★改造前是 `msg.includes('409')` / `msg.includes('403')` 两支——**恒不命中的死分支**：
+ *   api() 抛的是 `ApiError(后端中文原文, status)`，而 httpx.Error 只发
+ *   `{"error":{"message":…}}`，message 里永远没有状态码数字。于是本文件 14 个写操作
+ *   调用点全部落进最后那行 `Message.error(fallback)`，屏幕上只剩「保存失败」四个字。
+ * ★就算侥幸命中，那两句文案也是错的：opError 同时服务消息通道 / 审计外送 / 管理员 /
+ *   角色四个板块，而「必须保留至少一名超管」只对其中一个成立。被这两支吞掉的原话包括
+ *   403「角色「安全管理员」无权执行该操作（需要权限：admins）」、409「最后一名超级
+ *   管理员不可禁用」、409「角色「审计管理员」仍有 2 名管理员成员，请先改派后再删除」，
+ *   以及 **400 外部目录账号不得提升为管理员**——那条带着约 150 字的补救说明
+ *   （先给他重置一个本地口令），且它既不是 403 也不是 409，**按状态码分流根本救不回来**。
+ *   这正是纪律说"收口在 failReason、不要自己按状态码猜"的原因。
+ * ★状态码只用来选提示的**语气**（守卫拒绝 vs 系统故障），不参与措辞：
+ *   4xx 是"你这么做不行"，用 warning；5xx / 连不上才是"它坏了"，用 error。
+ */
+function opError(e: unknown, action: string) {
+  const st = failStatus(e);
+  const say = `${action}：${failReason(e)}`;
+  if (st >= 400 && st < 500) Message.warning(say);
+  else Message.error(say);
 }
 
 /* ── 审计日志外送（PRD ch16 + ch21.6）────────────────────────────────
@@ -1058,11 +1085,11 @@ async function loadForward(toast = false) {
     if (toast) Message.success('已刷新');
   } catch (e) {
     fwdTargets.value = [];
-    const msg = e instanceof Error ? e.message : String(e);
-    fwdErr.value = msg.includes('403')
-      ? '当前角色无权查看审计外送配置（该页归系统管理员一权）'
-      : '未连控制中心，审计外送配置不可用：' + msg;
-    if (toast) Message.error('刷新失败');
+    // 同上：`msg.includes('403')` 恒不命中，403 被说成"未连控制中心"。
+    fwdErr.value = failStatus(e) === 403
+      ? failReason(e) + '（审计外送归系统管理员一权）'
+      : '审计外送配置读取失败：' + failReason(e);
+    if (toast) Message.error('刷新失败：' + failReason(e));
   }
 }
 function reloadForward() { void loadForward(true); }
@@ -1186,8 +1213,10 @@ async function flushForward(t: AuditForwardTarget) {
     const r = await api<AuditForwardFlushResp>(`/audit/forward/${encodeURIComponent(t.id)}/flush`, { method: 'POST' });
     Message.success(`已触发投递（清零 ${r.reset} 条退避），当前积压 ${r.target?.queued ?? '—'}`);
   } catch (e) {
-    const msg = e instanceof Error ? e.message : String(e);
-    if (msg.includes('409')) { Message.warning('该出口已停用，启用后才会投递'); return; }
+    // 改造前这里先用 `msg.includes('409')` 抄了一遍后端那句「该出口已停用，启用后才会投递」，
+    // 而那支恒不命中（message 不含状态码），真正生效的一直是下面的 opError。
+    // 现在 opError 本身就把 409 原话原样转述了，这份手抄的副本没有存在理由——
+    // 留着只会在后端改文案那天，变成第二个不会跟着改的真相来源。
     opError(e, '投递失败');
   } finally { await loadForward(); }
 }

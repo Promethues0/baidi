@@ -7,8 +7,10 @@ package main
 // 与测试本身毫无关联，排查成本极高。那部分代码**未经实机验证**，见 resolver_*.go 的说明。
 
 import (
-	"os"
 	"encoding/json"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"net"
 	"reflect"
 	"strings"
@@ -215,30 +217,91 @@ func TestRoutesCover(t *testing.T) {
 // 「创建 TUN 失败」，而机器的域名解析（Linux 退路上是**整机**解析）仍指着一个
 // 不存在的 VIP —— 第二层保险被语句顺序架空。
 //
-// 用源码文本断言而不是跑 main：那两步都要 root，单测里跑不了；
+// 用源码断言而不是跑 main：那两步都要 root，单测里跑不了；
 // 而这条纪律要守的恰恰是「谁写在谁前面」。同 elevate.rs 里那批打包配置守卫。
+//
+// ★判据必须走语法树，不能用 strings.Index/Count 搜源码文本：**文本会命中注释**。
+// 改造前这里搜的就是 "sweepStaleDNSConfig()" 这个子串，而上面这段注释里逐字出现过它。
+// 实测：把 main.go 里那行调用整行注释掉，Index 仍 ≥0、Count 仍是 1（命中的是注释），
+// 本用例照旧 PASS。后果正是上面描述的形态——上一轮 SIGKILL/断电留下的
+// /etc/resolver、resolvectl、NRPT 残留再无回收点，Linux 退路上那是**整机**解析
+// 指着一个不存在的 VIP，而客户端只报一句「创建 TUN 失败」。
 func TestSweepRunsBeforeTunCreation(t *testing.T) {
-	src, err := os.ReadFile("main.go")
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, "main.go", nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("读 main.go: %v", err)
+		t.Fatalf("解析 main.go: %v", err)
 	}
-	s := string(src)
-	sweep := strings.Index(s, "sweepStaleDNSConfig()")
-	if sweep < 0 {
-		t.Fatal("main.go 里必须无条件调用 sweepStaleDNSConfig()——" +
-			"缺了它，上一轮异常退出留下的解析器残留再无回收点")
+	isSweep := func(c *ast.CallExpr) bool {
+		id, ok := c.Fun.(*ast.Ident)
+		return ok && id.Name == "sweepStaleDNSConfig"
 	}
-	create := strings.Index(s, "tun.CreateTUN(")
-	if create < 0 {
-		t.Fatal("找不到 tun.CreateTUN 调用点")
+	isCreateTUN := func(c *ast.CallExpr) bool {
+		sel, ok := c.Fun.(*ast.SelectorExpr)
+		if !ok || sel.Sel.Name != "CreateTUN" {
+			return false
+		}
+		x, ok := sel.X.(*ast.Ident)
+		return ok && x.Name == "tun"
 	}
-	if sweep > create {
+
+	// 全文件里恰好一处调用（多一处说明有人在后面又补了一次清扫，那是把问题掩盖掉）
+	if n := countCalls(f, isSweep); n != 1 {
+		t.Fatalf("sweepStaleDNSConfig() 应在全文件恰好调用一次，实得 %d 次——"+
+			"0 次意味着上一轮异常退出留下的解析器残留再无回收点", n)
+	}
+
+	var mainFn *ast.FuncDecl
+	for _, d := range f.Decls {
+		if fn, ok := d.(*ast.FuncDecl); ok && fn.Name.Name == "main" && fn.Recv == nil {
+			mainFn = fn
+		}
+	}
+	if mainFn == nil {
+		t.Fatal("main.go 里找不到 func main")
+	}
+
+	// 在 main 的**顶层语句序列**里定位两者，比下标。用顶层语句而不是字节偏移，
+	// 顺带把「无条件」也钉住：清扫被塞进某个 if/for 里时，它就不再是 main 的
+	// 顶层 ExprStmt——那种写法在「上一轮残留 + 这一轮某条件不成立」时同样跑不到。
+	sweepIdx, createIdx := -1, -1
+	for i, st := range mainFn.Body.List {
+		if countCalls(st, isSweep) > 0 && sweepIdx < 0 {
+			sweepIdx = i
+			es, ok := st.(*ast.ExprStmt)
+			if !ok || countCalls(es.X, isSweep) == 0 {
+				t.Errorf("sweepStaleDNSConfig() 必须是 main 里**无条件**的一句（%s）："+
+					"包进 if/for 之后，条件不成立那次残留就没人回收，而这条清扫本身就是兜底",
+					fset.Position(st.Pos()))
+			}
+		}
+		if countCalls(st, isCreateTUN) > 0 && createIdx < 0 {
+			createIdx = i
+		}
+	}
+	if sweepIdx < 0 {
+		t.Fatal("main 函数体里没有 sweepStaleDNSConfig() 调用——" +
+			"挪到别的函数里就等于没有回收点（main 未必会走到那里）")
+	}
+	if createIdx < 0 {
+		t.Fatal("main 函数体里找不到 tun.CreateTUN 调用点")
+	}
+	if sweepIdx > createIdx {
 		t.Error("sweepStaleDNSConfig() 必须排在 tun.CreateTUN 之前：" +
 			"建卡失败是 log.Fatalf，排在后面时清扫永远跑不到，而建卡失败恰恰是" +
 			"「上一次异常退出」之后最容易紧接着发生的")
 	}
-	// 顺带钉住它只被调一次（调两次说明有人在后面又补了一处，那是把问题掩盖掉）
-	if n := strings.Count(s, "sweepStaleDNSConfig()"); n != 1 {
-		t.Errorf("sweepStaleDNSConfig() 应恰好调用一次，实得 %d 次", n)
-	}
+}
+
+// countCalls 数 n 子树里满足 pred 的调用点。
+// 注释不进语法树，所以「注释里写了这个调用」不会被算进来——这正是改用 AST 的理由。
+func countCalls(n ast.Node, pred func(*ast.CallExpr) bool) int {
+	var c int
+	ast.Inspect(n, func(m ast.Node) bool {
+		if call, ok := m.(*ast.CallExpr); ok && pred(call) {
+			c++
+		}
+		return true
+	})
+	return c
 }

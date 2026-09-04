@@ -43,8 +43,11 @@
               <div class="kpi__l">授信终端 · 纳管率 {{ (ov.devices.rate * 100).toFixed(0) }}%</div>
             </div>
             <div class="kpi">
-              <div class="kpi__v">{{ nSessions }}</div>
-              <div class="kpi__l">活跃会话</div>
+              <!-- ★三态：sessions 缺席 = 一台在线网关都没在上报心跳，"有谁接入"没有数据源。
+                   大屏最容易顺手写 `?? 0`——那会让"控制面失去数据面视野"在墙上显示成
+                   一个安静的 0，与"确实没人连"完全同形。 -->
+              <div class="kpi__v" :class="{ 'kpi__v--unknown': sessionsUnknown }">{{ sessionsUnknown ? '—' : nSessions }}</div>
+              <div class="kpi__l">{{ sessionsUnknown ? '活跃会话 · 无网关上报' : '活跃会话' }}</div>
             </div>
             <div class="kpi">
               <div class="kpi__v">{{ nUsers }}</div>
@@ -295,7 +298,10 @@ const verdictTotal = computed(() => ov.value.verdicts.reduce((s, b) => s + b.val
 const auditMax = computed(() => Math.max(...ov.value.auditByKind.map((b) => b.value), 1));
 
 const nDevTrusted = useCountUp(() => ov.value.devices.trusted);
-const nSessions = useCountUp(() => ov.value.sessions);
+/* sessionsUnknown 见模板处注释：缺席 = 不可判定，不是 0。
+ * useCountUp 只在"确实有数"时才有意义，缺席时模板走 '—' 分支，这里的 0 不会被渲染。 */
+const sessionsUnknown = computed(() => ov.value.sessions === undefined || ov.value.sessions === null);
+const nSessions = useCountUp(() => ov.value.sessions ?? 0);
 const nUsers = useCountUp(() => ov.value.users.total);
 const nThreat = useCountUp(() => threatTotal.value);
 const nVerdict = useCountUp(() => verdictTotal.value);
@@ -549,6 +555,8 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .kpi__v small { font-size: 14px; font-weight: 500; color: var(--c-t3); margin-left: 2px; }
 .kpi__l { font-size: 12px; color: var(--c-t2); margin-top: 5px; }
 .kpi--danger .kpi__v { color: #ff6b6b; text-shadow: 0 0 16px rgba(255, 77, 79, .45); }
+/* 不可判定：暗、无光晕——在墙上一眼能看出这不是一个读数 */
+.kpi__v--unknown { color: var(--c-t3); font-weight: 600; text-shadow: none; }
 
 /* 判定环图 */
 .donut { display: grid; grid-template-columns: 130px 1fr; align-items: center; gap: 6px; position: relative; }

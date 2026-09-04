@@ -57,6 +57,42 @@ func auditWhere(q AuditQuery) (string, []any) {
 	return strings.Join(where, " AND "), args
 }
 
+// auditSearchSQL 拼检索的取行语句（cond 来自 auditWhere，参数全部走占位符）。
+//
+// ★`ORDER BY ts DESC, id DESC` 与 idx_audit_log_ts 是**一对**，改一个必须动另一个：
+// 索引项即 (ts, rowid)，这个排序恰是它的逆序，于是「取一页」= 从索引尾部倒读 N 条，
+// 计划里连 `USE TEMP B-TREE FOR ORDER BY` 都不出现。
+//
+// 三种形态 200 万行实测（audit_bench_test.go 的 BenchmarkAudit检索*，M1 Pro）：
+//
+//	                        无索引+ORDER BY id  有索引+ORDER BY id  有索引+ORDER BY ts,id
+//	最近 7 天 · 第 1 页            139µs             979ms ★            190µs
+//	最近 7 天 · 第 5 页            216µs             （同上量级）        227µs
+//	最早那一天（旧窗口）           297ms             （同上量级）        208µs
+//
+// 读法要诚实，三件事：
+//
+//	① 中间那一列（★）是这次改造**差点引入的回退**：只加索引不改排序，
+//	   审计页最主要的那条查询会从 0.14ms 掉到 0.98s——加索引把系统改慢了 7000 倍。
+//	   反过来只改排序不加索引也糟（全表扫 + 临时 B 树排序，实测 1.7s）。两者必须成对。
+//	② 最常见的那一发（最近几天 · 第 1 页）改造后**略慢**（139µs → 190µs）：
+//	   旧计划从表尾倒扫 rowid、凑够 100 行就停，而 ts 与 id 天然同序，它本来就很快；
+//	   新计划走索引区间、每行还要回表取列。这一点没什么可粉饰的。
+//	③ 买回来的是第三行：**旧时间窗** 297ms → 0.2ms（1400 倍）。旧计划要先趟过
+//	   全部更新的行才够得着那个窗口，窗口越旧越贵——而"翻两个月前的旧账"
+//	   正是审计检索这个功能的立身之本（见 SearchAudit 上方那段回归背景）。
+//	   另外每次检索都要跑的那条 COUNT(*) 总数，也从 223ms 降到 27ms。
+//
+// 排序键从 id 换成 ts 还顺带修了一处名不副实：列表按「时间」列展示，却按落库序排。
+// 二者只在 ts 由调用方显式指定（不是落库当刻）时才会分岔，那时页面上看到的正是
+// 「时间列忽大忽小」。id 留作次级键保证分页确定——同一秒内多条时，
+// 少了它 LIMIT/OFFSET 翻页会重复或漏行，而这在页面上表现为"某条记录怎么找都找不到"
+// （TestAuditSearchOrderIsDeterministic 钉住）。
+func auditSearchSQL(cond string) string {
+	return `SELECT ts,category,actor,src_ip,event,verdict,
+COALESCE(seq,0),COALESCE(mac,'') FROM audit_log WHERE ` + cond + ` ORDER BY ts DESC, id DESC LIMIT ? OFFSET ?`
+}
+
 // dayBound 只有日期时补上时分秒；已经是完整时间戳就原样用。
 func dayBound(v, bound string) string {
 	if len(v) == len("2006-01-02") {
@@ -79,8 +115,7 @@ func (s *SQLiteStore) SearchAudit(ctx context.Context, q AuditQuery) ([]AuditEnt
 	if limit > 500 {
 		limit = 500
 	}
-	rows, err := s.db.QueryContext(ctx, `SELECT ts,category,actor,src_ip,event,verdict,
-COALESCE(seq,0),COALESCE(mac,'') FROM audit_log WHERE `+cond+` ORDER BY id DESC LIMIT ? OFFSET ?`,
+	rows, err := s.db.QueryContext(ctx, auditSearchSQL(cond),
 		append(args, limit, max(q.Offset, 0))...)
 	if err != nil {
 		return nil, 0, err

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
@@ -630,6 +631,14 @@ func (s *Server) handleSaveAlertRule(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	saved, err := wr.SaveAlertRule(r.Context(), rule)
+	// 阈值越界：400 + **后端原话**（哪一项、越了哪一边、后果是什么）。
+	// 走 errors.Is 而不是加进下面那个 switch：错误正文里带着具体项目名，
+	// 不是可比较的单例；落进 default 会变成 500「failed to save alert rule」，
+	// 管理员照着去查后端连接，而真实原因是他把某个阈值框清空了。
+	if err != nil && errors.Is(err, store.ErrThresholdRange) {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch err {
 	case nil:
 	case store.ErrUnknownAlertKind:

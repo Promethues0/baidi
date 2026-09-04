@@ -87,6 +87,25 @@ jobs:
         # deploy/** 与 gateway/**，而那两处的脚本才是 root/mac 上真正会被执行的。
         run: bash scripts/check-shell-fullwidth-vars.sh
 
+  # ── 部署交付件（nginx 站点配置）─────────────────────────────────────────
+  #
+  # ★为什么单列一步、而不是继续挂在 deploy/build.sh 里：这批自检此前的唯一触发方式
+  #   是有人手工跑一遍全量 build（npm ci + 五个 Go 二进制，几分钟起步）。而本文件的
+  #   paths 虽然从一开始就含 `deploy/**`，上面四个 job（actionlint / go test / console /
+  #   e2e）**没有一个读 deploy/nginx/ 或执行 build.sh** —— 也就是说，改 nginx 配置的那种
+  #   提交，CI 会认认真真跑一遍然后全绿，而真正被改动的那份文件谁都没看。
+  #   一条只在「有人记得手工跑」时才执行的构建期检查，与没有检查的差别没有想象中大。
+  #
+  # ★它查的是仓库里那份**模板**；build.sh 继续查 `_out/nginx` 那份**产物**
+  #   （两者之间隔着一次 cp，历史上出过旧模板混进产物的事）。同一份实现两个调用方。
+  deploy-nginx:
+    name: 部署交付件（nginx 限流应用点 / 存活探测通路）
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: nginx 站点配置自检
+        run: bash deploy/check-nginx.sh
+
   go:
     name: Go · ${{ matrix.mod }}（vet + test）
     runs-on: ubuntu-latest

@@ -136,9 +136,16 @@ func (s *Server) handleUserState(w http.ResponseWriter, r *http.Request) {
 	//
 	//   store 层拿不到 gwSess（那是 api 层的内存登记），所以在这里覆盖，
 	//   与 handleUsers 的 enrichDirUsers 走同一个 onlineAccounts()。
-	online := s.onlineAccounts()
+	//   ★一台在线网关都没有时**这一列整个缺席**（不可判定），而不是全判成离线：
+	//   网关心跳断了（证书过期 / 控制面刚重启 / mTLS 口挂了）时敲门与隧道照常，
+	//   人是真连着的。而这一页正是"要不要现在踢他"的决策入口——
+	//   告诉管理员"已经离线了"，他就不动手了。
+	online, onlineKnown := s.onlineAccounts()
 	for i := range b.Items {
-		b.Items[i].Online = online[normUser(b.Items[i].Account)]
+		if onlineKnown {
+			on := online[normUser(b.Items[i].Account)]
+			b.Items[i].Online = &on
+		}
 	}
 	httpx.JSON(w, http.StatusOK, b)
 }

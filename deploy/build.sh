@@ -63,59 +63,19 @@ if [ -d "$HERE/artifacts/downloads" ]; then
   cp -R "$HERE/artifacts/downloads" "$OUT/downloads"
 fi
 
-# 自检：交付 nginx 站点绝不得含 default_server（防旧模板混入毒化烛龙后续 reload）
-if sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'default_server'; then
-  echo "✗ 交付 nginx/baidi.conf 含 default_server 指令，构建中止"; exit 1
-fi
-
-# 自检：限流指令必须在交付件里（wave8 行动 16）。
+# 自检：交付 nginx 站点配置（限流指令 / 存活探测通路 / 烛龙共存契约 / 片段命名）。
 #
-# ★这道检查就是限流配置的**执行方**。没有它，「登录端点限速」是一句只存在于
-# 文档与代码注释里的话——`lockout.go` 的运行期告警字面把运维指向 nginx limit_req，
-# 而改造前 `grep limit_ deploy/` 零命中。删掉哪一条都必须在构建期当场红。
-for d in limit_req_zone limit_conn_zone 'zone=baidi_login' 'zone=baidi_api' 'limit_conn baidi_dl'; do
-  if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q -- "$d"; then
-    # ${d} 必须带花括号：macOS 自带 bash 3.2 在 UTF-8 locale 下会把紧跟 $d 的全角
-    # 「」」的首字节吞进变量名，于是这句话恰好丢掉它唯一要传达的信息（是哪一条没了）。
-    echo "✗ 交付 nginx/baidi.conf 缺少限流指令「${d}」，构建中止（见 docs/charter/wave8.md 行动 16）"; exit 1
-  fi
-done
-# 自检：存活探测通路必须在交付件里，且必须是**精确匹配**。
+# ★这批检查抽在 deploy/check-nginx.sh 里、这里只是**调用方之一**：
+#   留在这里的话，它们唯一的触发方式是有人手工跑一遍全量 build（npm ci + 五个 Go 二进制，
+#   几分钟起步），而改一行 nginx 配置的人不会为了几条 grep 去跑它；
+#   `.github/workflows/server.yml` 的 paths 虽然含 deploy/**，但它的 job 一个都不读
+#   deploy/nginx/ ——改 nginx 配置时 CI 只是空转一遍全绿。现在 server.yml 直接跑那个脚本，
+#   本行则继续守住「交付件本身」这一侧（模板与产物之间隔着一次 cp）。
 #
-# ★这道检查就是那条 location 的执行方。没有它，`location = /healthz` 是一行谁删了都
-# 不会有人发现的配置——删掉之后 /healthz 静静地落回 `location /` 的 SPA 回退，
-# 恒回 200 HTML，客户端的「控制中心可达」变成一个**永远为真**的指示灯，
-# 而控制面是死是活在 HTTP 层面再也分不出来（2026-09-03 抓到的正是这个形态）。
-# 一并钉住 `=`：写成前缀匹配 `location /healthz` 语义就变了（/healthzXXX 也命中），
-# 而且更要命的是——SPA 那条也是前缀匹配，两条前缀规则的优先级不是一眼能看出来的东西。
-if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | grep -q 'location[[:space:]]*=[[:space:]]*/healthz'; then
-  echo "✗ 交付 nginx/baidi.conf 缺少精确匹配的 /healthz 反代通路，构建中止"
-  echo "  后果：/healthz 落进 SPA 回退恒回 200，客户端「控制中心可达」变成永真指示灯"
-  exit 1
-fi
-# 同一段里必须真的反代到 control：只有 location 壳子而没有 proxy_pass 的话，
-# nginx 会拿 root 下的静态文件去 try（找不到 → 404），照样与「控制面挂了」分不开。
-# ★必须**限定在该 location 的花括号块内**扫：先前写成「命中 location 后一路往下找
-# proxy_pass」时，它会越过块边界撞上下面 `location /api/` 里的那一行，于是把
-# 「/healthz 只剩个空壳子」判成通过——一道检查不出错误的检查比没有检查更坏
-# （变异检查当场抓到的就是这一条）。先剥注释，避免说明文字里的字样自证。
-if ! sed 's/#.*//' "$OUT/nginx/baidi.conf" | awk '
-       /location[[:space:]]*=[[:space:]]*\/healthz/ { f=1; next }
-       f && /^[[:space:]]*}/                        { f=0 }
-       f && /proxy_pass/                            { hit=1 }
-       END { exit !hit }'; then
-  echo "✗ 交付 nginx/baidi.conf 的 /healthz location 里没有 proxy_pass，构建中止"
-  echo "  后果：只有 location 壳子时 nginx 会去 root 下找静态文件，恒 404——"
-  echo "  与「控制面挂了」依旧分不开，只是把假阳性换成了假阴性"
-  exit 1
-fi
-
-# 片段文件必须随包发，且**不能**叫 .conf（conf.d/*.conf 会被 include 进 http{}，
-# 而它全是只能出现在 location 里的 proxy_* 指令 → 整台机器的 nginx 起不来）。
-[ -f "$OUT/nginx/baidi-proxy-api.inc" ] || { echo "✗ 交付件缺少 nginx/baidi-proxy-api.inc，构建中止"; exit 1; }
-if ls "$OUT/nginx/"*.inc.conf >/dev/null 2>&1; then
-  echo "✗ nginx 片段不得以 .conf 结尾（会被 include 进 http{} 而炸掉整台机器的 nginx）"; exit 1
-fi
+# ★检查内容为什么必须区分「zone 定义」与「限流应用点」，见 check-nginx.sh 顶部：
+#   改造前这里是一句纯子串循环，五条判据里有四条被顶部那三行 zone 定义顶包，
+#   实测删掉全部 5 个 limit_req 应用点仍然五条全绿。
+"$HERE/check-nginx.sh" "$OUT/nginx"
 
 echo "✓ 构建完成 → $OUT"
 ls -la "$OUT" "$OUT/bin"

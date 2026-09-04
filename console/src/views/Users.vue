@@ -39,8 +39,21 @@
     <!-- 聚合计数 -->
     <div class="bd-agg">
       <div v-for="s in agg" :key="s.label" class="bd-agg__c">
-        <span class="bd-agg__dot" :style="{ background: s.color }" /><b>{{ s.n }}</b>{{ s.label }}
+        <span class="bd-agg__dot" :style="{ background: s.color }" /><b :class="{ unknown: s.n === UNKNOWN }">{{ s.n }}</b>{{ s.label }}
       </div>
+    </div>
+
+    <!-- ★在线态没有数据源时必须当面说出来（后端把 online 整个字段缺席下发）。
+         此前同样的处境下这一页是整表灰点「离线」+ 页头「在线 0」，一句提示都没有，
+         而那时敲门与隧道照常，人是真连着的——管理员据此判断"要不要踢"就会判错。 -->
+    <div v-if="onlineUnknown" class="bd-unk">
+      <icon-exclamation-circle-fill class="bd-unk__ic" />
+      <span>
+        <b>在线态当前不可判定</b>：控制面此刻收不到任何网关的心跳上报，「谁连着」这件事没有数据源
+        （网关证书过期 / 控制面刚重启 / mTLS 端口不通都会这样）。
+        此时<b>敲门与隧道并不受影响</b>，用户很可能正连着——不要据此认定"人已经离线了"。
+        去 <router-link class="bd-link" to="/security/gateway">网关与隐身</router-link> 看网关心跳。
+      </span>
     </div>
 
     <div class="bd-two">
@@ -166,7 +179,7 @@
                 <span v-for="gid in u.groups" :key="gid" class="bd-tg bd-tg--sm" :style="tagStyle('#722ED1')">{{ groupName(gid) }}</span>
               </td>
               <td>
-                <span class="bd-st"><span class="d" :style="{ background: u.online ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ u.online ? '在线' : '离线' }}</span>
+                <span class="bd-st" :title="onlineHint(u.online)"><span class="d" :style="{ background: onlineDot(u.online) }" />{{ onlineText(u.online) }}</span>
                 <span class="bd-umono">{{ u.device }} · {{ u.ip }}</span>
               </td>
               <td><span class="bd-tg" :style="tagStyle(statusMeta(u.status).color)">{{ statusMeta(u.status).label }}</span></td>
@@ -184,7 +197,7 @@
         <div class="bd-ud__head">
           <span class="bd-avatar" :style="{ background: avBg(sel), width: '46px', height: '46px', fontSize: '18px' }">{{ sel.name.slice(0, 1) }}</span>
           <div>
-            <div class="bd-ud__name">{{ sel.name }}<span class="bd-st" style="margin-left: 8px"><span class="d" :style="{ background: sel.online ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ sel.online ? '在线' : '离线' }}</span></div>
+            <div class="bd-ud__name">{{ sel.name }}<span class="bd-st" style="margin-left: 8px" :title="onlineHint(sel.online)"><span class="d" :style="{ background: onlineDot(sel.online) }" />{{ onlineText(sel.online) }}</span></div>
             <div class="bd-ud__acct bd-mono">{{ sel.account }} · {{ sel.org || '无组织归属' }}</div>
           </div>
         </div>
@@ -655,14 +668,42 @@ function editCurMembers() { if (curGroup.value?.kind === 'static') openMembers(c
 function editCurGroup() { if (curGroup.value) openGroup(curGroup.value); }
 function removeCurGroup() { if (curGroup.value) askRemoveGroup(curGroup.value); }
 
+/* ── 在线态三态渲染（后端 online 可缺席 = 不可判定）──
+ *
+ * ★照抄 Gateway.vue 的 triText：`u.online ? '在线' : '离线'` 会把"控制面没有数据源"
+ *   渲染成一个确定结论。**绝不能在这里写 `?? false` 把缺席补回 false**——
+ *   那时链路更长（后端如实缺席、前端偷偷塌回），更难查。
+ *   缺席的成因见 lib/api.ts DirUser.online：网关心跳断了而隧道照常，人可能正连着。 */
+const UNKNOWN = '—';
+function onlineText(v: boolean | undefined) {
+  return v === undefined || v === null ? '不可判定' : v ? '在线' : '离线';
+}
+function onlineDot(v: boolean | undefined) {
+  // 不可判定用与"离线"不同的灰：两者在处置上完全不同，不能长成一个样。
+  return v === undefined || v === null ? 'var(--bd-warning)' : v ? 'var(--bd-success)' : 'var(--bd-t4)';
+}
+function onlineHint(v: boolean | undefined) {
+  return v === undefined || v === null
+    ? '控制面此刻收不到任何网关心跳，"谁连着"没有数据源；敲门与隧道不受影响，此人可能正连着'
+    : v
+      ? '在线网关正上报着这个账号的接入会话'
+      : '有网关在上报，但其中没有这个账号的会话';
+}
+/** 只要有一行的 online 缺席，整页在线口径就不可判定（后端是整批下发的，不会半有半无）。 */
+const onlineUnknown = computed(() => users.value.some((u) => u.online === undefined || u.online === null));
+
 // ★顶部四个聚合数跟随当前身份源：用全库口径的话，它与刚点中的那个目录对不上。
 const agg = computed(() => {
   const u = inDir.value;
+  // 在线/离线两格必须跟着三态走：不可判定时这两个数一个都算不出来。
+  // 写成 `filter(x => !x.online)` 的话，缺席的那批会被整体记进"离线"，
+  // 页头就出现「在线 0 · 离线 312」——一个凭空的确定结论。
+  const unknown = u.some((x) => x.online === undefined || x.online === null);
   return [
-    { label: '在线', n: u.filter((x) => x.online).length, color: 'var(--bd-success)' },
-    { label: '离线', n: u.filter((x) => !x.online).length, color: 'var(--bd-t4)' },
-    { label: '锁定', n: u.filter((x) => x.status === 'locked').length, color: 'var(--bd-danger)' },
-    { label: '禁用', n: u.filter((x) => x.status === 'disabled').length, color: 'var(--bd-t3)' }
+    { label: '在线', n: unknown ? UNKNOWN : String(u.filter((x) => x.online === true).length), color: 'var(--bd-success)' },
+    { label: '离线', n: unknown ? UNKNOWN : String(u.filter((x) => x.online === false).length), color: 'var(--bd-t4)' },
+    { label: '锁定', n: String(u.filter((x) => x.status === 'locked').length), color: 'var(--bd-danger)' },
+    { label: '禁用', n: String(u.filter((x) => x.status === 'disabled').length), color: 'var(--bd-t3)' }
   ];
 });
 
@@ -1263,7 +1304,17 @@ onMounted(load);
 .bd-agg { display: flex; gap: 24px; padding: 0 2px 16px; }
 .bd-agg__c { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t3); }
 .bd-agg__c b { font-size: 20px; font-weight: 700; color: var(--bd-t1); }
+/* 不可判定：灰、细，明显不是一个读数——绝不让它长得像 0（同 DeviceStat 的 .bd-tile__value.unknown） */
+.bd-agg__c b.unknown { color: var(--bd-t4); font-weight: 500; }
 .bd-agg__dot { width: 8px; height: 8px; border-radius: 50%; }
+
+/* 在线态不可判定的横幅：橙色告警调，与蓝色的 .bd-sync 说明条区分开 */
+.bd-unk {
+  display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; line-height: 1.7;
+  color: var(--bd-t2); background: var(--bd-tag-gold-bg); border: 1px solid var(--bd-warning);
+  border-radius: 8px; padding: 10px 14px; margin: 0 0 14px;
+}
+.bd-unk__ic { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
 
 .bd-two { display: flex; gap: 16px; align-items: flex-start; }
 .bd-otree { width: 246px; flex: none; padding: 10px; }

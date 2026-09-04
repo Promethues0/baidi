@@ -104,11 +104,15 @@ type Overview struct {
 	Devices     DeviceStat `json:"devices"`
 	Users       UserStat   `json:"users"`
 	Threats     ThreatStat `json:"threats"`
-	// Sessions 当前活跃接入会话数。**store 层恒为 0**：会话的权威事实在网关上报里
-	// （api.Server.gwSess），库里没有这回事。由 api.handleOverview 在有在线网关时注入；
-	// 没有任何网关上报就是 0——那是"控制面确实不知道有谁接入"的如实表达，
-	// 不是"平时都有 186 个人在线"。
-	Sessions    int           `json:"sessions"`
+	// Sessions 当前活跃接入会话数。**store 层永远不填**（留 nil）：会话的权威事实
+	// 在网关上报里（api.Server.gwSess），库里没有这回事。由 api.handleOverview
+	// 在**有在线网关**时注入。
+	//
+	// ★三态指针，缺席 = 不可判定。改造前是 `int`，handleOverview 里那句
+	// `if n := s.onlineSessionCount(); n >= 0` 的 -1 分支因此在 SQLite 后端等于白写：
+	// store 恒 0，于是「一台网关都没在上报，控制面不知道有谁接入」与
+	// 「确实一个人都没连」在页面上是同一个字——而 KPI 底下还写着「当前活跃接入」。
+	Sessions    *int          `json:"sessions,omitempty"`
 	AuditByKind []KV          `json:"auditByKind"`
 	Verdicts    []KV          `json:"verdicts"`
 	Defense     []DefenseLine `json:"defense"`

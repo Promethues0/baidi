@@ -233,7 +233,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, fetchProfile, checkClientUpdate, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
+import { api, fetchProfile, checkClientUpdate, ApiError, failReason, failStatus, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, type TunView, type DataplaneNotice } from '@/lib/tunnel';
@@ -283,31 +283,43 @@ async function doLogin(withMfa: boolean) {
     else if (r.needWebauthn) { err.value = '该账号已启用 passkey 二次认证：客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP。'; }
     else if (r.needMfa) { needMfa.value = true; mfaReason.value = r.reason || ''; err.value = ''; }
     else { err.value = r.reason || '登录失败'; }
-  } catch {
+  } catch (e) {
     // ★不要再统一说「检查地址」：最常见的那种失败地址恰恰是对的（自签证书被系统拒）。
     //   先探一次 TCP 再下结论，见 diagnose.ts 的 explainControlFailure。
-    err.value = await explainControl();
+    //   而**后端答复过**（哪怕是 403）就连探都不该探，见 explainControl 顶部。
+    err.value = await explainControl(e);
   } finally { loading.value = false; }
 }
 
 /**
- * 控制面连不上时给一句**说得出原因**的话。
+ * 控制面请求失败时给一句**说得出原因**的话。
  *
- * ★先 TCP 探一次再下结论：webview 的 fetch 把「TLS 被拒」和「连不上」压成同一个
- * TypeError，而这两者的下一步动作完全相反（导证书 vs 改地址）。
- * 探测本身失败就如实回落到通用文案，不猜。
+ * ★第一优先级是后端原话：/portal/login 在口令校验之前就会定性拒绝——防爆破锁
+ *   （403「登录失败次数过多，已被临时锁定，请约 N 分钟后重试」）、账号被禁用、
+ *   认证域没选。改造前这里是 bare catch + 无条件传输层归因，于是锁定场景下
+ *   （TCP 必然通、HTTPS "失败"）用户看到的是一句方向完全相反却非常笃定的
+ *   「地址是对的，问题在证书，请把该站点证书导入本机受信任的根证书颁发机构」，
+ *   照做之后仍然登不进去，且每试一次都在给自己续锁。
+ *   后端答复过 ⇒ 传输层显然是通的 ⇒ 连 probe_tcp 都不必发（还省一个 RTT）。
+ *
+ * ★只有请求压根没到后端（NetworkError）才轮到 TCP 探测：webview 的 fetch 把
+ *   「TLS 被拒」和「连不上」压成同一个 TypeError，这两者的下一步动作完全相反
+ *   （导证书 vs 改地址）。探测本身失败就如实回落到通用文案，不猜。
  */
-async function explainControl(): Promise<string> {
+async function explainControl(e?: unknown): Promise<string> {
+  const said = e instanceof ApiError ? failReason(e) : '';
   const u = config.control.trim();
   let probe: TcpProbe | undefined;
-  try {
-    const m = u.match(/^(https?):\/\/([^/:]+)(?::(\d+))?/i);
-    if (m) {
-      const port = m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'https' ? 443 : 80);
-      probe = await invoke<TcpProbe>('probe_tcp', { host: m[2], port });
-    }
-  } catch { /* 探不到就不猜，交给下面的通用文案 */ }
-  return explainControlFailure(u, probe);
+  if (!said) {
+    try {
+      const m = u.match(/^(https?):\/\/([^/:]+)(?::(\d+))?/i);
+      if (m) {
+        const port = m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'https' ? 443 : 80);
+        probe = await invoke<TcpProbe>('probe_tcp', { host: m[2], port });
+      }
+    } catch { /* 探不到就不猜，交给下面的通用文案 */ }
+  }
+  return explainControlFailure(u, probe, said);
 }
 
 /** TOTP 第二回合：口令已验票据 + 动态验证码换会话令牌（同码只能成功一次）。 */
@@ -327,9 +339,16 @@ async function doTotp() {
       void checkUpdate();
     } else { err.value = r.reason || '验证码不正确或已使用'; }
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    if (msg.startsWith('401') && msg.includes('票据')) { err.value = '认证超时，请重新登录'; needTotp.value = false; totpTicket.value = ''; }
-    else { err.value = '验证码不正确或已使用，请输入 App 当前显示的验证码'; }
+    // ★改造前这两支**都**是死的：api() 抛的是 `Error("401 Unauthorized")`，
+    //   `msg.startsWith('401')` 成立而 `msg.includes('票据')` 永不成立，于是不管后端
+    //   说什么都落进 else 那句"验证码不正确或已使用"——包括 403「账号已被禁用」
+    //   和 403 防爆破锁（TOTP 第二回合同样过 loginGateLocked）。被锁的人于是照着提示
+    //   一遍遍重输验证码，每输一次都在续锁，而屏幕上从没出现过"已被临时锁定"。
+    //   现在状态码走 failStatus（唯一能判它的东西），文案一律用后端原话。
+    //   401 单独拎出来是因为它要**改状态**（票据 3 分钟就过期，得退回口令那一步重来），
+    //   不是为了改文案。
+    err.value = failReason(e);
+    if (failStatus(e) === 401) { needTotp.value = false; totpTicket.value = ''; }
   } finally { loading.value = false; }
 }
 
@@ -468,7 +487,9 @@ async function loadProfile(): Promise<void> {
   try {
     setProfile(await fetchProfile());
   } catch (e) {
-    setProfileError(String((e as Error)?.message ?? e));
+    // 用 failReason 而不是 String(e.message)：剖面被拒时后端说的是具体原因
+    //（账号被禁用 / 终端环境不合规 / 无可用网关落点），那正是接入页要显著提示的内容。
+    setProfileError(failReason(e));
   }
 }
 

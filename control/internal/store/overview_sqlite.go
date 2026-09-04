@@ -258,13 +258,19 @@ func (s *SQLiteStore) postureDefense(ctx context.Context) ([]string, int, error)
 func (s *SQLiteStore) auditAggregates(ctx context.Context, windowHours int) (byCat, byVerdict map[string]int, err error) {
 	byCat, byVerdict = map[string]int{}, map[string]int{}
 	cutoff := time.Now().Add(-time.Duration(windowHours) * time.Hour).Format("2006-01-02 15:04:05")
-	if err = scanCounts(ctx, s, `SELECT category, COUNT(*) FROM audit_log WHERE ts >= ? GROUP BY category`,
-		byCat, cutoff); err != nil {
+	if err = scanCounts(ctx, s, auditWindowGroupSQL("category"), byCat, cutoff); err != nil {
 		return
 	}
-	err = scanCounts(ctx, s, `SELECT verdict, COUNT(*) FROM audit_log WHERE ts >= ? GROUP BY verdict`,
-		byVerdict, cutoff)
+	err = scanCounts(ctx, s, auditWindowGroupSQL("verdict"), byVerdict, cutoff)
 	return
+}
+
+// auditWindowGroupSQL 「时间窗内按某一列分组计数」的语句（col 只由代码常量传入，
+// 不接受外部输入）。抽出来是为了让 EQP 守卫（audit_index_test.go）测的就是
+// **生产在跑的这一条**——这两条查询正是 idx_audit_log_ts 最主要的受益方，
+// 也是「谁再给 category 建一条索引就会整条退化到 1.5s」的那两条。
+func auditWindowGroupSQL(col string) string {
+	return `SELECT ` + col + `, COUNT(*) FROM audit_log WHERE ts >= ? GROUP BY ` + col
 }
 
 func scanCounts(ctx context.Context, s *SQLiteStore, q string, into map[string]int, args ...any) error {

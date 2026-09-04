@@ -49,8 +49,16 @@
       <a-grid-item>
         <a-card class="bd-kpi" :bordered="false">
           <div class="bd-kpi__label">在线会话</div>
-          <div class="bd-kpi__value">{{ ov.sessions }}</div>
-          <div class="bd-kpi__foot">当前活跃接入</div>
+          <!-- ★三态：sessions 缺席 = 控制面收不到任何网关心跳，"有谁接入"没有数据源。
+               改造前后端那句 `if n >= 0` 的 -1 分支等于白写（store 侧恒 0），
+               于是「不可判定」与「确实 0 个」在这一格上是同一个字，底下还标着
+               「当前活跃接入」。渲染口径与 DeviceStat 的不可判定磁贴一致。 -->
+          <div class="bd-kpi__value" :class="{ 'bd-kpi__value--unknown': sessionsUnknown }">
+            {{ sessionsUnknown ? '—' : ov.sessions }}
+          </div>
+          <div class="bd-kpi__foot">
+            {{ sessionsUnknown ? '无网关上报心跳，接入数不可判定（隧道可能仍在转发）' : '当前活跃接入' }}
+          </div>
         </a-card>
       </a-grid-item>
       <a-grid-item>
@@ -193,6 +201,12 @@ const ov = ref<Overview>(MOCK);
 const live = ref(false);
 const loading = ref(false);
 
+/* sessionsUnknown 后端把 sessions 整个字段缺席下发 = 一台在线网关都没在上报，
+ * 控制面**不知道**有谁接入（与 /diag 的「在线 —（无网关上报）」同一口径）。
+ * ★绝不能写 `ov.sessions ?? 0`：那把后端如实的缺席在前端塌回一个确定的 0，
+ *   而此刻隧道可能正在转发——KPI 底下那句「当前活跃接入」会直接把人带偏。 */
+const sessionsUnknown = computed(() => ov.value.sessions === undefined || ov.value.sessions === null);
+
 /* hours 态势统计的时间窗（默认 24h，钳制在后端 store.ClampOverviewWindow 一处）。 */
 const hours = ref(24);
 /* scopeText 窗口标签文案（跟随 hours，不写死）。 */
@@ -237,6 +251,8 @@ onMounted(load);
 .bd-kpi__label { font-size: 13px; color: var(--color-text-3); }
 .bd-kpi__value { font-size: 30px; font-weight: 700; line-height: 1.4; color: var(--color-text-1); }
 .bd-kpi__value--danger { color: var(--bd-danger); }
+/* 不可判定：灰、细，明显不是一个读数——绝不让它长得像 0（同 DeviceStat.bd-tile__value.unknown） */
+.bd-kpi__value--unknown { color: var(--bd-t4); font-weight: 500; }
 .bd-kpi__unit { font-size: 15px; font-weight: 400; color: var(--color-text-3); }
 .bd-kpi__foot { font-size: 12px; color: var(--color-text-3); margin-top: 6px; }
 

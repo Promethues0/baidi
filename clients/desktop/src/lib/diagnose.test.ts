@@ -7,7 +7,7 @@
  * 而不是给一句中性的猜测。
  */
 import { describe, expect, it } from 'vitest';
-import { judgeKnock, judgeTunnel } from './diagnose';
+import { explainControlFailure, judgeKnock, judgeTunnel } from './diagnose';
 
 describe('judgeTunnel', () => {
   it('运行中未就绪、健康行带 err → detail 转述数据面原话', () => {
@@ -50,5 +50,44 @@ describe('judgeKnock', () => {
   it('未运行 → skip；保活在 → pass', () => {
     expect(judgeKnock({ running: false, ready: false }).state).toBe('skip');
     expect(judgeKnock({ running: true, ready: true, keepalive: true }).state).toBe('pass');
+  });
+});
+
+/**
+ * explainControlFailure 的**归因边界**。
+ *
+ * 这一组守的是本仓那条「失败必须转述后端原话」纪律在桌面端漏掉的那一半：
+ * Connect.vue 的 doLogin 此前是 bare catch，把**任何**登录失败都送进这个传输层
+ * 归因器。最坏的一例是防爆破锁定——lockout.go 在口令校验之前回 403，此刻 TCP 当然
+ * 连得上、HTTPS 请求也确实"失败"了，于是它会给出一句方向完全相反却写得笃定又可执行的
+ * 「地址是对的，问题在证书：请把该站点证书导入本机受信任的根证书颁发机构」。
+ * 用户会真的去动系统根证书库，动完仍然登不进去（锁 15 分钟，期间每试一次还在续锁）。
+ */
+describe('explainControlFailure · 后端答复过就不许自己编', () => {
+  const locked = '登录失败次数过多，已被临时锁定，请约 12 分钟后重试';
+
+  it('后端答复过（403 防爆破锁）→ 原样转述，且一个字都不提证书', () => {
+    // TCP 通 + HTTPS 失败：这正是会触发"问题在证书"那一支的输入组合。
+    const say = explainControlFailure('https://gw.example.com', { kind: 'held-open', ms: 7 }, locked);
+    expect(say).toBe(locked);
+    expect(say).not.toContain('证书');
+    expect(say).not.toContain('地址是对的');
+  });
+
+  it('后端答复过 → 连"TCP 都没通"那支也不许抢答（拒绝原因优先于任何探测结论）', () => {
+    expect(explainControlFailure('https://gw.example.com', { kind: 'refused', ms: 0 }, locked)).toBe(locked);
+  });
+
+  it('全是空白的 serverSaid 不算答复过：回落到传输层归因，不许显示一句空话', () => {
+    const say = explainControlFailure('https://gw.example.com', { kind: 'held-open', ms: 7 }, '   ');
+    expect(say).toContain('证书');
+  });
+
+  it('没有 serverSaid（真·请求没到后端）→ 原有归因一字未改', () => {
+    expect(explainControlFailure('https://gw.example.com', { kind: 'held-open', ms: 7 })).toContain('问题在证书');
+    expect(explainControlFailure('https://gw.example.com', { kind: 'refused', ms: 0 })).toContain('TCP 都没通');
+    expect(explainControlFailure('http://gw.example.com:8090', { kind: 'held-open', ms: 7 })).toContain('它可能不是 baidi-control');
+    expect(explainControlFailure('https://gw.example.com')).toContain('运维诊断');
+    expect(explainControlFailure('  ')).toBe('未配置控制中心地址');
   });
 });

@@ -224,8 +224,20 @@ export function overall(states: DiagState[]): { level: 'fail' | 'warn' | 'pass' 
  *
  * 判据很简单，且只用现成材料：TCP 连得上而 HTTPS 请求失败 ⇒ 传输层没问题，
  * 问题在 TLS。**探不到就不猜**：TCP 探测本身失败时如实回落到通用文案。
+ *
+ * ★serverSaid：后端**答复过**的那句话（有 HTTP 应答就有它，哪怕是 403）。
+ *   非空时本函数一个字都不许自己编——这是一道结构性的闸，不是约定。
+ *   改造前它没有这个参数，而 Connect.vue 的 doLogin 是 bare catch，把**任何**登录失败
+ *   都送进来做传输层归因。最坏的一例是防爆破锁定：lockout.go 在口令校验之前回 403，
+ *   此时 TCP 当然是通的、HTTPS 请求也"失败"了，于是这里给出下面那句写得笃定又可执行的
+ *   「**地址是对的，问题在证书**：请把该站点证书导入本机受信任的根证书颁发机构」——
+ *   方向完全相反，而用户会照着真的去动系统根证书库，动完仍然登不进去
+ *   （锁 15 分钟，期间每试一次还在续锁）。让"后端说了什么"成为入参并排在最前面，
+ *   下一个调用方就没法再绕过它了。
  */
-export function explainControlFailure(control: string, probe?: TcpProbe): string {
+export function explainControlFailure(control: string, probe?: TcpProbe, serverSaid = ''): string {
+  const said = serverSaid.trim();
+  if (said) return said;
   const u = control.trim();
   if (!u) return '未配置控制中心地址';
   const https = /^https:/i.test(u);

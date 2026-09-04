@@ -1,7 +1,9 @@
 package natfw
 
 import (
-	"os"
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"strings"
 	"testing"
 )
@@ -238,17 +240,128 @@ func TestWebPortsAreExempted(t *testing.T) {
 // 生产者那一半：main.go 必须真的把 -web 端口填进 Exempt。
 // ★字段有消费方、没生产者时，上面那些断言全都通过而功能是死的——
 // 这正是本条缺陷此前的形态，所以判据要一直追到调用点。
+//
+// ★为什么走 go/parser 而不是 strings.Contains：**文本搜索会命中注释**。
+// 改造前这里搜的是 "WebPorts:" 与 "portOf(*webAddr)" 两个子串，而 main.go 那段
+// 构造代码上方正好有一段注释，逐字写着这两个词（那段注释解释的正是本缺陷）。
+// 实测：把 `WebPorts: webPorts,` 整行注释掉（补 `_ = webPorts` 让它编得过），
+// 本用例照旧 PASS——守卫等于不存在，而现场后果是同时带 -web 与 -nat 的网关
+// 其 L7 回包与拨后端的连接一起被 SNAT 改写源地址（「配了 NAT 之后 B/S 入口
+// 时通时不通」，两侧零报错）。注释不进语法树，换成 AST 之后
+// 「注释里写了」与「代码里做了」在判据上再也不同形。
 func TestWebPortsHaveProducer(t *testing.T) {
-	src, err := os.ReadFile("../../cmd/baidi-gateway/main.go")
+	const mainPath = "../../cmd/baidi-gateway/main.go"
+	fset := token.NewFileSet()
+	f, err := parser.ParseFile(fset, mainPath, nil, parser.SkipObjectResolution)
 	if err != nil {
-		t.Fatalf("读 main.go: %v", err)
+		t.Fatalf("解析 %s: %v", mainPath, err)
 	}
-	s := string(src)
-	if !strings.Contains(s, "WebPorts:") {
+
+	// ① 找到 natfw.Exempt{…} 这个构造点本身。
+	var lit *ast.CompositeLit
+	ast.Inspect(f, func(n ast.Node) bool {
+		cl, ok := n.(*ast.CompositeLit)
+		if !ok {
+			return true
+		}
+		sel, ok := cl.Type.(*ast.SelectorExpr)
+		if !ok {
+			return true
+		}
+		if x, ok := sel.X.(*ast.Ident); ok && x.Name == "natfw" && sel.Sel.Name == "Exempt" {
+			lit = cl
+		}
+		return true
+	})
+	if lit == nil {
+		t.Fatal("main.go 里找不到 natfw.Exempt{…} 构造点：排除集没有生产者，" +
+			"nft/pf 两侧的消费方永远收到零值，隧道口与敲门口也一起不被排除")
+	}
+
+	// ② WebPorts 必须是这个字面量里真实存在的一个 key。
+	var val ast.Expr
+	for _, e := range lit.Elts {
+		kv, ok := e.(*ast.KeyValueExpr)
+		if !ok {
+			continue
+		}
+		if k, ok := kv.Key.(*ast.Ident); ok && k.Name == "WebPorts" {
+			val = kv.Value
+		}
+	}
+	if val == nil {
 		t.Fatal("main.go 构造 natfw.Exempt 时必须填 WebPorts——" +
 			"否则 nft/pf 两侧的消费方永远收到空切片，FR-NAT-13 的排除规则等于不存在")
 	}
-	if !strings.Contains(s, "portOf(*webAddr)") {
-		t.Error("WebPorts 应取自 -web 监听地址（portOf(*webAddr)）")
+
+	// ③ 值要能**追到** portOf(*webAddr)。当前写法是先算进一个局部变量
+	//    （`if p := portOf(*webAddr); p > 0 { webPorts = append(webPorts, p) }`），
+	//    所以这里做一次赋值定点传播，而不是只认「值就字面写着那个调用」——
+	//    只认字面写法会逼着实现去迁就测试，而判据本来就是「端口取自 -web 监听地址」。
+	tainted := map[string]bool{}
+	var collected []ast.Expr
+	if id, ok := val.(*ast.Ident); ok {
+		tainted[id.Name] = true
+	} else {
+		collected = append(collected, val)
+	}
+	for range 8 { // 传播链就那么两跳，8 轮足够到定点
+		grew := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			as, ok := n.(*ast.AssignStmt)
+			if !ok {
+				return true
+			}
+			hit := false
+			for _, l := range as.Lhs {
+				if li, ok := l.(*ast.Ident); ok && tainted[li.Name] {
+					hit = true
+				}
+			}
+			if !hit {
+				return true
+			}
+			for _, r := range as.Rhs {
+				collected = append(collected, r)
+				ast.Inspect(r, func(m ast.Node) bool {
+					if mi, ok := m.(*ast.Ident); ok && !tainted[mi.Name] {
+						tainted[mi.Name] = true
+						grew = true
+					}
+					return true
+				})
+			}
+			return true
+		})
+		if !grew {
+			break
+		}
+	}
+	found := false
+	for _, e := range collected {
+		ast.Inspect(e, func(n ast.Node) bool {
+			call, ok := n.(*ast.CallExpr)
+			if !ok || len(call.Args) != 1 {
+				return true
+			}
+			fn, ok := call.Fun.(*ast.Ident)
+			if !ok || fn.Name != "portOf" {
+				return true
+			}
+			star, ok := call.Args[0].(*ast.StarExpr)
+			if !ok {
+				return true
+			}
+			// 只认 *webAddr：main.go 里还有 portOf(*proxyAddr)/portOf(*spaAddr)
+			// 两个同名调用，认宽了就等于不认。
+			if id, ok := star.X.(*ast.Ident); ok && id.Name == "webAddr" {
+				found = true
+			}
+			return true
+		})
+	}
+	if !found {
+		t.Error("WebPorts 的值追不到 portOf(*webAddr)：排除的必须是 -web 真正监听的那个端口，" +
+			"填成常量或别的端口时规则集保护的是别人，L7 流量照样被 SNAT 改写源地址")
 	}
 }

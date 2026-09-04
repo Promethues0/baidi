@@ -94,9 +94,18 @@ type UserStateItem struct {
 	// 同一个"被降权的用户"在安全中心叫 degrade、在用户状态页叫 risk-low，
 	// 管理员无法判断两处说的是不是同一件事，也无法从这页看出「谁正在被降权」。
 	// idle（空闲挂起）一并删除——它从来没有真实来源，真实实现恒为 0。
-	State     string   `json:"state"` // block | degrade | gray | locked | disabled
-	Risk      string   `json:"risk"`  // none | low | high
-	Online    bool     `json:"online"`
+	State string `json:"state"` // block | degrade | gray | locked | disabled
+	Risk  string `json:"risk"`  // none | low | high
+	// Online 此刻有没有在线网关上报着这个账号的接入会话。
+	//
+	// ★三态指针，**缺席 = 不可判定**：控制面此刻一台在线网关都没有（心跳断了 /
+	// 刚重启 / mTLS 口挂了）时，"谁连着"这件事**没有数据源**，而敲门与隧道
+	// 并不受影响——用户可能正连着。由 api.handleUserState 现算填入。
+	//
+	// 改造前是 bool：无在线网关时整页绿点全灭、一句提示都没有。这一页的定位
+	// 写在它自己的注释里——"就近处置：要不要现在踢他，取决于他现在有没有连着"，
+	// 把"不知道"渲染成"已经离线了"，管理员就不会动手。
+	Online    *bool    `json:"online,omitempty"`
 	Reasons   []string `json:"reasons"` // 命中的风险 / 异常原因
 	LastEvent string   `json:"lastEvent"`
 	LastSeen  string   `json:"lastSeen"`
@@ -116,14 +125,14 @@ type UserStateBundle struct {
 // UserStates 返回演示用的用户态势数据。
 func (m *Memory) UserStates(_ context.Context) (UserStateBundle, error) {
 	items := []UserStateItem{
-		{ID: "u-ext-zhao", User: "外包-赵磊", Account: "ext.zhao", Org: "外部协作 / 驻场", State: DisposalBlock, Risk: "high", Online: true, Reasons: []string{"磁盘未加密", "终端防护未在线"}, LastEvent: "终端环境不合规，接入已阻断", LastSeen: "2 分钟前"},
-		{ID: "u-ext-sun", User: "外包-孙伟", Account: "ext.sun", Org: "外部协作 / 远程", State: DisposalDegrade, Risk: "high", Online: true, Reasons: []string{"系统完整性保护未开启"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "5 分钟前"},
-		{ID: "u-svc-bot-04", User: "svc-bot-04", Account: "svc.bot.04", Org: "系统账号 / 自动化", State: DisposalDegrade, Risk: "high", Online: true, Reasons: []string{"客户端版本过低"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "1 分钟前"},
-		{ID: "u-chen-jing", User: "陈静", Account: "chen.jing", Org: "市场中心 / 品牌组", State: DisposalGray, Risk: "low", Online: true, Reasons: []string{"主机防火墙未开启"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "8 分钟前"},
-		{ID: "u-wu-min", User: "吴敏", Account: "wu.min", Org: "财务中心 / 资金组", State: DisposalGray, Risk: "low", Online: true, Reasons: []string{"操作系统版本落后"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "12 分钟前"},
-		{ID: "u-li-fang", User: "李芳", Account: "li.fang", Org: "研发中心 / 测试组", State: "locked", Risk: "high", Online: false, Reasons: []string{"连续 5 次口令错误，账号已锁定", "疑似暴力破解"}, LastEvent: "账号锁定（自动）", LastSeen: "31 分钟前"},
-		{ID: "u-zhang-wei", User: "张伟", Account: "zhang.wei", Org: "销售中心 / 华南", State: "disabled", Risk: "none", Online: false, Reasons: []string{"离职流程已触发，账号被禁用"}, LastEvent: "管理员禁用账号", LastSeen: "3 天前"},
-		{ID: "u-zhao-lei2", User: "赵雷", Account: "zhao.lei", Org: "人力中心", State: "disabled", Risk: "none", Online: false, Reasons: []string{"长期未登录，已临时停用"}, LastEvent: "策略自动停用", LastSeen: "21 天前"},
+		{ID: "u-ext-zhao", User: "外包-赵磊", Account: "ext.zhao", Org: "外部协作 / 驻场", State: DisposalBlock, Risk: "high", Reasons: []string{"磁盘未加密", "终端防护未在线"}, LastEvent: "终端环境不合规，接入已阻断", LastSeen: "2 分钟前"},
+		{ID: "u-ext-sun", User: "外包-孙伟", Account: "ext.sun", Org: "外部协作 / 远程", State: DisposalDegrade, Risk: "high", Reasons: []string{"系统完整性保护未开启"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "5 分钟前"},
+		{ID: "u-svc-bot-04", User: "svc-bot-04", Account: "svc.bot.04", Org: "系统账号 / 自动化", State: DisposalDegrade, Risk: "high", Reasons: []string{"客户端版本过低"}, LastEvent: "高敏资源已暂停访问（降权，普通资源不受影响）", LastSeen: "1 分钟前"},
+		{ID: "u-chen-jing", User: "陈静", Account: "chen.jing", Org: "市场中心 / 品牌组", State: DisposalGray, Risk: "low", Reasons: []string{"主机防火墙未开启"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "8 分钟前"},
+		{ID: "u-wu-min", User: "吴敏", Account: "wu.min", Org: "财务中心 / 资金组", State: DisposalGray, Risk: "low", Reasons: []string{"操作系统版本落后"}, LastEvent: "灰度观察中（访问权未变更）", LastSeen: "12 分钟前"},
+		{ID: "u-li-fang", User: "李芳", Account: "li.fang", Org: "研发中心 / 测试组", State: "locked", Risk: "high", Reasons: []string{"连续 5 次口令错误，账号已锁定", "疑似暴力破解"}, LastEvent: "账号锁定（自动）", LastSeen: "31 分钟前"},
+		{ID: "u-zhang-wei", User: "张伟", Account: "zhang.wei", Org: "销售中心 / 华南", State: "disabled", Risk: "none", Reasons: []string{"离职流程已触发，账号被禁用"}, LastEvent: "管理员禁用账号", LastSeen: "3 天前"},
+		{ID: "u-zhao-lei2", User: "赵雷", Account: "zhao.lei", Org: "人力中心", State: "disabled", Risk: "none", Reasons: []string{"长期未登录，已临时停用"}, LastEvent: "策略自动停用", LastSeen: "21 天前"},
 	}
 	count := func(states ...string) int {
 		n := 0

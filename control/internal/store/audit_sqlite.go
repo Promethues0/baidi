@@ -349,8 +349,7 @@ func (s *SQLiteStore) Audit(ctx context.Context) (AuditBundle, error) {
 	}
 
 	// 带上 seq/mac：列表、CSV 导出、外送三个出口同源（见 AuditEntry 的注释）。
-	rows, err := s.db.QueryContext(ctx, `SELECT ts,category,actor,src_ip,event,verdict,
-COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY id DESC LIMIT 200`)
+	rows, err := s.db.QueryContext(ctx, auditRecentSQL)
 	if err != nil {
 		return out, err
 	}
@@ -367,23 +366,11 @@ COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY id DESC LIMIT 200`)
 		return out, err
 	}
 
-	// 分类计数（全表），按固定顺序铺满四类（缺失类计 0）。
-	counts := map[string]int{}
-	crows, err := s.db.QueryContext(ctx, `SELECT category, COUNT(*) FROM audit_log GROUP BY category`)
+	// 分类计数（全表口径，与页面「条 · 累计留痕」的文案一致），按固定顺序铺满全部类别
+	// （缺失类计 0）。语义与改造前那条全表 GROUP BY 逐字相同，只是不再每请求重算——
+	// 200 万行时它自己就要 1.32s，而大屏每 15s 打一发。理由与增量条件见 auditcat_sqlite.go。
+	counts, err := s.auditCategoryCounts(ctx)
 	if err != nil {
-		return out, err
-	}
-	for crows.Next() {
-		var cat string
-		var n int
-		if err := crows.Scan(&cat, &n); err != nil {
-			crows.Close()
-			return out, err
-		}
-		counts[cat] = n
-	}
-	crows.Close()
-	if err := crows.Err(); err != nil {
 		return out, err
 	}
 	// 类别卡走唯一字典（见 AuditCategories）：此前这里手抄了一份，漏掉 policy/system，
@@ -393,7 +380,34 @@ COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY id DESC LIMIT 200`)
 		out.Categories = append(out.Categories, KV{Name: c.Label, Value: counts[c.Key]})
 	}
 
-	today := time.Now().Format("2006-01-02")
-	_ = s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit_log WHERE ts LIKE ?`, today+"%").Scan(&out.TodayTotal)
+	// 今日总量用**半开区间**而不是 `ts LIKE '今天%'`：参数化的 LIKE 里 SQLite 看不出
+	// 那是个前缀常量，无论有没有索引都只能逐行比——200 万行实测无索引 321ms，
+	// 建了 ts 索引也只是把全表扫换成全索引扫（225ms，计划里是 SCAN 不是 SEARCH）。
+	// 换成 ts>=? AND ts<? 是一次索引定位 + 区间扫，实测 2ms。
+	// 上界取次日零点（不含），别写成「今天 23:59:59」——那会漏掉 23:59:59 与
+	// 次日零点之间那一秒里落的行，而这种缺一秒的账没人对得出来。
+	today := time.Now()
+	_ = s.db.QueryRowContext(ctx, auditTodayCountSQL,
+		today.Format("2006-01-02")+" 00:00:00",
+		today.AddDate(0, 0, 1).Format("2006-01-02")+" 00:00:00").Scan(&out.TodayTotal)
 	return out, nil
 }
+
+// 首屏取行与今日总量的 SQL 抽成常量：EQP 守卫（audit_index_test.go）测的必须是
+// **生产在跑的那一条**，测试里另抄一份的话，改了生产语句而守卫仍绿，等于没守。
+const (
+	// auditRecentSQL 首屏最近 200 条。
+	//
+	// ★`ORDER BY ts DESC, id DESC` 而不是原来的 `ORDER BY id DESC`：ts 索引的索引项
+	// 就是 (ts, rowid)，这个排序恰是它的逆序，于是取一页 = 从索引尾部倒读，不用排序。
+	// 另一半理由是**一致性**：SearchAudit 用的是同一个序，页面在"首屏快照"与
+	// "检索结果"之间来回切时，同一批行的先后不该变。
+	//
+	// 代价说清楚：ts 为空的历史行（RecordAudit 补时刻之前落的）在 DESC 下排到最末，
+	// 而改造前它们按 id 混在正常行里。这类行对所有按时间窗的查询本来就不可见
+	// （见 RecordAudit 里那段注释），排在末尾与排在中间同样查不到它——不新增失效形态。
+	auditRecentSQL = `SELECT ts,category,actor,src_ip,event,verdict,
+COALESCE(seq,0),COALESCE(mac,'') FROM audit_log ORDER BY ts DESC, id DESC LIMIT 200`
+	// auditTodayCountSQL 今日总量（半开区间，理由见调用点）。
+	auditTodayCountSQL = `SELECT COUNT(*) FROM audit_log WHERE ts>=? AND ts<?`
+)

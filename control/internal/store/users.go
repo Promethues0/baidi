@@ -56,12 +56,25 @@ type DirUser struct {
 	IP        string   `json:"ip"`
 	Auth      string   `json:"auth"`
 	LastLogin string   `json:"lastLogin"`
-	Online    bool     `json:"online"`
-	Status    string   `json:"status"` // active | locked | disabled | idle
-	Risk      string   `json:"risk"`   // none | low | high | unknown（不可判定，见 api.enrichDirUsers）
-	Roles     []string `json:"roles"`
-	Role      string   `json:"role,omitempty"` // 权威鉴权角色 admin | user（≠展示用 Roles）
-	PassHash  string   `json:"-"`              // bcrypt 口令哈希；绝不序列化进 API 响应
+	// Online 此刻有没有在线网关上报着这个账号的接入会话。
+	//
+	// ★三态指针，**缺席 = 不可判定**（json 里根本没有这个键）。判据由
+	// api.enrichDirUsers 现算，而"谁在线"只有数据面知道：一台网关都没在向控制面
+	// 上报心跳时（网关 mTLS 客户端证书过期 / 控制面刚重启内存态还没重建 /
+	// BAIDI_MTLS_ADDR 那个独立端口挂了），控制面**不知道**有谁连着——
+	// 而此时敲门与隧道都不受影响，用户是真连着的。
+	//
+	// 改造前这里是 `bool`：同样情形下 onlineAccounts 只返回一张空表，
+	// 于是整页灰点「离线」+ 页头「在线 0」，一句「数据源不可用」都没有。
+	// 同一个循环里 IP/Device/Risk 三列都老老实实降级成了 "—"/unknown，
+	// 唯独这一列把"不知道"写成了确定的"否"——而这一页正是管理员判断
+	// "疑似被盗的账号要不要现在踢"的入口，告诉他"已经离线了"，他就不动手了。
+	Online   *bool    `json:"online,omitempty"`
+	Status   string   `json:"status"` // active | locked | disabled | idle
+	Risk     string   `json:"risk"`   // none | low | high | unknown（不可判定，见 api.enrichDirUsers）
+	Roles    []string `json:"roles"`
+	Role     string   `json:"role,omitempty"` // 权威鉴权角色 admin | user（≠展示用 Roles）
+	PassHash string   `json:"-"`              // bcrypt 口令哈希；绝不序列化进 API 响应
 	// MustChangePw 首次登录须改密标志。管理员新建/重置口令置 1，自助改密成功清 0；
 	// 置位期间登录只拿到 15min 受限令牌（Use=pwreset），调不到任何业务端点。
 	// 不序列化：消费方是登录链路（Credential），目录 API 无人读它。
@@ -115,13 +128,13 @@ type Credential struct {
 
 func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {
 	users := []DirUser{
-		{ID: "u1", Name: "张伟", Account: "zhang.wei", Org: "研发部", OrgKey: "dev", Device: "Windows 11", IP: "10.8.2.31", Auth: "密码+短信", LastLogin: "2026-06-22 19:42", Online: true, Status: "active", Risk: "none", Roles: []string{"研发", "管理员"}},
-		{ID: "u2", Name: "李芳", Account: "li.fang", Org: "销售部", OrgKey: "sales", Device: "macOS 14", IP: "10.8.5.12", Auth: "SAML SSO", LastLogin: "2026-06-22 18:10", Online: true, Status: "active", Risk: "high", Roles: []string{"销售"}},
-		{ID: "u3", Name: "王强", Account: "wang.qiang", Org: "销售部", OrgKey: "sales", Device: "iPhone", IP: "10.8.5.40", Auth: "密码", LastLogin: "2026-06-22 14:05", Online: true, Status: "active", Risk: "none", Roles: []string{"销售"}},
-		{ID: "u4", Name: "赵敏", Account: "zhao.min", Org: "客服中心", OrgKey: "cs", Device: "Windows 10", IP: "10.8.7.9", Auth: "密码+UKey", LastLogin: "2026-06-22 09:30", Online: false, Status: "locked", Risk: "low", Roles: []string{"客服"}},
-		{ID: "u5", Name: "外包-周", Account: "ext.zhou", Org: "外包人员", OrgKey: "ext", Device: "未授信终端", IP: "203.0.113.7", Auth: "密码+短信", LastLogin: "2026-06-22 11:18", Online: false, Status: "disabled", Risk: "high", Roles: []string{"外包"}},
-		{ID: "u6", Name: "陈静", Account: "chen.jing", Org: "研发部", OrgKey: "dev", Device: "Ubuntu 22", IP: "10.8.2.55", Auth: "密码", LastLogin: "2026-05-20 16:00", Online: false, Status: "idle", Risk: "none", Roles: []string{"研发"}},
-		{ID: "u7", Name: "刘洋", Account: "liu.yang", Org: "客服中心", OrgKey: "cs", Device: "Windows 11", IP: "10.8.7.21", Auth: "密码+短信", LastLogin: "2026-06-22 20:01", Online: true, Status: "active", Risk: "none", Roles: []string{"客服", "组长"}},
+		{ID: "u1", Name: "张伟", Account: "zhang.wei", Org: "研发部", OrgKey: "dev", Device: "Windows 11", IP: "10.8.2.31", Auth: "密码+短信", LastLogin: "2026-06-22 19:42", Status: "active", Risk: "none", Roles: []string{"研发", "管理员"}},
+		{ID: "u2", Name: "李芳", Account: "li.fang", Org: "销售部", OrgKey: "sales", Device: "macOS 14", IP: "10.8.5.12", Auth: "SAML SSO", LastLogin: "2026-06-22 18:10", Status: "active", Risk: "high", Roles: []string{"销售"}},
+		{ID: "u3", Name: "王强", Account: "wang.qiang", Org: "销售部", OrgKey: "sales", Device: "iPhone", IP: "10.8.5.40", Auth: "密码", LastLogin: "2026-06-22 14:05", Status: "active", Risk: "none", Roles: []string{"销售"}},
+		{ID: "u4", Name: "赵敏", Account: "zhao.min", Org: "客服中心", OrgKey: "cs", Device: "Windows 10", IP: "10.8.7.9", Auth: "密码+UKey", LastLogin: "2026-06-22 09:30", Status: "locked", Risk: "low", Roles: []string{"客服"}},
+		{ID: "u5", Name: "外包-周", Account: "ext.zhou", Org: "外包人员", OrgKey: "ext", Device: "未授信终端", IP: "203.0.113.7", Auth: "密码+短信", LastLogin: "2026-06-22 11:18", Status: "disabled", Risk: "high", Roles: []string{"外包"}},
+		{ID: "u6", Name: "陈静", Account: "chen.jing", Org: "研发部", OrgKey: "dev", Device: "Ubuntu 22", IP: "10.8.2.55", Auth: "密码", LastLogin: "2026-05-20 16:00", Status: "idle", Risk: "none", Roles: []string{"研发"}},
+		{ID: "u7", Name: "刘洋", Account: "liu.yang", Org: "客服中心", OrgKey: "cs", Device: "Windows 11", IP: "10.8.7.21", Auth: "密码+短信", LastLogin: "2026-06-22 20:01", Status: "active", Risk: "none", Roles: []string{"客服", "组长"}},
 	}
 	// ★这里**不给 Directories**：身份源只有 auth_sources 真实行说了算
 	// （SQLiteStore.userDirectories）。种子里那两条「本地目录 124 / 总部 AD 域 1160」

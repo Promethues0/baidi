@@ -259,6 +259,8 @@ func idlePolicyZh(p store.IdlePolicy) string {
 //   - **默认关**（store.DefaultIdlePolicy），且每一轮都重新读策略：管理员关掉它之后
 //     下一轮就必须停手，不能靠重启才生效。
 //   - **不动管理员账号**（lockIdleAccount 的 adminsOK 恒 false）。
+//   - **不动「没有登录记录」的账号**（RunIdleAutoLock 里跳过 NeverRecorded）：
+//     那类行的闲置天数是拿建号时间估的，不可判定不是闲置。
 //   - **每一次锁定都落审计，行为人是 system**：这是系统在没人看着的时候动了别人的
 //     账号，记到某个管理员头上是最难自证的错记。
 func (s *Server) StartIdleLockLoop(ctx context.Context, interval time.Duration) {
@@ -299,8 +301,34 @@ func (s *Server) RunIdleAutoLock(ctx context.Context) {
 		slog.Error("闲置自动锁定：清单读取失败，本轮跳过", "err", err)
 		return
 	}
-	locked, failed, admins := 0, 0, 0
+	locked, failed, admins, unknown := 0, 0, 0, 0
 	for _, a := range accounts {
+		// ★NeverRecorded = **不可判定**，不是「已闲置 N 天」：那一行的 last_login
+		//   解析不出（外部目录建号那条 INSERT 写的是占位 "—"，8① 上线前的历史行也没有），
+		//   于是 IdleDays 是拿 created_at 估出来的「建号至今」。
+		//
+		//   改造前这条循环只跳过 IsAdmin，对 NeverRecorded 一字不看，后果是：
+		//   一套装了一段时间的部署升级到带 last_login 写入的版本后，库里既有账号的
+		//   last_login 仍是占位值，要等各人下次登录才刷新。管理员这时打开「自动锁定」
+		//   （出厂阈值 90 天），一小时内的第一轮就会把「建号早于阈值、且升级后还没
+		//   登录过」的人**整批**锁掉——一个建号两年前、每周都正常上班的普通员工
+		//   idleDays=730 ≥ 90，锁定 + 数据面撤窗断隧道，他下次登录只看到
+		//   「账号已被锁定，请联系管理员」。而汇总审计写的是「闲置账号自动锁定
+		//   （阈值 90 天）」，读起来像这些人真的 90 天没登录，管理员没有任何线索
+		//   看得出系统数的其实是「建号至今」。
+		//
+		//   手工路径早就照这条纪律做了（Users.vue 把这类行渲染成「无登录记录 · 建号 N 天」，
+		//   与「N 天未登录」分开显示，由人去判）；执行方一侧此前零消费。
+		//
+		//   与跳过管理员同款：不逐条记审计（每小时一轮，一批没登录记录的历史账号
+		//   就够把审计冲成每天几百条同样的噪声），只把计数附进汇总那条。
+		//
+		//   ★要治理「建号后从未登录」是另一件事，得做成策略里的显式开关（默认关），
+		//   不能让执行方把两种语义悄悄合并——两者的处置对象和误伤面完全不同。
+		if a.NeverRecorded {
+			unknown++
+			continue
+		}
 		// ★管理员账号在**调 lockIdleAccount 之前**就跳过，而不是让那道闸去拒。
 		//   两者结果一样，但那道闸会为每个管理员写一条「拒绝越权」审计——而这是一条
 		//   每小时都跑的循环，一个长期不登录的审计管理员就够把审计冲成每天 24 条
@@ -320,13 +348,19 @@ func (s *Server) RunIdleAutoLock(ctx context.Context) {
 	}
 	// ★只在真锁了什么、或有账号锁失败时才记这条汇总。每轮都记的话，一套没有闲置账号的
 	// 部署会每小时多一条"0 个已锁定"的审计（与 wave8 行动 8 那条「撤销回执只在真
-	// 切断了什么时才报」同一条纪律）。管理员跳过数只作为上下文附在这条里，
-	// 自己不触发记录——它每一轮都成立。
+	// 切断了什么时才报」同一条纪律）。两类跳过只作为上下文附在这条里，
+	// 自己不触发记录——它们每一轮都成立。
+	//
+	// ★两类跳过**分开计数**：合成一个"跳过 N 个"的话，事后没法自证这一轮锁的是哪一批，
+	// 也看不出"有 N 个账号因为没有登录记录而不可判定"这件本身就该被处理的事。
 	if locked > 0 || failed > 0 {
-		msg := "闲置账号自动锁定（阈值 " + strconv.Itoa(days) + " 天）：" +
+		msg := "闲置账号自动锁定（阈值 " + strconv.Itoa(days) + " 天，判据为 last_login）：" +
 			strconv.Itoa(locked) + " 个已锁定、" + strconv.Itoa(failed) + " 个失败"
 		if admins > 0 {
-			msg += "；另跳过 " + strconv.Itoa(admins) + " 个管理员账号（自动锁定不处置管理员）"
+			msg += "；跳过 " + strconv.Itoa(admins) + " 个管理员账号（自动锁定不处置管理员）"
+		}
+		if unknown > 0 {
+			msg += "；跳过 " + strconv.Itoa(unknown) + " 个无登录记录的账号（闲置天数是按建号时间估的，不可判定 ≠ 已闲置，须人工核对）"
 		}
 		s.auditBG(ctx, "admin", msg, "ok")
 	}

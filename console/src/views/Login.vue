@@ -141,8 +141,19 @@ async function submit() {
     } else {
       err.value = r.reason || '登录失败';
     }
-  } catch {
-    err.value = '无法连接控制中心（baidi-control）';
+  } catch (e) {
+    // ★这里必须转述后端原话，理由是 /auth/login 会在**口令校验之前**就定性拒绝：
+    //   lockout.go 的 loginGateLocked 挂在最前面，回 403 +「登录失败次数过多，已被临时
+    //   锁定，请约 N 分钟后重试」。改造前这里是 bare catch，把那句话整句换成
+    //   「无法连接控制中心（baidi-control）」——而防爆破默认账号维与 IP 维都开：
+    //   一个人连错 5 次，同一 NAT 出口的所有人在接下来 15 分钟里都看到"连不上"，
+    //   于是不停重试（每次重试都在续锁），管理员则去 ssh 上机查 systemctl、查 nginx，
+    //   而后端一直在正常回答唯一有用的那句话（含还要等几分钟）。
+    //   同文件的 passkey / TOTP 两个分支早就按纪律用了 failStatus/failReason——
+    //   本项目里出现频率最高的那种「纪律只做了一半」，漏掉的正是唯一会被拒绝的这一步。
+    //   请求压根没到后端时 failReason 回的是 NetworkError 那句「连不上控制面」，
+    //   原来那句话该说的场景一个都没少。
+    err.value = failReason(e);
   } finally {
     loading.value = false;
   }

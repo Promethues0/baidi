@@ -2288,7 +2288,24 @@ func (s *Server) handleApps(w http.ResponseWriter, r *http.Request) {
 // onlineAccounts 当前**真正在线**的账号集合（在线网关上报的会话，与 GET /online 同源）。
 //
 // ★"谁在线"这件事只有数据面知道：用户目录里那一列存的是建号那一刻写下的值。
-func (s *Server) onlineAccounts() map[string]bool {
+//
+// 第二个返回值 known = **此刻有没有在线网关在上报**。它不是锦上添花的元信息，
+// 而是这份答案能不能当结论用的前提：
+//
+//	known=true，账号不在表里 → 确定离线（有网关在报，它没报这个人）
+//	known=false             → 不可判定，一台网关都没在报
+//
+// 后一种情形很现实且**不影响用户接入**：网关进程活着、隧道照常转发，只是它到
+// 控制面 mTLS 口的心跳断了——内部 CA 签的网关客户端证书到期 / 控制面刚重启
+// （内存态要等最长 15s 才由下一轮心跳重建）/ BAIDI_MTLS_ADDR 那个独立端口挂了
+// 而管理 API 正常。敲门与隧道全都照旧，人是真连着的。
+//
+// 改造前这个函数只返回一张 map，两种情形对调用方**完全同形**，于是
+// 「用户与角色」整表灰点离线 + KPI「在线 0」、「用户状态」页绿点全灭，三处
+// 一句「数据源不可用」都没有；而同一套控制台的「在线用户」页因为有独立空态文案
+// （"尚无网关上报在线会话：数据面网关未注册，或当前无人接入"）反而说了实话。
+// 姊妹函数 onlineSessionCount 一直是算了 hasLiveGw 的——这半边只是没跟上。
+func (s *Server) onlineAccounts() (accounts map[string]bool, known bool) {
 	now := time.Now().Unix()
 	window := int64(gatewayOnlineWindow / time.Second)
 	out := map[string]bool{}
@@ -2299,11 +2316,14 @@ func (s *Server) onlineAccounts() map[string]bool {
 		if !ok || now-gw.LastSeen > window { // 离线网关的会话不算数（同 handleOnline）
 			continue
 		}
+		// ★known 的判据是"这台网关的心跳还新鲜"，**不是"它报了会话"**：
+		// 一台在线网关上报零会话，是"确实没人连"这个确定结论。
+		known = true
 		for _, se := range sess {
 			out[normUser(se.User)] = true
 		}
 	}
-	return out
+	return out, known
 }
 
 func (s *Server) handleUsers(w http.ResponseWriter, r *http.Request) {
@@ -2351,11 +2371,17 @@ func (s *Server) enrichDirUsers(ctx context.Context, users []store.DirUser) {
 	if len(users) == 0 {
 		return
 	}
-	online := s.onlineAccounts()
+	online, onlineKnown := s.onlineAccounts()
 	ips := s.sessionIPsByAccount()
 	for i := range users {
 		acc := normUser(users[i].Account)
-		users[i].Online = online[acc]
+		// ★没有任何在线网关时**不写这一列**（缺席=不可判定），与紧接着的 IP/Device/Risk
+		// 三列同一条纪律。写成 `users[i].Online = online[acc]` 的话，"控制面没有数据源"
+		// 会被渲染成"这个人确定离线"——上面那段注释立的规矩里，唯独这一列此前没做到。
+		if onlineKnown {
+			on := online[acc]
+			users[i].Online = &on
+		}
 		if ip := ips[acc]; ip != "" {
 			users[i].IP = ip
 		} else {
@@ -2421,8 +2447,12 @@ func (s *Server) handleOverview(w http.ResponseWriter, r *http.Request) {
 	// 同时开几条，拿它当设备数只是让那个来自种子的 186/240 看起来像被更新过。
 	// 设备口径已改成 trusted_devices 台账（store.DeviceStat），与会话不是一回事，
 	// 不再互相顶替。
+	// ★n<0（一台在线网关都没有）时**让字段缺席**，页面显示「—」。
+	// 改造前这里写 `ov.Sessions = n` 而 store 的 Sessions 恒 0，于是那个 -1 分支
+	// 在 SQLite 后端等于白写：「不可判定」与「确实 0 个」在 KPI 上是同一个字，
+	// 底下还标着「当前活跃接入」。
 	if n := s.onlineSessionCount(); n >= 0 {
-		ov.Sessions = n
+		ov.Sessions = &n
 	}
 	httpx.JSON(w, http.StatusOK, ov)
 }

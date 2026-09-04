@@ -309,7 +309,7 @@
 import { onMounted, reactive, ref } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
-import { api, setToken, type PortalLoginResp, type AuthDomainOption, failStatus } from '@/lib/api';
+import { api, setToken, type PortalLoginResp, type AuthDomainOption, failStatus, failReason } from '@/lib/api';
 import { getAssertion, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 
 const router = useRouter();
@@ -438,8 +438,14 @@ async function post(withMfa: boolean): Promise<PortalLoginResp | null> {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-  } catch {
-    errMsg.value = '网络异常或服务不可达，请稍后重试。';
+  } catch (e) {
+    // ★后端在**口令校验之前**就会定性拒绝：lockout.go 的 loginGateLocked 挂在最前面，
+    //   回 403 +「登录失败次数过多，已被临时锁定，请约 N 分钟后重试」；认证域没选对时
+    //   回的是「配置了多个认证域，请选择」。改造前这里是 bare catch，把这些整句换成
+    //   「网络异常或服务不可达，请稍后重试。」——而防爆破的 IP 维默认开着：同一 NAT 出口
+    //   有人连错 5 次，其余人都被这句话支去"稍后重试"，每一次重试又在续锁，
+    //   门户于是对整个办公室静默地关了 15 分钟，且没有任何一处说得出为什么。
+    errMsg.value = failReason(e);
     return null;
   }
 }
@@ -631,8 +637,15 @@ async function submitChangePw() {
     pwToken.value = '';
     step.value = 'login';
     await submitLogin();
-  } catch {
-    pwMsg.value = '口令修改失败（受限令牌可能已过期，请返回重新登录）。';
+  } catch (e) {
+    // ★同一族的第三处。/auth/password 的拒绝几乎都不是"令牌过期"：最高频的是
+    //   400「新口令强度不足：<具体哪一条不达标>。要求：至少 10 位且含大写/小写/数字/
+    //   符号中的三类；或 16 位以上的长口令」——首登强制改密是每套标准部署的第一个动作
+    //   （BAIDI_SEED_MUST_CHANGE 默认 1），而这里把那句唯一说得出"改成什么样才行"的话
+    //   换成了「受限令牌可能已过期，请返回重新登录」：用户返回重登、再次被要求改密、
+    //   再撞同一堵墙，来回死循环而屏幕上从没出现过"强度不足"四个字。
+    //   （旧口令错误走的是 200 + reason，不经这里；令牌真过期是 401，failReason 照样原样转述。）
+    pwMsg.value = failReason(e);
   } finally {
     loading.value = false;
   }

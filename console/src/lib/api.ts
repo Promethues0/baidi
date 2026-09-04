@@ -116,7 +116,10 @@ export interface Overview {
   devices: { total: number; trusted: number; pending: number; revoked: number; rate: number };
   users: { total: number; disabled: number; locked: number };
   threats: { rejected: number; failed: number; secondary: number };
-  sessions: number;
+  /** 当前活跃接入会话数。★**缺席 = 不可判定**：一台在线网关都没在上报，控制面
+   *  不知道有谁接入（与 /diag 的「在线 —（无网关上报）」同一口径）。
+   *  渲染成 0 会让它与"确实一个人都没连"变成同一个字。 */
+  sessions?: number;
   auditByKind: KV[];
   verdicts: KV[];
   defense: DefenseLine[];
@@ -223,7 +226,12 @@ export interface DirUser {
   /** 所属用户组 id（含角色组的派生归属）。 */
   groups: string[];
   device: string; ip: string; auth: string; lastLogin: string;
-  online: boolean; status: 'active' | 'locked' | 'disabled' | 'idle';
+  /** 在线态。★**可缺席 = 不可判定**：控制面此刻没有任何在线网关在上报会话
+   *  （网关心跳断了 / 控制面刚重启 / mTLS 口挂了），而那时敲门与隧道并不受影响，
+   *  人可能正连着。**绝不能写 `?? false`**——那会把"没有数据源"重新塌回
+   *  "确定离线"，而链路比改造前更长、更难查。三态渲染照抄 Gateway.vue 的 triText。 */
+  online?: boolean;
+  status: 'active' | 'locked' | 'disabled' | 'idle';
   /** 邮箱。外部源登录时由 refreshExternalProfile 带回；本地账号可在详情里编辑。 */
   email?: string;
   /** 风险档。★含 'unknown'：该账号从未上报过终端环境，控制面**不知道**它的风险，
@@ -953,7 +961,11 @@ export interface UserStateItem {
    * locked/disabled 是与风险正交的目录账号状态。另起一套叫法，就没法与风险页对照。
    */
   state: 'block' | 'degrade' | 'gray' | 'locked' | 'disabled';
-  risk: 'none' | 'low' | 'high'; online: boolean;
+  risk: 'none' | 'low' | 'high';
+  /** 在线态。★可缺席 = 不可判定（无在线网关上报），语义与 DirUser.online 同源。
+   *  这一页是"就近处置"的入口：要不要现在踢他，取决于他现在有没有连着——
+   *  把不可判定画成灰点「离线」，管理员就不动手了。 */
+  online?: boolean;
   reasons: string[]; lastEvent: string; lastSeen: string;
   /** 该账号当前有生效的登录防爆破锁定（login_lockouts）。与目录 status=locked 是两种锁：
    *  爆破锁到期自动解除、解锁走 /security/lockouts/unlock；目录锁走 /users/{id}/status。

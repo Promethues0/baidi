@@ -7,10 +7,13 @@ package dataplane
 // "备用网关也坏了"。所以下面每条用例都用**两张不同的自签证书**跑真 TLS 握手。
 
 import (
+	"bytes"
 	"encoding/json"
+	"log/slog"
 	"net"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -228,5 +231,77 @@ func TestKnock_ReachesEveryEndpointWithItsOwnToken(t *testing.T) {
 	}
 	if got := issued.Load(); got != 2 {
 		t.Fatalf("应逐落点各取一张令牌（共 2 张），实得 %d", got)
+	}
+}
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 跨轨契约：数据面打的落点状态行 ⇄ 桌面客户端接入页的解析。
+ *
+ * ★为什么必须有：`endpoint=<i>/<n> id= addr= reason=` 这四个键是 Go 数据面与
+ *   桌面 TS 之间唯一的接头，而两边的注释都写着「改键名要同步改那边」——纪律写到了，
+ *   守卫一条没有：Go 侧从没断言过键名，桌面侧 tunnel.test.ts 喂的是**手写示例行**。
+ *   实测变异：把这里的 "endpoint" 改成 "ep" → go test ./internal/dataplane/ 全绿、
+ *   桌面 npm test 56 passed。现场后果：parseEndpoint 一条正则都不匹配 → 静默回落成
+ *   「第 1 个落点 / pin = 首选落点的指纹」。故障转移到第 2 台之后，接入页仍显示第 1 台的
+ *   id 与地址，并按第 1 台的指纹渲染「证书钉扎」——**未钉扎的运行中隧道被显示成已钉扎**，
+ *   而隧道是通的、页面是「已接入」的，没有任何一处报错。
+ *
+ * 做法：捕获 logCurrent 的**真实输出**（不是手抄一行），落进 testdata/endpoint_log.txt，
+ * 桌面侧单测读**同一份文件**喂进 parseEndpoint。任一侧改键名，另一侧当场红。
+ * ────────────────────────────────────────────────────────────────────────── */
+
+// endpointLogGolden 两轨共用的样本行。改动它必须同时跑
+// `go test ./internal/dataplane/` 与 `cd clients/desktop && npm test`。
+const endpointLogGolden = "testdata/endpoint_log.txt"
+
+func TestLogCurrent_KeysAreDesktopContract(t *testing.T) {
+	var buf bytes.Buffer
+	// 时间戳固定成常量，好让样本行逐字可比；桌面侧的正则不关心它，
+	// 但样本行保留 time=/level=/msg= 前缀，这样喂过去的就是真实日志形制。
+	h := slog.NewTextHandler(&buf, &slog.HandlerOptions{
+		ReplaceAttr: func(groups []string, a slog.Attr) slog.Attr {
+			if len(groups) == 0 && a.Key == slog.TimeKey {
+				return slog.Attr{Key: slog.TimeKey, Value: slog.StringValue("2026-09-04T10:00:00.000+08:00")}
+			}
+			return a
+		},
+	})
+	old := slog.Default()
+	slog.SetDefault(slog.New(h))
+	defer slog.SetDefault(old)
+
+	p := newPicker([]Endpoint{
+		{ID: "gw-a", SPAAddr: "10.0.0.1:18201", ProxyAddr: "10.0.0.1:18443", Pin: "aa11"},
+		{ID: "gw-b", SPAAddr: "10.0.0.2:18201", ProxyAddr: "10.0.0.2:18443"}, // 备用落点没上报指纹：切过去就是降级
+		{ID: "gw-c", SPAAddr: "10.0.0.3:18201", ProxyAddr: "10.0.0.3:18443", Pin: "cc33"},
+	})
+	if !p.promote(1, "首选落点拨号失败：dial tcp 10.0.0.1:18443: i/o timeout") {
+		t.Fatal("提升到第 2 个落点应返回 true")
+	}
+	p.logCurrent("网关落点切换", true)
+
+	line := strings.TrimRight(buf.String(), "\n")
+	if strings.Contains(line, "\n") {
+		t.Fatalf("落点状态行必须是**一行**（桌面侧按行取最后一条）：%q", line)
+	}
+	for _, want := range []string{
+		"endpoint=2/3",        // 第几个/共几个
+		"id=gw-b",             // 当前落点标识
+		"addr=10.0.0.2:18443", // 当前隧道地址
+		`reason="首选落点拨号失败：`,   // 切换原因（含空格 → slog 会加引号，桌面正则要认这一支）
+	} {
+		if !strings.Contains(line, want) {
+			t.Errorf("落点状态行缺 %q——桌面接入页按这四个键解析，缺一个就整条回落成「第 1 个落点」：\n%s", want, line)
+		}
+	}
+
+	want, err := os.ReadFile(endpointLogGolden)
+	if err != nil {
+		t.Fatalf("读 %s 失败（这份样本是与桌面端共用的契约，不能删）：%v", endpointLogGolden, err)
+	}
+	if got := strings.TrimRight(string(want), "\n"); got != line {
+		t.Fatalf("落点状态行与 %s 对不上。\n实际：%s\n样本：%s\n"+
+			"★改了输出形制就把实际那行写回样本文件，并跑一遍 `cd clients/desktop && npm test`——"+
+			"桌面侧的解析用例读的就是这份文件，两轨必须一起改。", endpointLogGolden, line, got)
 	}
 }

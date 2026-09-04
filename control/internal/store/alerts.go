@@ -3,6 +3,8 @@ package store
 import (
 	"context"
 	"errors"
+	"fmt"
+	"strconv"
 )
 
 // ── 业务告警实体与规则（PRD ch5 FR-MON-21~25）──
@@ -336,13 +338,110 @@ var ErrUnknownAlertKind = errors.New("未知的告警规则种类")
 // 实际评估用的还是默认值——又一处"配置齐全却不生效"。
 var ErrUnknownThreshold = errors.New("该规则不支持此阈值项")
 
+// ErrThresholdRange 阈值超出该键的取值区间。用 errors.Is 判（错误正文里带的是
+// 具体哪一项、越了哪一边、后果是什么——那句话要原样进 400 body 给管理员看）。
+var ErrThresholdRange = errors.New("告警阈值超出取值区间")
+
+// thresholdBound 一个阈值键的取值区间与"越界后果"。
+//
+// ★为什么必须有下界：改造前 NormalizeThresholds **只校验键认不认识、完全不看值**，
+// 于是控制台那个阈值输入框被清空的瞬间（Arco InputNumber emit change(undefined)，
+// 前端兜成 0）就会把 0 落库，接口回 200、toast 说「规则「网关离线」已保存」、
+// 绿色「已启用」开关一字不变，而规则的行为已经翻到了另一端：
+// expireDays 15 → 0：License 到期前不再有任何提醒（到期那天容量闸 fail-closed 直接咬人）；
+// beforeMinutes 30 → 0：JIT 将到期提醒永不触发；
+// withinMinutes 30 → 0：审计外送"投不出去"那一支在 alerting 里被 `within > 0` 挡住，永不触发；
+// offlineSec 120 → 0：每台在线网关每轮都被判离线，冷却一到就刷一条告警 + 一封邮件。
+// 两个方向（永不触发 / 每轮都触发）都不报错，都是"配置齐全却不生效"那一族。
+//
+// ★区间是**拒绝**不是夹取：夹取会让管理员拿到 200 OK 而实际生效的是另一个数，
+// 与 IdlePolicy.Validate 那条「入口不许比实现宽」同源。
+//
+// Max<=0 表示不设上界（秒/分/天这类没有天然天花板；冷却期另有 ClampAlertCooldown 管）。
+type thresholdBound struct {
+	Min, Max float64
+	// Why 低于下界会发生什么（进 400 正文——只说"不合法"会让管理员反复换数字试）。
+	Why string
+}
+
+// thresholdBounds 逐键的取值区间。**没有一条通用规则**：同一个 0，对 graceMinutes
+// 是合法配置（过期即报，不留宽限），对 beforeMinutes 是"提醒永不触发"。
+// 谁能取 0 必须逐个照着 internal/alerting 里那段判定读出来，不许拍脑袋统一。
+var thresholdBounds = map[string]thresholdBound{
+	// 网关心跳每 15s 一次。低于两个心跳周期，所有在线网关都会在心跳间隙被判成离线。
+	// ★0 的真实后果是**静默回落**不是误报：alerting 里 `limit := thresh(...)` 之后紧跟
+	// `if limit <= 0 { limit = snap.OfflineAfterSec }`，判定按全局默认走，一点没变。
+	// 文案必须说这个——写成"每轮都误报"会把管理员支去调冷却期，而该看的是这个值本身。
+	ThreshOfflineSec: {Min: 30, Why: "0 会被静默回落成全局默认值：你改了配置、页面显示已保存，而判定一点没变；" +
+		"30 以下（但大于 0）则低于两个心跳周期，每一台在线网关都会在心跳间隙被判成离线"},
+	// 占用率三项：0 表示"任何占用都超标"（恒触发），>100 表示永不触发。
+	ThreshCPUPercent:  {Min: 1, Max: 100, Why: "0 表示任何占用都算超标，该规则会对每台网关恒触发"},
+	ThreshMemPercent:  {Min: 1, Max: 100, Why: "0 表示任何占用都算超标，该规则会对每台网关恒触发"},
+	ThreshDiskPercent: {Min: 1, Max: 100, Why: "0 表示任何占用都算超标，该规则会对每台网关恒触发"},
+	// 提前量 0 = 窗口为空，"即将到期"这条规则永不触发（到期后由 grant_stale 接手，但那已经晚了）。
+	ThreshBeforeMin: {Min: 1, Why: "提前量为 0 时窗口为空，「即将到期」永不触发，等于关掉了这条规则"},
+	// ★宽限期 0 是**合法**的：alerting 里判的是 overdue < grace，0 = 过期即报。不设下界。
+	ThreshGraceMinutes: {Min: 0},
+	// 偏差 0 = 任何亚秒级抖动都算超标，每轮每台网关都报。
+	// ★同 offlineSec：`if limit <= 0 { limit = 10 }`，0 是静默回落不是恒触发。
+	ThreshSkewSec: {Min: 1, Why: "0 会被静默回落成默认的 10 秒：你改了配置、页面显示已保存，而判定一点没变"},
+	// 到期前提醒 0 天 = 只有真的过期了才叫，而过期那一刻容量闸已经在拒建号拒签证书。
+	ThreshExpireDays: {Min: 1, Why: "0 天表示不做任何到期前预警，等 License 过期那天容量闸直接拒建号、拒签网关证书"},
+	ThreshSeatPercent: {Min: 1, Max: 100,
+		Why: "0% 表示任何占用都算将满，该规则恒触发"},
+	// ★同一个键在两条规则里语义相反：audit_write_fail 的 `within > 0` 是"不看时间窗、一直报"，
+	// audit_forward_fail 的 `within > 0` 是那一支的**前置条件**，取 0 直接让"投不出去"永不触发。
+	// 一个在两处含义相反的 0 不该是可配置的值。
+	ThreshWithinMin: {Min: 1, Why: "0 分钟在「审计外送投递失败」里会让「持续投不出去」那一支永不触发"},
+	// ★方向与直觉相反：alerting 那一支的条件是 `if pct > 0 && …`，0 直接被短路。
+	// 旧文案写的是"恒触发"，**完全说反了**——管理员照着理解会以为调低是"更灵敏"，
+	// 实际是把这条判定整条关掉，而队列丢新保旧的丢弃是不可逆的。
+	ThreshBacklogPercent: {Min: 1, Max: 100,
+		Why: "0% 会让「队列积压」那一支被 `pct > 0` 短路，该条件永不触发（不是恒触发）"},
+}
+
+// checkThresholdRange 校验单个阈值取值。zh 是该键的中文标签（进错误正文——
+// 报 "backlogPercent 超范围" 管理员要回去对着代码猜是页面上哪一栏）。
+func checkThresholdRange(key, zh string, v float64) error {
+	b, ok := thresholdBounds[key]
+	if !ok {
+		// 新增阈值键忘了登记区间：不拦（保持可用），但这是个应当补上的疏漏。
+		return nil
+	}
+	label := zh
+	if label == "" {
+		label = key
+	}
+	if v < b.Min {
+		msg := fmt.Sprintf("阈值「%s」不能小于 %s（当前 %s）", label, trimNum(b.Min), trimNum(v))
+		if b.Why != "" {
+			msg += "：" + b.Why
+		}
+		return fmt.Errorf("%w：%s", ErrThresholdRange, msg)
+	}
+	if b.Max > 0 && v > b.Max {
+		return fmt.Errorf("%w：阈值「%s」不能大于 %s（当前 %s）：超过上界后该条件永远不成立，规则看着是启用的却永不触发",
+			ErrThresholdRange, label, trimNum(b.Max), trimNum(v))
+	}
+	return nil
+}
+
+// trimNum 阈值是 float64 但管理员填的都是整数：把 "30" 印成 30 而不是 30.000000。
+func trimNum(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
+}
+
 // ErrAlertDecided 告警已被处置（非 pending），不接受二次处置。调用方回 409。
 var ErrAlertDecided = errors.New("该告警已处置")
 
 // ErrAlertNotFound 告警不存在。
 var ErrAlertNotFound = errors.New("告警不存在")
 
-// NormalizeThresholds 校验并补齐某 kind 的阈值：未知键报错，缺失键补默认值。
+// NormalizeThresholds 校验并补齐某 kind 的阈值：未知键报错、**越界报错**、缺失键补默认值。
+//
+// ★取值区间这一道是后端兜底：前端那个输入框此前被清空就会提交 0，而这里只看键、
+// 不看值，于是 0 一路落库。前端已改成"清空即不提交"，但客户端不是唯一入口
+// （API 可以直接 POST），且下一次改前端的人不一定记得这条——判据必须在执行侧也成立。
 func NormalizeThresholds(kind string, in map[string]float64) (map[string]float64, error) {
 	spec, ok := AlertKindSpecOf(kind)
 	if !ok {
@@ -355,6 +454,9 @@ func NormalizeThresholds(kind string, in map[string]float64) (map[string]float64
 	for k, v := range in {
 		if _, known := spec.Thresholds[k]; !known {
 			return nil, ErrUnknownThreshold
+		}
+		if err := checkThresholdRange(k, spec.ThresholdZh[k], v); err != nil {
+			return nil, err
 		}
 		out[k] = v
 	}

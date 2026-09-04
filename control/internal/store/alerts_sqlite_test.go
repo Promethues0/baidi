@@ -343,3 +343,108 @@ func TestGatewayMetricsProbeReportsReason(t *testing.T) {
 		t.Fatal("采不到的指标必须保持 nil——塌缩成 0 会让失明的网关看起来永远空闲")
 	}
 }
+
+// TestClampAlertThresholdsUnlocksLegacyRules 钉住「存量越界值会被一次性夹回，规则不再被锁死」。
+//
+// ★为什么必须有这条迁移：本波给阈值加了取值区间，但**只校验写入侧**。而库里已经落了 0 的行
+// 正是这次要修的那个缺陷（旧版输入框清空 → `Number(nv ?? 0)`）留下的产物——
+// 「存量库里有 0」不是假设，是这次修复的前提。
+//
+// 不夹的后果是**规则在控制台上被彻底锁死**：saveRule 每次都整条 POST（`{...r, ...patch}`），
+// 于是管理员哪怕只想把这条吵闹的规则**关掉**，也会被 400 挡回，理由还指向一个他没碰的阈值框。
+// gateway_load 有三个阈值键，只要其中两个是 0，逐个改都改不完——每次提交都带着另一个 0。
+func TestClampAlertThresholdsUnlocksLegacyRules(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	rules, err := s.AlertRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var target AlertRule
+	for _, r := range rules {
+		if r.Kind == AlertKindGatewayOffline {
+			target = r
+			break
+		}
+	}
+	if target.ID == "" {
+		t.Fatal("种子里应有 gateway_offline 规则")
+	}
+
+	// 造出"旧版本落下的 0"：直接写库，绕过现在的写入侧校验（存量库就是这个形状）
+	if _, err := s.db.ExecContext(ctx,
+		`UPDATE alert_rules SET threshold_json=? WHERE id=?`,
+		`{"offlineSec":0}`, target.ID); err != nil {
+		t.Fatal(err)
+	}
+	// 清掉标记，让迁移能再跑一次（openTestStore 建库时已经跑过一轮）
+	if _, err := s.db.ExecContext(ctx, `DELETE FROM settings WHERE k=?`, alertThresholdClampMarker); err != nil {
+		t.Fatal(err)
+	}
+
+	// 夹取前：连"关掉它"都做不到——这才是这条迁移要解的那个死结
+	if _, err := s.SaveAlertRule(ctx, AlertRule{
+		ID: target.ID, Name: target.Name, Kind: target.Kind,
+		Threshold: map[string]float64{"offlineSec": 0}, Enabled: false,
+	}); err == nil {
+		t.Fatal("前提不成立：越界值本应被写入侧拒绝（否则这条迁移没有存在的必要）")
+	}
+
+	if err := s.clampAlertThresholds(ctx); err != nil {
+		t.Fatalf("清洗失败：%v", err)
+	}
+
+	after, err := s.AlertRules(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got AlertRule
+	for _, r := range after {
+		if r.ID == target.ID {
+			got = r
+		}
+	}
+	spec, _ := AlertKindSpecOf(AlertKindGatewayOffline)
+	if want := spec.Thresholds[ThreshOfflineSec]; got.Threshold[ThreshOfflineSec] != want {
+		t.Fatalf("越界值应被夹回该键的默认值 %g，实得 %g", want, got.Threshold[ThreshOfflineSec])
+	}
+
+	// 夹取后：管理员终于能关掉它了
+	if _, err := s.SaveAlertRule(ctx, AlertRule{
+		ID: got.ID, Name: got.Name, Kind: got.Kind,
+		Threshold: got.Threshold, Enabled: false,
+	}); err != nil {
+		t.Fatalf("夹取之后应当能正常保存（哪怕只是关掉它），实得：%v", err)
+	}
+
+	// ★必须留痕：管理员会发现自己配的值变了，查不出是谁改的比值被改更糟
+	found := false
+	for _, e := range mustAudit(t, s, ctx) {
+		if strings.Contains(e.Event, "清洗越界的告警阈值") && strings.Contains(e.Event, "心跳超时") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("夹取必须落一条审计，写清哪条规则的哪一项从多少改成了多少")
+	}
+
+	// 幂等：标记已落，再跑一次不该重复写审计
+	before := len(mustAudit(t, s, ctx))
+	if err := s.clampAlertThresholds(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if after := len(mustAudit(t, s, ctx)); after != before {
+		t.Errorf("迁移必须幂等：第二次运行又写了 %d 条审计", after-before)
+	}
+}
+
+// mustAudit 取全部审计条目（测试用）。
+func mustAudit(t *testing.T, s *SQLiteStore, ctx context.Context) []AuditEntry {
+	t.Helper()
+	b, err := s.Audit(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return b.Logs
+}

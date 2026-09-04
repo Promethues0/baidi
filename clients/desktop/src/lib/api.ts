@@ -8,19 +8,80 @@ function inTauri(): boolean {
 // （默认 http://127.0.0.1:8090）。控制中心 CORS=* 且放行 OPTIONS。dev 浏览器走 vite 代理（ORIGIN=''）。
 function origin(): string { return inTauri() ? config.control.replace(/\/+$/, '') : ''; }
 
+/**
+ * 后端**明确拒绝**（HTTP 4xx/5xx，带 httpx.Error 的中文原因）。
+ *
+ * ★与 NetworkError 分开是有意的，两者该说的话完全相反：前者要原样转述后端那句话，
+ *   后者才该去做传输层归因（探 TCP、查地址、导证书）。桌面端此前**没有这个区分**——
+ *   api() 一律 `throw new Error(\`${res.status} ${res.statusText}\`)`，连后端 message
+ *   都不解，于是 Connect.vue 的 catch 把一次 403 当成"连不上"，交给 explainControl()
+ *   去做证书归因。控制台那边（console/src/lib/api.ts）早就有这两个类型了，
+ *   桌面端漏掉——同一条纪律只做了一半，而漏掉的这半后果最坏（见 Connect.vue doLogin）。
+ */
+export class ApiError extends Error {
+  constructor(message: string, readonly status: number) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+/** 请求压根没到后端（fetch 抛 TypeError：控制面没起 / 网络断 / TLS 被拒 / CORS 拦）。
+ *  ★只有这条路径才轮得到 explainControlFailure 那套传输层归因。 */
+export class NetworkError extends Error {
+  constructor(readonly cause: unknown) {
+    super('连不上控制面');
+    this.name = 'NetworkError';
+  }
+}
+
+/** 取后端的错误文案（httpx.Error 的 {"error":{"message":…}}），拿不到才退回状态行。 */
+async function errText(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { message?: string } };
+    const msg = body?.error?.message;
+    if (msg) return msg;
+  } catch { /* 非 JSON 应答（反代 502 之类）：退回状态行 */ }
+  return `${res.status} ${res.statusText}`;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
   // headers 必须在 ...rest 之后合并：否则调用方传入 headers 会把 Authorization 整体顶掉（静默 401）
   const { headers: extra, ...rest } = init ?? {};
-  const res = await fetch(origin() + '/api/v1' + path, {
-    ...rest,
-    headers: {
-      Accept: 'application/json',
-      ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
-      ...(extra ?? {})
-    }
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  let res: Response;
+  try {
+    res = await fetch(origin() + '/api/v1' + path, {
+      ...rest,
+      headers: {
+        Accept: 'application/json',
+        ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
+        ...(extra ?? {})
+      }
+    });
+  } catch (e) {
+    throw new NetworkError(e);
+  }
+  if (!res.ok) throw new ApiError(await errText(res), res.status);
   return (await res.json()) as T;
+}
+
+/**
+ * failStatus 取失败的 HTTP 状态码（不是 ApiError 就回 0）。
+ * ★判状态码只能用它：api() 抛出的 message 是**后端中文原文**，永远不以状态码开头，
+ * `msg.startsWith('401')` 那种写法在正常路径上一次都不会命中。
+ */
+export function failStatus(e: unknown): number {
+  return e instanceof ApiError ? e.status : 0;
+}
+
+/**
+ * failReason 把一次失败翻译成该给用户看的那句话：后端明确拒绝 → **原样转述**，一个字不改；
+ * 请求没到后端 → 这时才该说"连不上"（调用方通常还会再做一次传输层归因）。
+ */
+export function failReason(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof NetworkError) return '连不上控制中心';
+  if (e instanceof Error && e.message) return e.message;
+  return '未知错误';
 }
 
 /** 连通性探测打的端点：一条真实的免认证 API（控制面 api.go 的免认证白名单里有它）。 */

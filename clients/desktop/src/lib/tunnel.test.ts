@@ -7,7 +7,8 @@
  * 三类故障在接入页一律绿色「已接入」，App.vue 的 session.connected 也跟着放行。
  * 这批用例把 TS 这半边钉住；改回只用旧正则，前三组必须变红。
  */
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
 
 // tunnel.ts 顶层 import 了 Tauri 运行时与 store（store 在模块加载时就读 localStorage）；
 // 被测的是纯解析逻辑，两者都换成最小桩——不为它们引 jsdom。
@@ -20,6 +21,9 @@ vi.mock('./store', () => ({
 }));
 
 import { classifyFail, nextDataplaneNotice, parseHealth, parseTunStatus, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
+// 跨轨契约用例要摆一份三落点剖面：store 已被上面的 vi.mock 换成最小桩，这里拿到的就是那个对象。
+import { profile } from './store';
+import type { ProfileGateway } from './api';
 
 /** 数据面启动期那两行 + 一条引流日志：改造前光凭它们就会被判成「已接入 · 保活中」。 */
 const BOOT_LOG = [
@@ -354,5 +358,70 @@ describe('nextDataplaneNotice · terr 可判定时按它判隧道类真恢复（
     // false→true 仍是老判据下唯一的自动收起条件
     const n1 = nextDataplaneNotice(null, view({ error: PIN_ERR, tunnelUsed: false }), 1000);
     expect(nextDataplaneNotice(n1, view({ error: '', tunnelUsed: true }), 5000)).toBeNull();
+  });
+});
+
+/* ────────────────────────────────────────────────────────────────────────────
+ * 跨轨契约：Go 数据面打的落点状态行 ⇄ 这边的 parseEndpoint。
+ *
+ * ★为什么必须读 Go 侧的 testdata 而不是自己手抄一行：
+ *   `endpoint=<i>/<n> id= addr= reason=` 四个键是两条轨道之间唯一的接头，两边的注释都
+ *   写着「改键名要同步改那边」，但此前**没有任何用例把两侧拴住**——Go 侧的 failover_test.go
+ *   一次都没断言过键名，这边喂的是手写示例行。实测变异：把 Go 侧的 "endpoint" 改成 "ep"，
+ *   `go test ./internal/dataplane/` 全绿、`npm test` 56 passed，两轨都不红。
+ *   现场后果：下面这些正则一条都不匹配 → 静默回落成「第 1 个落点 / pin = 首选落点的指纹」。
+ *   故障转移到第 2 台之后，接入页仍显示第 1 台的 id 与地址，并按第 1 台的指纹渲染
+ *   「证书钉扎」——**未钉扎的运行中隧道被显示成已钉扎**，而隧道是通的、页面是「已接入」的。
+ *
+ * 样本行由 gateway/internal/dataplane/failover_test.go 捕获 logCurrent 的**真实输出**
+ * 落盘，两边读同一份文件：任一侧改键名/改形制，另一侧当场红。
+ * ────────────────────────────────────────────────────────────────────────── */
+const ENDPOINT_GOLDEN = readFileSync(
+  new URL('../../../../gateway/internal/dataplane/testdata/endpoint_log.txt', import.meta.url),
+  'utf8'
+).trim();
+
+/** 与样本行同一套落点：第 2 台（gw-b）刻意没有指纹——切过去就是一次真实降级。 */
+function gw(id: string, host: string, tunnelPin: string): ProfileGateway {
+  return { id, host, spaPort: '18201', proxyPort: '18443', tunnelPin, online: true };
+}
+function useThreeGateways(): void {
+  const gws = [gw('gw-a', '10.0.0.1', 'aa11'), gw('gw-b', '10.0.0.2', ''), gw('gw-c', '10.0.0.3', 'cc33')];
+  profile.data = {
+    generatedAt: '2026-09-04T10:00:00+08:00', user: 'u',
+    gateway: gws[0], gateways: gws,
+    vipCidr: '10.99.0.0/24', tunIp: '10.99.0.2',
+    routes: ['10.99.0.0/24'], apps: [], resmap: {}
+  };
+}
+
+describe('parseEndpoint · 跨轨契约（喂 Go 侧 logCurrent 的真实输出）', () => {
+  afterEach(() => { profile.data = null; });
+
+  it('样本行本身就是数据面的真实形制（键齐、单行）', () => {
+    expect(ENDPOINT_GOLDEN.split('\n')).toHaveLength(1);
+    expect(ENDPOINT_GOLDEN).toMatch(/endpoint=\d+\/\d+/);
+  });
+
+  it('四个键都解析得出来：第几落点 / id / 地址 / 切换原因', () => {
+    useThreeGateways();
+    const v = parseTunStatus(raw({ endpoint: ENDPOINT_GOLDEN, health: SLOG + 'knock=true tunnel=true err=""' }));
+    expect(v.endpointIndex).toBe(2);
+    expect(v.endpointTotal).toBe(3);
+    expect(v.endpointId).toBe('gw-b');
+    // 网关地址必须是**此刻真正在用的那个落点**，不是首选落点
+    expect(v.gateway).toBe('10.0.0.2:18443');
+    // reason 带空格 → Go 侧 slog 会加引号，这里要脱引号后拿到完整原文
+    expect(v.endpointReason).toBe('首选落点拨号失败：dial tcp 10.0.0.1:18443: i/o timeout');
+  });
+
+  it('钉扎按**当前落点**算：切到没上报指纹的备用网关后不得再显示「证书钉扎」', () => {
+    useThreeGateways();
+    // 没有落点行时是首选落点 gw-a（有指纹）→ 已钉扎
+    const first = parseTunStatus(raw({ health: SLOG + 'knock=true tunnel=true err=""' }));
+    expect(first.cipher).toContain('证书钉扎');
+    // 切到 gw-b（无指纹）后必须翻成「未钉扎」——这正是本契约断掉时被掩盖掉的那件事
+    const after = parseTunStatus(raw({ endpoint: ENDPOINT_GOLDEN, health: SLOG + 'knock=true tunnel=true err=""' }));
+    expect(after.cipher).toContain('未钉扎');
   });
 });

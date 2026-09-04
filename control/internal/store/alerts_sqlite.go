@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"sort"
 	"strings"
 	"time"
@@ -509,4 +510,71 @@ func (s *SQLiteStore) GatewayMetricsProbe(ctx context.Context) (MetricsProbe, er
 		return MetricsProbe{Reason: "等待数据面上报：gateway_metrics 表已建立但还没有任何一条指标"}, nil
 	}
 	return MetricsProbe{Ready: true, Samples: samples}, nil
+}
+
+// alertThresholdClampMarker 阈值越界值的一次性清洗标记。
+const alertThresholdClampMarker = "alert.rules.threshold.clamp.v1"
+
+// clampAlertThresholds 把库里越界的阈值夹回该键的默认值，一次性。
+//
+// ★为什么必须有：本波给阈值加了取值区间，但**只校验写入侧**。而库里已经落了 0 的行
+// 正是这次要修的那个缺陷（前端输入框清空 → `Number(nv ?? 0)`）留下的产物——
+// 「存量库里有 0」不是假设，是这次修复的前提。
+//
+// 不清洗的后果是**规则在界面上被彻底锁死**：控制台 saveRule 每次都整条 POST
+// （`body = {...r, ...patch}`），于是管理员哪怕只想把这条吵闹的规则**关掉**，
+// 也会被 400 挡回，理由指向一个他根本没碰的阈值框。gateway_load 有三个阈值键，
+// 只要其中两个是 0，逐个改都改不完——每次提交都带着另一个 0。只能上机改库。
+//
+// ★迁移里做夹取不违反「拒绝而非夹取」那条纪律：那条管的是**入口**——管理员当场提交的
+// 越界值必须拒，不能给他 200 OK 而实际生效另一个数；历史脏数据没有"当场"可言，
+// 只能夹，且必须留痕（落审计写清哪条规则的哪一项从多少改成了多少），
+// 否则管理员会发现自己配的值变了而查不出是谁改的。
+func (s *SQLiteStore) clampAlertThresholds(ctx context.Context) error {
+	if _, done, err := s.Setting(ctx, alertThresholdClampMarker); err != nil || done {
+		return err
+	}
+	rules, err := s.AlertRules(ctx)
+	if err != nil {
+		return err
+	}
+	for _, r := range rules {
+		spec, ok := AlertKindSpecOf(r.Kind)
+		if !ok {
+			continue // 库里有未知 kind：不是本函数该管的事，留给别处报
+		}
+		var fixed []string
+		next := map[string]float64{}
+		for k, v := range r.Threshold {
+			next[k] = v
+			if _, known := spec.Thresholds[k]; !known {
+				continue
+			}
+			if err := checkThresholdRange(k, spec.ThresholdZh[k], v); err != nil {
+				def := spec.Thresholds[k]
+				next[k] = def
+				fixed = append(fixed, fmt.Sprintf("%s %g→%g", spec.ThresholdZh[k], v, def))
+			}
+		}
+		if len(fixed) == 0 {
+			continue
+		}
+		sort.Strings(fixed) // map 遍历无序：审计正文每次运行都该一样
+		b, err := json.Marshal(next)
+		if err != nil {
+			return err
+		}
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE alert_rules SET threshold_json=? WHERE id=?`, string(b), r.ID); err != nil {
+			return err
+		}
+		if err := s.RecordAudit(ctx, AuditEntry{
+			Category: "admin", User: "system", Verdict: "ok",
+			Event: fmt.Sprintf("清洗越界的告警阈值（规则「%s」）：%s。"+
+				"这些值是旧版本输入框清空时落下的，会让该规则在控制台上改不动也关不掉", r.Name, strings.Join(fixed, "、")),
+		}); err != nil {
+			return err
+		}
+	}
+	return s.SetSetting(ctx, alertThresholdClampMarker, nowStr())
 }

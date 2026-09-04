@@ -16,6 +16,19 @@
       </div>
     </div>
 
+    <!-- ★在线态没有数据源时当面说出来。这一页的定位是"就近处置"——要不要现在踢他，
+         取决于他现在有没有连着。改造前无在线网关时绿点全灭、无任何提示，
+         而那时敲门与隧道照常，人是真连着的：管理员看到"已经离线了"就不会动手。 -->
+    <div v-if="onlineUnknown" class="bd-tip bd-tip--warn">
+      <icon-exclamation-circle-fill class="bd-tip__ic bd-tip__ic--warn" />
+      <span>
+        <b>在线态当前不可判定</b>：控制面此刻收不到任何网关的心跳上报，「谁连着」这件事没有数据源
+        （网关证书过期 / 控制面刚重启 / mTLS 端口不通都会这样）。
+        此时<b>敲门与隧道并不受影响</b>，下方这些人很可能正连着——处置前先去
+        <router-link class="bd-link" to="/security/gateway">网关与隐身</router-link> 确认网关心跳。
+      </span>
+    </div>
+
     <!-- 灰度处置提示条（呼应 P9） -->
     <div class="bd-tip">
       <icon-info-circle class="bd-tip__ic" />
@@ -92,8 +105,8 @@
         <div class="bd-row__who">
           <div class="bd-row__name">{{ u.user }}</div>
           <div class="bd-row__meta">{{ u.account }} · {{ u.org }}</div>
-          <span class="bd-st">
-            <span class="d" :style="{ background: u.online ? 'var(--bd-success)' : 'var(--bd-t4)' }" />{{ u.online ? '在线' : '离线' }}
+          <span class="bd-st" :title="onlineHint(u.online)">
+            <span class="d" :style="{ background: onlineDot(u.online) }" />{{ onlineText(u.online) }}
           </span>
         </div>
       </div>
@@ -264,6 +277,27 @@ async function unlockIP(lk: LoginLockout) {
   }
 }
 
+/* ── 在线态三态渲染（后端 online 可缺席 = 不可判定）──
+ *
+ * ★照抄 Gateway.vue 的 triText。`u.online ? '在线' : '离线'` 会把"控制面没有数据源"
+ *   渲染成确定结论；而 `?? false` 更坏——它把后端如实缺席的三态在前端偷偷塌回两态，
+ *   症状与改造前一模一样却更难查。 */
+function onlineText(v: boolean | undefined) {
+  return v === undefined || v === null ? '不可判定' : v ? '在线' : '离线';
+}
+function onlineDot(v: boolean | undefined) {
+  return v === undefined || v === null ? 'var(--bd-warning)' : v ? 'var(--bd-success)' : 'var(--bd-t4)';
+}
+function onlineHint(v: boolean | undefined) {
+  return v === undefined || v === null
+    ? '控制面此刻收不到任何网关心跳，"谁连着"没有数据源；敲门与隧道不受影响，此人可能正连着'
+    : v
+      ? '在线网关正上报着这个账号的接入会话'
+      : '有网关在上报，但其中没有这个账号的会话';
+}
+/** 只要有一行的 online 缺席，整页在线口径就不可判定（后端整批下发，不会半有半无）。 */
+const onlineUnknown = computed(() => bundle.value.items.some((i) => i.online === undefined || i.online === null));
+
 function toggle(key: string) { filter.value = filter.value === key ? '' : key; }
 function tagStyle(c: string) { return { color: c, background: c + '14' }; }
 function toneHex(t: string) {
@@ -349,6 +383,9 @@ onMounted(load);
   font-size: 12.5px; color: var(--bd-t2); line-height: 1.6;
 }
 .bd-tip__ic { color: var(--bd-primary); font-size: 16px; flex: none; }
+/* 告警调的提示条（在线态不可判定）：与蓝色的说明条区分开，align 顶对齐容纳多行 */
+.bd-tip--warn { align-items: flex-start; background: var(--bd-tag-gold-bg); border-color: var(--bd-warning); }
+.bd-tip__ic--warn { color: var(--bd-warning); margin-top: 2px; }
 
 /* P10 聚合卡 */
 .bd-bk {

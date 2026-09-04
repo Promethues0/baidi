@@ -102,7 +102,13 @@ func (p *picker) status() (idx, total int, label, addr, reason string) {
 // ★格式是与桌面客户端的契约：clients/desktop/src/lib/tunnel.ts 按
 // `endpoint=<i>/<n>`、`id=`、`addr=`、`reason=` 四个键解析出「当前用的是第几落点、
 // 为什么切」并显示在接入页。改键名要同步改那边的正则，否则接入页会静默退回
-// "第 1 个落点"——而那正是切换之后最不该显示的信息。
+// "第 1 个落点"——而那正是切换之后最不该显示的信息（地址显示成已挂掉的那台、
+// 指纹退回首选那台的，于是**未钉扎的运行中隧道被显示成已钉扎**）。
+//
+// 这条契约有守卫，光靠纪律拴不住：TestLogCurrent_KeysAreDesktopContract 把本函数的
+// 真实输出落进 testdata/endpoint_log.txt，桌面侧 tunnel.test.ts 读**同一份文件**喂
+// parseEndpoint。改了输出形制就把新的一行写回样本，并跑一遍
+// `cd clients/desktop && npm test`——只更新样本而不改那边的正则，桌面侧当场红。
 func (p *picker) logCurrent(msg string, warn bool) {
 	idx, total, label, addr, reason := p.status()
 	args := []any{

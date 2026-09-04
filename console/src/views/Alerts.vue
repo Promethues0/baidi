@@ -154,11 +154,13 @@
               <td>{{ catZh[specOf(r.kind)?.category || ''] || '—' }}</td>
               <td>
                 <div v-if="!Object.keys(r.threshold).length" class="bd-al__o">无阈值（条件成立即报）</div>
+                <!-- thBump 参与 key：清空后不提交，需要强制重挂载才能把真实值回显出来
+                     （model-value 没变，Arco 不会自己把空框填回去）。 -->
                 <div v-for="(v, k) in r.threshold" :key="k" class="bd-th">
                   <span>{{ specOf(r.kind)?.thresholdZh?.[k] || k }}</span>
                   <a-input-number
-                    :model-value="v" :min="0" size="mini" style="width: 96px"
-                    @change="(nv) => saveThreshold(r, k as string, Number(nv ?? 0))"
+                    :key="`${k}:${thBump}`" :model-value="v" :min="0" size="mini" style="width: 96px"
+                    @change="(nv) => saveThreshold(r, k as string, nv)"
                   />
                 </div>
               </td>
@@ -332,8 +334,33 @@ function saveEnabled(r: AlertRule, enabled: boolean) { void saveRule(r, { enable
 function saveCooldown(r: AlertRule, sec: number) { void saveRule(r, { cooldownSec: sec }); }
 /** 点名通知通道。留空 = 发给全部启用中的通道（与后端 notifyAlert 的语义逐字一致）。 */
 function saveChannels(r: AlertRule, ids: string[]) { void saveRule(r, { channels: ids }); }
-function saveThreshold(r: AlertRule, key: string, v: number) {
-  void saveRule(r, { threshold: { ...r.threshold, [key]: v } });
+/** 阈值输入框重挂载计数：清空后用它把真实值回显回去（见模板里的 :key）。 */
+const thBump = ref(0);
+
+/**
+ * 保存单项阈值。
+ *
+ * ★守卫的是「输入框被清空」这一刻：Arco 的 InputNumber 在清空时 emit change(undefined)，
+ * 改造前这里写的是 `Number(nv ?? 0)`——于是空框直接落库成 0，接口回 200、
+ * toast 说「规则「网关离线」已保存」、绿色「已启用」开关一字不变，而规则的行为
+ * 已经翻到了另一端：到期前提醒 15 天 → 0 = 再也不提醒；网关离线 120s → 0 =
+ * 每台在线网关每轮都判离线、冷却一到就刷一条告警加一封邮件。两个方向都不报错。
+ *
+ * 同一张表格里紧挨着的冷却期那一栏写的就是 `Number(nv ?? cooldown.default)`，
+ * Policy.vue 的 save() 里也有一道「输入框被清空的瞬间（undefined/NaN）不提交」——
+ * 只有阈值这一处漏了。
+ *
+ * 这里选**不提交并回显原值**，而不是兜成 spec 默认值：管理员清空多半是想改成
+ * 别的数、还没输完，替他保存一个他没打算要的默认值同样是"背着他改配置"。
+ * 后端另有取值区间兜底（store.NormalizeThresholds），API 直接 POST 也绕不过去。
+ */
+function saveThreshold(r: AlertRule, key: string, v: number | undefined) {
+  if (v === undefined || v === null || Number.isNaN(Number(v))) {
+    Message.warning(`阈值「${specOf(r.kind)?.thresholdZh?.[key] || key}」不能为空，未保存（已恢复原值）`);
+    thBump.value++; // 强制重挂载，把空框恢复成库里那个值
+    return;
+  }
+  void saveRule(r, { threshold: { ...r.threshold, [key]: Number(v) } });
 }
 
 async function evaluateNow() {

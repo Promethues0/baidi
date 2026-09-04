@@ -1182,7 +1182,28 @@ func (s *SQLiteStore) seed() error {
 		seedStrength := auth.PasswordStrength("", seedPassword)
 		for _, u := range b.Users {
 			u.PassHash = hash
-			u.Role = roleFromDisplay(u.Roles)
+			// ★种子的权威角色必须**显式声明**，绝不从展示标签推导。
+			//
+			// 改造前这里是无条件的 `u.Role = roleFromDisplay(u.Roles)`，而 DirUser.Role 的注释
+			// 白纸黑字写着「权威鉴权角色 admin | user（≠展示用 Roles）」——那一行把它整个冲掉了。
+			// roleFromDisplay 的判据是 strings.Contains(r, "管理员")，而种子用户「张伟 zhang.wei」
+			// 的展示标签正好是 []string{"研发", "管理员"}，于是他被判成 role=admin；
+			// 紧接着 ensureAdminRoles 的 root 回填（admins_sqlite.go 的
+			// `UPDATE users SET admin_role='root' WHERE role='admin'`）把他升成**超级管理员**。
+			//
+			// 后果：**每一台新装的机器上都有第二把超管钥匙，口令是公开的 baidi@123**，
+			// 而它恰好活过了产品里唯一那条口令加固措施——BAIDI_SEED_MUST_CHANGE 只保证
+			// 「谁先登谁改」，拦不住知道公开口令的人抢先把它改成自己的。
+			// 2026-09-04 在演示站实测：zhang.wei / baidi@123 登录 → /auth/me 回
+			// adminRole.perms=["*"] → GET /audit 与 GET /system 均 200。
+			//
+			// 这条纪律本仓在 requirePerm 上已经写过一遍（「判定点是 scope_json 里的权限键，
+			// 不是 power 也不是页面文案」），种子这一处是它没覆盖到的另一半：
+			// 中文展示标签是给人看的数据，管理员随时可以改，拿它当鉴权判据等于把提权入口
+			// 开在一个谁都不会当成安全面的字段上。
+			if u.Role == "" {
+				u.Role = "user"
+			}
 			u.MustChangePw = seedMustChange
 			u.PwStrength = seedStrength
 			if err := s.insertUser(u); err != nil {

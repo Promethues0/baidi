@@ -12,10 +12,31 @@ import (
 	"baidi.dev/control/internal/auth"
 )
 
+// makeIdleAdminFixture 把 account 提成管理员（审计管理员，权最小），供「闲置的管理员」这类夹具用。
+//
+// ★为什么现在要显式造：改造前这几条用例白拿了一个**缺陷**的副作用——种子循环用
+// roleFromDisplay 从中文展示标签「管理员」推出权威角色 role=admin，于是种子用户
+// zhang.wei 免费成了管理员，并被随后的 root 回填升成**超级管理员**，而口令还是公开的
+// baidi@123（2026-09-04 在演示站实测可登录并拿到 perms:["*"]）。
+// 这几条用例正是那个缺陷能活到今天的原因：它们把它当成了预期行为钉住。
+//
+// 走 POST /api/v1/admins 这条**唯一的建管理员入口**而不是直接改库——那样连提权路径
+// 本身也一并被覆盖到，夹具与产品行为不会分家。
+func makeIdleAdminFixture(t *testing.T, h http.Handler, account string) {
+	t.Helper()
+	code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(), map[string]any{
+		"account": account, "roleKey": "audit",
+	})
+	if code != http.StatusOK && code != http.StatusCreated {
+		t.Fatalf("提权夹具 %s 失败 http %d: %v", account, code, out)
+	}
+}
+
 func TestIdleListAndBatchLock(t *testing.T) {
 	h := newTestServer(t)
+	makeIdleAdminFixture(t, h, "zhang.wei")
 
-	// 识别：种子里 4 个 active 超 30 天（zhang.wei 是管理员）
+	// 识别：种子里 4 个 active 超 30 天（zhang.wei 由上面的夹具提成了管理员）
 	code, out := doJSON(t, h, "GET", "/api/v1/users/idle?days=30", adminToken(), nil)
 	if code != http.StatusOK {
 		t.Fatalf("idle list http %d", code)
@@ -63,6 +84,7 @@ func TestIdleListAndBatchLock(t *testing.T) {
 // 分权与防自锁在批量路径同样生效。
 func TestIdleLockGuards(t *testing.T) {
 	h := newTestServer(t)
+	makeIdleAdminFixture(t, h, "zhang.wei")
 
 	// root 建一个 security 角色的管理员
 	_, atok := doJSON(t, h, "POST", "/api/v1/auth/login", "",

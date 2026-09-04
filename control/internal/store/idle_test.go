@@ -35,6 +35,14 @@ func TestClassifyIdle(t *testing.T) {
 func TestIdleAccountsSeeded(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
+	// ★这条用例要一个「闲置的管理员」当夹具。改造前它白拿了一个**缺陷**的副作用：
+	// 种子循环用 roleFromDisplay 从展示标签「管理员」推出 role=admin，于是 zhang.wei
+	// 免费变成管理员（且随后被回填成 admin_role=root，口令还是公开的 baidi@123）。
+	// 修掉那处推导之后，夹具必须自己显式造——测试不该依赖一个不该存在的身份，
+	// 否则它就是在替缺陷背书：这四条用例正是那个缺陷能活到今天的原因。
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET role='admin' WHERE account='zhang.wei'`); err != nil {
+		t.Fatalf("提权夹具：%v", err)
+	}
 	list, err := s.IdleAccounts(ctx, 30)
 	if err != nil {
 		t.Fatal(err)

@@ -213,6 +213,46 @@ func main() {
 		slog.Info("CORS 白名单生效", "origins", cfg.AllowOrigin)
 	}
 
+	// ── 仍持出厂口令的账号：当场比对，别只信「配了 BAIDI_SEED_MUST_CHANGE 就没事」──
+	//
+	// ★为什么是**当场比对库里的哈希**而不是看配置：BAIDI_SEED_MUST_CHANGE 只保证「谁先登谁改」，
+	// 拦不住一个知道公开口令 baidi@123 的人抢在正主之前登进去把它改成自己的；而且它对
+	// **已经装出去**的机器完全无效。2026-09-04 发现的那条正是这个形态：种子循环曾用中文展示
+	// 标签推导权威角色，导致每台旧机器上都有第二名 admin_role='root' 的超级管理员（zhang.wei），
+	// 口令就是 baidi@123 —— 修掉推导只对新建库生效，存量库里那把钥匙还在。
+	// 演示站实测过：登录 → /auth/me 回 perms:["*"] → GET /audit 与 /system 均 200。
+	//
+	// 管理员单独成一条 Warn 并点名，普通账号合并成一条：前者是**当前就成立的全权入口**，
+	// 后者是待办。两者都只报事实，不自动处置——启动时改别人的口令或状态属于越权。
+	{
+		if accts, err := st.FactoryPasswordAccounts(context.Background()); err != nil {
+			slog.Warn("出厂口令自检失败（本次启动无法判定是否有账号仍持公开口令）", "err", err)
+		} else if len(accts) > 0 {
+			var admins, users []string
+			for _, a := range accts {
+				label := a.Account
+				if a.AdminRole != "" {
+					label += "（" + a.AdminRole + "）"
+				}
+				if a.Role == "admin" {
+					admins = append(admins, label)
+				} else {
+					users = append(users, a.Account)
+				}
+			}
+			if len(admins) > 0 {
+				slog.Warn("⚠ 有**管理员**账号仍在使用公开的出厂口令 baidi@123 —— 任何读过本项目文档的人都能登进来",
+					"账号", strings.Join(admins, "、"),
+					"处置", "立刻改口令（控制台「用户与角色」→ 重置口令），或删除多余的管理员；"+
+						"BAIDI_SEED_MUST_CHANGE 只保证「谁先登谁改」，拦不住知道口令的人抢先改成自己的")
+			}
+			if len(users) > 0 {
+				slog.Warn("有普通账号仍在使用公开的出厂口令 baidi@123",
+					"数量", len(users), "账号", strings.Join(users, "、"))
+			}
+		}
+	}
+
 	handler := httpx.Chain(srv.Routes(),
 		httpx.RequestID,
 		httpx.CORS(cfg.AllowOrigin),

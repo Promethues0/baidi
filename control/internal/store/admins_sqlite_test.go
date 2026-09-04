@@ -3,6 +3,7 @@ package store
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 )
 
@@ -283,5 +284,60 @@ func TestSystemBundleComesFromDBNotSeed(t *testing.T) {
 		if r.Key == "audit" && r.Members != wantAudit {
 			t.Errorf("审计角色成员数应实算为 %d，得到 %d", wantAudit, r.Members)
 		}
+	}
+}
+
+// TestSeedHasExactlyOneRoot 钉住「全新库只有一名超级管理员」。
+//
+// ★这条守卫当初该有而没有，缺了它的代价是：种子循环用 roleFromDisplay 从**中文展示标签**
+// 「管理员」推出权威角色 role=admin，于是种子用户 zhang.wei 成了 role=admin，
+// 再被 ensureAdminRoles 的 root 回填升成 admin_role='root'——
+// **每一台按 deploy.sh 装出来的机器上都有第二把超管钥匙，口令是公开的 baidi@123**。
+// 2026-09-04 在演示站实测：zhang.wei / baidi@123 登录 → /auth/me 回 adminRole.perms=["*"]
+// → GET /audit 与 GET /system 均 200。
+//
+// 它活得久是因为**四条用例把它当成预期行为钉住了**（store/idle_test.go 的
+// 「zhang.wei 应标记为管理员」、api 侧三条闲置治理用例、以及 soleRoot 脚手架的注释）。
+// 那几处现在都改成显式造管理员夹具，这条则从正面把不变式钉死。
+//
+// 断言两层：数量为 1（防再冒出第二把钥匙），以及那一个必须是 admin
+// （防有人"修"成把 root 给了别人而不是 admin）。
+func TestSeedHasExactlyOneRoot(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT account, role FROM users WHERE admin_role='root' ORDER BY account`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	var roots []string
+	for rows.Next() {
+		var acct, role string
+		if err := rows.Scan(&acct, &role); err != nil {
+			t.Fatal(err)
+		}
+		roots = append(roots, acct+"(role="+role+")")
+	}
+	if len(roots) != 1 || roots[0] != "admin(role=admin)" {
+		t.Fatalf("全新库必须**只有** admin 一名超级管理员，实得 %v。\n"+
+			"多出来的每一把钥匙都持有公开的种子口令 baidi@123，且活过了 BAIDI_SEED_MUST_CHANGE\n"+
+			"（那条只保证「谁先登谁改」，拦不住知道公开口令的人抢先改成自己的）。", roots)
+	}
+
+	// 反面：权威角色绝不许从展示标签推导。zhang.wei 的展示标签含「管理员」，
+	// 它是给页面看的中文数据、管理员随时可改；拿它当鉴权判据等于把提权入口
+	// 开在一个谁都不会当成安全面的字段上（同 requirePerm 那条「判定点是权限键、不是页面文案」）。
+	var roles, role string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT roles, role FROM users WHERE account='zhang.wei'`).Scan(&roles, &role); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(roles, "管理员") {
+		t.Skip("种子数据已变：zhang.wei 的展示标签不再含「管理员」，这条反面断言失去意义")
+	}
+	if role != "user" {
+		t.Fatalf("展示标签含「管理员」的种子用户，其权威角色必须仍是 user，实得 %q", role)
 	}
 }

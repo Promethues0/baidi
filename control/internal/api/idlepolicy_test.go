@@ -106,8 +106,9 @@ func TestIdlePolicyRejectsOutOfRange(t *testing.T) {
 func TestIdleAutoLockOnlyRunsWhenEnabled(t *testing.T) {
 	h, srv := newTestServerWithSrv(t)
 	ctx := t.Context()
+	makeIdleAdminFixture(t, h, "zhang.wei") // 见该函数注释：这个身份以前是白拿缺陷的副作用
 
-	// 种子里 30 天阈值命中 4 个 active 账号，其中 zhang.wei 是管理员。
+	// 种子里 30 天阈值命中 4 个 active 账号，其中 zhang.wei 已被夹具提成管理员。
 	// ① 开关关着：跑一轮，一个都不该动。
 	if code, _ := setIdlePolicy(t, h, 30, false); code != http.StatusOK {
 		t.Fatal("保存策略失败")

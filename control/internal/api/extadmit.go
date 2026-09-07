@@ -270,6 +270,19 @@ func admitAttrHint(rec store.AuthSourceRec, id authsrc.Identity) string {
 			"请在该认证源上开启「调用 UserInfo 端点补全属性」"
 	case authsrc.KindLDAP, authsrc.KindAD:
 		return "；请检查该认证源的邮箱/组属性名是否与目录实际一致"
+	case authsrc.KindRADIUS:
+		// ★RADIUS 的 Email **恒空**，missingEmail 在这里恒 true，不能拿它当"域白名单没过"的判据——
+		// 此前正是这么写的，于是组白名单不过时也提示「请清掉允许的邮箱域」，而那个源根本没配域。
+		// 改按**配置**判：只有真配了域白名单（保存接口已拒收；能走到这里是存量配置或绕过了控制台），
+		// 域那条才可能是拒绝原因；否则只可能是组。
+		if len(store.NormalizeAdmitList(admitCfgOf(rec).AllowedDomains)) > 0 {
+			return "；RADIUS 应答里没有邮箱，域白名单对它恒拒绝，请清掉该源的「允许的邮箱域」"
+		}
+		if missingGroups {
+			return "；RADIUS 应答里没有映射出任何组：请确认该源的「组属性」已选（class / filter-id / reply-message），" +
+				"且 RADIUS 服务端策略确实把组写进了同一个属性"
+		}
+		return "" // 组拿到了、只是不在白名单里：管理员该改的是白名单，不加提示
 	}
 	return ""
 }

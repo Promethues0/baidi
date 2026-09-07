@@ -696,7 +696,7 @@ export interface AdaptiveRule { id: string; name: string; enabled: boolean; logi
  * 与上面的 AuthSource 同一批库行的两个投影：这一份带凭据元信息（只写不读的
  * 存在性 + 指纹），编辑抽屉用；上一份带账号计数，卡片汇总用。
  */
-export type AuthSrcKind = 'local' | 'ldap' | 'ad' | 'oidc';
+export type AuthSrcKind = 'local' | 'ldap' | 'ad' | 'oidc' | 'radius';
 
 export interface AuthSourceRec {
   id: string;
@@ -752,7 +752,25 @@ export interface OidcConfig {
   useUserInfo?: boolean;
 }
 
-/** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC 共用）。
+/** RADIUS 的配置形状（与 control 的 radiusConfigDTO 对齐）。共享密钥不在这里——走独立的 secret 端点。
+ *  ★这是「RADIUS 作为口令认证源」（FR-INT-03）；认证策略里的「Radius 动态令牌」是二次认证方式，
+ *  仍冻结，两者不是一回事。 */
+export interface RadiusConfig {
+  host: string;
+  /** 0 = 1812（认证口；1813 是计费口）。 */
+  port?: number;
+  /** 报文里的 NAS-Identifier，服务端常按它找客户端条目/挑策略。留空 = baidi-control。 */
+  nasIdentifier?: string;
+  /** pap（默认，互通面最广）| chap（服务端须持有明文口令）。EAP / MS-CHAPv2 本版本不做。 */
+  protocol?: 'pap' | 'chap';
+  /** 组从应答的哪个标准属性映射；空 = 不映射组。 */
+  groupAttr?: '' | 'class' | 'filter-id' | 'reply-message';
+  /** 单次等待应答（ms），0 = 3000；重发次数 0~5。总预算仍受外部认证 8s 预算钳制。 */
+  timeoutMs?: number;
+  retries?: number;
+}
+
+/** AdmitConfig 外部身份准入设置（LDAP/AD/OIDC/RADIUS 共用）。
  *  ★两项的判定时机不同：白名单**每次登录都判**（目录侧移出组后下次登录就该被拒），
  *  审批**只判首次建号**（已批过的账号不必天天再批）。 */
 export interface AdmitConfig {
@@ -771,7 +789,14 @@ export interface ExtAdmission {
   decidedAt?: string; decidedBy?: string; reason?: string;
 }
 
-export interface ProbeResp { ok: boolean; detail: string; elapsedMs?: number }
+export interface ProbeResp {
+  ok: boolean;
+  detail: string;
+  elapsedMs?: number;
+  /** 探测方法（有能力说清的源才下发）：RADIUS 是 status-server（RFC 5997）或回退的
+   *  access-request——后者会在对面日志里留一条失败登录，管理员得知道那条是谁打的。 */
+  method?: string;
+}
 export interface SaveSourceResp { ok: boolean; source: AuthSourceRec; warning?: string }
 
 /* ── 认证策略（store.AuthPolicy，FR-INTRO-07/08、FR-AUTH-12）──

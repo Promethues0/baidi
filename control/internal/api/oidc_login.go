@@ -371,7 +371,7 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	// ★准入闸（wave8 行动 10）：与口令登录**同一个判定函数**，同样在 BindExternalUser
 	// 之前。OIDC 这一侧尤其要紧——一个允许任意公有云账号完成授权码流的 IdP 配置，
 	// 没有域/组白名单就等于对全互联网开放自动建号。
-	_, bound, berr := as.UserBySubject(r.Context(), rec.ID, ident.Subject)
+	cur, bound, berr := as.UserBySubject(r.Context(), rec.ID, ident.Subject)
 	if berr != nil {
 		slog.Error("OIDC 绑定查询失败", "源", rec.Name, "err", berr.Error())
 		s.oidcFail(w, r, rec.Name, "账号绑定失败，请联系管理员")
@@ -382,6 +382,14 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 			s.auditAdmitDenied(r, rec, ident, v)
 		}
 		s.oidcFail(w, r, rec.Name, v.Reason)
+		return
+	}
+	// ★与口令路径 finishExternalAuth 同构、同一处文案与审计（denyAdminExternal）：
+	// 管理员账号在 BindExternalUser **之前**就拒。放到下面那道签发前的闸上是不够的——
+	// 会话虽被拒，refreshExternalProfile 已经把这名管理员的显示名/邮箱与外部组归属
+	// 按 IdP 的应答改写完了（把他移出一个「一律二次认证」的用户组 = 替他的本地登录降档）。
+	if bound && cur.Role == "admin" {
+		s.oidcFail(w, r, rec.Name, s.denyAdminExternal(r, cur.Account, "OIDC 认证源「"+rec.Name+"」"))
 		return
 	}
 	cred, err := as.BindExternalUser(r.Context(), rec.ID, store.ExternalIdentity{
@@ -396,6 +404,25 @@ func (s *Server) handleOIDCCallback(w http.ResponseWriter, r *http.Request) {
 	if !bound {
 		s.auditExtUserCreated(r, rec, ident, cred.Account)
 	}
+	// ★与门户口令路径**同一道闸**（externalSessionCredential）：重读完整账号行 + 管理员一律拒。
+	// 必须排在 secondFactor 之前——passkey/TOTP 第二回合（handleWebauthnLoginFinish /
+	// handleTotpLogin）是各自按 store.Credential 签完整令牌的，闸放在签交接票据那一行的话，
+	// 一名注册了 TOTP 的管理员走 IdP 认证 → needTotp → 验码，照样拿到 role=admin 会话。
+	// BindExternalUser 回的 cred 是窄 SELECT（没有 must_change_pw），下面一律用重读的这份。
+	full, deny, gerr := s.externalSessionCredential(r, cred.Account, "OIDC 认证源「"+rec.Name+"」")
+	if gerr != nil {
+		s.oidcFail(w, r, rec.Name, "账号信息读取失败，请联系管理员")
+		return
+	}
+	if deny != "" {
+		s.oidcFail(w, r, rec.Name, deny)
+		return
+	}
+	cred = full
+	// 本回合第一因子来自 IdP：登记外部认证回合（唯一消费方是首登强制改密，见 extAuthRounds）。
+	// 登记在闸之后、二次因子之前——TOTP 第二回合会另换一张令牌来签改密票据，
+	// 标记按账号存正是为了跨过那一跳。
+	s.extAuth.mark(cred.Account)
 	if accountBlocked(cred.Status) {
 		s.auditAs(r, cred.Account, "auth", "OIDC 登录被拒（账号已"+statusZh[cred.Status]+"，源 "+rec.Name+"）", "deny")
 		s.oidcFail(w, r, rec.Name, "账号已被"+statusZh[cred.Status])
@@ -453,25 +480,41 @@ func (s *Server) handleOIDCSession(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusForbidden, "交接票据已被使用")
 		return
 	}
-	// 60s 窗口内账号状态可能刚被改：复查，别让"禁用前最后一刻发起的登录"漏进来。
-	if u, blocked, err := s.blockedDirAccount(r.Context(), c.Sub); err != nil {
+	// 60s 窗口内账号可能刚被改：状态与**角色**都复查，别让"禁用/改派前最后一刻发起的登录"漏进来。
+	// 复查走与回调、与门户口令路径同一道闸（externalSessionCredential）：票据里的 Role 是签发
+	// 那一刻的快照，此后管理员把他提了权，拿快照签会话就是一张不该存在的令牌；
+	// 反过来，闸拒了管理员，会话的角色就只能从**重读的行**取，不从票据取。
+	// 读不到账号一律不签（60s 内被删号 = 不该再进来），比原先「不在目录中视为不受限」更严。
+	cred, deny, gerr := s.externalSessionCredential(r, c.Sub, "OIDC 交接票据")
+	if gerr != nil {
 		httpx.Error(w, http.StatusInternalServerError, "账号状态复查失败")
 		return
-	} else if blocked {
-		s.auditAs(r, c.Sub, "auth", "OIDC 登录被拒（换取会话时账号已"+statusZh[u.Status]+"）", "deny")
-		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[u.Status])
+	}
+	if deny != "" {
+		httpx.Error(w, http.StatusForbidden, deny)
 		return
 	}
-	s.noteLoginSuccess(r.Context(), c.Sub)
-	s.auditAs(r, c.Sub, "auth", "OIDC 登录成功", "ok")
-	tok := s.keys.Sign(auth.Claims{Sub: c.Sub, Role: c.Role, Name: c.Name}, tokenTTL)
-	display := c.Name
-	if u, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool {
-		return normUser(du.Account) == normUser(c.Sub)
-	}); err == nil && found {
-		display = u.Name
+	// 交接票据兑换也是外部认证回合的一部分（回调那次已 mark 过；控制面在两次之间
+	// 重启的话这里补一次，方向仍是"有就免填旧口令、没有就照旧追问"）。
+	s.extAuth.mark(cred.Account)
+	if accountBlocked(cred.Status) {
+		s.auditAs(r, c.Sub, "auth", "OIDC 登录被拒（换取会话时账号已"+statusZh[cred.Status]+"）", "deny")
+		httpx.Error(w, http.StatusForbidden, "账号已被"+statusZh[cred.Status])
+		return
 	}
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": display, "role": c.Role})
+	// 首登强制改密：与门户口令路径同一处理（mustChangeLogin，签受限改密令牌 + mustChangePassword）。
+	// 此前 OIDC 这条路直接签完整会话——一个被管理员重置过本地口令的外部绑定账号，
+	// 走一遍 IdP 就跳过了「首次登录须修改初始口令」，而口令路径上它是拦着的。
+	// 门户前端对 /auth/oidc/session 的响应与口令登录共用同一个 onSuccess，认得这个形状。
+	if cred.MustChangePw {
+		s.auditAs(r, cred.Account, "auth", "OIDC 认证通过（交接票据换取会话）", "ok")
+		s.mustChangeLogin(w, r, cred)
+		return
+	}
+	s.noteLoginSuccess(r.Context(), cred.Account)
+	s.auditAs(r, cred.Account, "auth", "OIDC 登录成功", "ok")
+	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: cred.Role, Name: cred.Account}, tokenTTL)
+	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name, "role": cred.Role})
 }
 
 // oidcFail 统一的失败收尾：302 回门户登录页并带上人话原因。

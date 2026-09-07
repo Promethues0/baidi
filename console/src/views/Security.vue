@@ -1,19 +1,36 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">安全中心</div>
-        <div class="bd-page__sub">终端环境基线 + SPA 服务隐身 · 风险驱动的纵深准入（UEM / 虚拟网络域不在白帝范围内）</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
+    <PageHeader title="安全中心" subtitle="终端环境基线 + SPA 服务隐身 · 风险驱动的纵深准入（UEM / 虚拟网络域不在白帝范围内）" :live="live" off-text="降级演示" />
+
+    <!-- ★读取失败时，后端那句原话必须在页面上有地方看。改造前唯一的线索是页头右上
+         那枚橙色「降级演示」标签——看得出"出事了"，看不到"是什么事"，而 /security 的
+         403（这一页归安全管理员一权）与"连不上控制面"的下一步动作完全相反。
+         基线是风险引擎的判据：把两条演示基线当成现场，会以为「阻断基线已启用」。 -->
+    <div v-if="live === false" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">
+        安全基线未读取（后端原话：<b>{{ loadErr }}</b>），左栏与右侧详情里的基线是<b>内置演示数据</b>，
+        <b>不代表风险引擎当前实际生效的基线</b>；此时「保存 / 新建 / 删除」仍会发往后端，成败以后端回执为准。
       </div>
     </div>
 
+    <!-- ★终端合规清单读取失败的提示提到**页签之上**。改造前它挂在非激活的「终端合规」
+         页签里：默认首屏是「安全基线」，于是控制面整个不可达时，第一眼只有一枚橙色
+         「降级演示」和一屏演示基线，写着后端原话的那条 danger notice 一个字都看不到。
+         两个页签是同一次故障的两个侧面，提示不该只挂在其中一个下面。 -->
+    <div v-if="postureErr" class="bd-notice bd-notice--danger">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">{{ postureErr }}</div>
+    </div>
+
     <!-- Tab 切换 -->
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'baseline' }" @click="tab = 'baseline'">安全基线</span>
-      <span class="bd-tab" :class="{ on: tab === 'posture' }" @click="tab = 'posture'; loadPosture()">终端合规</span>
+    <div class="bd-tabs" role="tablist">
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'baseline'" @click="tab = 'baseline'">安全基线</button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'posture'" @click="tab = 'posture'; loadPosture()">
+        终端合规
+        <!-- 红点角标：站在「安全基线」页签上也能看出另一边出了事（与上面那条 notice 同一判据） -->
+        <span v-if="postureErr" class="bd-badge" title="终端合规清单读取失败">!</span>
+      </button>
     </div>
 
     <!-- ============ 安全基线（两栏）============ -->
@@ -22,10 +39,12 @@
       <div class="bd-card bd-blist">
         <div class="bd-blist__h">
           <span>安全基线策略</span>
-          <span class="bd-blist__add" @click="addBaseline"><icon-plus-circle />新建</span>
+          <button type="button" class="bd-link bd-blist__add" @click="addBaseline"><icon-plus-circle />新建</button>
         </div>
+        <!-- 首屏骨架：第一次 /security 回来之前不画内置 mock——那一瞬显示的是假基线 -->
+        <SkeletonBlock v-if="!loaded" kind="text" :rows="5" />
         <button
-          v-for="b in baselines"
+          v-for="b in (loaded ? baselines : [])"
           :key="b.id"
           class="bd-bnode"
           :class="{ on: b.id === selected }"
@@ -33,23 +52,23 @@
         >
           <div class="bd-bnode__top">
             <span class="bd-bnode__name">{{ b.name }}</span>
-            <span class="bd-st"><span class="d" :style="{ background: b.status === 'enabled' ? 'var(--bd-success)' : 'var(--bd-t4)' }" /></span>
+            <span class="bd-st" :class="b.status === 'enabled' ? 'bd-st--ok' : 'bd-st--off'"><span class="d" /></span>
           </div>
           <div class="bd-bnode__tags">
-            <span class="bd-tg" :style="tagStyle(disposalColor(b.disposal))">{{ disposalText(b.disposal) }}</span>
-            <span class="bd-tg" :style="tagStyle(scopeAll(b) ? '#165DFF' : '#00B42A')">{{ scopeBrief(b) }}</span>
+            <span class="bd-tg" :class="disposalTag(b.disposal)">{{ disposalText(b.disposal) }}</span>
+            <span class="bd-tg" :class="scopeAll(b) ? 'bd-tg--blue' : 'bd-tg--green'">{{ scopeBrief(b) }}</span>
           </div>
           <div class="bd-bnode__scope">{{ scopeDetail(b) }}</div>
         </button>
       </div>
 
       <!-- 右：基线详情 / 编辑 -->
-      <div class="bd-bedit" v-if="cur">
+      <div class="bd-bedit bd-two__main" v-if="cur && loaded">
         <!-- 概要卡 -->
-        <div class="bd-card bd-bhead">
+        <div class="bd-card bd-card--pad bd-bhead">
           <div class="bd-bhead__top">
-            <div style="display: flex; align-items: center; gap: 10px">
-              <a-input v-model="cur.name" size="small" style="width: 220px; font-weight: 700" />
+            <div class="bd-bhead__name">
+              <a-input v-model="cur.name" size="small" class="bd-bhead__name-in" />
             </div>
             <div class="bd-bhead__sw">
               <span class="bd-bhead__swt">{{ cur.status === 'enabled' ? '已启用' : '已停用' }}</span>
@@ -76,13 +95,13 @@
             <b>
               <div class="bd-scope">
                 <a-select v-model="cur.scopeOrgs" multiple allow-clear size="small"
-                          placeholder="不限组织" style="min-width: 210px">
+                          placeholder="不限组织" class="bd-scope__sel">
                   <a-option v-for="o in orgOpts" :key="o.id" :value="o.id">
                     {{ o.name }}（{{ o.accounts.length }} 人）
                   </a-option>
                 </a-select>
                 <a-select v-model="cur.scopeGroups" multiple allow-clear size="small"
-                          placeholder="不限用户组" style="min-width: 210px">
+                          placeholder="不限用户组" class="bd-scope__sel">
                   <a-option v-for="g in groupOpts" :key="g.id" :value="g.id">
                     {{ g.name }}（{{ g.accounts.length }} 人）
                   </a-option>
@@ -92,134 +111,147 @@
             </b>
           </div>
           <div class="bd-kv"><span>覆盖平台</span>
-            <b><span v-for="p in cur.platforms" :key="p" class="bd-tg bd-plat">{{ p }}</span></b>
+            <b><span v-for="p in cur.platforms" :key="p" class="bd-tg bd-tg--grey bd-plat">{{ p }}</span></b>
           </div>
         </div>
 
         <!-- 处置动作（P7 风险分级配色）-->
-        <div class="bd-card bd-disp">
-          <div class="bd-section-title">命中处置动作</div>
-          <div class="bd-disp__hint">终端未通过本基线检测项时的纵深准入处置（风险越高、处置越强）</div>
-          <div class="bd-disp__grid">
+        <div class="bd-card">
+          <div class="bd-card__h">命中处置动作<span class="bd-card__h-sub">终端未通过本基线检测项时的纵深准入处置（风险越高、处置越强）</span></div>
+          <div class="bd-card__b bd-disp__grid">
             <button
               v-for="d in DISPOSALS"
               :key="d.key"
+              type="button"
               class="bd-dchip"
-              :class="{ on: cur.disposal === d.key }"
-              :style="cur.disposal === d.key ? { borderColor: d.color, background: d.color + '14' } : {}"
+              :class="[`bd-dchip--${d.tone}`, { on: cur.disposal === d.key }]"
               @click="cur.disposal = d.key"
             >
-              <span class="bd-dchip__dot" :style="{ background: d.color }" />
-              <span class="bd-dchip__t" :style="cur.disposal === d.key ? { color: d.color } : {}">{{ d.label }}</span>
+              <span class="bd-dchip__dot" />
+              <span class="bd-dchip__t">{{ d.label }}</span>
               <span class="bd-dchip__d">{{ d.desc }}</span>
             </button>
           </div>
         </div>
 
         <!-- 平台条件编辑器（P6：分平台 AND 条件）-->
-        <div class="bd-card bd-checks">
-          <div class="bd-checks__top">
-            <div>
-              <div class="bd-section-title" style="margin-bottom: 4px">平台检测项 · 分平台 AND 条件</div>
-              <div class="bd-checks__hint">同一平台下所有检测项需全部满足（AND）方判为合规，否则按上方处置动作执行</div>
+        <div class="bd-card">
+          <div class="bd-card__h">
+            平台检测项 · 分平台 AND 条件
+            <span class="bd-card__h-sub">同一平台下所有检测项需全部满足（AND）方判为合规，否则按上方处置动作执行</span>
+          </div>
+          <div class="bd-card__b">
+            <!-- 平台 pill 切换 -->
+            <div class="bd-platbar">
+              <button
+                v-for="p in PLATFORMS"
+                :key="p"
+                type="button"
+                class="bd-platpill"
+                :class="{ on: plat === p }"
+                @click="plat = p"
+              >
+                {{ p }}
+                <span class="bd-platpill__n">{{ checksFor(p).length }}</span>
+              </button>
             </div>
-          </div>
 
-          <!-- 平台 pill 切换 -->
-          <div class="bd-platbar">
-            <button
-              v-for="p in PLATFORMS"
-              :key="p"
-              class="bd-platpill"
-              :class="{ on: plat === p }"
-              @click="plat = p"
-            >
-              {{ p }}
-              <span class="bd-platpill__n">{{ checksFor(p).length }}</span>
-            </button>
-          </div>
+            <!-- 检测项表 -->
+            <div class="bd-chktable">
+            <table class="bd-table">
+              <thead>
+                <tr>
+                  <th>检测项</th>
+                  <th>期望值</th>
+                  <th>风险等级</th>
+                  <th>适用</th>
+                  <th class="r">操作</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="c in checksFor(plat)" :key="c.key">
+                  <td><b class="bd-cell-strong">{{ c.label }}</b></td>
+                  <td><span class="bd-mono">{{ c.expect }}</span></td>
+                  <td>
+                    <span class="bd-tg" :class="severityTag(c.severity)">{{ severityText(c.severity) }}</span>
+                  </td>
+                  <td>
+                    <span class="bd-tg" :class="c.platform === 'All' ? 'bd-tg--purple' : 'bd-tg--grey'">{{ c.platform === 'All' ? '全平台' : c.platform }}</span>
+                  </td>
+                  <td class="r">
+                    <span class="bd-acts"><button type="button" class="bd-link bd-link--danger" @click="removeCheck(c.key)">删除</button></span>
+                  </td>
+                </tr>
+                <tr v-if="checksFor(plat).length === 0" class="bd-table__emptyrow">
+                  <td colspan="5"><EmptyState size="sm" title="该平台暂无检测项，可点击下方按钮添加" /></td>
+                </tr>
+              </tbody>
+            </table>
+            </div>
 
-          <!-- 检测项表 -->
-          <table class="bd-table bd-chktable">
-            <thead>
-              <tr>
-                <th>检测项</th>
-                <th>期望值</th>
-                <th>风险等级</th>
-                <th>适用</th>
-                <th class="r">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr v-for="c in checksFor(plat)" :key="c.key">
-                <td><b style="color: var(--bd-t1); font-weight: 500">{{ c.label }}</b></td>
-                <td><span class="bd-mono">{{ c.expect }}</span></td>
-                <td>
-                  <span class="bd-tg" :style="tagStyle(severityColor(c.severity))">{{ severityText(c.severity) }}</span>
-                </td>
-                <td>
-                  <span class="bd-tg" :style="tagStyle(c.platform === 'All' ? '#722ED1' : '#86909C')">{{ c.platform === 'All' ? '全平台' : c.platform }}</span>
-                </td>
-                <td class="r">
-                  <span class="bd-link bd-link--danger" @click="removeCheck(c.key)">删除</span>
-                </td>
-              </tr>
-              <tr v-if="checksFor(plat).length === 0">
-                <td colspan="5" class="bd-empty">该平台暂无检测项，可点击下方按钮添加</td>
-              </tr>
-            </tbody>
-          </table>
-
-          <!-- ★只能从采集器目录里选，不能自由填 key：采集器不报的 key 会让这条基线
-               对全平台终端永远判违规（接入准入基线默认处置是 block）。目录由后端下发。 -->
-          <div class="bd-addcheck-row">
-            <a-select
-              v-model="pickedCheck"
-              size="small"
-              placeholder="选择要添加的检测项…"
-              :disabled="!addableChecks.length"
-              style="flex: 1; max-width: 340px"
-              allow-clear
-            >
-              <a-option v-for="s in addableChecks" :key="s.key" :value="s.key">
-                {{ s.label }}（{{ s.key }}）
-              </a-option>
-            </a-select>
-            <a-button size="small" type="primary" :disabled="!pickedCheck" @click="addCheck">
-              <icon-plus />添加检测项
-            </a-button>
-            <span v-if="!catalog.length" class="bd-addcheck-note">未连后端，取不到采集项目录</span>
-            <span v-else-if="!addableChecks.length" class="bd-addcheck-note">采集器可上报的 {{ catalog.length }} 项已全部配置</span>
-            <span v-else class="bd-addcheck-note">
-              只列采集器真的会上报的项——配一个采集器不报的 key，这条基线会对全平台终端永远判违规
-            </span>
+            <!-- ★只能从采集器目录里选，不能自由填 key：采集器不报的 key 会让这条基线
+                 对全平台终端永远判违规（接入准入基线默认处置是 block）。目录由后端下发。 -->
+            <div class="bd-addcheck-row">
+              <a-select
+                v-model="pickedCheck"
+                size="small"
+                placeholder="选择要添加的检测项…"
+                :disabled="!addableChecks.length"
+                class="bd-addcheck-sel"
+                allow-clear
+              >
+                <a-option v-for="s in addableChecks" :key="s.key" :value="s.key">
+                  {{ s.label }}（{{ s.key }}）
+                </a-option>
+              </a-select>
+              <a-button size="small" type="primary" :disabled="!pickedCheck" @click="addCheck">
+                <icon-plus />添加检测项
+              </a-button>
+              <span v-if="!catalog.length" class="bd-addcheck-note">未连后端，取不到采集项目录</span>
+              <span v-else-if="!addableChecks.length" class="bd-addcheck-note">采集器可上报的 {{ catalog.length }} 项已全部配置</span>
+              <span v-else class="bd-addcheck-note">
+                只列采集器真的会上报的项——配一个采集器不报的 key，这条基线会对全平台终端永远判违规
+              </span>
+            </div>
+            <div v-if="pickedSpec?.note" class="bd-notice bd-notice--plain bd-addcheck-hint"><icon-info-circle /><span>{{ pickedSpec.note }}</span></div>
           </div>
-          <div v-if="pickedSpec?.note" class="bd-addcheck-hint"><icon-info-circle />{{ pickedSpec.note }}</div>
         </div>
       </div>
     </div>
 
     <!-- ============ 终端合规（最新 posture 上报 × 风险引擎判定）============ -->
-    <div v-show="tab === 'posture'" class="bd-card" style="padding: 16px 20px">
-      <div class="bd-section-title" style="display: flex; justify-content: space-between; align-items: center">
+    <div v-show="tab === 'posture'" class="bd-tablecard">
+      <div class="bd-card__h">
         终端合规状态（最新上报）
-        <a-button size="small" @click="loadPosture"><icon-refresh /> 刷新</a-button>
+        <div class="bd-card__h-right">
+          <button type="button" class="bd-btn bd-btn--ghost bd-btn--sm" @click="loadPosture"><icon-refresh /> 刷新</button>
+        </div>
       </div>
-      <div v-if="postureErr" class="bd-empty" style="display: block">{{ postureErr }}</div>
-      <!-- ★截断必须可见：清单只读前 N 条。不说的话，一份被截断的合规清单会被当成全量，
-           管理员据此判断「没有不合规终端」——而看不见的那截里可能全是 block。 -->
-      <div v-else-if="postureTruncated" class="bd-trunc">
-        共 {{ postureTotal }} 台终端上报，本页只显示最近 {{ postureRows.length }} 条，
-        其余 {{ postureTotal - postureRows.length }} 条未加载——请用 API 查询完整清单。
-        （准入判定不受此上限影响：闸门读的是独立的全量查询。）
+      <div v-if="postureTruncated && !postureErr" class="bd-card__b bd-posture__b">
+        <!-- ★截断必须可见：清单只读前 N 条。不说的话，一份被截断的合规清单会被当成全量，
+             管理员据此判断「没有不合规终端」——而看不见的那截里可能全是 block。 -->
+        <div class="bd-notice bd-notice--warn">
+          <icon-exclamation-circle-fill />
+          <span>共 {{ postureTotal }} 台终端上报，本页只显示最近 {{ postureRows.length }} 条，
+          其余 {{ postureTotal - postureRows.length }} 条未加载——请用 API 查询完整清单。
+          （准入判定不受此上限影响：闸门读的是独立的全量查询。）</span>
+        </div>
       </div>
-      <table v-if="!postureErr" class="bd-table">
+      <SkeletonBlock v-if="!postureLoaded" kind="table" :rows="4" :cols="9" />
+      <!-- 读取失败：表格整块不画，此处给一条 danger 空态说明"为什么是空的"——
+           后端原话在上方那条页级 notice 里，两处不重复同一句话。 -->
+      <div v-else-if="postureErr" class="bd-card__b">
+        <EmptyState size="md" tone="danger" title="终端合规清单未读取"
+          desc="失败原因见页面顶部的红色提示条（后端原话）；修好后点右上「刷新」重试。这里不画任何演示终端——编造的合规状态与真实上报在这一屏上无法区分。" />
+      </div>
+      <div v-else class="bd-tablewrap">
+      <table class="bd-table">
         <thead>
           <tr><th>账号</th><th>设备指纹</th><th>平台 / 系统</th><th>客户端</th><th>检查</th><th>判定</th><th>评分</th><th>最后上报</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="p in postureRows" :key="p.user + p.device">
-            <td><b style="color: var(--bd-t1)">{{ p.user }}</b></td>
+            <td><b class="bd-cell-strong">{{ p.user }}</b></td>
             <td><span class="bd-mono">{{ p.device }}</span></td>
             <td>{{ p.platform }} · {{ p.os || '—' }}</td>
             <td>{{ p.clientVersion || '—' }}</td>
@@ -230,28 +262,28 @@
                 管理员据此去追一台其实合规的终端。title 给出终端上报的原始值/原因。
               -->
               <span
-                v-for="c in p.checks" :key="c.key" class="bd-tg" :title="c.value"
-                :style="tagStyle(c.unknown ? '#86909C' : c.ok ? '#00B42A' : '#F53F3F')"
-                style="margin: 1px 3px 1px 0"
+                v-for="c in p.checks" :key="c.key" class="bd-tg bd-chk" :title="c.value"
+                :class="c.unknown ? 'bd-tg--grey' : c.ok ? 'bd-tg--green' : 'bd-tg--red'"
               >{{ c.label }}{{ c.unknown ? '（无法判定）' : '' }}</span>
             </td>
-            <td><span class="bd-tg" :style="tagStyle(verdictColor(p.verdict))">{{ verdictText(p.verdict) }}</span></td>
-            <td><b :style="{ color: p.score >= 60 ? '#F53F3F' : p.score >= 30 ? '#FF7D00' : 'var(--bd-t1)' }">{{ p.score }}</b></td>
-            <td style="color: var(--bd-t3)">{{ tsText(p.ts) }}</td>
+            <td><span class="bd-tg" :class="verdictTag(p.verdict)">{{ verdictText(p.verdict) }}</span></td>
+            <td><b :class="`bd-score bd-score--${scoreTone(p.score)}`">{{ p.score }}</b></td>
+            <td class="bd-dim">{{ tsText(p.ts) }}</td>
             <td class="r">
               <a-popconfirm
                 :content="p.verdict === 'block' ? '该设备为阻断状态，退役后将解除其触发的接入收缩。确认删除？' : '删除该设备的终端报告（设备退役）？'"
                 type="warning" @ok="removePosture(p)"
               >
-                <span class="bd-link bd-link--danger">退役</span>
+                <button type="button" class="bd-link bd-link--danger">退役</button>
               </a-popconfirm>
             </td>
           </tr>
-          <tr v-if="postureRows.length === 0">
-            <td colspan="9" class="bd-empty">尚无终端上报——桌面客户端登录后每 60s 自动上报</td>
+          <tr v-if="postureRows.length === 0" class="bd-table__emptyrow">
+            <td colspan="9"><EmptyState size="md" title="尚无终端上报" desc="桌面客户端登录后每 60s 自动上报" /></td>
           </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
   </div>
@@ -261,12 +293,22 @@
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type SecurityBundle, type BaselinePolicy, type BaselineCheck, type CheckSpec, type PostureRow, type PostureResp, type SubjectOption, failReason } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 type Platform = 'Windows' | 'macOS' | 'Linux';
 const PLATFORMS: Platform[] = ['Windows', 'macOS', 'Linux'];
 
 const tab = ref<'baseline' | 'posture'>('baseline');
-const live = ref(false);
+/** 连接态三态：undefined = 首轮请求还在路上（判不出来，PageHeader 此时不画标签）/
+ *  true 已连 / false 降级演示。★初值写 false 的话，首屏那一瞬页头就挂上一枚橙色
+ *  「降级演示」——把"还没探过"说成"确定离线"，而那一刻什么都还没发生。 */
+const live = ref<boolean | undefined>(undefined);
+/** /security 读取失败时后端那句原话（failReason 收口，前端不编造归因）。 */
+const loadErr = ref('');
+/** 首屏是否已完成一次 /security 加载（成功或降级都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 
 /* ── 内置 mock（结构同后端 SecurityBundle）── */
 const MOCK_BASELINES: BaselinePolicy[] = [
@@ -307,25 +349,25 @@ function checksFor(p: Platform): BaselineCheck[] {
 }
 
 /* ── 处置动作（P7 风险分级配色）── */
-const DISPOSALS: { key: BaselinePolicy['disposal']; label: string; desc: string; color: string }[] = [
-  { key: 'allow', label: '放行', desc: '记录但不拦截', color: '#00B42A' },
-  { key: 'degrade', label: '降权', desc: '仅放行低敏应用', color: '#FF7D00' },
-  { key: 'block', label: '阻断', desc: '高危 · 直接拒绝接入', color: '#F53F3F' },
-  { key: 'gray', label: '灰度', desc: '小范围观察', color: '#86909C' }
+/* tone 只走 --bd-* 语义族（allow 绿 / degrade 橙 / block 红 / gray 中性灰），不写十六进制。 */
+const DISPOSALS: { key: BaselinePolicy['disposal']; label: string; desc: string; tone: 'success' | 'warning' | 'danger' | 'grey' }[] = [
+  { key: 'allow', label: '放行', desc: '记录但不拦截', tone: 'success' },
+  { key: 'degrade', label: '降权', desc: '仅放行低敏应用', tone: 'warning' },
+  { key: 'block', label: '阻断', desc: '高危 · 直接拒绝接入', tone: 'danger' },
+  { key: 'gray', label: '灰度', desc: '小范围观察', tone: 'grey' }
 ];
 
 /* ── 颜色 / 文案 ── */
 function disposalText(d: BaselinePolicy['disposal']) {
   return d === 'allow' ? '放行' : d === 'degrade' ? '降权' : d === 'block' ? '阻断' : '灰度';
 }
-function disposalColor(d: BaselinePolicy['disposal']) {
-  return d === 'allow' ? '#00B42A' : d === 'degrade' ? '#FF7D00' : d === 'block' ? '#F53F3F' : '#86909C';
+function disposalTag(d: BaselinePolicy['disposal']) {
+  return d === 'allow' ? 'bd-tg--green' : d === 'degrade' ? 'bd-tg--gold' : d === 'block' ? 'bd-tg--red' : 'bd-tg--grey';
 }
 function severityText(s: BaselineCheck['severity']) { return s === 'high' ? '高' : s === 'medium' ? '中' : '低'; }
-function severityColor(s: BaselineCheck['severity']) {
-  return s === 'high' ? '#F53F3F' : s === 'medium' ? '#FF7D00' : '#86909C';
+function severityTag(s: BaselineCheck['severity']) {
+  return s === 'high' ? 'bd-tg--red' : s === 'medium' ? 'bd-tg--gold' : 'bd-tg--grey';
 }
-function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 /* ── 适用范围（真判据）──
  * 候选与账号展开由后端随 /security 下发，与资源授权、认证策略共用同一次组织子树展开；
@@ -429,6 +471,8 @@ const postureRows = ref<PostureRow[]>([]);
 const postureTotal = ref(0);
 const postureTruncated = ref(false);
 const postureErr = ref('');
+/** 终端合规清单是否已完成一次拉取（成功或失败都算）——只决定骨架屏何时让位。 */
+const postureLoaded = ref(false);
 async function loadPosture() {
   try {
     const pr = await api<PostureResp>('/posture');
@@ -442,9 +486,12 @@ async function loadPosture() {
     // 把"缺哪个权限"换成"需管理员登录"，管理员会去重登（他本来就登着），
     // 而这一格恰好是终端合规判定的唯一入口。
   } catch (e) { postureErr.value = '终端环境判定读取失败：' + failReason(e); }
+  finally { postureLoaded.value = true; }
 }
 function verdictText(v: string) { return v === 'allow' ? '合规' : v === 'degrade' ? '降权' : v === 'gray' ? '灰度' : '阻断'; }
-function verdictColor(v: string) { return v === 'allow' ? '#00B42A' : v === 'degrade' ? '#FF7D00' : v === 'gray' ? '#86909C' : '#F53F3F'; }
+function verdictTag(v: string) { return v === 'allow' ? 'bd-tg--green' : v === 'degrade' ? 'bd-tg--gold' : v === 'gray' ? 'bd-tg--grey' : 'bd-tg--red'; }
+/** 评分上色阈值与改造前一致（≥60 红 / ≥30 橙 / 其余正文色）。 */
+function scoreTone(score: number) { return score >= 60 ? 'danger' : score >= 30 ? 'warning' : 'default'; }
 function tsText(ts: number) { return new Date(ts * 1000).toLocaleString('zh-CN', { hour12: false }); }
 async function removePosture(p: PostureRow) {
   try {
@@ -467,102 +514,113 @@ onMounted(async () => {
     catalog.value = b.checkCatalog ?? [];
     if (b.baselines.length) selected.value = b.baselines[0].id;
     live.value = true;
-  } catch {
+    loadErr.value = '';
+  } catch (e) {
     live.value = false;
+    loadErr.value = failReason(e);
+  } finally {
+    loaded.value = true;
   }
   loadPosture();
 });
 </script>
 
 <style scoped>
-.bd-trunc { margin: 8px 0 4px; padding: 8px 11px; background: rgba(255,125,0,.08); border-radius: 6px; font-size: 12px; line-height: 1.7; color: var(--bd-warning); }
-/* tabs */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
+/* 本页独有：基线左栏、处置动作芯片、平台 pill。页签在 app.css（.bd-tabs / .bd-tab）；卡片头 / 表格 / 标签 / 状态点 / 空态 / 提示条都在共享件与 app.css 里。 */
 
-.bd-two { display: flex; gap: 16px; align-items: flex-start; }
-.bd-section-title { font-size: 15px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
-.bd-kv { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--bd-fill-1); font-size: 13px; }
-.bd-kv:last-child { border-bottom: none; }
+.bd-kv { display: flex; align-items: center; justify-content: space-between; padding: 10px 0; border-bottom: 1px solid var(--bd-border-2); font-size: var(--bd-fs-md); }
+.bd-kv:last-child { border-bottom: none; padding-bottom: 0; }
 .bd-kv span { color: var(--bd-t3); }
 .bd-kv b { font-weight: 500; color: var(--bd-t1); }
 .bd-kv--scope { align-items: flex-start; }
 .bd-kv--scope > span { padding-top: 5px; }
-.bd-scope { display: flex; gap: 8px; flex-wrap: wrap; justify-content: flex-end; }
-.bd-scope__hint { margin-top: 6px; font-size: 11.5px; color: var(--bd-t3); text-align: right; font-weight: 400; }
+.bd-scope { display: flex; gap: var(--bd-sp-2); flex-wrap: wrap; justify-content: flex-end; }
+.bd-scope__sel { min-width: 210px; }
+.bd-scope__hint { margin-top: 6px; font-size: var(--bd-fs-xs); color: var(--bd-t3); text-align: right; font-weight: 400; }
 
 /* 左：基线列表 */
 .bd-blist { width: 300px; flex: none; padding: 10px; }
-.bd-blist__h { display: flex; align-items: center; justify-content: space-between; font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; }
-.bd-blist__add { display: inline-flex; align-items: center; gap: 4px; color: var(--bd-primary); cursor: pointer; font-weight: 500; }
-.bd-blist__add:hover { text-decoration: underline; }
+.bd-blist__h { display: flex; align-items: center; justify-content: space-between; font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t3); padding: var(--bd-sp-1) var(--bd-sp-2) 10px; }
+.bd-blist__add { display: inline-flex; align-items: center; gap: var(--bd-sp-1); font-size: var(--bd-fs-sm); }
 .bd-bnode {
   width: 100%; display: block; text-align: left; border: 1px solid transparent; background: transparent;
-  border-radius: 8px; cursor: pointer; padding: 10px 12px; transition: background .12s, border-color .12s; margin-bottom: 2px;
+  border-radius: var(--bd-radius-s); cursor: pointer; padding: 10px var(--bd-sp-3); margin-bottom: 2px;
+  transition: background var(--bd-dur-fast) var(--bd-ease), border-color var(--bd-dur-fast) var(--bd-ease);
 }
 .bd-bnode:hover { background: var(--bd-fill-2); }
 .bd-bnode.on { background: var(--bd-primary-1); border-color: var(--bd-primary-b); }
 .bd-bnode__top { display: flex; align-items: center; justify-content: space-between; }
-.bd-bnode__name { font-size: 13.5px; font-weight: 500; color: var(--bd-t1); }
+.bd-bnode__name { font-size: var(--bd-fs-md); font-weight: 500; color: var(--bd-t1); }
 .bd-bnode.on .bd-bnode__name { color: var(--bd-primary); }
-.bd-bnode__tags { display: flex; gap: 6px; margin-top: 8px; }
-.bd-bnode__scope { font-size: 11.5px; color: var(--bd-t3); margin-top: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-bnode__tags { display: flex; gap: 6px; margin-top: var(--bd-sp-2); }
+.bd-bnode__scope { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 7px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 
 /* 右：编辑区 */
-.bd-bedit { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 14px; }
+.bd-bedit { display: flex; flex-direction: column; gap: var(--bd-sp-4); }
 
 /* 概要卡 */
-.bd-bhead { padding: 16px 20px; }
-.bd-bhead__top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
-.bd-bhead__name { font-size: 16px; font-weight: 700; color: var(--bd-t1); }
-.bd-bhead__sw { display: flex; align-items: center; gap: 8px; }
-.bd-bhead__swt { font-size: 12.5px; color: var(--bd-t3); }
+.bd-bhead__top { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-3); margin-bottom: 6px; flex-wrap: wrap; }
+.bd-bhead__name { display: flex; align-items: center; gap: 10px; }
+.bd-bhead__name-in { width: 220px; }
+.bd-bhead__name-in :deep(.arco-input) { font-weight: 700; }
+.bd-bhead__sw { display: flex; align-items: center; gap: var(--bd-sp-2); }
+.bd-bhead__swt { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 .bd-plat { margin-right: 6px; }
 
-/* tag 通用（页内细化 padding） */
-.bd-tg { font-size: 11.5px; padding: 2px 8px; border-radius: 4px; font-weight: 500; display: inline-flex; align-items: center; gap: 4px; }
-
-/* 处置动作 */
-.bd-disp { padding: 16px 20px 18px; }
-.bd-disp__hint { font-size: 12px; color: var(--bd-t3); margin: -8px 0 14px; }
-.bd-disp__grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+/* 处置动作：芯片的语义色只走 --bd-* 语义族，选中态由 .on 抬亮 */
+.bd-disp__grid { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--bd-sp-3); }
 .bd-dchip {
-  display: flex; flex-direction: column; align-items: flex-start; gap: 4px; text-align: left;
-  border: 1.5px solid var(--bd-border); background: #fff; border-radius: 9px; padding: 12px 14px; cursor: pointer;
-  transition: border-color .12s, background .12s;
+  display: flex; flex-direction: column; align-items: flex-start; gap: var(--bd-sp-1); text-align: left;
+  border: 1.5px solid var(--bd-border); background: var(--bd-bg-1); border-radius: var(--bd-radius-s); padding: var(--bd-sp-3) 14px; cursor: pointer;
+  font: inherit; --chip: var(--bd-t3); --chip-1: var(--bd-fill-2);
+  transition: border-color var(--bd-dur-fast) var(--bd-ease), background var(--bd-dur-fast) var(--bd-ease);
 }
+.bd-dchip--success { --chip: var(--bd-success); --chip-1: var(--bd-success-1); }
+.bd-dchip--warning { --chip: var(--bd-warning); --chip-1: var(--bd-warning-1); }
+.bd-dchip--danger { --chip: var(--bd-danger); --chip-1: var(--bd-danger-1); }
 .bd-dchip:hover { border-color: var(--bd-t4); }
-.bd-dchip__dot { width: 8px; height: 8px; border-radius: 50%; }
-.bd-dchip__t { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
-.bd-dchip__d { font-size: 11.5px; color: var(--bd-t3); }
+.bd-dchip.on { border-color: var(--chip); background: var(--chip-1); }
+.bd-dchip__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--chip); }
+.bd-dchip__t { font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); }
+.bd-dchip.on .bd-dchip__t { color: var(--chip); }
+.bd-dchip__d { font-size: var(--bd-fs-xs); color: var(--bd-t3); }
 
 /* 平台检测项编辑器 */
-.bd-checks { padding: 16px 20px 18px; }
-.bd-checks__hint { font-size: 12px; color: var(--bd-t3); margin-bottom: 14px; }
-.bd-platbar { display: flex; gap: 8px; margin-bottom: 14px; }
+.bd-platbar { display: flex; gap: var(--bd-sp-2); margin-bottom: 14px; }
 .bd-platpill {
-  display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--bd-border); background: #fff;
-  border-radius: 16px; padding: 6px 14px; font-size: 13px; color: var(--bd-t2); cursor: pointer; transition: all .12s;
+  display: inline-flex; align-items: center; gap: 7px; border: 1px solid var(--bd-border); background: var(--bd-bg-1);
+  border-radius: var(--bd-radius-pill); padding: 6px 14px; font: inherit; font-size: var(--bd-fs-md); color: var(--bd-t2); cursor: pointer;
+  transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease), border-color var(--bd-dur-fast) var(--bd-ease);
 }
 .bd-platpill:hover { border-color: var(--bd-primary-b); }
 .bd-platpill.on { background: var(--bd-primary-1); border-color: var(--bd-primary-b); color: var(--bd-primary); font-weight: 600; }
-.bd-platpill__n { font-size: 11px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--bd-fill-2); color: var(--bd-t3); display: inline-flex; align-items: center; justify-content: center; }
-.bd-platpill.on .bd-platpill__n { background: #fff; color: var(--bd-primary); }
+.bd-platpill__n { font-size: var(--bd-fs-xs); min-width: 18px; height: 18px; padding: 0 5px; border-radius: 9px; background: var(--bd-fill-2); color: var(--bd-t3); display: inline-flex; align-items: center; justify-content: center; }
+.bd-platpill.on .bd-platpill__n { background: var(--bd-bg-1); color: var(--bd-primary); }
 
-.bd-chktable { border: 1px solid var(--bd-fill-2); border-radius: var(--bd-radius-s); overflow: hidden; }
-.bd-chktable thead tr { background: var(--bd-fill-1); }
-.bd-empty { text-align: center; color: var(--bd-t3); font-size: 12.5px; padding: 22px 0; }
+/* 内嵌表格：带边框的表格卡，clip 而非 hidden（见 app.css 对粘性表头的说明） */
+.bd-chktable { border: 1px solid var(--bd-border-2); border-radius: var(--bd-radius-s); overflow: clip; }
+.bd-cell-strong { color: var(--bd-t1); font-weight: 500; }
 
 .bd-addcheck-row {
-  margin-top: 14px; padding: 10px 12px; border: 1px dashed var(--bd-border); background: var(--bd-fill-1);
-  border-radius: 8px; display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+  margin-top: 14px; padding: 10px var(--bd-sp-3); border: 1px dashed var(--bd-border); background: var(--bd-fill-1);
+  border-radius: var(--bd-radius-s); display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
 }
-.bd-addcheck-note { font-size: 12px; color: var(--bd-t3); flex: 1; min-width: 200px; }
-.bd-addcheck-hint {
-  margin-top: 8px; padding: 8px 12px; border-radius: 6px; font-size: 12px; line-height: 1.6;
-  color: var(--bd-t2); background: var(--bd-fill-1); display: flex; align-items: flex-start; gap: 6px;
-}
+.bd-addcheck-sel { flex: 1; max-width: 340px; }
+.bd-addcheck-note { font-size: var(--bd-fs-sm); color: var(--bd-t3); flex: 1; min-width: 200px; }
+.bd-addcheck-hint { margin: var(--bd-sp-2) 0 0; }
 
+/* 终端合规 */
+.bd-posture__b { padding-bottom: 0; }
+.bd-posture__b > .bd-notice { margin-bottom: var(--bd-sp-4); }
+.bd-tablewrap { overflow-x: auto; }
+.bd-chk { margin: 1px 3px 1px 0; }
+.bd-dim { color: var(--bd-t3); }
+.bd-score--danger { color: var(--bd-danger); }
+.bd-score--warning { color: var(--bd-warning); }
+.bd-score--default { color: var(--bd-t1); }
+
+@media (max-width: 1320px) {
+  .bd-blist { width: 250px; }
+  .bd-disp__grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+}
 </style>

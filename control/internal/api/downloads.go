@@ -58,8 +58,13 @@ type downloadsManifest struct {
 //
 // ★占位文案要与 clients/build-artifacts.sh 里那份**逐字一致**（两处都得改），
 // downloads_script_test.go 真的跑一遍那个脚本来比对。
-// ★「构建中，敬请期待」只能用在**真的会被构建出来、且装了能用**的平台上。
-// iOS 与鸿蒙不是——它们缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号
+// ★任何平台都不写「构建中，敬请期待」。那四个字是一句**状态**（"有个构建正在进行"），
+// 而控制面手里没有任何执行方能证明它：manifest 缺失只说明这台部署机上没人跑过
+// clients/build-artifacts.sh，此刻**没有任何东西在构建**——macOS 与 Android 也一样。
+// 它们与其余四个平台的差别只在"包能不能出、能不能用"（macOS 已端到端实机跑通、Android 已装进
+// 真机，见 BUILD.md 第十一 / 十二节），不在"有没有一个正在进行的构建"，所以占位文案要说的是
+// 同一件事：**包不在这台机器上、谁能把它铺进来、找谁**。
+// iOS 与鸿蒙缺的更不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号
 // 签名 + Network Extension 授权 / DevEco Studio 工具链）。
 // **Windows 也不是**：包在 CI 上出得来、组件也齐（wintun.dll 构建期从官方取件 + 哈希校验，
 // 随包装在 baidi-tun.exe 旁边），缺的是**完整的实机验证**——截至 2026-08-21 只有一台
@@ -73,11 +78,11 @@ type downloadsManifest struct {
 // 明明存在，却被那句话挡住了。照实说，他才知道该找谁。理由见 clients/BUILD.md 第九节。
 func placeholderManifest() downloadsManifest {
 	return downloadsManifest{Clients: []ClientDownload{
-		{Platform: "macos", Label: "macOS 桌面客户端", Note: "构建中，敬请期待"},
+		{Platform: "macos", Label: "macOS 桌面客户端", Note: "本部署尚未放入 macOS 安装包（dmg 由 CI 或本机 clients/build-artifacts.sh 产出后铺进下载目录，控制面不会自己构建）；请联系管理员"},
 		{Platform: "windows", Label: "Windows 桌面客户端", Note: "ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机；产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "linux", Label: "Linux 桌面客户端", Note: "pkexec 提权与数据面均未实机验证；CI 产物标 UNVERIFIED、刻意不进下载中心，请联系管理员"},
 		{Platform: "ios", Label: "iOS 客户端", Note: "需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"},
-		{Platform: "android", Label: "Android 客户端", Note: "构建中，敬请期待"},
+		{Platform: "android", Label: "Android 客户端", Note: "本部署尚未放入 Android 安装包（调试签名 APK 由 CI 产出后铺进下载目录，控制面不会自己构建）；请联系管理员"},
 		{Platform: "harmony", Label: "鸿蒙客户端", Note: "需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员"},
 	}}
 }

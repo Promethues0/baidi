@@ -1,35 +1,34 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">审计中心</div>
-        <div class="bd-page__sub">全链路留痕 · HMAC-SM3 防篡改链 · CSV 合规出口</div>
-      </div>
-      <div class="bd-head__right">
-        <!-- 本页没有演示数据可降级：拉不到就是拉不到，原因写在下面那条红条里。 -->
-        <a-tag :color="live ? 'green' : 'red'" bordered>{{ live ? '已连 baidi-control' : '数据未读取' }}</a-tag>
-        <button class="bd-btn" :disabled="!!loadErr" :title="loadErr ? '审计数据未读取，导出走的是同一道权限闸' : ''"
-                :style="{ opacity: loadErr ? 0.5 : 1 }" @click="openExport"><icon-download />导出 CSV</button>
-        <!-- 审计外送的配置在系统管理页（保留天数由 BAIDI_AUDIT_RETENTION_DAYS 决定），
-             这个按钮只负责指过去。本页不放任何外送开关。 -->
-        <button class="bd-btn bd-btn--ghost" @click="gotoForward"><icon-export />日志外送</button>
-      </div>
-    </div>
+    <!-- 本页没有演示数据可降级：拉不到就是拉不到，原因写在下面那条红条里。 -->
+    <PageHeader title="审计中心" subtitle="全链路留痕 · HMAC-SM3 防篡改链 · CSV 合规出口" :live="live" off-text="数据未读取" off-color="red">
+      <button class="bd-btn" :disabled="!!loadErr" :title="loadErr ? '审计数据未读取，导出走的是同一道权限闸' : ''"
+              @click="openExport"><icon-download />导出 CSV</button>
+      <!-- 审计外送的配置在系统管理页（保留天数由 BAIDI_AUDIT_RETENTION_DAYS 决定），
+           这个按钮只负责指过去。本页不放任何外送开关。 -->
+      <button class="bd-btn bd-btn--ghost" @click="gotoForward"><icon-export />日志外送</button>
+    </PageHeader>
 
     <!-- ★拉不到审计就**什么都不画**：编造的审计记录与真实留痕在页面上无法区分。
          /audit 归 PermAudit，安全/系统管理员打开它拿到的是 403，
          这条红条必须原样转述后端那句话，不能笼统说成"后端没起"。 -->
-    <div v-if="loadErr" class="bd-auditerr">
-      <icon-exclamation-circle-fill class="bd-auditerr__ic" />
-      <div>
-        <div class="bd-auditerr__t">无法读取审计数据</div>
+    <div v-if="loadErr" class="bd-card">
+      <EmptyState size="lg" tone="danger" title="无法读取审计数据">
         <div class="bd-auditerr__m">{{ loadErr }}</div>
         <div class="bd-auditerr__n">
           本页不提供演示数据——编造的审计记录无法与真实留痕区分。
           审计读取归「审计」权限（PermAudit）：若上面写的是无权执行，请用具备审计权的管理员账号登录。
         </div>
-      </div>
+      </EmptyState>
     </div>
+
+    <!-- 首屏骨架：第一次拉取回来之前不画空白的聚合头与表头，也不编任何数字。 -->
+    <template v-else-if="!loaded">
+      <div class="bd-aggrow">
+        <div v-for="i in 5" :key="i" class="bd-card"><SkeletonBlock kind="stat" /></div>
+      </div>
+      <div class="bd-tablecard"><SkeletonBlock kind="table" :rows="8" :cols="6" /></div>
+    </template>
 
     <template v-else>
 
@@ -37,7 +36,7 @@
     <!-- 审计写入失败：控制面没能把审计写进库（后端零失败即整段不下发，常态零噪声）。
          ★文案必须说清"链校验查不出它们"——链重算的是**已存在行**的连续性，
          压根没写进去的行不在链上，而防篡改链全绿会被读成"没事"。 -->
-    <div v-if="bundle?.writeHealth" class="bd-auditwarn">
+    <div v-if="bundle?.writeHealth" class="bd-notice bd-notice--danger">
       <icon-close-circle-fill />
       <span>
         控制面已有 <b>{{ bundle!.writeHealth!.failures }}</b> 条审计<b>未能写入数据库</b>（首次
@@ -50,44 +49,33 @@
 
     <!-- P10 聚合头 -->
     <div class="bd-aggrow">
-      <!-- 四个分类计数卡 -->
-      <div v-for="c in catCards" :key="c.key" class="bd-card bd-mcard">
-        <div class="bd-mcard__top">
-          <span class="bd-mcard__dot" :style="{ background: c.color }" />
-          <span class="bd-mcard__label">{{ c.label }}</span>
-        </div>
-        <div class="bd-mcard__num" :style="{ color: c.color }">{{ fmtNum(c.value) }}</div>
-        <div class="bd-mcard__sub">条 · 累计留痕</div>
-      </div>
+      <!-- 分类计数卡：类别色只做左上角的色点（七类分类色多于语义色档数，属分类调色板而非语义色） -->
+      <StatCard v-for="c in catCards" :key="c.key" :label="c.label" :value="fmtNum(c.value)" foot="条 · 累计留痕">
+        <template #badge><span class="bd-catdot" :style="{ background: c.color }" /></template>
+      </StatCard>
 
       <!-- 今日总量卡 -->
-      <div class="bd-card bd-mcard bd-mcard--total">
-        <div class="bd-mcard__top">
-          <icon-clock-circle class="bd-mcard__ic" />
-          <span class="bd-mcard__label">今日总量</span>
-        </div>
-        <div class="bd-mcard__num">{{ fmtNum(bundle?.todayTotal ?? 0) }}</div>
-        <div class="bd-mcard__sub">条 · 今日累计</div>
-      </div>
+      <StatCard label="今日总量" :value="bundle ? fmtNum(bundle.todayTotal) : null" foot="条 · 今日累计" tone="primary">
+        <template #badge><icon-clock-circle class="bd-mcard__ic" /></template>
+      </StatCard>
 
       <!-- 审计库占用卡。★主数是**审计库自己**有多大，不是文件系统占用率：
            在审计页上把磁盘水位当主数，会被读成"审计日志吃掉的"，
-           而两者的处置动作相反——前者缩留存，后者清磁盘。 -->
-      <div class="bd-card bd-mcard bd-disk">
-        <div class="bd-mcard__top">
-          <icon-storage class="bd-mcard__ic" />
-          <span class="bd-mcard__label">审计库占用</span>
-          <span class="bd-disk__tag" :style="{ color: diskColor, background: diskColor + '14' }">所在磁盘{{ diskLabel }}</span>
-        </div>
-        <div class="bd-disk__main">
-          <b>{{ dbSize }}</b>
-          <span class="bd-disk__cap">占文件系统 {{ bundle?.disk.selfPct ?? 0 }}%</span>
-        </div>
-        <div class="bd-disk__track"><span class="bd-disk__fill" :style="{ width: (bundle?.disk.usedPct ?? 0) + '%', background: diskColor }" /></div>
-        <div class="bd-mcard__sub">
-          所在磁盘已用 {{ bundle?.disk.usedPct ?? 0 }}% / {{ bundle?.disk.totalGB ?? 0 }} GB · 保留 {{ bundle?.disk.retainDays ?? 0 }} 天
-        </div>
-      </div>
+           而两者的处置动作相反——前者缩留存，后者清磁盘。
+           ★三态逐项判（判据见 script 里 dbKnown / fsKnown 的注释）：判不出来的字段一律「—」或整段不画，
+           不许出现「占文件系统 0%」「已用 0% / 0 GB」「保留 0 天」，也不给一根 0% 的绿色水位条——
+           此前 bundle 缺席 / 后端把"探测不到"折成 0 值时，主数「—」旁边配的正是这一整套言之凿凿的 0，
+           徽标还写着「所在磁盘健康」。value 传 null（不是字符串 '—'）StatCard 才认它是不可判定。 -->
+      <StatCard label="审计库占用" :value="dbSize" :unit="selfPctText" class="bd-disk"
+        unknown-text="后端未上报磁盘用量：库文件大小与所在文件系统容量均不可判定（非 SQLite 持久化，或库文件 / 文件系统探测失败；/diag 的「审计磁盘水位」项有原话）">
+        <template #badge><span class="bd-tg" :class="diskTagClass">{{ diskBadge }}</span></template>
+        <!-- 水位条只在容量可判定时画：一根 0% 的绿条长得与"磁盘几乎是空的"一模一样 -->
+        <template v-if="fsKnown" #extra>
+          <div class="bd-disk__track"><span class="bd-disk__fill" :class="`bd-disk__fill--${diskTone}`" :style="{ width: disk!.usedPct + '%' }" /></div>
+        </template>
+        <!-- 脚注：判得出哪一半就写哪一半，另一半写明"未上报"；三项全判不出时不给这个插槽，让 unknown-text 说话 -->
+        <template v-if="diskFootKnown" #foot>{{ diskFoot }}</template>
+      </StatCard>
     </div>
 
     <!-- 日志表 -->
@@ -96,23 +84,23 @@
         <!-- 类别筛选 pill：已连控制面时是**服务端检索条件**（全表 WHERE），
              未连时退回对最近 200 条快照的前端过滤 -->
         <div class="bd-pillrow">
-          <span v-for="f in catFilters" :key="f.key" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch(true)">{{ f.label }}</span>
+          <button v-for="f in catFilters" :key="f.key" type="button" class="bd-pill2" :class="{ on: catSel === f.key }" @click="catSel = f.key; runSearch(true)">{{ f.label }}</button>
         </div>
-        <div style="flex: 1" />
+        <div class="bd-toolbar__spacer" />
         <!-- 检索：账号精确（查证据链要精确，模糊会把 li 匹配到 alice）+ 事件关键词 -->
-        <a-input v-model="q.actor" size="small" style="width: 140px" placeholder="账号（精确）"
+        <a-input v-model="q.actor" size="small" class="bd-q bd-q--actor" placeholder="账号（精确）"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <!-- 源 IP 精确检索：数据面事件记的是网关报来的攻击者地址，「按攻击源查」靠这一维。 -->
-        <a-input v-model="q.srcIp" size="small" style="width: 150px" placeholder="源 IP（精确）"
+        <a-input v-model="q.srcIp" size="small" class="bd-q bd-q--ip" placeholder="源 IP（精确）"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
-        <a-input v-model="q.kw" size="small" style="width: 170px" placeholder="事件关键词 / 回车检索"
+        <a-input v-model="q.kw" size="small" class="bd-q bd-q--kw" placeholder="事件关键词 / 回车检索"
           allow-clear @press-enter="runSearch(true)" @clear="runSearch(true)" />
         <!-- 时间快选 pill：服务端时间窗（按服务器时间解释，见 sinceOf） -->
         <div class="bd-pillrow">
-          <span v-for="t in timeFilters" :key="t.key" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch(true)">{{ t.label }}</span>
+          <button v-for="t in timeFilters" :key="t.key" type="button" class="bd-pill2 bd-pill2--time" :class="{ on: timeSel === t.key }" @click="timeSel = t.key; runSearch(true)">{{ t.label }}</button>
         </div>
       </div>
-      <table class="bd-table">
+      <table class="bd-table bd-table--dense">
         <thead>
           <tr><th>时间</th><th>类别</th><th>用户</th><th>源 IP</th><th>事件</th><th class="r">判定</th></tr>
         </thead>
@@ -123,15 +111,17 @@
             <td>{{ e.user }}</td>
             <td class="bd-mono">{{ e.srcIp }}</td>
             <td>{{ e.event }}</td>
-            <td class="r"><span class="bd-tg" :style="tagStyle(verdictColor(e.verdict))">{{ verdictLabel(e.verdict) }}</span></td>
+            <td class="r"><span class="bd-tg" :class="verdictTag(e.verdict)">{{ verdictLabel(e.verdict) }}</span></td>
           </tr>
-          <tr v-if="!shownLogs.length"><td colspan="6" style="text-align: center; color: var(--bd-t3); padding: 40px 0">当前筛选无匹配日志</td></tr>
+          <tr v-if="!shownLogs.length" class="bd-table__emptyrow">
+            <td colspan="6"><EmptyState size="md" title="当前筛选无匹配日志" /></td>
+          </tr>
         </tbody>
       </table>
       <div class="bd-pager">
         <template v-if="searchTotal >= 0">
           全表命中 {{ searchTotal }} 条，本页第 {{ shownLogs.length ? page * PAGE_SIZE + 1 : 0 }}–{{ page * PAGE_SIZE + shownLogs.length }} 条 · 时间范围「{{ timeFilters.find(t => t.key === timeSel)?.label }}」
-          <div style="flex: 1" />
+          <div class="bd-toolbar__spacer" />
           <span class="bd-pgbtn" :class="{ off: page === 0 }" @click="prevPage">上一页</span>
           <span class="bd-pgnum">第 {{ page + 1 }} / {{ pageCount }} 页</span>
           <span class="bd-pgbtn" :class="{ off: page + 1 >= pageCount }" @click="nextPage">下一页</span>
@@ -143,11 +133,11 @@
     <!-- 导出（GET /api/v1/audit/export，流式 CSV 附件）。
          只暴露后端真支持的条件：类别 + 账号 + 源 IP + 关键词 + 时间范围。 -->
     <a-modal v-model:visible="exp.open" :width="520" :footer="false" title="导出审计日志（CSV）" unmount-on-close>
-      <div class="bd-wbody bd-wbody--slim">
+      <div>
         <div class="bd-wdesc">按条件从 baidi-control 导出全量审计日志（不限于页面上最近 200 条）。</div>
-        <div class="bd-field">
+        <div class="bd-fld">
           <label>日志类别</label>
-          <a-select v-model="exp.category" style="width: 100%">
+          <a-select v-model="exp.category">
             <a-option value="all">全部类别</a-option>
             <a-option value="access">访问决策</a-option>
             <a-option value="auth">登录认证</a-option>
@@ -161,23 +151,23 @@
         <!-- ★账号 / 源 IP / 关键词三维必须与列表检索同维同义（两侧共用后端
              store.AuditQuery）：少一维就会出现「筛出 12 条、导出 8 万条」，
              而拿到 CSV 的人会以为它就是屏幕上那些行。 -->
-        <div class="bd-field">
+        <div class="bd-fld">
           <label>行为人账号（精确，留空 = 不限）</label>
           <a-input v-model="exp.actor" placeholder="如 li.fang" allow-clear />
         </div>
-        <div class="bd-field">
+        <div class="bd-fld">
           <label>源 IP（前缀匹配，留空 = 不限）</label>
           <a-input v-model="exp.srcIp" placeholder="如 10.8. 可查整段" allow-clear />
         </div>
-        <div class="bd-field">
+        <div class="bd-fld">
           <label>事件关键词（留空 = 不限）</label>
           <a-input v-model="exp.kw" placeholder="如 拒绝越权" allow-clear />
         </div>
-        <div class="bd-field">
+        <div class="bd-fld">
           <label>时间范围（留空 = 不限；可选到具体日期，不受页面上三个快选档约束）</label>
-          <a-range-picker v-model="exp.range" style="width: 100%" />
+          <a-range-picker v-model="exp.range" />
         </div>
-        <div class="bd-recap">
+        <div class="bd-notice bd-recap">
           <icon-info-circle />
           <span>
             导出「<b>{{ expCatLabel }}</b>」<template v-if="exp.actor.trim()"> · 账号 <b>{{ exp.actor.trim() }}</b></template
@@ -188,10 +178,10 @@
           </span>
         </div>
       </div>
-      <div class="bd-wfoot">
+      <div class="bd-drawer__foot">
         <button class="bd-btn bd-btn--ghost" @click="exp.open = false">取消</button>
-        <div style="flex: 1" />
-        <button class="bd-btn" :disabled="exp.busy" :style="{ opacity: exp.busy ? 0.6 : 1 }" @click="doExport">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn" :disabled="exp.busy" @click="doExport">
           <icon-download />{{ exp.busy ? '导出中…' : '导出' }}
         </button>
       </div>
@@ -206,8 +196,16 @@ import { ref, computed, reactive, onMounted } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, getToken, type AuditBundle, type AuditEntry, type KV, failReason } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：onMounted 里那次 /audit 的 try 尾（true）与 catch（false）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
 const router = useRouter();
 const route = useRoute();
 
@@ -222,6 +220,8 @@ function gotoForward() { void router.push({ path: '/system/manage', query: { tab
  */
 const bundle = ref<AuditBundle | null>(null);
 const loadErr = ref('');
+/** 首屏是否已完成一次加载（成功或失败都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 
 
 /* tsText Unix 秒 → 本地时刻；缺席回破折号（0/undefined 都是"没有这个时刻"）。 */
@@ -245,24 +245,53 @@ const catCards = computed(() =>
 );
 function fmtNum(n: number) { return n.toLocaleString('en-US'); }
 
-/* dbSize 审计库文件大小（人话）。 */
-const dbSize = computed(() => {
-  const b = bundle.value?.disk.dbBytes ?? 0;
-  if (b <= 0) return '—';
+/* ── 审计库占用卡：三态逐项判 ──
+ * 后端 store.AuditDiskStat.ToDiskStat 把"判不出来"折成 0 值发下来（平台不支持 Statfs → usedPct/totalGB/selfPct
+ * 三项为 0；库文件 os.Stat 失败 → dbBytes 为 0；AuditDiskStat 整个出错 → Disk 是零值），报文里没有
+ * "可判定"标志，前端只能按字段回推：
+ *   fsKnown = totalGB > 0  容量可判定（真实文件系统不足 1 GB 的情形接受为"不可判定"，比把 Windows 画成 0 GB 强）
+ *   dbKnown = dbBytes > 0  库文件大小可判定（空库也至少有若干 KB 的页，0 只会是 stat 失败）
+ *   retainDays = 0 是「未配置滚动清理」（PurgeExpiredAudit 对 ≤0 直接返回），不是"保留 0 天"——措辞与 /diag 同一句。
+ * ★这里刻意一个 `?? 0` 都不写：判定写成「有 disk 且该字段 > 0」，判不出来的就是判不出来。 */
+const disk = computed(() => bundle.value?.disk ?? null);
+const fsKnown = computed(() => !!disk.value && disk.value.totalGB > 0);
+const dbKnown = computed(() => !!disk.value && disk.value.dbBytes > 0);
+
+/* dbSize 审计库文件大小（人话）。★不可判定时回 null 而不是字符串 '—'：StatCard 只认 null/undefined 为
+ * 不可判定（灰细「—」+ unknown-text），字符串 '—' 会被当成一个已知值——单位、徽标照常渲染在它旁边。 */
+const dbSize = computed<string | null>(() => {
+  if (!dbKnown.value) return null;
   const u = ['B', 'KB', 'MB', 'GB', 'TB'];
-  let i = 0, v = b;
+  let i = 0, v = disk.value!.dbBytes;
   while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
   return `${v >= 10 || i === 0 ? Math.round(v) : v.toFixed(1)} ${u[i]}`;
 });
+/* 主数旁的单位：审计库占文件系统的比例。两项都判得出才写；后端按整数四舍五入，4.7 MB / 460 GB 得 0——
+ * 写成「0%」会被读成"没占"，如实写「不足 1%」。 */
+const selfPctText = computed(() => {
+  if (!dbKnown.value || !fsKnown.value) return undefined;
+  const p = disk.value!.selfPct;
+  return p > 0 ? `占文件系统 ${p}%` : '占文件系统不足 1%';
+});
 
 /* ── 所在磁盘水位上色（进度条与标签说的都是**文件系统**，不是审计库）── */
-const diskColor = computed(() => {
-  const p = bundle.value?.disk.usedPct ?? 0;
-  return p >= 80 ? 'var(--bd-danger)' : p >= 60 ? 'var(--bd-warning)' : 'var(--bd-success)';
+const diskTone = computed<'danger' | 'warning' | 'success' | 'unknown'>(() => {
+  if (!fsKnown.value) return 'unknown';
+  const p = disk.value!.usedPct;
+  return p >= 80 ? 'danger' : p >= 60 ? 'warning' : 'success';
 });
-const diskLabel = computed(() => {
-  const p = bundle.value?.disk.usedPct ?? 0;
-  return p >= 80 ? '偏高' : p >= 60 ? '关注' : '健康';
+const diskTagClass = computed(() => ({ danger: 'bd-tg--red', warning: 'bd-tg--gold', success: 'bd-tg--green', unknown: 'bd-tg--grey' })[diskTone.value]);
+const diskBadge = computed(() => ({ danger: '所在磁盘偏高', warning: '所在磁盘关注', success: '所在磁盘健康', unknown: '磁盘容量不可判定' })[diskTone.value]);
+/* 脚注三段：库文件大小（只在判不出时写一句）· 文件系统水位 · 留存天数。三项全判不出时插槽不给，走 unknown-text。 */
+const diskFootKnown = computed(() => dbKnown.value || fsKnown.value || (!!disk.value && disk.value.retainDays > 0));
+const diskFoot = computed(() => {
+  const d = disk.value;
+  if (!d) return '';
+  const parts: string[] = [];
+  if (!dbKnown.value) parts.push('库文件大小未上报');
+  parts.push(fsKnown.value ? `所在磁盘已用 ${d.usedPct}% / ${d.totalGB} GB` : '所在磁盘容量未上报（当前平台不支持文件系统探测）');
+  parts.push(d.retainDays > 0 ? `保留 ${d.retainDays} 天` : '未配置滚动清理');
+  return parts.join(' · ');
 });
 
 /* ── 日志表筛选 ── */
@@ -353,10 +382,10 @@ function catMeta(c: AuditEntry['category']) {
     system: { label: '系统运维', color: '#86909C' }
   }[c] ?? { label: c, color: '#86909C' };
 }
-function verdictColor(v: AuditEntry['verdict']) {
-  if (v === 'allow' || v === 'ok') return '#00B42A';
-  if (v === 'deny' || v === 'fail') return '#F53F3F';
-  return '#FF7D00'; // mfa
+function verdictTag(v: AuditEntry['verdict']) {
+  if (v === 'allow' || v === 'ok') return 'bd-tg--green';
+  if (v === 'deny' || v === 'fail') return 'bd-tg--red';
+  return 'bd-tg--gold'; // mfa
 }
 function verdictLabel(v: AuditEntry['verdict']) {
   return { allow: '放行', deny: '拒绝', mfa: '二次认证', ok: '成功', fail: '失败' }[v];
@@ -459,69 +488,54 @@ onMounted(async () => {
     bundle.value = null;
     live.value = false;
     loadErr.value = failReason(e);
+  } finally {
+    loaded.value = true;
   }
 });
 </script>
 
 <style scoped>
-.bd-recap__hint { display: block; font-style: normal; font-size: 11px; color: var(--bd-t3); margin-top: 4px; }
+/* 本页独有：聚合头排布、类别色点、磁盘水位条、筛选 pill。KPI 卡 / 空态 / 提示条 / 表单节奏都在共享件与 app.css 里。 */
+.bd-recap__hint { display: block; font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); }
+.bd-recap b { color: var(--bd-primary); }
 
-/* 审计读取失败：整页只留这一条，不画任何编造数据 */
-.bd-auditerr {
-  display: flex; gap: 12px; align-items: flex-start; padding: 18px 20px; margin-bottom: 16px;
-  background: var(--bd-tag-red-bg); border: 1px solid #FFCDC7; border-radius: var(--bd-radius);
-}
-.bd-auditerr__ic { color: var(--bd-danger); font-size: 18px; flex: none; margin-top: 1px; }
-.bd-auditerr__t { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
-.bd-auditerr__m { font-size: 13px; color: var(--bd-danger); margin-top: 5px; line-height: 1.7; }
-.bd-auditerr__n { font-size: 12px; color: var(--bd-t2); margin-top: 8px; line-height: 1.8; }
+/* 审计读取失败：整页只留这一条，不画任何编造数据。后端原话用告警色，口径说明用正文色。 */
+.bd-auditerr__m { color: var(--bd-danger); font-size: var(--bd-fs-md); }
+.bd-auditerr__n { color: var(--bd-t2); font-size: var(--bd-fs-sm); margin-top: var(--bd-sp-2); }
 
-/* ── P10 聚合头 ── */
-.bd-aggrow { display: flex; gap: 16px; margin-bottom: 16px; flex-wrap: wrap; }
-.bd-mcard { flex: 1; min-width: 168px; padding: 16px 18px; }
-.bd-mcard__top { display: flex; align-items: center; gap: 8px; }
-.bd-mcard__dot { width: 8px; height: 8px; border-radius: 50%; flex: none; }
+/* ── P10 聚合头：flex 换行而不是 grid，末行的卡按原样撑满 ── */
+.bd-aggrow { display: flex; gap: var(--bd-sp-4); margin-bottom: var(--bd-sp-4); flex-wrap: wrap; }
+.bd-aggrow > * { flex: 1 1 168px; min-width: 0; }
+.bd-catdot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
 .bd-mcard__ic { font-size: 15px; color: var(--bd-t3); }
-.bd-mcard__label { font-size: 12.5px; color: var(--bd-t3); font-weight: 500; }
-.bd-mcard__num { font-size: 26px; font-weight: 700; color: var(--bd-t1); margin: 8px 0 2px; letter-spacing: .3px; }
-.bd-mcard__sub { font-size: 11.5px; color: var(--bd-t3); }
-.bd-mcard--total { background: linear-gradient(135deg, var(--bd-primary-1), #fff); }
 
-/* 磁盘水位卡 */
-.bd-disk { min-width: 210px; }
-.bd-disk__tag { font-size: 11px; padding: 1px 7px; border-radius: 4px; font-weight: 500; margin-left: auto; }
-.bd-disk__main { display: flex; align-items: baseline; gap: 6px; margin: 8px 0 8px; }
-.bd-disk__main b { font-size: 26px; font-weight: 700; }
-.bd-disk__cap { font-size: 13px; color: var(--bd-t3); }
-.bd-disk__track { height: 8px; background: var(--bd-fill-2); border-radius: 6px; overflow: hidden; margin-bottom: 8px; }
-.bd-disk__fill { display: block; height: 100%; border-radius: 6px; transition: width .3s; }
+/* 磁盘水位卡：进度条与标签说的都是**文件系统**，不是审计库 */
+.bd-disk { flex-basis: 210px; }
+.bd-disk__track { height: 8px; background: var(--bd-fill-2); border-radius: var(--bd-radius-xs); overflow: hidden; }
+.bd-disk__fill { display: block; height: 100%; border-radius: var(--bd-radius-xs); transition: width var(--bd-dur-slow) var(--bd-ease); }
+.bd-disk__fill--success { background: var(--bd-success); }
+.bd-disk__fill--warning { background: var(--bd-warning); }
+.bd-disk__fill--danger { background: var(--bd-danger); }
 
 /* ── 日志表筛选 pill ── */
 .bd-pillrow { display: flex; gap: 6px; }
-.bd-pill2 { font-size: 12.5px; color: var(--bd-t2); padding: 5px 13px; border-radius: 14px; cursor: pointer; background: var(--bd-fill-1); border: 1px solid transparent; transition: all .12s; }
+.bd-pill2 {
+  font-size: var(--bd-fs-sm); color: var(--bd-t2); padding: 5px 13px; border-radius: var(--bd-radius-pill); cursor: pointer;
+  background: var(--bd-fill-1); border: 1px solid transparent; font: inherit; font-size: var(--bd-fs-sm); line-height: var(--bd-lh);
+  transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease), border-color var(--bd-dur-fast) var(--bd-ease);
+}
 .bd-pill2:hover { background: var(--bd-fill-2); }
 .bd-pill2.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); border-color: var(--bd-primary-b); }
-.bd-pill2--time.on { color: var(--bd-primary); }
+.bd-q--actor { width: 140px; }
+.bd-q--ip { width: 150px; }
+.bd-q--kw { width: 170px; }
 
 /* ── 导出弹窗 ── */
-.bd-wbody { min-height: 220px; }
-.bd-wbody--slim { min-height: 0; }
-.bd-wdesc { font-size: 12.5px; color: var(--bd-t3); margin: 4px 0 16px; }
+.bd-wdesc { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin: var(--bd-sp-1) 0 var(--bd-sp-4); }
 
-.bd-field { margin-top: 14px; }
-.bd-field label { display: block; font-size: 12.5px; color: var(--bd-t2); font-weight: 500; margin-bottom: 8px; }
-
-.bd-recap { margin-top: 16px; display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: var(--bd-t2); background: var(--bd-tag-blue-bg); border: 1px solid var(--bd-primary-b); border-radius: 8px; padding: 10px 13px; line-height: 1.6; }
-.bd-recap b { color: var(--bd-primary); }
-
-.bd-wfoot { display: flex; align-items: center; gap: 10px; margin-top: 22px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
-.bd-btn[disabled] { cursor: not-allowed; }
-
-/* 审计写入失败红条：出现即代表已经丢了记录，用最强的告警色。 */
-.bd-auditwarn {
-  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 12px; padding: 10px 12px;
-  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
-  color: var(--bd-danger); background: var(--bd-tag-red-bg); border: 1px solid #FFC2C2;
+@media (max-width: 1320px) {
+  .bd-q--actor { width: 120px; }
+  .bd-q--ip { width: 130px; }
+  .bd-q--kw { width: 150px; }
 }
-.bd-auditwarn > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
 </style>

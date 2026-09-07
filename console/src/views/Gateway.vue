@@ -1,39 +1,48 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">网关与隐身</div>
-        <div class="bd-page__sub">已注册数据面网关 · SPA 服务隐身：先认证后连接（隐身是否真的生效见逐台实测回执）</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '后端未连接' }}</a-tag>
-        <!-- ★「最后心跳 N 秒前」是相对时间，靠每 15s 自动重拉（与网关心跳同频）保持真实；
-             数据时间必须写在屏上，否则「自动刷新」与「卡死」在页面上分不出来。 -->
-        <span v-if="fetchedAt" class="bd-gwts">数据时间 {{ fetchedAt }} · 每 15s 自动刷新</span>
-        <a-button @click="load"><template #icon><icon-refresh /></template>刷新</a-button>
-      </div>
-    </div>
+    <PageHeader title="网关与隐身" subtitle="已注册数据面网关 · SPA 服务隐身：先认证后连接（隐身是否真的生效见逐台实测回执）" :live="live" off-text="数据未读取" off-color="red">
+      <!-- ★「最后心跳 N 秒前」是相对时间，靠每 15s 自动重拉（与网关心跳同频）保持真实；
+           数据时间必须写在屏上，否则「自动刷新」与「卡死」在页面上分不出来。 -->
+      <span v-if="fetchedAt" class="bd-gwts">数据时间 {{ fetchedAt }} · 每 15s 自动刷新</span>
+      <button class="bd-btn bd-btn--ghost" @click="load"><icon-refresh />刷新</button>
+    </PageHeader>
 
     <!-- Tab 切换 -->
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'topo' }" @click="tab = 'topo'">拓扑总览</span>
-      <span class="bd-tab" :class="{ on: tab === 'spa' }" @click="tab = 'spa'">SPA 服务隐身</span>
-      <span class="bd-tab" :class="{ on: tab === 'node' }" @click="tab = 'node'">网关节点</span>
-      <span class="bd-tab" :class="{ on: tab === 'cert' }" @click="tab = 'cert'; loadCerts()">机器身份 · mTLS 证书</span>
+    <div class="bd-tabs" role="tablist">
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'topo'" @click="tab = 'topo'">拓扑总览</button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'spa'" @click="tab = 'spa'">SPA 服务隐身</button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'node'" @click="tab = 'node'">网关节点</button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'cert'" @click="tab = 'cert'; loadCerts()">机器身份 · mTLS 证书</button>
     </div>
 
     <!-- 空态：一台网关都没注册时整页不画任何拓扑（对着不存在的拓扑排查不了任何问题）。
          ★证书页不受这道空态影响：**先签证书、后起网关**，没有网关恰恰是最需要签证书的时候。 -->
-    <div v-if="!nodes.length && tab !== 'cert'" class="bd-card bd-empty">
-      <icon-exclamation-circle-fill class="bd-empty__ic" />
-      <div class="bd-empty__t">尚无数据面网关经 mTLS 注册</div>
-      <div class="bd-empty__d">
-        本页只展示注册心跳上报的真实网关。以 <code>-control</code> 指向本控制面、并带上
-        <code>-mtls-cert/-mtls-key/-mtls-ca</code> 启动 <code>baidi-gateway</code>，注册后此处才有事实可报。
-      </div>
-      <div class="bd-empty__d">
-        控制面自身可独立运行；没有网关不代表控制面异常，但也意味着<b>此刻没有任何隧道接入能力</b>。
-      </div>
+    <!-- 首屏骨架：第一次 load() 回来之前不画空态（那一瞬会把「还没拉到」说成「没有网关」）。 -->
+    <div v-if="!loaded && tab !== 'cert'" class="bd-card"><SkeletonBlock kind="card" :rows="4" /></div>
+    <!-- ★读取失败必须排在「没有网关」之前：/gateway 回 5xx 时 bundle 被清空、nodes 同样是空的，
+         若直接落进下面那个 warn 空态，管理员会照着它去改网关的 -control / -mtls-* 参数——
+         而读不出来的是控制面这一侧，网关本身在不在跑此刻根本不可判定。
+         tone=danger + 转述后端原话（与 Apps / Users 的「未读取——这里显示的不是「没有 X」」同款）。 -->
+    <div v-else-if="loadErr && tab !== 'cert'" class="bd-card">
+      <EmptyState size="lg" tone="danger" title="网关数据未读取">
+        <div>{{ loadErr }}——这里显示的不是「没有网关」。</div>
+        <div class="bd-gwempty__p">
+          本页读的是控制面 <code>GET /api/v1/gateway</code> 的注册登记，这次请求失败了：网关是否在线、
+          此刻有没有隧道接入能力都<b>不可判定</b>。请按上面那句原话排查控制面这一侧，
+          不要按「尚无网关注册」去改网关的 <code>-control</code> / <code>-mtls-*</code> 参数。本页每 15 s 自动重拉，读到即恢复。
+        </div>
+      </EmptyState>
+    </div>
+    <div v-else-if="!nodes.length && tab !== 'cert'" class="bd-card">
+      <EmptyState size="lg" tone="warn" title="尚无数据面网关经 mTLS 注册">
+        <div>
+          本页只展示注册心跳上报的真实网关。以 <code>-control</code> 指向本控制面、并带上
+          <code>-mtls-cert/-mtls-key/-mtls-ca</code> 启动 <code>baidi-gateway</code>，注册后此处才有事实可报。
+        </div>
+        <div class="bd-gwempty__p">
+          控制面自身可独立运行；没有网关不代表控制面异常，但也意味着<b>此刻没有任何隧道接入能力</b>。
+        </div>
+      </EmptyState>
     </div>
 
     <template v-if="nodes.length">
@@ -108,8 +117,9 @@
       <!-- ============ SPA 服务隐身 ============ -->
       <div v-show="tab === 'spa'">
         <div class="bd-spa">
-          <div class="bd-card bd-spacard">
-            <div class="bd-section-title">服务隐身状态</div>
+          <div class="bd-card">
+            <div class="bd-card__h">服务隐身状态</div>
+            <div class="bd-card__b">
             <div class="bd-spa__meta">
               <div class="bd-kv"><span>认证模式</span><b>先认证后连接：SPA 敲门 + mTLS 机器身份 + 证书指纹钉扎</b></div>
               <div class="bd-kv"><span>敲门令牌</span>
@@ -132,25 +142,27 @@
               <!-- ★这段注记不是免责声明，是口径说明：控制面只转述网关上报的事实，
                    "端口在公网上到底可不可见"要从外部实测，白帝不做这件事。
                    任何恒为真的「已隐身」标记都是在替一台可能没配防火墙规则的网关打包票。 -->
-              <div class="bd-spa__note">
-                控制面不从外部实测端口可见性：以上为网关自报的监听地址。
+              <div class="bd-notice bd-notice--plain bd-spa__note">
+                <icon-info-circle />
+                <span>控制面不从外部实测端口可见性：以上为网关自报的监听地址。
                 <b>但「内核规则集装没装、保护的是哪个端口」网关自己知道</b>，已随心跳上报，见下方逐台回执。
-                最终确认仍请从外网侧扫描（未敲门时应表现为超时/filtered 而非拒绝或握手成功）。
+                最终确认仍请从外网侧扫描（未敲门时应表现为超时/filtered 而非拒绝或握手成功）。</span>
               </div>
+            </div>
             </div>
           </div>
 
           <!-- 隐身实测回执。★文案全部由后端下发：这是安全结论，
                前端自己编就会与后端实际判定脱节（与 Nat.vue 的 warnings 同纪律）。 -->
-          <div class="bd-section-title" style="margin-top: 22px">
+          <div class="bd-section-title">
             内核态隐身 · 逐台实测回执
-            <span class="bd-stealth__count">{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台生效</span>
+            <span class="bd-section-title__sub">{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台生效</span>
           </div>
-          <div v-for="(w, i) in bundle.stealthWarnings" :key="'sw' + i" class="bd-stealthwarn">
+          <div v-for="(w, i) in bundle.stealthWarnings" :key="'sw' + i" class="bd-notice bd-notice--warn">
             <icon-exclamation-circle-fill /><span>{{ w }}</span>
           </div>
-          <div v-if="!bundle.stealth.length" class="bd-spa__note">无在线网关，隐身状态无从判定。</div>
-          <div v-for="rc in bundle.stealth" :key="rc.gatewayId" class="bd-card bd-stealth">
+          <div v-if="!bundle.stealth.length" class="bd-card"><EmptyState size="sm" tone="warn" title="无在线网关，隐身状态无从判定。" /></div>
+          <div v-for="rc in bundle.stealth" :key="rc.gatewayId" class="bd-card bd-card--pad bd-stealth">
             <div class="bd-stealth__h">
               <b>{{ rc.gatewayId }}</b>
               <span class="bd-tg" :class="stealthTagClass(rc.status)">{{ stealthLabel(rc.status) }}</span>
@@ -166,7 +178,7 @@
             </div>
           </div>
 
-          <div class="bd-section-title" style="margin-top: 22px">隐身效果 · 未装专属客户端 vs 已装客户端</div>
+          <div class="bd-section-title">隐身效果 · 未装专属客户端 vs 已装客户端</div>
           <div class="bd-cmp">
             <div class="bd-card bd-cmp__c bd-cmp__c--bad">
               <div class="bd-cmp__h"><icon-close-circle-fill class="bd-cmp__ic bad" />未装专属客户端</div>
@@ -217,7 +229,8 @@
 
       <!-- ============ 网关节点 ============ -->
       <div v-show="tab === 'node'">
-        <div class="bd-card">
+        <div class="bd-tablecard">
+          <div class="bd-tablewrap">
           <table class="bd-table">
             <thead>
               <tr>
@@ -230,7 +243,7 @@
             </thead>
             <tbody>
               <tr v-for="n in nodes" :key="n.id">
-                <td><b style="color: var(--bd-t1); font-weight: 500">{{ n.id }}</b></td>
+                <td><b class="bd-cell-strong">{{ n.id }}</b></td>
                 <td>
                   <template v-if="n.accessConfigured">
                     <div v-if="n.lanHost" class="bd-mono bd-acc"><i>内网</i>{{ n.lanHost }}</div>
@@ -244,8 +257,8 @@
                 <td><span class="bd-mono">{{ n.spa || '—' }}</span></td>
                 <td><span class="bd-mono">{{ n.proxy || '—' }}</span></td>
                 <td>
-                  <span class="bd-st">
-                    <span class="d" :style="{ background: statusColor(n.online) }" />{{ n.online ? '在线' : '心跳超时' }}
+                  <span class="bd-st" :class="n.online ? 'bd-st--ok' : 'bd-st--bad'">
+                    <span class="d" />{{ n.online ? '在线' : '心跳超时' }}
                   </span>
                 </td>
                 <td>{{ n.sessions }}</td>
@@ -256,8 +269,8 @@
                 <!-- 时钟偏差三态：null=未上报（不可判定，绝不显示 0）；超 10s 标黄提醒。
                      敲门令牌是控制面签、网关验的，这一列漂过令牌有效期时敲门全灭且无报错。 -->
                 <td>
-                  <span v-if="n.skewSec === null || n.skewSec === undefined" style="color: var(--bd-t3)">未上报</span>
-                  <span v-else :style="{ color: Math.abs(n.skewSec) > 10 ? 'var(--bd-warning, #FF7D00)' : 'var(--bd-t2)' }" class="bd-mono">
+                  <span v-if="n.skewSec === null || n.skewSec === undefined" class="bd-dim">未上报</span>
+                  <span v-else :class="{ 'bd-skew--warn': Math.abs(n.skewSec) > 10 }" class="bd-mono">
                     {{ n.skewSec > 0 ? '+' : '' }}{{ n.skewSec }}s
                   </span>
                 </td>
@@ -266,6 +279,7 @@
               </tr>
             </tbody>
           </table>
+          </div>
         </div>
       </div>
     </template>
@@ -274,9 +288,9 @@
          ★吊销是一台网关失陷时唯一的即刻处置手段（指纹白名单是执行点），
          且会把它从下发给终端的落点清单里一并摘掉。 -->
     <div v-show="tab === 'cert'">
-      <div class="bd-card bd-certnote">
-        <icon-info-circle class="bd-certnote__ic" />
-        <div>
+      <div class="bd-notice">
+        <icon-info-circle />
+        <div class="bd-notice__body">
           网关的机器身份<b>只有这一条路径</b>：控制面内部 CA 签发的 mTLS 客户端证书。
           网关带 <code>-mtls-cert/-mtls-key/-mtls-ca</code> 启动后才能调控制面拉策略；
           配了 <code>-control</code> 却没配证书会<b>直接拒绝启动</b>。
@@ -286,23 +300,23 @@
         </div>
       </div>
 
-      <div v-if="certs.caEnabled === false" class="bd-card bd-certwarn">
+      <div v-if="certs.caEnabled === false" class="bd-notice bd-notice--warn">
         <icon-exclamation-circle-fill />
         <span>控制面未启用内部 CA（未配置 <code>BAIDI_PKI_DIR</code>）：签发端点会返回 503。请先配置后重启控制面。</span>
       </div>
 
       <div class="bd-tablecard">
         <div class="bd-toolbar">
-          <div class="bd-searchbox" style="width: 260px">
+          <div class="bd-searchbox bd-cert__search">
             <icon-search />
             <input v-model="certKw" class="bd-searchbox__in" placeholder="按网关 id / 指纹搜索" />
           </div>
-          <div style="flex: 1" />
+          <div class="bd-toolbar__spacer" />
           <span class="bd-toolbar__c">共 {{ certs.certs.length }} 张 · 有效 {{ validCertCount }}</span>
-          <a-button size="small" @click="loadCerts"><template #icon><icon-refresh /></template>刷新</a-button>
-          <a-button type="primary" size="small" :disabled="certs.caEnabled === false" @click="openIssue">
-            <template #icon><icon-plus /></template>签发证书
-          </a-button>
+          <button type="button" class="bd-btn bd-btn--ghost bd-btn--sm" @click="loadCerts"><icon-refresh />刷新</button>
+          <button type="button" class="bd-btn bd-btn--sm" :disabled="certs.caEnabled === false" @click="openIssue">
+            <icon-plus />签发证书
+          </button>
         </div>
 
         <table class="bd-table">
@@ -324,25 +338,30 @@
                 <div v-if="c.gatewayId.startsWith('ipsec-')" class="bd-cellsub">站点组网网关（ipsec- 前缀）</div>
               </td>
               <td>
-                <span class="bd-mono bd-fp" :title="c.fingerprint">{{ c.fingerprint.slice(0, 24) }}…</span>
-                <span class="bd-link" style="margin-left: 8px" @click="copyText(c.fingerprint, '指纹')">复制</span>
+                <span class="bd-acts">
+                  <span class="bd-mono bd-fp" :title="c.fingerprint">{{ c.fingerprint.slice(0, 24) }}…</span>
+                  <button type="button" class="bd-link bd-fp__copy" @click="copyText(c.fingerprint, '指纹')">复制</button>
+                </span>
               </td>
               <td class="bd-mono">{{ c.issuedAt || '—' }}</td>
               <td class="bd-mono">{{ c.notAfter || '—' }}</td>
               <td>
-                <span class="bd-tg" :style="tagStyle(certStateColor(c))">{{ certStateText(c) }}</span>
+                <span class="bd-tg" :class="certStateTag(c)">{{ certStateText(c) }}</span>
                 <div v-if="c.revoked && c.revokeReason" class="bd-cellsub">{{ c.revokeReason }}</div>
               </td>
               <td class="r">
-                <span v-if="!c.revoked" class="bd-link bd-link--danger" @click="askRevoke(c)">吊销</span>
-                <span v-else class="bd-anyt">已吊销</span>
+                <span class="bd-acts">
+                  <button v-if="!c.revoked" type="button" class="bd-link bd-link--danger" @click="askRevoke(c)">吊销</button>
+                  <span v-else class="bd-anyt">已吊销</span>
+                </span>
               </td>
             </tr>
-            <tr v-if="!shownCerts.length">
-              <td colspan="6" class="bd-empty">
-                <template v-if="certs.certs.length">没有匹配「{{ certKw.trim() }}」的证书（共 {{ certs.certs.length }} 张）</template>
-                <template v-else-if="certErr">证书清单读取失败：{{ certErr }}</template>
-                <template v-else>尚未签发任何网关证书。点右上「签发证书」为第一台网关建立机器身份。</template>
+            <!-- 空态分三种处境：搜索无命中 / 读取失败（这不是「没有」）/ 一张都没签过 -->
+            <tr v-if="!shownCerts.length" class="bd-table__emptyrow">
+              <td colspan="6">
+                <EmptyState v-if="certs.certs.length" size="md" :title="`没有匹配「${certKw.trim()}」的证书`" :desc="`共 ${certs.certs.length} 张`" />
+                <EmptyState v-else-if="certErr" size="md" tone="danger" title="证书清单读取失败" :desc="certErr" />
+                <EmptyState v-else size="md" title="尚未签发任何网关证书。" desc="点右上「签发证书」为第一台网关建立机器身份。" />
               </td>
             </tr>
           </tbody>
@@ -354,23 +373,24 @@
     <a-modal v-model:visible="issue.open" title="签发网关 mTLS 客户端证书" :width="issue.result ? 640 : 480"
              :footer="false" @close="closeIssue">
       <template v-if="!issue.result">
-        <div class="bd-accnote">
-          证书的 <b>CN 就是网关 id</b>：网关启动时用它注册，控制面按 CN 识别这台机器。
-          填一个已存在的 id = 为同一台网关换证（旧证需另行吊销，不会自动失效）。
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <span>证书的 <b>CN 就是网关 id</b>：网关启动时用它注册，控制面按 CN 识别这台机器。
+          填一个已存在的 id = 为同一台网关换证（旧证需另行吊销，不会自动失效）。</span>
         </div>
-        <div class="bd-accfld">
+        <div class="bd-fld">
           <label>网关 id</label>
           <a-input v-model="issue.id" placeholder="如 gw-hq-1；站点组网网关须以 ipsec- 开头"
                    allow-clear @press-enter="doIssue" />
-          <span class="bd-accfld__d">
+          <span class="bd-fld__d">
             <code>standby-</code> 开头会被后端拒绝：那是温备节点的保留命名空间，
             凭它能拉走整套信任材料，只能在主机上离线签发。
           </span>
         </div>
-        <div v-if="issue.err" class="bd-accerr"><icon-close-circle-fill />{{ issue.err }}</div>
-        <div class="bd-wfoot">
+        <div v-if="issue.err" class="bd-notice bd-notice--danger"><icon-close-circle-fill /><span>{{ issue.err }}</span></div>
+        <div class="bd-drawer__foot">
           <a-button @click="issue.open = false">取消</a-button>
-          <div style="flex: 1" />
+          <div class="bd-drawer__foot-spacer" />
           <a-button type="primary" :loading="issue.busy" @click="doIssue">签发</a-button>
         </div>
       </template>
@@ -378,32 +398,36 @@
       <template v-else>
         <!-- ★私钥只在这一次应答里出现，控制面不留副本。这句话必须排在最前面，
              而不是塞在页脚：关掉弹窗之后只能重签一张。 -->
-        <div class="bd-certonce">
+        <div class="bd-notice bd-notice--danger">
           <icon-exclamation-circle-fill />
-          <div>
+          <div class="bd-notice__body">
             <b>私钥只显示这一次。</b>控制面不保存它——关掉本窗口后无法再取回，只能重新签发一张新证书。
             请现在就把三个文件保存到网关机器上。
           </div>
         </div>
-        <div class="bd-accnote">
-          网关 <b>{{ issue.result.gatewayId }}</b> · 指纹
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <span>网关 <b>{{ issue.result.gatewayId }}</b> · 指纹
           <span class="bd-mono">{{ issue.result.fingerprint.slice(0, 24) }}…</span> ·
-          有效期至 <span class="bd-mono">{{ issue.result.notAfter }}</span>
+          有效期至 <span class="bd-mono">{{ issue.result.notAfter }}</span></span>
         </div>
         <div v-for="f in issuedFiles" :key="f.name" class="bd-pemrow">
           <div class="bd-pemrow__h">
             <b>{{ f.name }}</b><span>{{ f.desc }}</span>
-            <div style="flex: 1" />
-            <span class="bd-link" @click="copyText(f.body, f.name)">复制</span>
-            <span class="bd-link" @click="downloadText(f.name, f.body)">下载</span>
+            <div class="bd-drawer__foot-spacer" />
+            <span class="bd-acts">
+              <button type="button" class="bd-link" @click="copyText(f.body, f.name)">复制</button>
+              <button type="button" class="bd-link" @click="downloadText(f.name, f.body)">下载</button>
+            </span>
           </div>
           <pre class="bd-pem">{{ f.body.slice(0, 88) }}…</pre>
         </div>
-        <div class="bd-accnote">
-          启动命令：<code class="bd-mono">baidi-gateway -control &lt;控制面地址&gt; -mtls-cert gateway.crt.pem -mtls-key gateway.key.pem -mtls-ca ca.pem</code>
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <span>启动命令：<code class="bd-mono">baidi-gateway -control &lt;控制面地址&gt; -mtls-cert gateway.crt.pem -mtls-key gateway.key.pem -mtls-ca ca.pem</code></span>
         </div>
-        <div class="bd-wfoot">
-          <div style="flex: 1" />
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <a-button type="primary" @click="closeIssue">我已保存，关闭</a-button>
         </div>
       </template>
@@ -413,45 +437,46 @@
     <a-modal v-model:visible="rev.open" title="吊销网关证书" :width="480"
              :ok-loading="rev.busy" ok-text="确认吊销" cancel-text="取消"
              :ok-button-props="{ status: 'danger' }" @ok="doRevoke">
-      <div class="bd-certonce bd-certonce--warn">
+      <div class="bd-notice bd-notice--warn">
         <icon-exclamation-circle-fill />
-        <div>
+        <div class="bd-notice__body">
           将吊销网关 <b>{{ rev.gatewayId }}</b> 的机器身份。<b>即刻生效</b>：
           该网关下一次调控制面即被拒（拉不到策略、心跳注册失败），
           并会从下发给终端的<b>落点清单</b>里摘掉——已连的客户端在下一次拉剖面时故障转移到其它落点。
           此操作不可撤销，恢复需要重新签发一张新证书并改网关启动参数。
         </div>
       </div>
-      <div class="bd-accfld">
+      <div class="bd-fld">
         <label>吊销原因</label>
         <a-textarea v-model="rev.reason" placeholder="会写进审计与证书台账，例如：机器下线 / 疑似失陷 / 换证"
                     :max-length="200" allow-clear :auto-size="{ minRows: 2, maxRows: 4 }" />
       </div>
-      <div v-if="rev.err" class="bd-accerr"><icon-close-circle-fill />{{ rev.err }}</div>
+      <div v-if="rev.err" class="bd-notice bd-notice--danger"><icon-close-circle-fill /><span>{{ rev.err }}</span></div>
     </a-modal>
-  </div>
     <!-- 对外接入地址（PRD FR-SCEN-08/17）。★两栏都可留空，都空即撤销登记。
          端口刻意不收：它的权威来源是网关自报的监听地址，收第二份就会有两个真相，
          而不一致时症状是「敲门发到 A 口、隧道拨到 B 口」，两边日志都正常。 -->
     <a-modal v-model:visible="acc.open" :title="`网关「${acc.id}」的对外接入地址`" :width="520"
       :ok-loading="acc.busy" ok-text="保存" cancel-text="取消" @ok="saveAccess">
-      <div class="bd-accnote">
-        客户端会照这两个地址拨号。它与网关自报的<b>监听地址</b>是两回事——网关默认监听
+      <div class="bd-notice bd-notice--plain">
+        <icon-info-circle />
+        <span>客户端会照这两个地址拨号。它与网关自报的<b>监听地址</b>是两回事——网关默认监听
         <code>:18201</code>，无从知道自己在 NAT / 负载均衡后面对外是什么地址。
-        两栏都填时，客户端按<b>内网优先</b>的顺序依次尝试（拨不通自动切下一个）。
+        两栏都填时，客户端按<b>内网优先</b>的顺序依次尝试（拨不通自动切下一个）。</span>
       </div>
-      <div class="bd-accfld">
+      <div class="bd-fld">
         <label>局域网访问地址</label>
         <a-input v-model="acc.lan" placeholder="如 10.0.0.9 或 gw-lan.corp.internal" allow-clear />
-        <span class="bd-accfld__d">内网终端用的地址。只填主机名或 IP，不要带端口和协议。</span>
+        <span class="bd-fld__d">内网终端用的地址。只填主机名或 IP，不要带端口和协议。</span>
       </div>
-      <div class="bd-accfld">
+      <div class="bd-fld">
         <label>互联网访问地址</label>
         <a-input v-model="acc.wan" placeholder="如 gw.example.com 或 203.0.113.9" allow-clear />
-        <span class="bd-accfld__d">公网终端用的地址。内外网想用同一个域名（分区 DNS）时，两栏填一样即可。</span>
+        <span class="bd-fld__d">公网终端用的地址。内外网想用同一个域名（分区 DNS）时，两栏填一样即可。</span>
       </div>
-      <div v-if="acc.err" class="bd-accerr"><icon-close-circle-fill />{{ acc.err }}</div>
+      <div v-if="acc.err" class="bd-notice bd-notice--danger"><icon-close-circle-fill /><span>{{ acc.err }}</span></div>
     </a-modal>
+  </div>
 </template>
 
 <script setup lang="ts">
@@ -468,6 +493,9 @@
 import { ref, reactive, computed, onMounted, onUnmounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, failReason, type GatewayBundle, type GwNode, type GatewayCert, type GatewayCertsResp, type GatewayCertIssued } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const tab = ref<'topo' | 'spa' | 'node' | 'cert'>('topo');
 /* ── 机器身份 · mTLS 证书（POST/GET /pki/gateway-certs、POST …/{fp}/revoke）──
@@ -500,10 +528,9 @@ function certState(c: GatewayCert): 'revoked' | 'expired' | 'valid' {
 function certStateText(c: GatewayCert) {
   return { revoked: '已吊销', expired: '已过期', valid: '有效' }[certState(c)];
 }
-/** 与其它页同款的浅色 tag 样式（Resources.vue 同名函数）。 */
-function tagStyle(color: string) { return { color, background: color + '14' }; }
-function certStateColor(c: GatewayCert) {
-  return { revoked: '#F53F3F', expired: '#FF7D00', valid: '#00B42A' }[certState(c)];
+/** 证书态的标签色（吊销红 / 过期橙 / 有效绿），只走 .bd-tg 变体，不写十六进制。 */
+function certStateTag(c: GatewayCert) {
+  return { revoked: 'bd-tg--red', expired: 'bd-tg--gold', valid: 'bd-tg--green' }[certState(c)];
 }
 
 async function loadCerts() {
@@ -589,7 +616,17 @@ function downloadText(name: string, body: string) {
   URL.revokeObjectURL(url);
 }
 
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false），15s 轮询每一轮再落定一次；loadCerts() 不参与判定（证书读不到有页内失败态）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
+/** 首屏是否已完成一次 /gateway 加载（成功或失败都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
+/** 最近一次 /gateway 读取失败的后端原话（failReason）；空串 = 最近一次读成功。
+ *  ★它是「读取失败」与「真没有网关」在页面上唯一的分野：失败时 bundle 被清成 EMPTY，
+ *  nodes 与"一台都没注册"完全同形，没有这句原话页面只能给出一个方向错误的确定结论。 */
+const loadErr = ref('');
 
 const EMPTY: GatewayBundle = {
   nodes: [], total: 0, online: 0, sessions: 0, onlineWindowSec: 0, knockTokenTtlSec: 0,
@@ -639,12 +676,12 @@ function stealthLabel(st: string) { return STEALTH_ZH[st] ?? st; }
  * 它们不是"轻微问题"，是"我们不知道"（与在线用户页的 unknown 同一条纪律）。 */
 const STEALTH_BAD = ['no-ruleset', 'no-drop-rule', 'orphan-ruleset', 'port-mismatch'];
 function stealthTagClass(st: string) {
-  if (st === 'armed') return 'bd-tg--ok';
+  if (st === 'armed') return 'bd-tg--green';
   /* 与后端 checkStealth 的 fail 分桶**同一份名单**：两处分头维护就会出现
      「后端判 fail、页面画成中性灰」。 */
-  if (STEALTH_BAD.includes(st)) return 'bd-tg--bad';
-  if (st === 'off') return 'bd-tg--warn';
-  return 'bd-tg--muted';
+  if (STEALTH_BAD.includes(st)) return 'bd-tg--red';
+  if (st === 'off') return 'bd-tg--gold';
+  return 'bd-tg--grey';
 }
 
 /* triText 三态布尔渲染：undefined = 网关没说过这件事，显示「不可判定」。
@@ -688,13 +725,16 @@ async function load(): Promise<void> {
   try {
     bundle.value = await api<GatewayBundle>('/gateway');
     live.value = true;
+    loadErr.value = '';
     fetchedAt.value = new Date().toLocaleTimeString('zh-CN', { hour12: false });
-  } catch {
-    // 拉不到就是拉不到：清空而不是回落到演示拓扑。
+  } catch (e) {
+    // 拉不到就是拉不到：清空而不是回落到演示拓扑。但后端原话必须留下——
+    // 清空之后 nodes 与「没有网关」同形，只有这句话能让模板分出是哪一种（bare catch 曾把它整句丢掉）。
     bundle.value = EMPTY;
     live.value = false;
+    loadErr.value = failReason(e);
     fetchedAt.value = '';
-  }
+  } finally { loaded.value = true; }
 }
 
 /* ── 对外接入地址 ── */
@@ -713,8 +753,9 @@ async function saveAccess() {
     Message.success('接入地址已保存，客户端下次拉取剖面即生效');
     await load();
   } catch (e) {
-    // 后端的校验文案要原样透出：它说清了为什么这个地址必然连不通（回环 / 带端口 / 带协议）
-    acc.err = (e as Error).message || '保存失败';
+    // 后端的校验文案要原样透出：它说清了为什么这个地址必然连不通（回环 / 带端口 / 带协议）。
+    // 走 failReason 而不是直接读 message：NetworkError 的 message 与后端原话不是一回事，前者该说「连不上控制面」。
+    acc.err = failReason(e);
   } finally { acc.busy = false; }
 }
 
@@ -730,119 +771,88 @@ onUnmounted(() => { if (gwTimer) window.clearInterval(gwTimer); });
 </script>
 
 <style scoped>
-.bd-cmp__ep { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 3px; padding-left: 22px; }
+/* 本页独有：页签、拓扑 SVG 卡、SPA 说明卡的键值行、对比卡、隐身回执卡、证书 PEM 行。
+   页头 / 提示条 / 表单节奏 / 抽屉底栏 / 空态 / 标签 / 状态点都在共享件与 app.css 里。 */
+.bd-cmp__ep { display: block; font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 3px; padding-left: 22px; }
 
-.bd-gwts { font-size: 12px; color: var(--bd-t3); }
+.bd-gwts { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-gwempty__p { margin-top: var(--bd-sp-2); }
+/* 空态正文里的命令行参数不许在连字符处折行：`-control` 被折成行尾一个「-」加下一行「control」，
+   而这句话正是在告诉人"不要去改这个参数"。插槽内容带本组件的 scope id，这条选得到。 */
+.bd-es code { white-space: nowrap; }
 
 /* 机器身份 · mTLS 证书 */
-.bd-certnote { display: flex; gap: 10px; padding: 13px 16px; margin-bottom: 12px; font-size: 12.5px; color: var(--bd-t2); line-height: 1.85; }
-.bd-certnote__ic { color: var(--bd-primary); font-size: 16px; flex: none; margin-top: 2px; }
-.bd-certwarn { display: flex; gap: 9px; align-items: center; padding: 11px 16px; margin-bottom: 12px; font-size: 12.5px; color: var(--bd-warning); }
-.bd-searchbox { display: flex; align-items: center; gap: 8px; height: 32px; padding: 0 11px; background: var(--bd-fill-2); border-radius: 6px; color: var(--bd-t3); }
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
-.bd-searchbox__in::placeholder { color: var(--bd-t3); }
-.bd-fp { font-size: 11.5px; color: var(--bd-t2); }
-.bd-cellsub { font-size: 11px; color: var(--bd-t3); margin-top: 2px; }
-.bd-anyt { font-size: 12px; color: var(--bd-t4); }
+.bd-cert__search { width: 260px; }
+.bd-fp { font-size: var(--bd-fs-xs); color: var(--bd-t2); }
+.bd-fp__copy { font-size: var(--bd-fs-sm); }
+.bd-cellsub { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 2px; }
+.bd-cell-strong { color: var(--bd-t1); font-weight: 500; }
+.bd-anyt { font-size: var(--bd-fs-sm); color: var(--bd-t4); }
 .bd-row--off { opacity: .55; }
-.bd-certonce {
-  display: flex; gap: 10px; align-items: flex-start; padding: 12px 14px; margin-bottom: 14px;
-  background: var(--bd-tag-red-bg); border: 1px solid #FFCDC7; border-radius: 8px;
-  font-size: 12.5px; color: var(--bd-t1); line-height: 1.8;
-}
-.bd-certonce > :first-child { color: var(--bd-danger); font-size: 16px; flex: none; margin-top: 2px; }
-.bd-certonce--warn { background: var(--bd-tag-gold-bg); border-color: #FFCF8B; }
-.bd-certonce--warn > :first-child { color: var(--bd-warning); }
-.bd-pemrow { margin-bottom: 12px; }
-.bd-pemrow__h { display: flex; align-items: center; gap: 9px; font-size: 12.5px; margin-bottom: 5px; }
-.bd-pemrow__h span { color: var(--bd-t3); font-size: 11.5px; }
+.bd-pemrow { margin-bottom: var(--bd-sp-3); }
+.bd-pemrow__h { display: flex; align-items: center; gap: 9px; font-size: var(--bd-fs-sm); margin-bottom: 5px; }
+.bd-pemrow__h span { color: var(--bd-t3); font-size: var(--bd-fs-xs); }
 .bd-pem {
-  margin: 0; padding: 8px 11px; background: var(--bd-fill-1); border-radius: 6px;
-  font-size: 11px; color: var(--bd-t2); overflow-x: auto; white-space: pre-wrap; word-break: break-all;
+  margin: 0; padding: var(--bd-sp-2) 11px; background: var(--bd-fill-1); border-radius: var(--bd-radius-s);
+  font-size: var(--bd-fs-xs); color: var(--bd-t2); overflow-x: auto; white-space: pre-wrap; word-break: break-all;
 }
-.bd-wfoot { display: flex; align-items: center; gap: 10px; margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--bd-fill-2); }
 
-/* tabs */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
-
-/* 空态 */
-.bd-empty { padding: 40px 24px; text-align: center; }
-.bd-empty__ic { font-size: 30px; color: var(--bd-warning); }
-.bd-empty__t { margin-top: 12px; font-size: 15px; font-weight: 600; color: var(--bd-t1); }
-.bd-empty__d { margin-top: 8px; font-size: 13px; color: var(--bd-t3); line-height: 1.8; }
-.bd-empty__d code { font-family: ui-monospace, monospace; background: var(--bd-fill-2); padding: 1px 6px; border-radius: 4px; }
 
 /* 拓扑卡 */
-.bd-topo { padding: 16px 18px; }
+.bd-topo { padding: var(--bd-sp-4) 18px; }
 .bd-topo svg { display: block; }
 
 /* SPA */
 .bd-spa { max-width: 1080px; }
-.bd-spacard { padding: 18px 20px 20px; }
-.bd-section-title { font-size: 15px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
 .bd-spa__meta { display: flex; flex-direction: column; }
-.bd-kv { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0; border-bottom: 1px solid var(--bd-fill-1); font-size: 13px; }
+.bd-kv { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-5); padding: 10px 0; border-bottom: 1px solid var(--bd-border-2); font-size: var(--bd-fs-md); }
 .bd-kv:last-child { border-bottom: none; }
 .bd-kv span { color: var(--bd-t3); flex: none; }
 .bd-kv b { font-weight: 500; color: var(--bd-t1); text-align: right; }
 
-.bd-spa__ports { margin-top: 18px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
-.bd-spa__portshead { font-size: 12.5px; color: var(--bd-t3); margin-bottom: 12px; }
+.bd-spa__ports { margin-top: 18px; padding-top: var(--bd-sp-4); border-top: 1px solid var(--bd-border-2); }
+.bd-spa__portshead { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-bottom: var(--bd-sp-3); }
 .bd-spa__portslist { display: flex; flex-wrap: wrap; gap: 10px; }
-.bd-port { font-size: 12.5px; padding: 5px 12px; border-radius: 14px; background: var(--bd-fill-2); color: var(--bd-t2); font-family: ui-monospace, monospace; }
-.bd-spa__note { margin-top: 12px; font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; }
+.bd-port { font-size: var(--bd-fs-sm); padding: 5px var(--bd-sp-3); border-radius: var(--bd-radius-pill); background: var(--bd-fill-2); color: var(--bd-t2); font-family: var(--bd-font-mono); }
+.bd-spa__note { margin: var(--bd-sp-3) 0 0; }
 
 /* 对比卡 */
-.bd-cmp { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
-.bd-cmp__c { padding: 18px 20px; }
-.bd-cmp__c--bad { border-color: var(--bd-tag-red-bg); background: linear-gradient(180deg, #FFF8F7 0%, #fff 60%); }
-.bd-cmp__c--good { border-color: var(--bd-tag-green-bg); background: linear-gradient(180deg, #F6FFF8 0%, #fff 60%); }
-.bd-cmp__h { display: flex; align-items: center; gap: 8px; font-size: 14px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
+.bd-cmp { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--bd-sp-4); }
+.bd-cmp__c { padding: 18px var(--bd-sp-5); }
+.bd-cmp__c--bad { border-color: var(--bd-danger-b); background: linear-gradient(180deg, var(--bd-danger-1) 0%, var(--bd-bg-1) 60%); }
+.bd-cmp__c--good { border-color: var(--bd-success-b); background: linear-gradient(180deg, var(--bd-success-1) 0%, var(--bd-bg-1) 60%); }
+.bd-cmp__h { display: flex; align-items: center; gap: var(--bd-sp-2); font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
 .bd-cmp__ic { font-size: 18px; }
 .bd-cmp__ic.bad { color: var(--bd-danger); }
 .bd-cmp__ic.good { color: var(--bd-success); }
 .bd-cmp__list { list-style: none; margin: 0; padding: 0; }
-.bd-cmp__list li { display: flex; align-items: flex-start; gap: 8px; font-size: 13px; color: var(--bd-t2); line-height: 1.7; padding: 5px 0; }
+.bd-cmp__list li { display: flex; align-items: flex-start; gap: var(--bd-sp-2); font-size: var(--bd-fs-md); color: var(--bd-t2); line-height: var(--bd-lh-loose); padding: 5px 0; }
 .bd-cmp__list li :deep(svg) { flex: none; margin-top: 4px; color: var(--bd-t4); font-size: 13px; }
 .bd-cmp__list li :deep(svg.li-ok) { color: var(--bd-success); }
 .bd-cmp__list b { color: var(--bd-t1); font-weight: 600; }
-.bd-cmp__foot { margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--bd-fill-2); font-size: 12.5px; font-weight: 600; }
+.bd-cmp__foot { margin-top: 14px; padding-top: var(--bd-sp-3); border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm); font-weight: 600; }
 .bd-cmp__foot.bad { color: var(--bd-danger); }
-.bd-cmp__foot.good { color: #0B8235; }
+.bd-cmp__foot.good { color: var(--bd-success-t); }
+
+/* 网关节点表 */
+.bd-tablewrap { overflow-x: auto; }
+.bd-dim { color: var(--bd-t3); }
+.bd-skew--warn { color: var(--bd-warning); }
 /* 对外接入地址列 */
-.bd-acc { font-size: 12px; line-height: 1.7; white-space: nowrap; }
-.bd-acc i { display: inline-block; min-width: 42px; margin-right: 6px; font-style: normal; color: var(--bd-t3); font-size: 11px; }
-.bd-acc__none { display: inline-flex; align-items: center; gap: 4px; font-size: 12px; color: var(--bd-warning, #FF7D00); }
-.bd-acc__edit { margin-left: 10px; font-size: 12px; }
-.bd-accnote { font-size: 12.5px; line-height: 1.8; color: var(--bd-t2); background: var(--bd-fill-1);
-  padding: 10px 12px; border-radius: 8px; margin-bottom: 14px; }
-.bd-accnote code { font-family: var(--bd-mono, monospace); background: var(--bd-fill-2, #f2f3f5); padding: 0 4px; border-radius: 3px; }
-.bd-accfld { margin-bottom: 14px; }
-.bd-accfld label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 6px; }
-.bd-accfld__d { display: block; margin-top: 5px; font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
-.bd-accerr { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-danger);
-  background: var(--bd-tag-red-bg, #FFECE8); padding: 8px 12px; border-radius: 6px; }
+.bd-acc { font-size: var(--bd-fs-sm); line-height: var(--bd-lh-loose); white-space: nowrap; }
+.bd-acc i { display: inline-block; min-width: 42px; margin-right: 6px; font-style: normal; color: var(--bd-t3); font-size: var(--bd-fs-xs); }
+.bd-acc__none { display: inline-flex; align-items: center; gap: var(--bd-sp-1); font-size: var(--bd-fs-sm); color: var(--bd-warning); }
+.bd-acc__edit { margin-left: 10px; font-size: var(--bd-fs-sm); }
 
 /* ── 内核态隐身回执 ── */
-.bd-stealth__count { margin-left: 10px; font-size: 12px; font-weight: 400; color: var(--bd-t3); }
-.bd-stealthwarn {
-  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; padding: 10px 12px;
-  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
-  color: #A8620E; background: #FFF7E8; border: 1px solid #FFD08A;
+.bd-stealth { margin-bottom: 10px; }
+.bd-stealth__h { display: flex; align-items: center; gap: 10px; font-size: var(--bd-fs-md); margin-bottom: var(--bd-sp-2); }
+.bd-stealth__intent { margin-left: auto; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-stealth__sum { font-size: var(--bd-fs-md); color: var(--bd-t1); line-height: var(--bd-lh); }
+.bd-stealth__scan { margin-top: 6px; font-size: var(--bd-fs-sm); color: var(--bd-t2); line-height: var(--bd-lh-loose); }
+.bd-stealth__meta { margin-top: var(--bd-sp-2); font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+
+@media (max-width: 1320px) {
+  .bd-cert__search { width: 220px; }
 }
-.bd-stealthwarn > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
-.bd-stealth { padding: 14px 16px; margin-bottom: 10px; }
-.bd-stealth__h { display: flex; align-items: center; gap: 10px; font-size: 13.5px; margin-bottom: 8px; }
-.bd-stealth__intent { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
-.bd-stealth__sum { font-size: 13px; color: var(--bd-t1); line-height: 1.6; }
-.bd-stealth__scan { margin-top: 6px; font-size: 12.5px; color: var(--bd-t2); line-height: 1.7; }
-.bd-stealth__meta { margin-top: 8px; font-size: 12px; color: var(--bd-t3); }
-/* 只有 armed 是绿的；不可判定/未上报走灰——它们不是"轻微问题"，是"我们不知道"。 */
-.bd-tg--ok { color: var(--bd-success); background: var(--bd-tag-green-bg); }
-.bd-tg--bad { color: var(--bd-danger); background: var(--bd-tag-red-bg); }
-.bd-tg--warn { color: #A8620E; background: #FFF7E8; }
-.bd-tg--muted { color: var(--bd-t3); background: var(--bd-fill2); }
 </style>

@@ -4,9 +4,10 @@
     <header class="bd-top">
       <div class="bd-logo">
         <span class="bd-logo__mark">
+          <!-- 盾与勾的颜色走 token（见 <style> 的 .bd-logo__shield / .bd-logo__tick），不在 SVG 属性里写十六进制 -->
           <svg width="17" height="17" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95" />
-            <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path class="bd-logo__shield" d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" />
+            <path class="bd-logo__tick" d="M9 12l2 2 4-4" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </span>
         <span class="bd-logo__txt">
@@ -113,8 +114,13 @@
              「未部署」，侧栏却宣称双节点活动，两处自相矛盾），暴露端口也从未探测。
              常驻在每一页的健康结论最容易被当真，所以改成入口而不是结论——
              真实体检在 /diag，那里有 9 项真探测。 -->
+        <!-- ★图标此前写的是 <icon-pulse />——Arco 图标集里没有这个名字。图标是全局注册的，
+             type-check 把它当任意自定义元素放过；浏览器里则是每页 4 条「Failed to resolve
+             component: icon-pulse」warn + 一块空白，空了几个月没人发现（同形态的还有过
+             icon-fingerprint）。换成图标集里真有的 icon-tool（扳手 = 运维），且与上方导航项
+             不撞：态势总览用 dashboard、JIT 用 thunderbolt。现在由 check-dead-ui 规则七守着。 -->
         <RouterLink to="/diag" class="bd-health bd-health--link">
-          <div class="bd-health__h"><icon-pulse />运维诊断</div>
+          <div class="bd-health__h"><icon-tool />运维诊断</div>
           <div class="bd-health__b">集群 / 隐身 / 审计 / 认证源等 9 项实测体检</div>
         </RouterLink>
       </aside>
@@ -220,28 +226,31 @@ async function doChangePw() {
 .bd-pwform__f { margin-bottom: 16px; }
 .bd-pwform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
 .bd-pwform__f :deep(.arco-input-wrapper) { width: 100%; }
-.bd-pwform__rule { font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; margin-top: -6px; }
+.bd-pwform__rule { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: 1.7; margin-top: -6px; }
 .bd-pwform__err {
   display: flex; align-items: flex-start; gap: 6px; margin-top: 12px; padding: 8px 10px;
   background: var(--bd-tag-red-bg); color: var(--bd-danger); border-radius: 7px;
   font-size: 12px; line-height: 1.65;
 }
 .bd-pwform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
-.bd-mbtn { height: 34px; padding: 0 18px; border-radius: 8px; border: none; background: var(--bd-primary); color: #fff; font-size: 13px; cursor: pointer; }
+/* 白字一律用 --bd-bg-1：tokens.css 里唯一的白，没有单独的「深底上的文字」token */
+.bd-mbtn { height: 34px; padding: 0 18px; border-radius: 8px; border: none; background: var(--bd-primary); color: var(--bd-bg-1); font-size: 13px; cursor: pointer; }
 .bd-mbtn--ghost { background: var(--bd-fill-2); color: var(--bd-t1); }
 .bd-mbtn[disabled] { opacity: .6; cursor: not-allowed; }
 
 /* 顶栏 */
 .bd-top {
-  height: var(--bd-header-h); flex: none; background: #fff; border-bottom: 1px solid var(--bd-border);
+  height: var(--bd-header-h); flex: none; background: var(--bd-bg-1); border-bottom: 1px solid var(--bd-border);
   display: flex; align-items: center; padding: 0 20px; gap: 16px; z-index: 20;
 }
 .bd-logo { display: flex; align-items: center; gap: 11px; }
 .bd-logo__mark {
   width: 30px; height: 30px; border-radius: 7px; flex: none;
   background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d));
-  display: flex; align-items: center; justify-content: center; box-shadow: 0 2px 6px rgba(22, 93, 255, .35);
+  display: flex; align-items: center; justify-content: center; box-shadow: var(--bd-shadow-primary);
 }
+.bd-logo__shield { fill: var(--bd-bg-1); opacity: .95; }
+.bd-logo__tick { stroke: var(--bd-primary); }
 .bd-logo__txt { display: flex; flex-direction: column; line-height: 1.15; }
 .bd-logo__txt b { font-size: 15px; font-weight: 700; letter-spacing: .3px; }
 .bd-logo__txt i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
@@ -255,7 +264,7 @@ async function doChangePw() {
 .bd-acct { display: flex; align-items: center; gap: 9px; cursor: pointer; padding: 3px 6px; border-radius: 8px; }
 .bd-acct:hover { background: var(--bd-fill-2); }
 .bd-acct__av {
-  width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 12px; font-weight: 600;
+  width: 30px; height: 30px; border-radius: 50%; flex: none; color: var(--bd-bg-1); font-size: 12px; font-weight: 600;
   background: linear-gradient(135deg, var(--bd-purple), var(--bd-primary));
   display: flex; align-items: center; justify-content: center;
 }
@@ -279,7 +288,7 @@ async function doChangePw() {
 /* 主体 */
 .bd-body { display: flex; flex: 1; overflow: hidden; }
 .bd-side {
-  width: var(--bd-sider-w); flex: none; background: #fff; border-right: 1px solid var(--bd-border);
+  width: var(--bd-sider-w); flex: none; background: var(--bd-bg-1); border-right: 1px solid var(--bd-border);
   padding: 12px 12px 24px; overflow-y: auto;
 }
 .bd-side__label {
@@ -303,7 +312,7 @@ async function doChangePw() {
 }
 
 .bd-health {
-  margin-top: 20px; padding: 12px; border-radius: 10px; color: #fff;
+  margin-top: 20px; padding: 12px; border-radius: 10px; color: var(--bd-bg-1);
   background: linear-gradient(135deg, var(--bd-dark-1), var(--bd-dark-2));
 }
 .bd-health--link { display: block; text-decoration: none; transition: filter .15s; }
@@ -311,7 +320,7 @@ async function doChangePw() {
 .bd-health--link:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 2px; }
 .bd-health__h { display: flex; align-items: center; gap: 7px; font-size: 12px; font-weight: 600; margin-bottom: 6px; }
 .bd-health__b { font-size: 11px; color: var(--bd-dark-txt); line-height: 1.7; }
-.bd-health__b b { color: #fff; }
+.bd-health__b b { color: var(--bd-bg-1); }
 
 .bd-main { flex: 1; overflow-y: auto; background: var(--bd-fill-1); }
 </style>

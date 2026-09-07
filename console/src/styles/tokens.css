@@ -1,21 +1,54 @@
-/* 白帝设计 token · 对齐《白帝零信任控制中心》设计稿（Arco 原生 ArcoBlue，不覆盖 Arco --primary） */
+/* 白帝设计 token · 对齐《白帝零信任控制中心》设计稿（Arco 原生 ArcoBlue，不覆盖 Arco --primary）
+ *
+ * 约定（见 console/DESIGN.md）：
+ *   · 自定义变量一律 --bd-* 前缀；**这里一个 Arco 变量都不写**（--primary-N 与 --color-N 归 Arco 管）。
+ *   ★注释里别写「星号+斜杠」的字样（例如带通配符的 CSS 变量名）——它会提前结束注释，
+ *     整个 :root 块随之解析失败、全站 token 归零，而 type-check / vite build 都不会报。
+ *     现在由 check-ui 规则五（scripts/check-dead-ui.mjs）在构建期拦住：剥掉注释后不许残留
+ *     任何注释定界符、没闭合的注释不许吞掉声明、:root 里 --bd-* 声明不少于 60 条、值不许为空，
+ *     违反即报出行号。
+ *   · 页面里不许再出现裸像素的间距/阴影/圆角/字号——全部走下面的尺度。加一档要先加在这里。
+ *   · 语义色（success/warning/danger）只表达"结果好坏"，不表达"品牌"；品牌只有 --bd-primary 一个。
+ */
 :root {
-  /* 主色 / 语义 */
+  /* ── 主色 / 语义 ── */
   --bd-primary:   #165DFF;
   --bd-primary-d: #0E42D2;   /* logo 渐变深 */
   --bd-primary-h: #4080FF;   /* hover */
+  --bd-primary-a: #0E42D2;   /* active（按下） */
   --bd-primary-1: #E8F3FF;   /* 主色浅底 */
   --bd-primary-b: #BEDAFF;   /* 主色浅边 */
   --bd-purple:    #722ED1;   /* 头像渐变 */
+  --bd-on-color:  #FFFFFF;   /* 主色 / 语义色实底上的文字与图标（按钮字、徽标字、头像首字母、logo 盾形）——不是底色，别拿 --bd-bg-1 顶替 */
   --bd-success:   #00B42A;
   --bd-warning:   #FF7D00;
   --bd-danger:    #F53F3F;
+  --bd-danger-h:  #F76560;   /* 危险按钮 hover：Arco red-5——与 --bd-primary-h 取 arcoblue-5 同一档（不是 red-4） */
+  --bd-danger-a:  #CB272D;   /* 危险按钮 active：Arco red-7——与 --bd-primary-a 取 arcoblue-7 同一档 */
 
-  /* 文本 / 中性（Arco 灰阶） */
+  /* 语义浅底 / 浅边（提示条、状态标签、空态图标底）。
+     ★三组各自成对，别把 warning 的底配 danger 的字——提示条颜色语义混用正是打磨前的常见错法。 */
+  --bd-success-1: #E8FFEA; --bd-success-b: #AFF0B5; --bd-success-t: #009A29;
+  --bd-warning-1: #FFF7E8; --bd-warning-b: #FFCF8B; --bd-warning-t: #A8620E;
+  --bd-danger-1:  #FFECE8; --bd-danger-b:  #FDCDC5; --bd-danger-t:  #CB2634;
+  --bd-info-1:    var(--bd-primary-1); --bd-info-b: var(--bd-primary-b); --bd-info-t: var(--bd-primary-d);
+
+  /* ── 文本 / 中性（Arco 灰阶） ── */
   --bd-t1: #1D2129; --bd-t2: #4E5969; --bd-t3: #86909C; --bd-t4: #C9CDD4;
   --bd-border: #E5E6EB;
-  --bd-fill-1: #F7F8FA;
-  --bd-fill-2: #F2F3F5;
+  --bd-border-2: #F2F3F5;    /* 更淡的分隔线：表格行线、卡片内分隔 */
+  --bd-fill-1: #F7F8FA;      /* 页面底 */
+  --bd-fill-2: #F2F3F5;      /* 控件底 / hover 底 */
+  --bd-fill-3: #E5E6EB;      /* 骨架屏 / 进度轨道 */
+  --bd-bg-1:   #FFFFFF;      /* 卡片 / 表格 / 弹层的白底 */
+
+  /* ★下面两条是「拼写别名」：全仓已有十余处在用 --bd-line / --bd-fill2，而它们此前从未定义——
+     那些 border-top / background 在浏览器里静默失效（Overview 的口径说明条、Nat 的分隔线都是）。
+     别名让存量引用立刻生效；新代码请写正名 --bd-border / --bd-fill-2。
+     同一轮补上的 --bd-bg-1 / --bd-danger-1 不是别名、是正名——已在上面各自的分组里声明
+     （Gateway 的弱化标签引的就是它们），这里不再重复。 */
+  --bd-line:  var(--bd-border);
+  --bd-fill2: var(--bd-fill-2);
 
   /* tag 浅色族（bg / text） */
   --bd-tag-blue-bg:   #F2F7FF;
@@ -29,9 +62,71 @@
   --bd-dark-2:   #15327F;
   --bd-dark-txt: #A8C0F0;
 
-  /* 尺度 */
+  /* ── 布局尺度 ── */
   --bd-header-h: 56px;
   --bd-sider-w:  228px;
-  --bd-radius:   10px;
-  --bd-radius-s: 7px;
+  --bd-page-x:   26px;       /* 页面左右内边距 */
+  --bd-page-y:   22px;       /* 页面上内边距 */
+  --bd-page-max: 1600px;     /* 超宽屏内容区上限（1440/1280 两档不触发） */
+
+  /* ── 间距（4px 基线） ── */
+  --bd-sp-1: 4px;
+  --bd-sp-2: 8px;
+  --bd-sp-3: 12px;
+  --bd-sp-4: 16px;
+  --bd-sp-5: 20px;
+  --bd-sp-6: 24px;
+  --bd-sp-7: 32px;
+  --bd-sp-8: 40px;
+
+  /* ── 圆角 ── */
+  --bd-radius-xs: 4px;       /* 标签、小徽标、代码片 */
+  --bd-radius-s:  7px;       /* 按钮、输入框、列表项 */
+  --bd-radius:    10px;      /* 卡片、表格卡、提示条 */
+  --bd-radius-l:  14px;      /* 弹窗、抽屉、登录卡 */
+  --bd-radius-pill: 999px;
+
+  /* ── 阴影（三档 + 品牌投影） ──
+     1 = 静置卡片（几乎不可见，只把卡从底色上"托"起来）
+     2 = 悬浮/可点卡片 hover、下拉、气泡
+     3 = 弹窗、抽屉、命令面板 */
+  --bd-shadow-1: 0 1px 2px rgba(29, 33, 41, .04), 0 1px 6px rgba(29, 33, 41, .04);
+  --bd-shadow-2: 0 4px 14px rgba(29, 33, 41, .08), 0 1px 3px rgba(29, 33, 41, .05);
+  --bd-shadow-3: 0 12px 40px rgba(29, 33, 41, .14), 0 2px 8px rgba(29, 33, 41, .06);
+  --bd-shadow-primary: 0 2px 6px rgba(22, 93, 255, .30);
+  --bd-shadow-primary-h: 0 4px 12px rgba(22, 93, 255, .35);
+
+  /* ── 字号 / 行高阶梯 ──
+     正文 13，辅助 12，脚注 11；页标题 20，KPI 数值 28。**不要再写 12.5 / 11.5 / 13.5 这类半档**。 */
+  --bd-fs-xs:   11px;
+  --bd-fs-sm:   12px;
+  --bd-fs-md:   13px;
+  --bd-fs-base: 14px;
+  --bd-fs-lg:   16px;
+  --bd-fs-xl:   20px;
+  --bd-fs-2xl:  28px;
+  --bd-lh-tight: 1.3;
+  --bd-lh:       1.5;
+  --bd-lh-loose: 1.7;
+  --bd-font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+
+  /* ── 动效 ── */
+  --bd-dur-fast: 120ms;      /* 颜色、背景 */
+  --bd-dur-base: 180ms;      /* 位移、阴影、边框 */
+  --bd-dur-slow: 320ms;      /* 进度条、面板展开 */
+  --bd-ease: cubic-bezier(.2, .6, .2, 1);
+
+  /* ── 焦点环（键盘可达性，所有可交互元素统一） ── */
+  --bd-focus-ring: 0 0 0 3px rgba(22, 93, 255, .28);
+  --bd-focus-outline: 2px solid var(--bd-primary);
+
+  /* ── 控件尺寸 ── */
+  --bd-ctl-h:    32px;       /* 输入框 / 次级按钮 */
+  --bd-ctl-h-l:  36px;       /* 主按钮 */
+  --bd-ctl-h-s:  28px;       /* 表格内 / 紧凑 */
+  --bd-row-y:    12px;       /* 表格行上下内边距（行高约 46px） */
+
+  /* ── 层级 ── */
+  --bd-z-sticky: 5;
+  --bd-z-top:    20;
 }

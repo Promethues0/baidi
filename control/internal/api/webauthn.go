@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -16,6 +17,7 @@ import (
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/authpolicy"
+	"baidi.dev/control/internal/authsrc"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/webauthnx"
@@ -76,7 +78,7 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 	if n > 0 {
 		s.auditAs(r, cred.Account, "auth", "登录触发 passkey 二次认证（账号已注册 passkey）", "mfa")
 		return map[string]any{
-			"ok": false, "needWebauthn": true, "ticket": s.signMfaTicket(account),
+			"ok": false, "needWebauthn": true, "ticket": s.signMfaTicket(account, lc.Directory),
 			"reason": "请用已注册的 passkey（Touch ID / Windows Hello / 安全密钥）完成二次认证",
 		}, true
 	}
@@ -90,7 +92,7 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 	if tfound && trec.Confirmed {
 		s.auditAs(r, cred.Account, "auth", "登录触发 TOTP 二次认证（账号已启用动态验证码）", "mfa")
 		return map[string]any{
-			"ok": false, "needTotp": true, "ticket": s.signMfaTicket(account),
+			"ok": false, "needTotp": true, "ticket": s.signMfaTicket(account, lc.Directory),
 			"reason": "请输入认证器 App 中的 6 位动态验证码",
 		}, true
 	}
@@ -165,17 +167,67 @@ func withLegacyMfaCode(ctx context.Context, code string) context.Context {
 
 // signMfaTicket 签发"口令已验"的一次性短票据：role=mfa 使其无法当会话令牌用
 // （requireAdmin/requireUser 都不认 mfa 角色），只能用来换取一次 WebAuthn 断言。
-func (s *Server) signMfaTicket(account string) string {
-	return s.keys.Sign(auth.Claims{Sub: account, Role: "mfa", Name: account, Jti: auth.RandJTI()}, mfaTicketTTL)
+//
+// dir 是**本回合第一因子来自哪个用户目录**（loginCtx.Directory：local / ldap / ad /
+// oidc / radius），随票据带到第二回合去（见 auth.Claims.Dir 与 denyExternalMfaAdmin）。
+// 它是**唯一**能把这件事告诉第二回合的通道：那两个 handler 拿票据换账号、重读 users 行、
+// 按当下的 role 签完整令牌，天然不知道第一因子是谁验的。
+func (s *Server) signMfaTicket(account, dir string) string {
+	return s.keys.Sign(auth.Claims{
+		Sub: account, Role: "mfa", Name: account, Jti: auth.RandJTI(), Dir: dir,
+	}, mfaTicketTTL)
 }
 
-// verifyMfaTicket 校验票据并取回账号；非 mfa 角色一律拒（防会话令牌当票据用）。
-func (s *Server) verifyMfaTicket(tok string) (string, bool) {
+// verifyMfaTicket 校验票据并取回账号与第一因子目录；非 mfa 角色一律拒（防会话令牌当票据用）。
+func (s *Server) verifyMfaTicket(tok string) (account, dir string, ok bool) {
 	c, err := s.keys.Verify(tok)
 	if err != nil || c.Role != "mfa" || c.Sub == "" {
-		return "", false
+		return "", "", false
 	}
-	return normUser(c.Sub), true
+	return normUser(c.Sub), c.Dir, true
+}
+
+// denyExternalMfaAdmin 二次认证第二回合的**纵深闸**：本回合第一因子不是本地口令，
+// 而重读出来的账号是管理员 → 一律不签任何令牌。写完响应返回 true（调用方直接 return）。
+//
+// ★它与「管理员的认证权不外包」是同一条纪律的第二层。第一层是**顺序**——
+// externalSessionCredential 排在 secondFactor 之前，于是外部路径上的管理员根本拿不到
+// mfa 票据。但顺序是一种"只要没人挪动它就成立"的保证，而两条腿各自看都自洽：
+// 门户/OIDC 那边闸确实在；handleTotpLogin / handleWebauthnLoginFinish 这边则是按票据
+// 重读 users 行、原样 Sign(Role: cred.Role)——它们从来不知道第一因子是谁验的。
+// 顺序一旦被挪动（把闸下沉到签发处、加一道新闸插在中间、重构 secondFactor），
+// 一名注册了 TOTP 的外部绑定管理员走一遍 IdP 就是一张 role=admin 的 8h 会话，
+// 而**两处代码都不会报错**。带上 Dir 之后这一回合能独立复判，纵深不再依赖顺序。
+//
+// 三条判据上的取舍：
+//   - **只对 role=admin 生效**：外部账号走 TOTP 二次认证是正常业务，不能拦。
+//   - **dir 为空 = 不可判定 → 按外部处理（fail-closed）**。它只可能出现在"升级那一刻
+//     尚在飞行的旧票据"上（3 分钟内自然消失），代价是那几个管理员重登一次；
+//     反过来把空当成 local，等于给旧票据留一条绕过去的路。
+//   - **读不到账号也拒**：与 externalSessionCredential 的 !found 同向。
+//
+// 拒绝不计入爆破锁定（外部那边的凭据是对的），审计与文案同经 denyAdminExternal 产出，
+// 与门户口令 / OIDC 两条路上的那句逐字相同。
+func (s *Server) denyExternalMfaAdmin(w http.ResponseWriter, r *http.Request, account, dir string) bool {
+	if dir == string(authsrc.KindLocal) {
+		// 本地口令那一回合：不读库、不判定，与改造前逐字同行为（绝大多数登录走这里）。
+		return false
+	}
+	cred, found, err := s.store.Credential(r.Context(), account)
+	if err != nil || !found {
+		slog.Error("二次认证第二回合重读账号失败，拒绝签发令牌", "账号", account, "第一因子目录", dir, "找到", found, "err", err)
+		httpx.Error(w, http.StatusInternalServerError, "账号状态复查失败")
+		return true
+	}
+	if cred.Role != "admin" {
+		return false
+	}
+	via := "外部认证源（目录 " + dir + "）"
+	if dir == "" {
+		via = "外部认证源（目录不可判定）"
+	}
+	httpx.Error(w, http.StatusForbidden, s.denyAdminExternal(r, cred.Account, via))
+	return true
 }
 
 // webauthnUserFor 按账号组装 go-webauthn User（含其已注册凭据）。
@@ -308,7 +360,9 @@ func (s *Server) handleWebauthnLoginBegin(w http.ResponseWriter, r *http.Request
 		httpx.Error(w, http.StatusBadRequest, "缺少认证票据")
 		return
 	}
-	account, ok := s.verifyMfaTicket(b.Ticket)
+	// begin 这一回合只出 allowCredentials、不签任何令牌，故不施加第一因子目录闸
+	// （真正的闸在 finish 那一回合，见 denyExternalMfaAdmin）。
+	account, _, ok := s.verifyMfaTicket(b.Ticket)
 	if !ok {
 		httpx.Error(w, http.StatusUnauthorized, "认证票据无效或已过期，请重新登录")
 		return
@@ -350,9 +404,14 @@ func (s *Server) handleWebauthnLoginFinish(w http.ResponseWriter, r *http.Reques
 		Ticket string `json:"ticket"`
 	}
 	_ = json.Unmarshal(body, &b)
-	account, ok := s.verifyMfaTicket(b.Ticket)
+	account, dir, ok := s.verifyMfaTicket(b.Ticket)
 	if !ok {
 		httpx.Error(w, http.StatusUnauthorized, "认证票据无效或已过期，请重新登录")
+		return
+	}
+	// ★纵深：本回合第一因子不是本地口令、而这个账号是管理员 → 到此为止。
+	// 排在断言校验之前——判定不需要那次断言，而"先验完再拒"会平白多一次认证器交互。
+	if s.denyExternalMfaAdmin(w, r, account, dir) {
 		return
 	}
 	// 防爆破锁：断言失败也计数，锁定可能在口令与断言两回合之间触发（含并行爆破），此处再拦一次。

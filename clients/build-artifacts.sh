@@ -122,7 +122,9 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 # （manifest 缺失时页面回落到那一份，两处不一致会让同一个平台在两种情况下说两种话）。
 # 有 Go 用例真的跑这个脚本、把生成的 manifest 与 placeholderManifest() 逐条比对，
 # 见 control/internal/api/downloads_script_test.go。
-# ★「构建中，敬请期待」只能用在**真的会被构建出来、且装了能用**的平台上。
+# ★任何平台都不写「构建中，敬请期待」：那是一句"有个构建正在进行"的状态断言，而这台部署机上
+#   没有任何执行方能证明它——manifest 里没有包只说明没人把包铺进来，此刻什么都没在构建。
+#   macOS / Android（包能出、也在真机上跑过）的占位同样只说"包不在这里、谁能铺进来、找谁"。
 #   - iOS 与鸿蒙缺的不是一次构建，而是公共 CI 上根本不存在的东西（Apple 付费账号签名 +
 #     Network Extension 授权 / DevEco Studio 工具链）；
 #   - Windows 的包组件已经齐了（wintun.dll 构建期取件 + 哈希校验，随包装在 baidi-tun.exe
@@ -136,9 +138,9 @@ def entry(platform, label, file, arch="", note="", rev="", built=""):
 # 写「敬请期待」等于给一个不会到来的版本许诺。理由见 clients/BUILD.md 第九节。
 clients = [
     # ★缺 dmg 时的 note 不能留空：空着的话页面上 macOS 那一行什么都不说，而 manifest
-    # 整体缺失时同一行会显示「构建中，敬请期待」——同一个平台在两条路径上说两种话。
+    # 整体缺失时同一行会显示 placeholderManifest 那句——同一个平台在两条路径上说两种话。
     entry("macos", "macOS 桌面客户端", os.environ["MAC_FILE"], os.environ["MAC_ARCH"],
-          note="" if os.environ["MAC_FILE"] else "构建中，敬请期待",
+          note="" if os.environ["MAC_FILE"] else "本部署尚未放入 macOS 安装包（dmg 由 CI 或本机 clients/build-artifacts.sh 产出后铺进下载目录，控制面不会自己构建）；请联系管理员",
           rev=os.environ.get("MAC_REV", ""), built=os.environ.get("MAC_BUILT", "")),
     entry("windows", "Windows 桌面客户端", "",
           note="ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；"
@@ -148,7 +150,7 @@ clients = [
           note="需 Xcode + 付费账号签名与 Network Extension 授权，公共 CI 无法构建；请联系管理员"),
     entry("android", "Android 客户端", os.environ["AND_FILE"],
           "armeabi-v7a / arm64-v8a / x86 / x86_64",
-          "调试签名版，安装时需允许「未知来源应用」" if os.environ["AND_FILE"] else "构建中，敬请期待",
+          "调试签名版，安装时需允许「未知来源应用」" if os.environ["AND_FILE"] else "本部署尚未放入 Android 安装包（调试签名 APK 由 CI 产出后铺进下载目录，控制面不会自己构建）；请联系管理员",
           rev=os.environ.get("AND_REV", ""), built=os.environ.get("AND_BUILT", "")),
     entry("harmony", "鸿蒙客户端", "",
           note="需 DevEco Studio 人工构建（工具链不在 CI 上）；请联系管理员"),

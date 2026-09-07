@@ -6,8 +6,8 @@
         <div class="bd-brand__logo">
           <span class="bd-brand__mark">
             <svg width="22" height="22" viewBox="0 0 24 24" fill="none">
-              <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95" />
-              <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+              <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" style="fill: var(--bd-on-color)" opacity=".95" />
+              <path d="M9 12l2 2 4-4" style="stroke: var(--bd-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
             </svg>
           </span>
           <span class="bd-brand__name">
@@ -44,20 +44,20 @@
 
     <!-- 右侧登录卡 -->
     <main class="bd-pane">
-      <div class="bd-card">
-        <span class="bd-card__mark">
+      <div class="bd-lcard">
+        <span class="bd-lcard__mark">
           <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
-            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" fill="#fff" opacity=".95" />
-            <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
+            <path d="M12 2l8 3v6c0 5-3.5 8.5-8 11-4.5-2.5-8-6-8-11V5l8-3z" style="fill: var(--bd-on-color)" opacity=".95" />
+            <path d="M9 12l2 2 4-4" style="stroke: var(--bd-primary)" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </span>
 
         <!-- 步骤一：账号口令 -->
         <template v-if="step === 'login'">
-          <h2 class="bd-card__h">欢迎登录</h2>
-          <p class="bd-card__p">请使用企业账号登录白帝安全接入门户</p>
+          <h2 class="bd-lcard__h">欢迎登录</h2>
+          <p class="bd-lcard__p">请使用企业账号登录白帝安全接入门户</p>
 
-          <div v-if="errMsg" class="bd-tip bd-tip--err">
+          <div v-if="errMsg" class="bd-notice bd-notice--danger bd-ltip">
             <icon-close-circle-fill />
             <span>{{ errMsg }}</span>
           </div>
@@ -121,16 +121,16 @@
 
         <!-- 步骤二：passkey 二次认证（WebAuthn 断言） -->
         <template v-else-if="step === 'webauthn'">
-          <h2 class="bd-card__h">二次认证</h2>
-          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 完成 passkey 验证</p>
+          <h2 class="bd-lcard__h">二次认证</h2>
+          <p class="bd-lcard__p">为账号 <b>{{ form.username }}</b> 完成 passkey 验证</p>
 
-          <div class="bd-tip bd-tip--warn">
+          <div class="bd-notice bd-notice--warn bd-ltip">
             <icon-safe />
             <span>{{ mfaReason || '请用已注册的 passkey 完成二次认证。' }}</span>
           </div>
 
           <div class="bd-pk">
-            <span class="bd-pk__ic"><icon-fingerprint /></span>
+            <span class="bd-pk__ic"><icon-idcard /></span>
             <div class="bd-pk__t">
               <b>Touch ID / Windows Hello / 安全密钥</b>
               <i>公钥密码学验证，抗钓鱼——凭据永不离开你的设备</i>
@@ -155,10 +155,10 @@
 
         <!-- 步骤二：TOTP 动态验证码（RFC 6238，已启用 TOTP 的账号强制） -->
         <template v-else-if="step === 'totp'">
-          <h2 class="bd-card__h">二次认证</h2>
-          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 输入动态验证码</p>
+          <h2 class="bd-lcard__h">二次认证</h2>
+          <p class="bd-lcard__p">为账号 <b>{{ form.username }}</b> 输入动态验证码</p>
 
-          <div class="bd-tip bd-tip--warn">
+          <div class="bd-notice bd-notice--warn bd-ltip">
             <icon-safe />
             <span>{{ mfaReason || '请输入认证器 App 中的 6 位动态验证码。' }}</span>
           </div>
@@ -196,10 +196,10 @@
 
         <!-- 强制改密：初始口令须由本人换掉后才发正常会话 -->
         <template v-else-if="step === 'changepw'">
-          <h2 class="bd-card__h">修改初始口令</h2>
-          <p class="bd-card__p">账号 <b>{{ form.username }}</b> 正在使用初始口令，须修改后才能进入门户</p>
+          <h2 class="bd-lcard__h">修改初始口令</h2>
+          <p class="bd-lcard__p">账号 <b>{{ form.username }}</b> 正在使用初始口令，须修改后才能进入门户</p>
 
-          <div v-if="pwMsg" class="bd-tip bd-tip--err">
+          <div v-if="pwMsg" class="bd-notice bd-notice--danger bd-ltip">
             <icon-close-circle-fill />
             <span>{{ pwMsg }}</span>
           </div>
@@ -249,10 +249,10 @@
              演示站可达。★文案不许写「短信」：系统从不发送任何短信，后端收的是编译进二进制的
              演示码（webauthn.go 的 legacyDemoCode），写成短信会让用户干等一条永远不来的短信。 -->
         <template v-else>
-          <h2 class="bd-card__h">二次认证</h2>
-          <p class="bd-card__p">为账号 <b>{{ form.username }}</b> 输入演示验证码</p>
+          <h2 class="bd-lcard__h">二次认证</h2>
+          <p class="bd-lcard__p">为账号 <b>{{ form.username }}</b> 输入演示验证码</p>
 
-          <div class="bd-tip bd-tip--warn">
+          <div class="bd-notice bd-notice--warn bd-ltip">
             <icon-exclamation-circle-fill />
             <span>{{ mfaReason || '该账号未注册 passkey / TOTP，本站回落到演示验证码（123456）——生产环境请在「我的安全」注册 TOTP。' }}</span>
           </div>
@@ -665,10 +665,13 @@ function backToLogin() {
 </script>
 
 <style scoped>
+/* 门户登录页：左品牌区 + 右登录卡。圆角 / 阴影 / 字号走 token；提示条复用全局 .bd-notice。
+   ★登录卡叫 .bd-lcard 而不是 .bd-card：全局 .bd-card__h 是「卡片头」（带内边距与底边线），
+   与这里的 h2 撞名会把标题画成一条卡片头。 */
 .bd-portal {
   display: flex;
   min-height: 100vh;
-  background: #fff;
+  background: var(--bd-bg-1);
 }
 
 /* ───── 左侧品牌区 ───── */
@@ -677,7 +680,8 @@ function backToLogin() {
   max-width: 620px;
   flex: none;
   padding: 48px 56px;
-  color: #fff;
+  /* 深色渐变底上的文字用 --bd-on-color（"实底上的字"），不是 --bd-bg-1（那是白底本身）。 */
+  color: var(--bd-on-color);
   background: linear-gradient(135deg, var(--bd-dark-1), var(--bd-dark-2));
   display: flex;
   flex-direction: column;
@@ -699,51 +703,53 @@ function backToLogin() {
 .bd-brand__mid,
 .bd-brand__foot { position: relative; z-index: 1; }
 
-.bd-brand__logo { display: flex; align-items: center; gap: 13px; }
+.bd-brand__logo { display: flex; align-items: center; gap: var(--bd-sp-3); }
 .bd-brand__mark {
-  width: 42px; height: 42px; border-radius: 10px; flex: none;
+  width: 42px; height: 42px; border-radius: var(--bd-radius); flex: none;
   background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d));
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 14px rgba(22, 93, 255, .5);
+  box-shadow: var(--bd-shadow-primary-h);
 }
 .bd-brand__name { display: flex; flex-direction: column; line-height: 1.25; }
 .bd-brand__name b { font-size: 17px; font-weight: 700; letter-spacing: .5px; }
-.bd-brand__name i { font-style: normal; font-size: 12px; color: var(--bd-dark-txt); }
+.bd-brand__name i { font-style: normal; font-size: var(--bd-fs-sm); color: var(--bd-dark-txt); }
 
-.bd-brand__mid { margin-top: auto; margin-bottom: auto; padding: 40px 0; }
+.bd-brand__mid { margin-top: auto; margin-bottom: auto; padding: var(--bd-sp-8) 0; }
 .bd-brand__h {
-  font-size: 40px; font-weight: 800; line-height: 1.2; letter-spacing: 1px; margin: 0 0 16px;
+  font-size: 40px; font-weight: 800; line-height: 1.2; letter-spacing: 1px; margin: 0 0 var(--bd-sp-4);
 }
 .bd-brand__sub {
-  font-size: 15px; line-height: 1.7; color: var(--bd-dark-txt); margin: 0 0 36px; max-width: 380px;
+  font-size: 15px; line-height: var(--bd-lh-loose); color: var(--bd-dark-txt); margin: 0 0 36px; max-width: 380px;
 }
 
 .bd-sell { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 18px; }
-.bd-sell li { display: flex; align-items: flex-start; gap: 14px; }
+.bd-sell li { display: flex; align-items: flex-start; gap: var(--bd-sp-4); }
 .bd-sell__ic {
-  width: 38px; height: 38px; border-radius: 9px; flex: none;
+  width: 38px; height: 38px; border-radius: var(--bd-radius-s); flex: none;
   background: rgba(255, 255, 255, .1); border: 1px solid rgba(255, 255, 255, .14);
   display: flex; align-items: center; justify-content: center;
-  font-size: 19px; color: #fff;
+  /* 19px 不在字号阶梯上：抬到 --bd-fs-xl(20)，与门户下载页 40px 方块里那枚图标同一档。
+     深色底上的图标同样用 --bd-on-color。 */
+  font-size: var(--bd-fs-xl); color: var(--bd-on-color);
 }
 .bd-sell__t { display: flex; flex-direction: column; line-height: 1.4; padding-top: 2px; }
-.bd-sell__t b { font-size: 14.5px; font-weight: 600; }
-.bd-sell__t i { font-style: normal; font-size: 12.5px; color: var(--bd-dark-txt); margin-top: 3px; }
+.bd-sell__t b { font-size: var(--bd-fs-base); font-weight: 600; }
+.bd-sell__t i { font-style: normal; font-size: var(--bd-fs-sm); color: var(--bd-dark-txt); margin-top: 3px; }
 
 .bd-stealth {
   display: inline-flex; align-items: center; gap: 9px;
-  font-size: 13px; color: var(--bd-dark-txt);
-  padding: 8px 14px; border-radius: 999px;
+  font-size: var(--bd-fs-md); color: var(--bd-dark-txt);
+  padding: var(--bd-sp-2) 14px; border-radius: var(--bd-radius-pill);
   background: rgba(255, 255, 255, .07); border: 1px solid rgba(255, 255, 255, .12);
 }
 .bd-stealth__dot {
-  width: 8px; height: 8px; border-radius: 50%; background: #23C343;
-  box-shadow: 0 0 0 4px rgba(35, 195, 67, .22);
+  width: 8px; height: 8px; border-radius: 50%; background: var(--bd-success);
+  box-shadow: 0 0 0 4px rgba(0, 180, 42, .22);
   animation: bd-pulse 2s ease-in-out infinite;
 }
 @keyframes bd-pulse {
-  0%, 100% { box-shadow: 0 0 0 4px rgba(35, 195, 67, .22); }
-  50% { box-shadow: 0 0 0 7px rgba(35, 195, 67, .08); }
+  0%, 100% { box-shadow: 0 0 0 4px rgba(0, 180, 42, .22); }
+  50% { box-shadow: 0 0 0 7px rgba(0, 180, 42, .08); }
 }
 
 /* ───── 右侧登录区 ───── */
@@ -753,83 +759,77 @@ function backToLogin() {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 48px 32px;
+  padding: 48px var(--bd-sp-7);
   background: var(--bd-fill-1);
 }
-.bd-card {
+.bd-lcard {
   width: 100%;
   max-width: 392px;
-  background: #fff;
+  background: var(--bd-bg-1);
   border: 1px solid var(--bd-border);
-  border-radius: var(--bd-radius);
-  padding: 38px 40px 30px;
-  box-shadow: 0 8px 40px rgba(20, 31, 74, .06);
+  border-radius: var(--bd-radius-l);
+  padding: var(--bd-sp-8) var(--bd-sp-8) var(--bd-sp-7);
+  box-shadow: var(--bd-shadow-3);
 }
-.bd-card__mark {
-  width: 48px; height: 48px; border-radius: 12px;
+.bd-lcard__mark {
+  width: 48px; height: 48px; border-radius: var(--bd-radius);
   background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d));
   display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 4px 14px rgba(22, 93, 255, .35);
-  margin-bottom: 22px;
+  box-shadow: var(--bd-shadow-primary-h);
+  margin-bottom: var(--bd-sp-5);
 }
-.bd-card__h { font-size: 23px; font-weight: 700; color: var(--bd-t1); margin: 0 0 6px; letter-spacing: .3px; }
-.bd-card__p { font-size: 13px; color: var(--bd-t3); margin: 0 0 24px; }
-.bd-card__p b { color: var(--bd-t2); font-weight: 600; }
+.bd-lcard__h { font-size: 23px; font-weight: 700; color: var(--bd-t1); margin: 0 0 6px; letter-spacing: .3px; line-height: var(--bd-lh-tight); }
+.bd-lcard__p { font-size: var(--bd-fs-md); color: var(--bd-t3); margin: 0 0 var(--bd-sp-6); }
+.bd-lcard__p b { color: var(--bd-t2); font-weight: 600; }
 
-.bd-tip {
-  display: flex; align-items: flex-start; gap: 8px;
-  font-size: 12.5px; line-height: 1.55; padding: 10px 12px; border-radius: var(--bd-radius-s);
-  margin-bottom: 18px;
-}
-.bd-tip :deep(.arco-icon) { font-size: 15px; flex: none; margin-top: 1px; }
-.bd-tip--err { background: var(--bd-tag-red-bg); color: var(--bd-danger); }
-.bd-tip--warn { background: var(--bd-tag-gold-bg); color: var(--bd-warning); }
+/* 提示条在窄卡里的间距（颜色语义由全局 .bd-notice--* 给） */
+.bd-ltip { margin-bottom: 18px; }
 
 /* passkey 提示卡 */
 .bd-pk {
-  display: flex; align-items: center; gap: 13px;
-  padding: 14px 16px; margin-bottom: 18px;
+  display: flex; align-items: center; gap: var(--bd-sp-3);
+  padding: 14px var(--bd-sp-4); margin-bottom: 18px;
   border: 1px solid var(--bd-border); border-radius: var(--bd-radius-s);
   background: var(--bd-fill-1);
 }
 .bd-pk__ic {
-  width: 40px; height: 40px; border-radius: 10px; flex: none;
+  width: 40px; height: 40px; border-radius: var(--bd-radius); flex: none;
   background: var(--bd-tag-blue-bg); color: var(--bd-primary);
   display: flex; align-items: center; justify-content: center; font-size: 21px;
 }
 .bd-pk__t { display: flex; flex-direction: column; line-height: 1.45; min-width: 0; }
-.bd-pk__t b { font-size: 13.5px; font-weight: 600; color: var(--bd-t1); }
-.bd-pk__t i { font-style: normal; font-size: 12px; color: var(--bd-t3); margin-top: 3px; }
+.bd-pk__t b { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); }
+.bd-pk__t i { font-style: normal; font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 3px; }
 
 .bd-submit { margin-top: 6px; font-weight: 600; letter-spacing: 2px; }
 .bd-back { margin-top: 10px; color: var(--bd-t3); }
 .bd-back:hover { color: var(--bd-primary); }
 
 .bd-demo {
-  margin: 22px 0 0; padding-top: 18px; border-top: 1px solid var(--bd-fill-2);
-  font-size: 11.5px; line-height: 1.7; color: var(--bd-t3);
+  margin: var(--bd-sp-5) 0 0; padding-top: 18px; border-top: 1px solid var(--bd-border-2);
+  font-size: var(--bd-fs-xs); line-height: var(--bd-lh-loose); color: var(--bd-t3);
 }
 .bd-demo code {
   background: var(--bd-fill-2); color: var(--bd-t2);
-  padding: 1px 5px; border-radius: 4px; font-size: 11px;
+  padding: 1px 5px; border-radius: var(--bd-radius-xs); font-size: var(--bd-fs-xs);
 }
 
 .bd-getcli { margin: 14px 0 0; text-align: center; }
 .bd-getcli__link {
-  display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px;
-  color: var(--bd-t3); text-decoration: none; transition: color .15s;
+  display: inline-flex; align-items: center; gap: 6px; font-size: var(--bd-fs-sm);
+  color: var(--bd-t3); text-decoration: none; transition: color var(--bd-dur-fast) var(--bd-ease);
 }
 .bd-getcli__link:hover { color: var(--bd-primary); }
 
-.bd-copy { margin-top: 26px; font-size: 12px; color: var(--bd-t4); }
+.bd-copy { margin-top: var(--bd-sp-6); font-size: var(--bd-fs-sm); color: var(--bd-t4); }
 
 @media (max-width: 880px) {
   .bd-brand { display: none; }
 }
 
-.bd-oidc__sep { display: flex; align-items: center; gap: 10px; margin: 18px 0 12px; color: var(--bd-t3); font-size: 12px; }
-.bd-oidc__sep::before, .bd-oidc__sep::after { content: ''; flex: 1; height: 1px; background: var(--bd-line, rgba(0,0,0,.08)); }
-.bd-oidc__btn { margin-bottom: 8px; }
+.bd-oidc__sep { display: flex; align-items: center; gap: 10px; margin: 18px 0 var(--bd-sp-3); color: var(--bd-t3); font-size: var(--bd-fs-sm); }
+.bd-oidc__sep::before, .bd-oidc__sep::after { content: ''; flex: 1; height: 1px; background: var(--bd-border); }
+.bd-oidc__btn { margin-bottom: var(--bd-sp-2); }
 
-.bd-dirkind { margin-left: 8px; font-size: 11px; color: var(--bd-t3); }
+.bd-dirkind { margin-left: var(--bd-sp-2); font-size: var(--bd-fs-xs); color: var(--bd-t3); }
 </style>

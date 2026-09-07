@@ -1,51 +1,40 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">业务告警</div>
-        <div class="bd-page__sub">设备异常 · 授权信息 · 安全事件 —— 每条规则都读一份真实信号</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'red'" bordered>{{ live ? '已连 baidi-control' : '未连控制中心' }}</a-tag>
-        <button class="bd-btn bd-btn--ghost" :disabled="busy" @click="evaluateNow">
-          <icon-play-arrow />立即检测
-        </button>
-        <button class="bd-btn bd-btn--ghost" @click="loadAll"><icon-refresh />刷新</button>
-      </div>
-    </div>
+    <!-- 离线文案「数据未读取」+ 红：本页不提供演示数据（见下方 err 说明），拉不到就什么都不画。 -->
+    <PageHeader title="业务告警" subtitle="设备异常 · 授权信息 · 安全事件 —— 每条规则都读一份真实信号" :live="live" off-text="数据未读取" off-color="red">
+      <button class="bd-btn bd-btn--ghost" :disabled="busy" @click="evaluateNow">
+        <icon-play-arrow />立即检测
+      </button>
+      <button class="bd-btn bd-btn--ghost" @click="loadAll"><icon-refresh />刷新</button>
+    </PageHeader>
 
     <!-- ★不连后端时**不给演示告警**：一页编造的"未处理告警"会让人以为系统正在监控。
          这里如实空着并说明原因，与其余页面的降级演示刻意不同。 -->
-    <div v-if="err" class="bd-warn"><icon-exclamation-circle-fill />{{ err }}</div>
+    <div v-if="err" class="bd-notice bd-notice--danger"><icon-exclamation-circle-fill /><span>{{ err }}</span></div>
 
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'list' }" @click="tab = 'list'">
+    <!-- 真 button 的页签：可 Tab、可回车，读屏报得出「可操作」 -->
+    <div class="bd-tabs" role="tablist">
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'list'" @click="tab = 'list'">
         告警列表
         <span v-if="counts.pending" class="bd-badge">{{ counts.pending }}</span>
-      </span>
-      <span class="bd-tab" :class="{ on: tab === 'rules' }" @click="tab = 'rules'">
+      </button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'rules'" @click="tab = 'rules'">
         告警规则 <em>{{ rules.length }}</em>
-      </span>
+      </button>
     </div>
 
     <!-- ============ 告警列表 ============ -->
     <div v-show="tab === 'list'">
-      <div class="bd-stats">
-        <div class="bd-stat" :class="{ on: status === 'pending' }" @click="setStatus('pending')">
-          <span class="bd-stat__n" style="color: var(--bd-danger)">{{ counts.pending }}</span>
-          <span class="bd-stat__l">未处理</span>
-        </div>
-        <div class="bd-stat" :class="{ on: status === 'handled' }" @click="setStatus('handled')">
-          <span class="bd-stat__n">{{ counts.handled }}</span>
-          <span class="bd-stat__l">已处理</span>
-        </div>
-        <div class="bd-stat" :class="{ on: status === 'ignored' }" @click="setStatus('ignored')">
-          <span class="bd-stat__n" style="color: var(--bd-t3)">{{ counts.ignored }}</span>
-          <span class="bd-stat__l">已忽略</span>
-        </div>
-        <div class="bd-stat bd-stat--note">
-          计数为全局量，不随下方筛选变化
-        </div>
+      <!-- 三个计数是**全局量**（不随下方筛选变化），点一下即按该状态筛选。
+           ★未连接时传 null：StatCard 画「—」而不是一个看起来像"确实 0 条"的 0。 -->
+      <div class="bd-alerts__stats">
+        <StatCard label="未处理" :value="live ? counts.pending : null" tone="danger" clickable
+          :active="status === 'pending'" unknown-text="未连接控制中心，计数不可读" @click="setStatus('pending')" />
+        <StatCard label="已处理" :value="live ? counts.handled : null" clickable
+          :active="status === 'handled'" unknown-text="未连接控制中心，计数不可读" @click="setStatus('handled')" />
+        <StatCard label="已忽略" :value="live ? counts.ignored : null" clickable
+          :active="status === 'ignored'" unknown-text="未连接控制中心，计数不可读" @click="setStatus('ignored')" />
+        <div class="bd-alerts__stats-note">计数为全局量，不随下方筛选变化</div>
       </div>
 
       <div class="bd-tablecard">
@@ -61,8 +50,9 @@
               <a-option value="authz">授权信息</a-option>
               <a-option value="security">安全事件</a-option>
             </a-select>
-            <a-range-picker v-model="range" style="width: 250px" @change="loadAlerts" />
+            <a-range-picker v-model="range" class="bd-alerts__range" @change="loadAlerts" />
           </div>
+          <div class="bd-toolbar__spacer" />
           <!-- ★截断必须可见：列表被后端 AlertListLimit 硬截，而页头那三个计数是全局量。
                不说的话，「未处理 350」会和一张 200 行的表并排显示，第 201 条之后的告警
                在管理台上根本不存在，页面上也没有任何线索。 -->
@@ -74,7 +64,9 @@
           </span>
         </div>
 
-        <table class="bd-table">
+        <!-- 首屏骨架：第一次 loadAll() 回来之前不画表头下面的空白 -->
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="6" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th style="width: 92px">严重度</th>
@@ -82,15 +74,19 @@
               <th>告警</th>
               <th style="width: 160px">触发时间</th>
               <th style="width: 132px">状态</th>
-              <th class="r" style="width: 130px">操作</th>
+              <th class="r" style="width: 150px">操作</th>
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!alerts.length">
-              <td colspan="6" class="bd-tcenter">{{ live ? '当前筛选下没有告警' : '未连接控制中心，无法读取告警' }}</td>
+            <!-- 空态两种处境分开画：连着但筛没了（没有待办是好事）/ 根本没读到（这不是「没有告警」） -->
+            <tr v-if="!alerts.length" class="bd-table__emptyrow">
+              <td colspan="6">
+                <EmptyState v-if="live" size="md" tone="ok" title="当前筛选下没有告警" />
+                <EmptyState v-else size="md" tone="danger" title="未连接控制中心，无法读取告警" />
+              </td>
             </tr>
             <tr v-for="a in alerts" :key="a.id">
-              <td><span class="bd-pill" :class="'sev-' + a.severity">{{ sevZh[a.severity] }}</span></td>
+              <td><span class="bd-tg" :class="`bd-tg--${sevTg[a.severity] || 'grey'}`">{{ sevZh[a.severity] }}</span></td>
               <td>{{ catZh[a.category] || a.category }}</td>
               <td>
                 <div class="bd-al__t">{{ a.title }}</div>
@@ -99,15 +95,15 @@
               </td>
               <td class="bd-mono">{{ fmtTs(a.triggeredAt) }}</td>
               <td>
-                <span class="bd-pill" :class="'st-' + a.status">{{ statusZh[a.status] }}</span>
+                <span class="bd-tg" :class="`bd-tg--${stTg[a.status] || 'grey'}`">{{ statusZh[a.status] }}</span>
                 <div v-if="a.handledBy" class="bd-al__by">{{ a.handledBy }} · {{ fmtTs(a.handledAt || 0) }}</div>
               </td>
               <td class="r">
-                <template v-if="a.status === 'pending'">
-                  <span class="bd-link" @click="decide(a, 'handle')">标记已处理</span>
-                  <span class="bd-link bd-link--grey" style="margin-left: 10px" @click="decide(a, 'ignore')">忽略</span>
-                </template>
-                <span v-else class="bd-link bd-link--grey">—</span>
+                <span v-if="a.status === 'pending'" class="bd-acts">
+                  <button type="button" class="bd-link" :disabled="busy" @click="decide(a, 'handle')">标记已处理</button>
+                  <button type="button" class="bd-link bd-link--grey" :disabled="busy" @click="decide(a, 'ignore')">忽略</button>
+                </span>
+                <span v-else class="bd-al__none">—</span>
               </td>
             </tr>
           </tbody>
@@ -117,7 +113,7 @@
 
     <!-- ============ 告警规则 ============ -->
     <div v-show="tab === 'rules'">
-      <div class="bd-sep__note">
+      <div class="bd-notice bd-notice--plain">
         <icon-safe />
         <span>
           每条规则读的都是<b>真实存在</b>的信号（「信号来源」写的就是取数点）。
@@ -125,14 +121,15 @@
           不冷却的话每轮评估刷一条，告警页当场不可用。
         </span>
       </div>
-      <div v-if="notify" class="bd-sep__note" :class="{ 'bd-sep__note--warn': !notify.wired }">
+      <div v-if="notify" class="bd-notice" :class="{ 'bd-notice--warn': !notify.wired }">
         <icon-notification />
         <span v-if="notify.wired">{{ notify.note }}（可用通道 {{ notify.channels.filter(c => c.enabled).length }} 条）</span>
         <span v-else>{{ notify.reason }}</span>
       </div>
 
       <div class="bd-tablecard">
-        <table class="bd-table">
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="6" :cols="7" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th>规则</th>
@@ -145,7 +142,9 @@
             </tr>
           </thead>
           <tbody>
-            <tr v-if="!rules.length"><td colspan="7" class="bd-tcenter">未读取到告警规则</td></tr>
+            <tr v-if="!rules.length" class="bd-table__emptyrow">
+              <td colspan="7"><EmptyState size="md" tone="danger" title="未读取到告警规则" /></td>
+            </tr>
             <tr v-for="r in rules" :key="r.id">
               <td>
                 <div class="bd-al__t">{{ r.name }}</div>
@@ -173,7 +172,7 @@
               </td>
               <td>
                 <template v-if="sourceOf(r.kind)">
-                  <span class="bd-pill" :class="sourceOf(r.kind)!.ready ? 'st-handled' : 'st-pending'">
+                  <span class="bd-tg" :class="sourceOf(r.kind)!.ready ? 'bd-tg--green' : 'bd-tg--gold'">
                     {{ sourceOf(r.kind)!.ready ? '数据就绪' : '等待数据面上报' }}
                   </span>
                   <div v-if="!sourceOf(r.kind)!.ready" class="bd-al__d">{{ sourceOf(r.kind)!.reason }}</div>
@@ -214,11 +213,21 @@ import {
   type Alert, type AlertCounts, type AlertsResp, type AlertRule, type AlertRulesResp,
   type AlertKindSpec, type AlertDataSource, type AlertNotifyOption, failReason, failStatus } from '@/lib/api';
 import { refreshBadges } from '@/lib/badges';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const tab = ref<'list' | 'rules'>('list');
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：loadAlerts() 的 try 尾（true）与 catch（false）；loadRules() 不参与判定（规则读不到有页内失败态）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
 const busy = ref(false);
 const err = ref('');
+/** 首屏是否已完成第一次加载：只决定骨架屏何时让位（成功 / 失败都算完成），不改任何数据流。 */
+const loaded = ref(false);
 
 const alerts = ref<Alert[]>([]);
 const counts = ref<AlertCounts>({ pending: 0, ignored: 0, handled: 0 });
@@ -235,6 +244,9 @@ const range = ref<string[]>([]);
 const sevZh: Record<string, string> = { info: '提示', warning: '警告', critical: '严重' };
 const statusZh: Record<string, string> = { pending: '未处理', ignored: '已忽略', handled: '已处理' };
 const catZh: Record<string, string> = { device: '设备异常', authz: '授权信息', security: '安全事件' };
+/* 标签语义色只走 .bd-tg--* 浅色对（严重度 / 状态），不再页内用 color-mix 自造一套。 */
+const sevTg: Record<string, string> = { critical: 'red', warning: 'gold', info: 'blue' };
+const stTg: Record<string, string> = { pending: 'gold', handled: 'green', ignored: 'grey' };
 
 function specOf(kind: string): AlertKindSpec | undefined { return kinds.value.find(k => k.kind === kind); }
 function sourceOf(kind: string): AlertDataSource | undefined { return sources.value.find(s => s.kind === kind); }
@@ -297,7 +309,9 @@ async function loadRules() {
   }
 }
 
-async function loadAll() { await Promise.all([loadAlerts(), loadRules()]); }
+async function loadAll() {
+  try { await Promise.all([loadAlerts(), loadRules()]); } finally { loaded.value = true; }
+}
 
 async function decide(a: Alert, action: 'handle' | 'ignore') {
   busy.value = true;
@@ -309,7 +323,7 @@ async function decide(a: Alert, action: 'handle' | 'ignore') {
   } catch (e) {
     if (failStatus(e) === 409) Message.error('该告警已被处置，请刷新');
     else if (failStatus(e) === 403) Message.error(failReason(e));
-    else Message.error('处置失败，请检查后端连接');
+    else Message.error(failReason(e));
   } finally {
     busy.value = false;
   }
@@ -383,42 +397,30 @@ onMounted(loadAll);
 </script>
 
 <style scoped>
-.bd-head__right { margin-left: auto; display: flex; align-items: center; gap: 12px; }
+/* 本页独有的布局。页头 / KPI 卡 / 空态 / 骨架 / 提示条 / 标签 / 操作列都在共享件与 app.css 里。 */
 
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
-.bd-tab em { font-style: normal; font-size: 11px; color: var(--bd-t3); }
-.bd-badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; background: var(--bd-danger); color: #fff; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
+/* 三个全局计数 + 一句口径说明：计数卡是筛选入口，选中态由 StatCard 的 :active 承接 */
+.bd-alerts__stats { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)) 1.4fr; gap: var(--bd-sp-4); margin-bottom: var(--bd-sp-4); align-items: stretch; }
+.bd-alerts__stats-note { display: flex; align-items: center; font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); }
+@media (max-width: 1320px) {
+  .bd-alerts__stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .bd-alerts__stats-note { grid-column: 1 / -1; }
+}
 
-.bd-stats { display: flex; gap: 12px; margin-bottom: 14px; }
-.bd-stat { min-width: 108px; padding: 12px 16px; border-radius: 10px; background: var(--bd-fill-1); cursor: pointer; border: 1px solid transparent; }
-.bd-stat:hover { background: var(--bd-fill-2); }
-.bd-stat.on { border-color: var(--bd-primary-b); background: var(--bd-primary-1); }
-.bd-stat__n { display: block; font-size: 22px; font-weight: 700; color: var(--bd-t1); line-height: 1.2; }
-.bd-stat__l { font-size: 12px; color: var(--bd-t3); }
-.bd-stat--note { display: flex; align-items: center; font-size: 12px; color: var(--bd-t3); background: transparent; cursor: default; }
-.bd-stat--note:hover { background: transparent; }
-
-.bd-filters { display: flex; gap: 10px; align-items: center; }
+.bd-filters { display: flex; gap: var(--bd-sp-2); align-items: center; flex-wrap: wrap; }
+/* ★必须 :deep()：`class` 会随属性透传落到 Arco RangePicker 的根 div 上（实测 class 里确有
+   bd-alerts__range），但 scoped 的 data-v-* **没有**跟着落到那个节点上——它被包在 Trigger 里，
+   不是本组件渲染出来的静态根。于是 `.bd-alerts__range[data-v-…]` 恒不命中：类名在、规则在、
+   浏览器不报错，日期框却从改造前 inline style 的 250px 悄悄回弹到自然宽 376px，把右侧计数挤走。
+   1280×800 实测：改前 offsetWidth=376 / matches=false，改后 250 / matches=true。 */
+:deep(.bd-alerts__range) { width: 250px; }
 .bd-toolbar__c--warn { color: var(--bd-warning); font-weight: 500; }
-.bd-toolbar__c { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
 
-.bd-al__t { font-size: 13.5px; font-weight: 600; color: var(--bd-t1); }
-.bd-al__d { font-size: 12px; color: var(--bd-t2); margin-top: 3px; line-height: 1.55; }
-.bd-al__o { font-size: 11px; color: var(--bd-t3); margin-top: 3px; }
-.bd-al__by { font-size: 11px; color: var(--bd-t3); margin-top: 4px; }
+.bd-al__t { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); }
+.bd-al__d { font-size: var(--bd-fs-sm); color: var(--bd-t2); margin-top: var(--bd-sp-1); line-height: var(--bd-lh); }
+.bd-al__o { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); }
+.bd-al__by { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); }
+.bd-al__none { color: var(--bd-t4); }
 
-.bd-th { display: flex; align-items: center; justify-content: space-between; gap: 8px; font-size: 12px; color: var(--bd-t2); margin-bottom: 4px; }
-
-.bd-pill { display: inline-flex; align-items: center; padding: 2px 9px; border-radius: 10px; font-size: 11.5px; font-weight: 500; }
-.bd-pill.sev-critical { color: var(--bd-danger); background: color-mix(in srgb, var(--bd-danger) 12%, #fff); }
-.bd-pill.sev-warning { color: var(--bd-warning); background: color-mix(in srgb, var(--bd-warning) 12%, #fff); }
-.bd-pill.sev-info { color: var(--bd-primary); background: var(--bd-primary-1); }
-.bd-pill.st-pending { color: var(--bd-warning); background: color-mix(in srgb, var(--bd-warning) 12%, #fff); }
-.bd-pill.st-handled { color: var(--bd-success); background: color-mix(in srgb, var(--bd-success) 12%, #fff); }
-.bd-pill.st-ignored { color: var(--bd-t3); background: var(--bd-fill-2); }
-
-.bd-sep__note--warn { color: var(--bd-warning); }
+.bd-th { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-2); font-size: var(--bd-fs-sm); color: var(--bd-t2); margin-bottom: var(--bd-sp-1); }
 </style>

@@ -1,75 +1,317 @@
-/* 白帝控制台 · 基础版式（对齐设计稿） */
+/* 白帝控制台 · 基础版式（对齐设计稿）
+ *
+ * 这份文件是全站共享的表现层：页面骨架 / 按钮三态 / 表格密度 / 提示条 / 表单节奏 / 焦点环。
+ * 页面 <style scoped> 里只写**本页独有**的布局；凡是这里有的类，不要在页里再抄一份。
+ * 变量全部来自 tokens.css，本文件不出现裸像素的阴影与圆角。 */
 * { box-sizing: border-box; }
 html, body, #app { height: 100%; margin: 0; }
 body {
   background: var(--bd-fill-1);
   color: var(--bd-t1);
   font-family: -apple-system, "PingFang SC", "Microsoft YaHei", "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+  font-size: var(--bd-fs-md);
+  line-height: var(--bd-lh);
   -webkit-font-smoothing: antialiased;
   font-variant-numeric: tabular-nums;
 }
 ::-webkit-scrollbar { width: 8px; height: 8px; }
-::-webkit-scrollbar-thumb { background: var(--bd-t4); border-radius: 4px; }
+::-webkit-scrollbar-thumb { background: var(--bd-t4); border-radius: var(--bd-radius-xs); }
+::-webkit-scrollbar-thumb:hover { background: var(--bd-t3); }
 ::-webkit-scrollbar-track { background: transparent; }
 
-/* 页面骨架 */
-.bd-page { padding: 22px 26px 40px; }
-.bd-page__head { display: flex; align-items: flex-start; gap: 16px; margin-bottom: 18px; }
-.bd-page__title { font-size: 20px; font-weight: 700; letter-spacing: .3px; color: var(--bd-t1); line-height: 1.3; }
-.bd-page__sub { margin-top: 4px; font-size: 13px; color: var(--bd-t3); }
+/* ── 焦点可见：键盘用户看得见自己在哪。
+   只在 :focus-visible 上画（鼠标点击不出环），Arco 自己的输入框内层 <input> 例外——
+   它的焦点态由外层 wrapper 的边框表达，再套一环会出现双框。 */
+:where(a, button, [role="button"], [tabindex]:not([tabindex="-1"]), summary, input, select, textarea):focus-visible {
+  outline: var(--bd-focus-outline);
+  outline-offset: 2px;
+  border-radius: var(--bd-radius-xs);
+}
+.arco-input-wrapper input:focus-visible,
+.arco-select-view input:focus-visible,
+.arco-textarea:focus-visible,
+.arco-input-number input:focus-visible { outline: none; }
+.arco-btn:focus-visible { outline: none; box-shadow: var(--bd-focus-ring); }
 
-/* 主按钮（设计稿主 CTA） */
+/* 用户开了「减少动态效果」时，所有过渡都缩成瞬时 */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { transition-duration: 1ms !important; animation-duration: 1ms !important; }
+}
+
+/* ── 页面骨架 ── */
+.bd-page { padding: var(--bd-page-y) var(--bd-page-x) var(--bd-sp-8); max-width: var(--bd-page-max); }
+/* ★手写页头的四条规则（.bd-page__head / __title / __sub / .bd-head__right）已删：
+   最后一个消费方（Auth.vue）迁到 <PageHeader> 之后它们零引用，而 CSS 的死类没有任何守卫
+   能拦——留着就是第二套页头定义，下一个人照着 app.css 手写一遍页头，构建期照绿、
+   连接态三态与离线文案又各写一份。页头只有 components/PageHeader.vue 一处实现。
+   （PageHeader 文件头注释与 DESIGN.md「不要再用」那一列仍写着这几个类名：那是**解释**
+   ——说明它替代了什么形态——不是消费方，别当引用一起删掉。） */
+/* 区块标题：卡片组之间的二级标题。★此前只在三个页面各自 scoped 定义，Overview 用了却没有定义，
+   渲染成一行与正文同大的裸字。 */
+.bd-section-title {
+  font-size: 15px; font-weight: 600; color: var(--bd-t1); line-height: var(--bd-lh-tight);
+  margin: var(--bd-sp-6) 0 var(--bd-sp-3);
+}
+.bd-section-title:first-child { margin-top: 0; }
+.bd-section-title__sub { margin-left: var(--bd-sp-2); font-size: var(--bd-fs-sm); font-weight: 400; color: var(--bd-t3); }
+
+/* ── 按钮三态（hover / active / focus）+ 禁用 ──
+   ★禁用态由 [disabled] 统一给：此前各页靠 :style="{ opacity: … }" 手写，
+   写漏的按钮看起来能点、点了没反应。
+   ★禁用态**不写 pointer-events: none**。那条声明会让按钮退出命中测试：鼠标停在它上面时
+   :hover 落到父级元素身上，浏览器不会为它弹原生 title，光标也不会变成 not-allowed。
+   而门户磁贴「请先修复终端」「请联系管理员」、升级页「校验」的**原因只写在 title 里**
+   （PortalApps.vue / Upgrade.vue）——加了这条，那句解释就等于被删掉，页面上却看不出少了什么。
+   禁用的 <button> 本就不派发 click，不需要 pointer-events 帮忙；hover / active 的视觉反馈
+   改由 :not([disabled]):not(.is-disabled) 收口，禁用态悬停时外观保持不动。
+   （修饰类 --ghost / --danger 的 hover / active 也要一并收口：它们此前与基类的 hover 同优先级、
+   靠源码顺序在后而胜出；基类加了 :not() 抬高优先级之后，不跟着抬就会被基类的主色 hover 盖掉。） */
 .bd-btn {
-  height: 36px; padding: 0 16px; background: var(--bd-primary); border: none; border-radius: 7px;
-  color: #fff; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 7px;
-  cursor: pointer; box-shadow: 0 2px 6px rgba(22, 93, 255, .3); transition: background .15s;
+  height: var(--bd-ctl-h-l); padding: 0 var(--bd-sp-4); background: var(--bd-primary); border: 1px solid transparent;
+  border-radius: var(--bd-radius-s); color: var(--bd-on-color); font-size: var(--bd-fs-md); font-weight: 500; line-height: 1;
+  display: inline-flex; align-items: center; justify-content: center; gap: 7px; white-space: nowrap;
+  cursor: pointer; box-shadow: var(--bd-shadow-primary);
+  transition: background var(--bd-dur-fast) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease),
+              border-color var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease),
+              transform var(--bd-dur-fast) var(--bd-ease);
 }
-.bd-btn:hover { background: var(--bd-primary-h); }
-.bd-btn--ghost {
-  background: #fff; color: var(--bd-t2); border: 1px solid var(--bd-border); box-shadow: none;
+.bd-btn:not([disabled]):not(.is-disabled):hover { background: var(--bd-primary-h); box-shadow: var(--bd-shadow-primary-h); }
+.bd-btn:not([disabled]):not(.is-disabled):active { background: var(--bd-primary-a); box-shadow: none; transform: translateY(1px); }
+.bd-btn:focus-visible { outline: none; box-shadow: var(--bd-focus-ring); }
+.bd-btn[disabled], .bd-btn.is-disabled {
+  opacity: .5; cursor: not-allowed; box-shadow: none; transform: none;
 }
-.bd-btn--ghost:hover { border-color: var(--bd-primary); color: var(--bd-primary); background: #fff; }
+.bd-btn--ghost { background: var(--bd-bg-1); color: var(--bd-t2); border-color: var(--bd-border); box-shadow: none; }
+.bd-btn--ghost:not([disabled]):not(.is-disabled):hover { border-color: var(--bd-primary); color: var(--bd-primary); background: var(--bd-bg-1); box-shadow: none; }
+.bd-btn--ghost:not([disabled]):not(.is-disabled):active { background: var(--bd-primary-1); }
+.bd-btn--danger { background: var(--bd-danger); box-shadow: none; }
+.bd-btn--danger:not([disabled]):not(.is-disabled):hover { background: var(--bd-danger-h); box-shadow: none; }
+.bd-btn--danger:not([disabled]):not(.is-disabled):active { background: var(--bd-danger-a); }
+/* 幽灵 + 危险叠加（Jit / Devices 的「驳回」）：白底、红边红字；hover 浅红底；active 再深一档。
+   ★两个修饰类各自单写、同优先级时，靠源码顺序合成出来的是「danger 的红底 + ghost 的灰字灰边」——
+   红底灰字灰边，既不像次要操作也不像危险操作（改前 CDP 实测 bg #F53F3F / color #4E5969 / border #E5E6EB）。
+   叠加态要比两个单类高一级；hover / active 也要压过 .bd-btn--danger 那两条四级选择器，否则悬停一下又变回实心红。
+   禁用照基类（opacity .5、cursor not-allowed），这里不另写。 */
+.bd-btn--ghost.bd-btn--danger { background: var(--bd-bg-1); color: var(--bd-danger); border-color: var(--bd-danger); }
+.bd-btn--ghost.bd-btn--danger:not([disabled]):not(.is-disabled):hover { background: var(--bd-danger-1); color: var(--bd-danger); border-color: var(--bd-danger); }
+.bd-btn--ghost.bd-btn--danger:not([disabled]):not(.is-disabled):active { background: var(--bd-danger-b); color: var(--bd-danger-t); border-color: var(--bd-danger-t); }
+.bd-btn--sm { height: var(--bd-ctl-h-s); padding: 0 var(--bd-sp-3); font-size: var(--bd-fs-sm); gap: 5px; }
+.bd-btn > svg { font-size: 14px; }
 
-/* 卡片 */
-.bd-card { background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); }
-
-/* 表格卡（对齐设计稿 在线用户/应用管理 表格） */
-.bd-tablecard { background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); overflow: hidden; }
-.bd-toolbar { display: flex; align-items: center; gap: 12px; padding: 14px 18px; border-bottom: 1px solid var(--bd-fill-2); }
-table.bd-table { width: 100%; border-collapse: collapse; }
-.bd-table thead tr { background: var(--bd-fill-1); }
-.bd-table th { padding: 11px 12px; text-align: left; font-size: 12px; font-weight: 600; color: var(--bd-t3); white-space: nowrap; }
-.bd-table th:first-child { padding-left: 18px; }
-.bd-table th.r, .bd-table td.r { text-align: right; }
-.bd-table th:last-child { padding-right: 18px; }
-.bd-table td { padding: 13px 12px; font-size: 12.5px; color: var(--bd-t2); border-top: 1px solid var(--bd-fill-2); }
-.bd-table td:first-child { padding-left: 18px; }
-.bd-table td:last-child { padding-right: 18px; }
-.bd-table tbody tr { transition: background .12s; }
-.bd-table tbody tr:hover { background: var(--bd-fill-1); }
-.bd-link { color: var(--bd-primary); cursor: pointer; font-weight: 500; }
-.bd-link:hover { text-decoration: underline; }
+/* 链接样式的 <button>：外观沿用 .bd-link，但可聚焦、可回车触发、有禁用态。
+   （原本只在 Apps.vue 里 scoped 定义，别的页要用得再抄一份——提到全局。） */
+.bd-link { color: var(--bd-primary); cursor: pointer; font-weight: 500; text-decoration: none; transition: color var(--bd-dur-fast) var(--bd-ease); }
+.bd-link:hover { text-decoration: underline; text-underline-offset: 2px; }
 .bd-link--danger { color: var(--bd-danger); }
 .bd-link--grey { color: var(--bd-t2); }
-.bd-mono { font-family: ui-monospace, monospace; }
-.bd-avatar { width: 28px; height: 28px; border-radius: 50%; color: #fff; font-size: 12px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex: none; }
-.bd-cellname { display: flex; align-items: center; gap: 9px; cursor: pointer; }
-.bd-cellname b { font-size: 13px; font-weight: 500; color: var(--bd-primary); display: block; }
-.bd-cellname i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
-.bd-tg { font-size: 11.5px; padding: 2px 8px; border-radius: 4px; font-weight: 500; display: inline-block; white-space: nowrap; }
-.bd-st { display: inline-flex; align-items: center; gap: 6px; font-size: 12.5px; }
+button.bd-link { border: none; background: transparent; padding: 0; font: inherit; line-height: inherit; }
+button.bd-link[disabled] { color: var(--bd-t4); cursor: not-allowed; text-decoration: none; }
+button.bd-link[disabled]:hover { text-decoration: none; }
+/* 表格操作列：多个链接按钮之间的间距统一，别再写 style="margin-left: 12px" */
+.bd-acts { display: inline-flex; align-items: center; gap: var(--bd-sp-3); white-space: nowrap; }
+
+/* ── 分段式页签（tabs）──
+   真 <button>：可 Tab、可回车、读屏报得出「可操作」。选中态**只认 aria-selected="true"**——
+   无障碍属性就是选中态的唯一真相，模板里不再另写 .on / .is-on 一类的类
+   （两套并存时漏掉一处就是「读屏说选中了、眼睛看不出」或反过来）。焦点环走全局 :focus-visible。
+   ★此前 11 个页面各 scoped 一份同款（em 字号 / 间距 / 是否 inline-flex 三处各有出入，Auth 还是 <span>），提到全局。
+   放进 PageHeader #below 时加 .bd-tabs--flush（页头自带下间距，再叠一层会多出 16px）。 */
+.bd-tabs { display: flex; flex-wrap: wrap; gap: var(--bd-sp-1); margin-bottom: var(--bd-sp-4); }
+.bd-tabs--flush { margin-bottom: 0; }
+.bd-tab {
+  display: inline-flex; align-items: center; gap: 6px; border: none; background: transparent; font: inherit;
+  font-size: var(--bd-fs-md); color: var(--bd-t2); padding: 7px 14px; border-radius: var(--bd-radius-s); cursor: pointer;
+  line-height: var(--bd-lh); white-space: nowrap;
+  transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease);
+}
+.bd-tab:hover { background: var(--bd-fill-2); }
+.bd-tab[aria-selected="true"] { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
+.bd-tab > svg { font-size: 14px; }
+/* 页签里的条目计数（灰小字）与待办计数（红色小圆标）：Devices / Jit / Alerts 三页同款 */
+.bd-tab em { font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-tab[aria-selected="true"] em { color: var(--bd-primary); }
+.bd-badge {
+  min-width: 16px; height: 16px; padding: 0 5px; border-radius: var(--bd-radius-pill); background: var(--bd-danger); color: var(--bd-on-color);
+  font-size: var(--bd-fs-xs); font-weight: 600; display: inline-flex; align-items: center; justify-content: center; line-height: 1;
+}
+
+/* ── 卡片 ── */
+.bd-card {
+  background: var(--bd-bg-1); border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
+  box-shadow: var(--bd-shadow-1);
+  transition: box-shadow var(--bd-dur-base) var(--bd-ease), border-color var(--bd-dur-base) var(--bd-ease);
+}
+.bd-card--pad { padding: var(--bd-sp-5); }
+.bd-card--hover:hover { box-shadow: var(--bd-shadow-2); border-color: var(--bd-primary-b); }
+/* 卡片头 / 体：替代 a-card 的 title 插槽，字号与内边距全站一致 */
+.bd-card__h {
+  display: flex; align-items: center; gap: var(--bd-sp-2); padding: var(--bd-sp-4) var(--bd-sp-5);
+  border-bottom: 1px solid var(--bd-border-2); font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1);
+}
+.bd-card__h-sub { font-size: var(--bd-fs-sm); font-weight: 400; color: var(--bd-t3); }
+.bd-card__h-right { margin-left: auto; display: flex; align-items: center; gap: var(--bd-sp-2); font-weight: 400; }
+.bd-card__b { padding: var(--bd-sp-4) var(--bd-sp-5); }
+
+/* ── 表格卡（对齐设计稿 在线用户/应用管理 表格） ──
+   overflow: clip 而不是 hidden：hidden 会把表格卡变成滚动容器，thead 的 sticky 就粘在卡上
+   而不是粘在页面视口上，等于没粘。 */
+.bd-tablecard {
+  background: var(--bd-bg-1); border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
+  box-shadow: var(--bd-shadow-1); overflow: clip;
+}
+.bd-toolbar {
+  display: flex; align-items: center; gap: var(--bd-sp-3); padding: var(--bd-sp-3) var(--bd-sp-5);
+  border-bottom: 1px solid var(--bd-border-2); min-height: 56px; flex-wrap: wrap;
+}
+.bd-toolbar__c { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-toolbar__spacer { flex: 1; }
+table.bd-table { width: 100%; border-collapse: separate; border-spacing: 0; }
+.bd-table thead th {
+  position: sticky; top: 0; z-index: var(--bd-z-sticky); background: var(--bd-fill-1);
+  padding: 10px var(--bd-sp-3); text-align: left; font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t3);
+  white-space: nowrap; border-bottom: 1px solid var(--bd-border-2); line-height: var(--bd-lh);
+}
+.bd-table th:first-child, .bd-table td:first-child { padding-left: var(--bd-sp-5); }
+.bd-table th:last-child, .bd-table td:last-child { padding-right: var(--bd-sp-5); }
+.bd-table th.r, .bd-table td.r { text-align: right; }
+.bd-table th.c, .bd-table td.c { text-align: center; }
+.bd-table td {
+  padding: var(--bd-row-y) var(--bd-sp-3); font-size: var(--bd-fs-md); color: var(--bd-t2); line-height: var(--bd-lh);
+  border-bottom: 1px solid var(--bd-border-2); vertical-align: middle;
+}
+.bd-table tbody tr:last-child td { border-bottom: none; }
+.bd-table tbody tr { transition: background var(--bd-dur-fast) var(--bd-ease); }
+.bd-table tbody tr:hover td { background: var(--bd-fill-1); }
+/* 斑马纹是可选项（长表 / 无行内操作时开）：.bd-table--zebra
+   偶数行底取 --bd-fill-1（#F7F8FA）：此前是裸值 #FAFBFC，与 fill-1 逐通道差 ≤3、与 fill-2 差 ≥7，
+   fill-1 是最近的一档而非像素相等；hover 仍是更深一档的 fill-2，斑马纹与悬停行分得开。 */
+.bd-table--zebra tbody tr:nth-child(even) td { background: var(--bd-fill-1); }
+.bd-table--zebra tbody tr:hover td { background: var(--bd-fill-2); }
+/* 紧凑密度：数据密集的审计 / 会话表用 */
+.bd-table--dense td { padding: 8px var(--bd-sp-3); font-size: var(--bd-fs-sm); }
+.bd-table--dense thead th { padding: 8px var(--bd-sp-3); }
+/* 表格里承载空态的整行：让 EmptyState 组件在 <td colspan> 里居中，不带 hover 底 */
+.bd-table tr.bd-table__emptyrow:hover td { background: transparent; }
+.bd-table__emptyrow td { padding: 0 !important; }
+
+.bd-mono { font-family: var(--bd-font-mono); }
+.bd-avatar { width: 28px; height: 28px; border-radius: 50%; color: var(--bd-on-color); font-size: var(--bd-fs-sm); font-weight: 600; display: inline-flex; align-items: center; justify-content: center; flex: none; }
+.bd-cellname { display: flex; align-items: center; gap: 9px; cursor: pointer; min-width: 0; }
+.bd-cellname b { font-size: var(--bd-fs-md); font-weight: 500; color: var(--bd-primary); display: block; line-height: var(--bd-lh-tight); }
+.bd-cellname i { font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); display: block; margin-top: 2px; }
+
+/* 标签：语义变体只走 --bd-* 浅色对，不许 inline 写十六进制 */
+.bd-tg { font-size: var(--bd-fs-xs); padding: 2px 8px; border-radius: var(--bd-radius-xs); font-weight: 500; display: inline-block; white-space: nowrap; line-height: 1.5; }
+.bd-tg--blue   { color: var(--bd-primary);   background: var(--bd-tag-blue-bg); }
+.bd-tg--green  { color: var(--bd-success-t); background: var(--bd-success-1); }
+.bd-tg--red    { color: var(--bd-danger-t);  background: var(--bd-danger-1); }
+.bd-tg--gold   { color: var(--bd-warning-t); background: var(--bd-warning-1); }
+.bd-tg--purple { color: var(--bd-purple);    background: var(--bd-tag-purple-bg); }
+.bd-tg--grey   { color: var(--bd-t3);        background: var(--bd-fill-2); }
+
+/* 状态点 + 文字 */
+.bd-st { display: inline-flex; align-items: center; gap: 6px; font-size: var(--bd-fs-md); }
 .bd-st .d { width: 7px; height: 7px; border-radius: 50%; flex: none; }
-.bd-pager { display: flex; align-items: center; padding: 13px 18px; border-top: 1px solid var(--bd-fill-2); font-size: 12.5px; color: var(--bd-t3); }
+.bd-st--ok .d { background: var(--bd-success); }
+.bd-st--warn .d { background: var(--bd-warning); }
+.bd-st--bad .d { background: var(--bd-danger); }
+.bd-st--off .d { background: var(--bd-t4); }
+
+.bd-pager { display: flex; align-items: center; padding: var(--bd-sp-3) var(--bd-sp-5); border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 /* 分页按钮。禁用态（.off）必须看得出来且点不动——「下一页」在最后一页仍可点、
    点了没反应，会让人以为是页面卡了。 */
-.bd-pgbtn { cursor: pointer; color: var(--bd-primary); padding: 2px 8px; border-radius: 4px; user-select: none; }
+.bd-pgbtn { cursor: pointer; color: var(--bd-primary); padding: 2px 8px; border-radius: var(--bd-radius-xs); user-select: none; transition: background var(--bd-dur-fast) var(--bd-ease); }
 .bd-pgbtn:hover { background: var(--bd-fill-1); }
 .bd-pgbtn.off { color: var(--bd-t4); cursor: not-allowed; pointer-events: none; }
 .bd-pgnum { padding: 0 6px; color: var(--bd-t2); }
-.bd-head__right { margin-left: auto; display: flex; align-items: center; gap: 10px; }
-.bd-searchbox { display: flex; align-items: center; height: 32px; background: var(--bd-fill-1); border: 1px solid var(--bd-border); border-radius: 6px; padding: 0 10px; gap: 8px; color: var(--bd-t3); font-size: 13px; }
+
+.bd-searchbox {
+  display: flex; align-items: center; height: var(--bd-ctl-h); background: var(--bd-fill-1); border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-s); padding: 0 10px; gap: var(--bd-sp-2); color: var(--bd-t3); font-size: var(--bd-fs-md);
+  transition: border-color var(--bd-dur-fast) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease), background var(--bd-dur-fast) var(--bd-ease);
+}
+.bd-searchbox:hover { border-color: var(--bd-t4); }
+.bd-searchbox:focus-within { border-color: var(--bd-primary); background: var(--bd-bg-1); box-shadow: var(--bd-focus-ring); }
 /* 搜索框里的真输入。★这条以前只存在于 Objects/Ipsec/Online/System 四页的 scoped 样式里，
    于是 Users/Resources/Apps 三页的「搜索框」是一个 div + 图标 + 一句静态中文——
    长得与能用的那四个一模一样，点进去没有光标。提到全局，新增搜索框不必再复制第五份。 */
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
+.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: var(--bd-fs-md); color: var(--bd-t1); }
 .bd-searchbox__in::placeholder { color: var(--bd-t3); }
+.bd-searchbox__in:focus-visible { outline: none; }
+
+/* ── 提示条（notice）：四种语义各一套底/边/字，替代各页散落的 scopebar / sync / unk / wz__warn。
+   规则：info = 口径说明 / 指路；warn = 需要注意但不阻断；danger = 出错、拒绝、数据缺失；success = 确认完成。
+   ★只有语义色随 tone 变，排版三者一致——读者靠颜色分轻重，靠版式知道"这是同一类东西"。 */
+.bd-notice {
+  display: flex; align-items: flex-start; gap: var(--bd-sp-2); padding: 10px var(--bd-sp-3); margin: 0 0 var(--bd-sp-4);
+  border-radius: var(--bd-radius-s); border: 1px solid var(--bd-info-b); background: var(--bd-info-1);
+  color: var(--bd-t2); font-size: var(--bd-fs-sm); line-height: var(--bd-lh-loose);
+}
+.bd-notice > svg, .bd-notice__ic { flex: none; margin-top: 3px; font-size: 15px; color: var(--bd-primary); }
+.bd-notice b { color: var(--bd-t1); font-weight: 600; }
+.bd-notice code { font-family: var(--bd-font-mono); background: rgba(29, 33, 41, .06); padding: 0 5px; border-radius: 3px; }
+.bd-notice--warn { border-color: var(--bd-warning-b); background: var(--bd-warning-1); }
+.bd-notice--warn > svg, .bd-notice--warn .bd-notice__ic { color: var(--bd-warning); }
+.bd-notice--danger { border-color: var(--bd-danger-b); background: var(--bd-danger-1); }
+.bd-notice--danger > svg, .bd-notice--danger .bd-notice__ic { color: var(--bd-danger); }
+.bd-notice--success { border-color: var(--bd-success-b); background: var(--bd-success-1); }
+.bd-notice--success > svg, .bd-notice--success .bd-notice__ic { color: var(--bd-success); }
+.bd-notice--plain { border-color: var(--bd-border); background: var(--bd-fill-1); }
+.bd-notice--plain > svg, .bd-notice--plain .bd-notice__ic { color: var(--bd-t3); }
+.bd-notice__body { flex: 1; min-width: 0; }
+.bd-notice__right { margin-left: auto; flex: none; align-self: center; }
+
+/* ── 抽屉 / 弹窗内表单节奏 ──
+   label 13/500 → 控件 → 说明 12/t3，字段之间 16px；一个字段的三部分靠 .bd-fld 一处约束，
+   页面里不要再给 label 单写 margin。 */
+.bd-fld { margin-bottom: var(--bd-sp-4); }
+.bd-fld > label { display: block; font-size: var(--bd-fs-md); font-weight: 500; color: var(--bd-t1); margin-bottom: 6px; line-height: var(--bd-lh); }
+/* 必填星号：页面里既有 <i class="req"> 也有 <span class="req">，<i> 的浏览器默认斜体要在这里抹平，否则同一个星号两种写法两种长相。 */
+.bd-fld > label .req { color: var(--bd-danger); margin-left: 2px; font-style: normal; }
+.bd-fld .arco-input-wrapper, .bd-fld .arco-select-view, .bd-fld .arco-input-number, .bd-fld .arco-textarea-wrapper, .bd-fld .arco-picker { width: 100%; }
+.bd-fld--row { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-4); }
+.bd-fld--row > label { margin-bottom: 2px; }
+.bd-fld__d { display: block; margin-top: 6px; font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); }
+.bd-fld__d code { font-family: var(--bd-font-mono); background: var(--bd-fill-2); padding: 0 5px; border-radius: 3px; }
+.bd-fld__err { display: block; margin-top: 6px; font-size: var(--bd-fs-sm); color: var(--bd-danger); line-height: var(--bd-lh-loose); }
+.bd-fld-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--bd-sp-4); }
+.bd-form-sec { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); margin: var(--bd-sp-5) 0 var(--bd-sp-3); padding-top: var(--bd-sp-4); border-top: 1px solid var(--bd-border-2); }
+.bd-form-sec:first-child { margin-top: 0; padding-top: 0; border-top: none; }
+/* 抽屉底部操作条：主操作靠右、次操作在它左侧、「上一步」类的回退操作靠左 */
+.bd-drawer__foot { display: flex; align-items: center; gap: var(--bd-sp-2); padding-top: var(--bd-sp-4); margin-top: var(--bd-sp-2); border-top: 1px solid var(--bd-border-2); }
+.bd-drawer__foot .bd-btn:not(.bd-btn--ghost) { min-width: 96px; }
+.bd-drawer__foot-spacer { flex: 1; }
+/* Arco 抽屉 / 弹窗的圆角与阴影跟随 token */
+.arco-drawer { box-shadow: var(--bd-shadow-3); }
+.arco-modal { border-radius: var(--bd-radius-l); box-shadow: var(--bd-shadow-3); }
+.arco-modal-header { border-bottom-color: var(--bd-border-2); }
+.arco-drawer-header { border-bottom-color: var(--bd-border-2); }
+.arco-drawer-title, .arco-modal-title { font-weight: 600; }
+/* ── 弹窗限高：正文内滚、底栏常驻 ──
+   Arco 弹窗默认垂直居中、整块随 wrapper 滚动：正文一长（Resources「新增资源」约 1045px、Ipsec「新建站点隧道」
+   约 1109px），1280×800 / 1440×900 下弹窗顶部贴着视口、「取消 / 创建」在首屏之外，填完表单找不到提交按钮。
+   给弹窗体一条上限：100vh 减去 Arco 头 48 + 原生脚 65（16 + 32 + 1 + 16）= 113，再留上下各约 53px 呼吸位，
+   合计 220px；正文超出就在 .arco-modal-body 里滚（Arco 自带 overflow: auto，这里只补 max-height）。
+   本仓 :footer="false" 的弹窗把底栏 .bd-drawer__foot 写在正文末尾，给它 sticky 到滚动容器底边：
+   负外边距把弹窗体的 20 / 24 内边距吃回来、再用同样的内边距补回，于是不滚时与原布局逐像素一致，
+   滚起来时底栏压在正文之上（白底 + 既有的上分隔线）。带原生 footer 的弹窗（Devices / Jit / System）不受这两条影响。
+   .bd-drawer__foot 在抽屉（.arco-drawer-body）里的用法不变——选择器限定在弹窗体内。
+   ★bottom 不是 0 而是 -24px：sticky 的约束矩形是滚动容器的**内容盒**（padding 之内），写 0 时底栏停在可视底边
+   往上 24px 处，下面那 24px 的带子里正文照样滚过去（2026-09-07 CDP 实测 footBottom=690 而弹窗体底=714）；
+   把约束往下放 24px，正好让底栏的边框盒贴到弹窗体的 padding 盒底边，即视觉上的底边。 */
+.arco-modal-body { max-height: calc(100vh - 220px); overflow: auto; }
+.arco-modal-body .bd-drawer__foot {
+  position: sticky; bottom: calc(-1 * var(--bd-sp-6)); z-index: 1; background: var(--bd-bg-1);
+  margin: var(--bd-sp-2) calc(-1 * var(--bd-sp-5)) calc(-1 * var(--bd-sp-6));
+  padding: var(--bd-sp-4) var(--bd-sp-5) var(--bd-sp-6);
+}
+
+/* ── 分栏：左窄栏（分类 / 组织树）+ 右主体，1280 下左栏收窄 ── */
+.bd-two { display: flex; gap: var(--bd-sp-4); align-items: flex-start; }
+.bd-two > .bd-two__main { flex: 1; min-width: 0; }
+@media (max-width: 1320px) {
+  .bd-page { --bd-page-x: 20px; }
+}
+
+/* ── 关键数字的"不可判定"态：灰、细、明显不是一个读数——绝不让它长得像 0 ── */
+.bd-unknown { color: var(--bd-t4) !important; font-weight: 500 !important; }

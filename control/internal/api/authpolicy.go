@@ -47,6 +47,7 @@ type authDirectory struct {
 // dirZh 目录 key 的中文名。未知 key 原样回显（存量策略可能绑着已删源的 kind）。
 var dirZh = map[string]string{
 	"local": "本地用户目录", "ldap": "通用 LDAP", "ad": "Active Directory", "oidc": "OpenID Connect",
+	"radius": "RADIUS",
 }
 
 func dirLabel(key string) string {

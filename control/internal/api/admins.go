@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -321,12 +322,25 @@ func (s *Server) handleSetAdminRole(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "roleKey 不能为空")
 		return
 	}
-	if target, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool {
+	// ★与 handleCreateAdmin 的 found 分支**同形**：目录读失败 → 500 不往下走，不存在 → 404。
+	// 此前写成 `err == nil && found { guard }`——目录读失败时**跳过守卫直接提权**，是提权路径
+	// 上的 fail-open：一次数据库抖动就让「外部目录账号不得提升为管理员」这道闸消失，
+	// 而 SetAdminRole 自己不看口令来源，照样 200。守卫读不到判据只能拒，与 lookupDirUser
+	// 注释里「调用方须 fail-closed」那句一致。
+	target, found, err := s.lookupDirUser(r.Context(), func(du store.DirUser) bool {
 		return normUser(du.Account) == normUser(account)
-	}); err == nil && found {
-		if !s.guardLocalCredentialForAdmin(w, r, target) {
-			return
-		}
+	})
+	if err != nil {
+		slog.Error("改派管理员角色前读用户目录失败，拒绝执行（fail-closed）", "账号", account, "err", err.Error())
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user directory")
+		return
+	}
+	if !found {
+		httpx.Error(w, http.StatusNotFound, "账号「"+account+"」不存在")
+		return
+	}
+	if !s.guardLocalCredentialForAdmin(w, r, target) {
+		return
 	}
 	if err := s.writer.SetAdminRole(r.Context(), account, body.RoleKey); err != nil {
 		s.audit(r, "admin", "改派管理员「"+account+"」角色为 "+body.RoleKey+" 被拒："+err.Error(), "fail")
@@ -389,6 +403,7 @@ func (s *Server) guardLocalCredentialForAdmin(w http.ResponseWriter, r *http.Req
 		"账号「"+target.Account+"」的口令在外部认证源里，没有本地口令。"+
 			"管理台登录只验本地口令（不走认证域路由），提升为管理员后他将**无法登录管理台**，"+
 			"而且每试一次都会被记成口令错误并计入防爆破锁定。"+
-			"如需让他管理系统，请先在「用户与角色」里为他重置一个本地口令，再来提权。")
+			"如需让他管理系统，请先在「用户与角色」里为他重置一个本地口令，再来提权；"+
+			"提权之后他在门户与管理台都只能用这把本地口令登录，凭外部认证源的口令/断言换取会话会被拒绝（管理员的认证权不外包）。")
 	return false
 }

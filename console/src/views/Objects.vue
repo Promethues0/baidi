@@ -1,50 +1,56 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">对象库</div>
-        <!-- ★副标题此前把三类对象一并说成"可被策略/资源/IPSec 复用"，
-             而**时间对象一个消费方都没有**（后端 objects_usage.go 里写得很直白：
-             `case "time": n = 0 // 时间对象暂无落库消费者`）。地址与服务是真被
-             resources.addr_ref / svc_ref 与 ipsec_sites 引用的，时间对象不是。 -->
-        <div class="bd-page__sub">地址 / 服务对象可被资源与 IPSec 站点复用；时间对象目前只是台账登记（见下）</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn" :disabled="!live" :title="live ? '' : '降级演示模式下不可写入'" @click="openCreate"><icon-plus />新增对象</button>
+    <!-- ★副标题此前把三类对象一并说成"可被策略/资源/IPSec 复用"，
+         而**时间对象一个消费方都没有**（后端 objects_usage.go 里写得很直白：
+         `case "time": n = 0 // 时间对象暂无落库消费者`）。地址与服务是真被
+         resources.addr_ref / svc_ref 与 ipsec_sites 引用的，时间对象不是。 -->
+    <PageHeader title="对象库" subtitle="地址 / 服务对象可被资源与 IPSec 站点复用；时间对象目前只是台账登记（见下）" :live="live">
+      <button class="bd-btn" :disabled="live !== true" :title="writeHint" @click="openCreate"><icon-plus />新增对象</button>
+    </PageHeader>
+
+    <!-- ★读取失败时，后端那句原话必须在页面上有地方看。改造前唯一的线索是页头右上
+         那枚橙色「降级演示」标签与「新增对象」的置灰 tooltip——看得出"出事了"，
+         看不到"是什么事"。这一页的三类演示对象与真实对象结构一致，误当成现场就会
+         以为地址/服务对象已经建好，而资源那边引用不到。 -->
+    <div v-if="live === false" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">
+        对象库未读取（后端原话：<b>{{ loadErr }}</b>），下面三个页签里的地址 / 服务 / 时间对象都是
+        <b>内置演示数据</b>，<b>不代表现场情况</b>——写入入口已按此置灰，「被引用」一栏也不是真实反查结果。
       </div>
     </div>
 
-    <!-- Tab 切换 -->
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'addr' }" @click="tab = 'addr'">地址对象 ({{ bundle.addrs.length }})</span>
-      <span class="bd-tab" :class="{ on: tab === 'service' }" @click="tab = 'service'">服务对象 ({{ bundle.services.length }})</span>
-      <span class="bd-tab" :class="{ on: tab === 'time' }" @click="tab = 'time'">时间对象 ({{ bundle.times.length }})</span>
+    <!-- Tab 切换：真 button（可 Tab、可回车） -->
+    <div class="bd-tabs" role="tablist">
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'addr'" @click="tab = 'addr'">地址对象 <em>{{ bundle.addrs.length }}</em></button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'service'" @click="tab = 'service'">服务对象 <em>{{ bundle.services.length }}</em></button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'time'" @click="tab = 'time'">时间对象 <em>{{ bundle.times.length }}</em></button>
     </div>
 
     <!-- ============ 地址对象 ============ -->
     <div v-show="tab === 'addr'" class="bd-tablecard">
       <div class="bd-toolbar">
         <span class="bd-toolbar__c">地址对象 · {{ shownAddrs.length }} 项</span>
-        <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 240px">
+        <div class="bd-toolbar__spacer" />
+        <div class="bd-searchbox bd-obj__search">
           <icon-search />
           <input v-model="kw" class="bd-searchbox__in" placeholder="按名称 / 值搜索" />
         </div>
       </div>
-      <table class="bd-table">
+      <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="6" />
+      <table v-else class="bd-table">
         <thead>
           <tr><th>名称</th><th>类型</th><th>值</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownAddrs" :key="o.id">
-            <td><b style="color: var(--bd-t1); font-weight: 500">{{ o.name }}</b></td>
-            <td><span class="bd-tg" :style="tagStyle(addrKindColor(o.kind))">{{ addrKindText(o.kind) }}</span></td>
+            <td><b class="bd-obj__name">{{ o.name }}</b></td>
+            <td><span class="bd-tg" :class="addrKindTag(o.kind)">{{ addrKindText(o.kind) }}</span></td>
             <td><span class="bd-mono">{{ o.value }}</span></td>
             <td>{{ o.desc || '—' }}</td>
             <td>
               <a-popover v-if="refsOf(o.id).length" position="top">
-                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <span class="bd-tg bd-tg--gold bd-ref">被引用 {{ refsOf(o.id).length }}</span>
                 <template #content>
                   <div class="bd-reflist">
                     <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
@@ -54,13 +60,22 @@
               <span v-else class="bd-ref-none">未被引用</span>
             </td>
             <td class="r">
-              <span class="bd-link" @click="openEdit('addr', o)">编辑</span>
-              <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('addr', o.id)">
-                <span class="bd-link bd-link--danger" style="margin-left: 12px">删除</span>
-              </a-popconfirm>
+              <span class="bd-acts">
+                <button type="button" class="bd-link" @click="openEdit('addr', o)">编辑</button>
+                <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('addr', o.id)">
+                  <button type="button" class="bd-link bd-link--danger">删除</button>
+                </a-popconfirm>
+              </span>
             </td>
           </tr>
-          <tr v-if="!shownAddrs.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownAddrs.length" class="bd-table__emptyrow">
+            <td colspan="6">
+              <EmptyState v-if="kw.trim()" size="md" title="无匹配对象" :desc="`按「${kw.trim()}」搜索名称、值与描述均无命中`" />
+              <EmptyState v-else size="md" title="暂无对象" desc="点右上「新增对象」创建">
+                <template #action><button class="bd-btn" :disabled="live !== true" :title="writeHint" @click="openCreate"><icon-plus />新增对象</button></template>
+              </EmptyState>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -69,25 +84,26 @@
     <div v-show="tab === 'service'" class="bd-tablecard">
       <div class="bd-toolbar">
         <span class="bd-toolbar__c">服务对象 · {{ shownServices.length }} 项</span>
-        <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 240px">
+        <div class="bd-toolbar__spacer" />
+        <div class="bd-searchbox bd-obj__search">
           <icon-search />
           <input v-model="kw" class="bd-searchbox__in" placeholder="按名称 / 端口搜索" />
         </div>
       </div>
-      <table class="bd-table">
+      <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="6" />
+      <table v-else class="bd-table">
         <thead>
           <tr><th>名称</th><th>协议</th><th>端口</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownServices" :key="o.id">
-            <td><b style="color: var(--bd-t1); font-weight: 500">{{ o.name }}</b></td>
-            <td><span class="bd-tg" :style="tagStyle(protoColor(o.proto))">{{ o.proto.toUpperCase() }}</span></td>
+            <td><b class="bd-obj__name">{{ o.name }}</b></td>
+            <td><span class="bd-tg" :class="protoTag(o.proto)">{{ o.proto.toUpperCase() }}</span></td>
             <td><span class="bd-mono">{{ o.ports || '—' }}</span></td>
             <td>{{ o.desc || '—' }}</td>
             <td>
               <a-popover v-if="refsOf(o.id).length" position="top">
-                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <span class="bd-tg bd-tg--gold bd-ref">被引用 {{ refsOf(o.id).length }}</span>
                 <template #content>
                   <div class="bd-reflist">
                     <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
@@ -97,13 +113,22 @@
               <span v-else class="bd-ref-none">未被引用</span>
             </td>
             <td class="r">
-              <span class="bd-link" @click="openEdit('service', o)">编辑</span>
-              <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('service', o.id)">
-                <span class="bd-link bd-link--danger" style="margin-left: 12px">删除</span>
-              </a-popconfirm>
+              <span class="bd-acts">
+                <button type="button" class="bd-link" @click="openEdit('service', o)">编辑</button>
+                <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('service', o.id)">
+                  <button type="button" class="bd-link bd-link--danger">删除</button>
+                </a-popconfirm>
+              </span>
             </td>
           </tr>
-          <tr v-if="!shownServices.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownServices.length" class="bd-table__emptyrow">
+            <td colspan="6">
+              <EmptyState v-if="kw.trim()" size="md" title="无匹配对象" :desc="`按「${kw.trim()}」搜索名称、端口与描述均无命中`" />
+              <EmptyState v-else size="md" title="暂无对象" desc="点右上「新增对象」创建">
+                <template #action><button class="bd-btn" :disabled="live !== true" :title="writeHint" @click="openCreate"><icon-plus />新增对象</button></template>
+              </EmptyState>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
@@ -114,9 +139,9 @@
          「周一~周五 09:00-18:00」，以为能拿去卡访问时段，实际上只是一行谁也不读的记录。
          按时段限制访问的**真**执行方在认证策略的「非工作时间」规则里（offHours），
          那是另一套配置，名字还对不上。这条告警不能删——它是这一屏唯一说真话的地方。 -->
-    <div v-show="tab === 'time'" class="bd-timewarn">
+    <div v-show="tab === 'time'" class="bd-notice bd-notice--warn">
       <icon-exclamation-circle-fill />
-      <div>
+      <div class="bd-notice__body">
         <b>时间对象目前没有执行方，仅作台账登记。</b>
         这里建的时间段不会被任何策略、资源或 IPSec 站点读取（后端的引用复核对时间对象恒返回
         「未被引用」），因此它<b>不会限制任何人的访问时段</b>。
@@ -127,25 +152,26 @@
     <div v-show="tab === 'time'" class="bd-tablecard">
       <div class="bd-toolbar">
         <span class="bd-toolbar__c">时间对象 · {{ shownTimes.length }} 项</span>
-        <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 240px">
+        <div class="bd-toolbar__spacer" />
+        <div class="bd-searchbox bd-obj__search">
           <icon-search />
           <input v-model="kw" class="bd-searchbox__in" placeholder="按名称 / 规格搜索" />
         </div>
       </div>
-      <table class="bd-table">
+      <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="6" />
+      <table v-else class="bd-table">
         <thead>
           <tr><th>名称</th><th>类型</th><th>时间规格</th><th>描述</th><th>被引用</th><th class="r">操作</th></tr>
         </thead>
         <tbody>
           <tr v-for="o in shownTimes" :key="o.id">
-            <td><b style="color: var(--bd-t1); font-weight: 500">{{ o.name }}</b></td>
-            <td><span class="bd-tg" :style="tagStyle(timeKindColor(o.kind))">{{ timeKindText(o.kind) }}</span></td>
+            <td><b class="bd-obj__name">{{ o.name }}</b></td>
+            <td><span class="bd-tg" :class="timeKindTag(o.kind)">{{ timeKindText(o.kind) }}</span></td>
             <td><span class="bd-mono">{{ o.spec }}</span></td>
             <td>{{ o.desc || '—' }}</td>
             <td>
               <a-popover v-if="refsOf(o.id).length" position="top">
-                <span class="bd-tg bd-ref" :style="tagStyle('#FF7D00')">被引用 {{ refsOf(o.id).length }}</span>
+                <span class="bd-tg bd-tg--gold bd-ref">被引用 {{ refsOf(o.id).length }}</span>
                 <template #content>
                   <div class="bd-reflist">
                     <div v-for="(r, i) in refsOf(o.id)" :key="i" class="bd-reflist__i">{{ refLabel(r) }}</div>
@@ -155,75 +181,83 @@
               <span v-else class="bd-ref-none">未被引用</span>
             </td>
             <td class="r">
-              <span class="bd-link" @click="openEdit('time', o)">编辑</span>
-              <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('time', o.id)">
-                <span class="bd-link bd-link--danger" style="margin-left: 12px">删除</span>
-              </a-popconfirm>
+              <span class="bd-acts">
+                <button type="button" class="bd-link" @click="openEdit('time', o)">编辑</button>
+                <a-popconfirm content="确定删除该对象？" type="warning" @ok="del('time', o.id)">
+                  <button type="button" class="bd-link bd-link--danger">删除</button>
+                </a-popconfirm>
+              </span>
             </td>
           </tr>
-          <tr v-if="!shownTimes.length"><td colspan="6" class="bd-empty">{{ kw ? '无匹配对象' : '暂无对象，点右上「新增对象」创建' }}</td></tr>
+          <tr v-if="!shownTimes.length" class="bd-table__emptyrow">
+            <td colspan="6">
+              <EmptyState v-if="kw.trim()" size="md" title="无匹配对象" :desc="`按「${kw.trim()}」搜索名称、规格与描述均无命中`" />
+              <EmptyState v-else size="md" title="暂无对象" desc="点右上「新增对象」创建">
+                <template #action><button class="bd-btn" :disabled="live !== true" :title="writeHint" @click="openCreate"><icon-plus />新增对象</button></template>
+              </EmptyState>
+            </td>
+          </tr>
         </tbody>
       </table>
     </div>
 
     <!-- 新增 / 编辑 对象 -->
     <a-modal v-model:visible="formOpen" :title="modalTitle" :width="480" :footer="false" unmount-on-close>
-      <div class="bd-uform">
-        <div class="bd-uform__f"><label>名称<i class="req">*</i></label>
-          <a-input v-model="form.name" placeholder="如 OA 服务器" />
+      <div class="bd-fld"><label>名称<span class="req">*</span></label>
+        <a-input v-model="form.name" placeholder="如 OA 服务器" />
+      </div>
+
+      <!-- 地址对象字段 -->
+      <template v-if="form.kind === 'addr'">
+        <div class="bd-fld"><label>类型</label>
+          <a-select v-model="form.addrKind">
+            <a-option value="ip">主机（ip）</a-option>
+            <a-option value="cidr">网段（cidr）</a-option>
+            <a-option value="range">范围（range）</a-option>
+            <a-option value="domain">域名（domain）</a-option>
+          </a-select>
         </div>
-
-        <!-- 地址对象字段 -->
-        <template v-if="form.kind === 'addr'">
-          <div class="bd-uform__f"><label>类型</label>
-            <a-select v-model="form.addrKind">
-              <a-option value="ip">主机（ip）</a-option>
-              <a-option value="cidr">网段（cidr）</a-option>
-              <a-option value="range">范围（range）</a-option>
-              <a-option value="domain">域名（domain）</a-option>
-            </a-select>
-          </div>
-          <div class="bd-uform__f"><label>值<i class="req">*</i></label>
-            <a-input v-model="form.value" :placeholder="addrValuePlaceholder" />
-          </div>
-        </template>
-
-        <!-- 服务对象字段 -->
-        <template v-else-if="form.kind === 'service'">
-          <div class="bd-uform__f"><label>协议</label>
-            <a-select v-model="form.proto">
-              <a-option value="tcp">TCP</a-option>
-              <a-option value="udp">UDP</a-option>
-              <a-option value="icmp">ICMP</a-option>
-              <a-option value="any">ANY</a-option>
-            </a-select>
-          </div>
-          <div class="bd-uform__f"><label>端口</label>
-            <a-input v-model="form.ports" placeholder="如 443 或 8000-8100 或 1521,3306" />
-          </div>
-        </template>
-
-        <!-- 时间对象字段 -->
-        <template v-else>
-          <div class="bd-uform__f"><label>类型</label>
-            <a-select v-model="form.timeKind">
-              <a-option value="periodic">周期</a-option>
-              <a-option value="absolute">绝对</a-option>
-            </a-select>
-          </div>
-          <div class="bd-uform__f"><label>时间规格<i class="req">*</i></label>
-            <a-input v-model="form.spec" :placeholder="timeSpecPlaceholder" />
-          </div>
-        </template>
-
-        <div class="bd-uform__f"><label>描述</label>
-          <a-input v-model="form.desc" placeholder="可选说明" />
+        <div class="bd-fld"><label>值<span class="req">*</span></label>
+          <a-input v-model="form.value" :placeholder="addrValuePlaceholder" />
         </div>
+      </template>
 
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="formOpen = false">取消</button>
-          <button class="bd-btn" :disabled="saving" @click="save">{{ editing ? '保存' : '创建' }}并落库</button>
+      <!-- 服务对象字段 -->
+      <template v-else-if="form.kind === 'service'">
+        <div class="bd-fld"><label>协议</label>
+          <a-select v-model="form.proto">
+            <a-option value="tcp">TCP</a-option>
+            <a-option value="udp">UDP</a-option>
+            <a-option value="icmp">ICMP</a-option>
+            <a-option value="any">ANY</a-option>
+          </a-select>
         </div>
+        <div class="bd-fld"><label>端口</label>
+          <a-input v-model="form.ports" placeholder="如 443 或 8000-8100 或 1521,3306" />
+        </div>
+      </template>
+
+      <!-- 时间对象字段 -->
+      <template v-else>
+        <div class="bd-fld"><label>类型</label>
+          <a-select v-model="form.timeKind">
+            <a-option value="periodic">周期</a-option>
+            <a-option value="absolute">绝对</a-option>
+          </a-select>
+        </div>
+        <div class="bd-fld"><label>时间规格<span class="req">*</span></label>
+          <a-input v-model="form.spec" :placeholder="timeSpecPlaceholder" />
+        </div>
+      </template>
+
+      <div class="bd-fld"><label>描述</label>
+        <a-input v-model="form.desc" placeholder="可选说明" />
+      </div>
+
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="formOpen = false">取消</button>
+        <button class="bd-btn" :disabled="saving" @click="save">{{ editing ? '保存' : '创建' }}并落库</button>
       </div>
     </a-modal>
   </div>
@@ -233,6 +267,9 @@
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { api, type AddrObject, type ServiceObject, type TimeObject, type ObjectBundle, type ObjectRef, type ObjectUsageResp, failReason, failStatus } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 type Kind = 'addr' | 'service' | 'time';
 
@@ -259,7 +296,18 @@ const MOCK: ObjectBundle = {
 };
 
 const tab = ref<Kind>('addr');
-const live = ref(false);
+/** 连接态三态：undefined = 首轮请求还在路上（判不出来，PageHeader 此时不画标签）/
+ *  true 已连 / false 降级演示。★初值写 false 的话，首屏那一瞬页头就挂上一枚橙色
+ *  「降级演示」——把"还没探过"说成"确定离线"，而那一刻什么都还没发生。 */
+const live = ref<boolean | undefined>(undefined);
+/** 读取失败时后端那句原话（failReason 收口，前端不编造归因）。 */
+const loadErr = ref('');
+/** 写入入口的禁用说明。三态各说各的：判不出来时说「正在读取」，
+ *  ★不许直接说「降级演示模式下不可写入」——首轮请求还没回来，那件事还没发生。 */
+const writeHint = computed(() =>
+  live.value === true ? '' : live.value === false ? '降级演示模式下不可写入' : '正在读取对象库，稍候可写入');
+/** 首屏是否已完成第一次 load（成功或降级都算）：只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 const bundle = ref<ObjectBundle>({ addrs: [], services: [], times: [] });
 
 /* ── 「被引用」反查（objectId -> 引用方列表）── */
@@ -279,11 +327,11 @@ const shownAddrs = computed(() => bundle.value.addrs.filter((o) => matches(o.nam
 const shownServices = computed(() => bundle.value.services.filter((o) => matches(o.name, o.ports, o.desc)));
 const shownTimes = computed(() => bundle.value.times.filter((o) => matches(o.name, o.spec, o.desc)));
 
-function tagStyle(color: string) { return { color, background: color + '14' }; }
-function addrKindColor(k: AddrObject['kind']) { return k === 'ip' ? '#165DFF' : k === 'cidr' ? '#0FC6C2' : k === 'range' ? '#FF7D00' : '#722ED1'; }
+/* 标签色只走 .bd-tg--* 语义变体（不写十六进制）：颜色只用来把同一列里的几种类型区分开，不承载安全语义。 */
+function addrKindTag(k: AddrObject['kind']) { return k === 'ip' ? 'bd-tg--blue' : k === 'cidr' ? 'bd-tg--green' : k === 'range' ? 'bd-tg--gold' : 'bd-tg--purple'; }
 function addrKindText(k: AddrObject['kind']) { return k === 'ip' ? '主机' : k === 'cidr' ? '网段' : k === 'range' ? '范围' : '域名'; }
-function protoColor(p: ServiceObject['proto']) { return p === 'tcp' ? '#165DFF' : p === 'udp' ? '#0FC6C2' : p === 'icmp' ? '#FF7D00' : '#86909C'; }
-function timeKindColor(k: TimeObject['kind']) { return k === 'periodic' ? '#165DFF' : '#722ED1'; }
+function protoTag(p: ServiceObject['proto']) { return p === 'tcp' ? 'bd-tg--blue' : p === 'udp' ? 'bd-tg--green' : p === 'icmp' ? 'bd-tg--gold' : 'bd-tg--grey'; }
+function timeKindTag(k: TimeObject['kind']) { return k === 'periodic' ? 'bd-tg--blue' : 'bd-tg--purple'; }
 function timeKindText(k: TimeObject['kind']) { return k === 'periodic' ? '周期' : '绝对'; }
 
 async function load() {
@@ -291,11 +339,13 @@ async function load() {
     const b = await api<ObjectBundle>('/objects');
     bundle.value = { addrs: b.addrs || [], services: b.services || [], times: b.times || [] };
     live.value = true;
+    loadErr.value = '';
     try {
       const u = await api<ObjectUsageResp>('/objects/usage');
       usage.value = u.usage || {};
     } catch { usage.value = {}; }
-  } catch { bundle.value = MOCK; usage.value = {}; live.value = false; }
+  } catch (e) { bundle.value = MOCK; usage.value = {}; live.value = false; loadErr.value = failReason(e); }
+  finally { loaded.value = true; }
 }
 
 /* ── 表单（单 reactive 容纳全字段）── */
@@ -350,7 +400,9 @@ function openEdit(k: Kind, o: AddrObject | ServiceObject | TimeObject) {
 }
 
 async function save() {
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  // ★归因不自拟：原文案写死「未连接后端」，而对象库读不到也可能是 403（这一页归系统管理员一权）。
+  //   loadErr 是 failReason(e) 存下的后端原话，有就带上。
+  if (live.value !== true) { Message.warning(`${writeHint.value}${loadErr.value ? `：${loadErr.value}` : ''}`); return; }
   if (!form.name) { Message.warning('名称必填'); return; }
   if (form.kind === 'addr' && !form.value) { Message.warning('地址对象的值必填'); return; }
   if (form.kind === 'time' && !form.spec) { Message.warning('时间对象的规格必填'); return; }
@@ -377,7 +429,9 @@ async function save() {
 }
 
 async function del(k: Kind, id: string) {
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  // ★归因不自拟：原文案写死「未连接后端」，而对象库读不到也可能是 403（这一页归系统管理员一权）。
+  //   loadErr 是 failReason(e) 存下的后端原话，有就带上。
+  if (live.value !== true) { Message.warning(`${writeHint.value}${loadErr.value ? `：${loadErr.value}` : ''}`); return; }
   /* 主动防护：已被引用则拦截，不下发 DELETE */
   const refs = refsOf(id);
   if (refs.length) {
@@ -411,43 +465,20 @@ onMounted(load);
 </script>
 
 <style scoped>
-.bd-timewarn {
-  display: flex; gap: 10px; align-items: flex-start; padding: 12px 16px; margin-bottom: 12px;
-  background: var(--bd-tag-gold-bg); border: 1px solid #FFCF8B; border-radius: var(--bd-radius);
-  font-size: 12.5px; color: var(--bd-t2); line-height: 1.85;
-}
-.bd-timewarn > :first-child { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
+/* 本页独有的布局。页头 / 表格卡 / 搜索框 / 标签 / 操作列 / 空态 / 提示条 / 表单字段 / 弹窗底栏都在共享件与 app.css 里。 */
 
-/* tabs（对齐 Gateway.vue） */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
 
-/* toolbar 计数文案 */
-.bd-toolbar__c { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
-
-/* 搜索框输入 */
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
-.bd-searchbox__in::placeholder { color: var(--bd-t3); }
-
-/* 降级演示下禁用写入按钮 */
-.bd-btn:disabled { opacity: .5; cursor: not-allowed; }
-
-/* 空表 */
-.bd-empty { text-align: center; color: var(--bd-t3, #86909c); padding: 28px 0; }
+.bd-obj__search { width: 240px; }
+.bd-obj__name { color: var(--bd-t1); font-weight: 500; }
 
 /* 「被引用」指示 */
 .bd-ref { cursor: pointer; }
-.bd-ref-none { font-size: 12px; color: var(--bd-t3, #86909c); }
+.bd-ref-none { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 .bd-reflist { min-width: 140px; max-width: 280px; }
-.bd-reflist__i { font-size: 12.5px; color: var(--bd-t1); padding: 3px 0; line-height: 1.5; }
-.bd-reflist__i + .bd-reflist__i { border-top: 1px solid var(--bd-fill-2); }
+.bd-reflist__i { font-size: var(--bd-fs-sm); color: var(--bd-t1); padding: 3px 0; line-height: var(--bd-lh); }
+.bd-reflist__i + .bd-reflist__i { border-top: 1px solid var(--bd-border-2); }
 
-/* 表单（对齐 Resources.vue 的 .bd-uform） */
-.bd-uform { padding: 2px 0; }
-.bd-uform__f { margin-bottom: 16px; }
-.bd-uform__f label { display: block; font-size: 13px; color: var(--bd-t2); margin-bottom: 7px; }
-.bd-uform__f .req { color: var(--bd-danger, #f53f3f); margin-left: 2px; font-style: normal; }
-.bd-uform__foot { display: flex; justify-content: flex-end; gap: 12px; margin-top: 8px; }
+@media (max-width: 1320px) {
+  .bd-obj__search { width: 200px; }
+}
 </style>

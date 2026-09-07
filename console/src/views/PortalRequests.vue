@@ -1,13 +1,9 @@
 <template>
   <div class="bd-portal">
-    <PortalBar title="白帝 · 我的申请">
+    <PortalBar title="白帝 · 我的申请" :user="displayName">
       <button class="bd-pquit" @click="router.push('/portal/apps')">
         <icon-apps /><span>返回应用</span>
       </button>
-      <div class="bd-pacct">
-        <span class="bd-pacct__av">{{ avatarText }}</span>
-        <span class="bd-pacct__name">{{ displayName }}</span>
-      </div>
     </PortalBar>
 
     <main class="bd-pmain">
@@ -21,21 +17,45 @@
               <i>{{ pendingCount }}</i> 个待审批
             </p>
           </div>
-          <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
+          <!-- 连接态三态：live == null（首轮请求还在路上）不画标签——那一刻既不是"已连"
+               也不是"降级演示"，与 PageHeader 的口径一致。 -->
+          <a-tag v-if="live != null" :color="live ? 'green' : 'orange'" bordered>
+            <template #icon><icon-cloud /></template>
+            {{ live ? '已连 baidi-control' : '降级演示' }}
+          </a-tag>
         </div>
 
-        <a-spin :loading="loading" style="display:block">
+        <!-- ★读取失败时，后端那句原话必须在页面上有地方看。改造前唯一的线索是右上角
+             那枚橙色「降级演示」标签——用户看得出"出事了"，看不到"是什么事"，
+             而这里恰恰是他判断「我那条申请到底批没批」的地方。 -->
+        <div v-if="live === false" class="bd-notice bd-notice--warn bd-preq__warn">
+          <icon-exclamation-circle-fill />
+          <div class="bd-notice__body">
+            申请记录未读取（后端原话：<b>{{ loadErr }}</b>），下面的授予与申请单是<b>内置演示数据</b>，
+            <b>不代表你的真实申请状态</b>。请稍后刷新，或联系管理员。
+          </div>
+        </div>
+
+        <!-- 首屏骨架：第一次 load() 回来之前不画演示数据，也不画「还没有提交过申请」 -->
+        <template v-if="!loaded">
+          <div class="bd-psec">
+            <div class="bd-psec__t"><icon-history />申请记录</div>
+            <div class="bd-tablecard"><SkeletonBlock kind="table" :rows="3" :cols="5" /></div>
+          </div>
+        </template>
+
+        <a-spin v-else :loading="loading" class="bd-pspin">
           <!-- 有效授予（时限访问） -->
-          <div v-if="activeGrants.length" class="bd-sec">
-            <div class="bd-sec__t"><icon-unlock />当前有效授予</div>
+          <div v-if="activeGrants.length" class="bd-psec">
+            <div class="bd-psec__t"><icon-unlock />当前有效授予</div>
             <div class="bd-glist">
-              <div v-for="g in activeGrants" :key="g.id" class="bd-gcard">
+              <div v-for="g in activeGrants" :key="g.id" class="bd-card bd-gcard">
                 <div class="bd-gcard__l">
                   <div class="bd-gcard__name">{{ g.resourceName }}</div>
                   <div class="bd-gcard__meta bd-mono">授予至 {{ fmtTs(g.expiresAt) }}</div>
                 </div>
                 <div class="bd-gcard__r">
-                  <span class="bd-remain" :class="{ soon: remainSec(g.expiresAt) < 300 }">
+                  <span class="bd-tg bd-remain" :class="remainSec(g.expiresAt) < 300 ? 'bd-tg--gold' : 'bd-tg--green'">
                     <icon-clock-circle />剩余 {{ remainText(g.expiresAt) }}
                   </span>
                 </div>
@@ -44,25 +64,31 @@
           </div>
 
           <!-- 申请单列表 -->
-          <div class="bd-sec">
-            <div class="bd-sec__t"><icon-history />申请记录 <em>{{ requests.length }}</em></div>
-            <div v-if="!requests.length && !loading" class="bd-empty">
-              <icon-info-circle />还没有提交过访问申请，去<a class="bd-inline" @click="router.push('/portal/apps')">应用门户</a>发起吧
+          <div class="bd-psec">
+            <div class="bd-psec__t"><icon-history />申请记录 <em>{{ requests.length }}</em></div>
+            <div class="bd-tablecard">
+              <table class="bd-table">
+                <thead>
+                  <tr><th>资源</th><th>理由</th><th>期望时长</th><th>提交时间</th><th>状态</th></tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in requests" :key="r.id">
+                    <td><b class="bd-rres">{{ r.resourceName }}</b></td>
+                    <td class="bd-rreason">{{ r.reason }}</td>
+                    <td>{{ r.ttlMinutes }} 分钟</td>
+                    <td class="bd-mono">{{ r.submittedAt }}</td>
+                    <td><span class="bd-tg" :class="statusTag[r.status]">{{ statusZh[r.status] }}</span></td>
+                  </tr>
+                  <tr v-if="!requests.length && !loading" class="bd-table__emptyrow">
+                    <td colspan="5">
+                      <EmptyState size="md" title="还没有提交过访问申请" tone="ok">
+                        去<button type="button" class="bd-link" @click="router.push('/portal/apps')">应用门户</button>发起吧
+                      </EmptyState>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
             </div>
-            <table v-else class="bd-rtable">
-              <thead>
-                <tr><th>资源</th><th>理由</th><th>期望时长</th><th>提交时间</th><th>状态</th></tr>
-              </thead>
-              <tbody>
-                <tr v-for="r in requests" :key="r.id">
-                  <td><b>{{ r.resourceName }}</b></td>
-                  <td class="bd-rreason">{{ r.reason }}</td>
-                  <td>{{ r.ttlMinutes }} 分钟</td>
-                  <td class="bd-mono">{{ r.submittedAt }}</td>
-                  <td><span class="bd-pill" :class="'s-' + r.status">{{ statusZh[r.status] }}</span></td>
-                </tr>
-              </tbody>
-            </table>
           </div>
         </a-spin>
       </div>
@@ -73,13 +99,21 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onUnmounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { Message } from '@arco-design/web-vue';
-import { api, type MyRequestsResp, type AccessRequest, type JitGrant } from '@/lib/api';
+import { api, failReason, type MyRequestsResp, type AccessRequest, type JitGrant } from '@/lib/api';
 import PortalBar from '@/components/PortalBar.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const router = useRouter();
 const loading = ref(false);
-const live = ref(false);
+/** 首屏是否已完成第一次 load()：只决定骨架屏何时让位（成功 / 降级都算完成），不改任何数据流。 */
+const loaded = ref(false);
+/** 连接态三态：undefined = 首轮请求还在路上（判不出来，不画标签）/ true 已连 / false 降级演示。
+ *  ★初值写 false 的话，首屏那一瞬右上角就挂上一枚橙色「降级演示」——把"还没探过"
+ *  说成"确定离线"，而那一刻什么都还没发生。 */
+const live = ref<boolean | undefined>(undefined);
+/** 读取失败时后端那句原话（failReason 收口，前端不编造归因）。 */
+const loadErr = ref('');
 const displayName = ref('');
 const requests = ref<AccessRequest[]>([]);
 const grants = ref<JitGrant[]>([]);
@@ -96,8 +130,8 @@ const MOCK_GRANTS: JitGrant[] = [
 ];
 
 const statusZh: Record<AccessRequest['status'], string> = { pending: '待审批', approved: '已批准', rejected: '已驳回' };
-
-const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
+/** 状态 → .bd-tg 颜色变体（待审批金 / 已批准绿 / 已驳回红） */
+const statusTag: Record<AccessRequest['status'], string> = { pending: 'bd-tg--gold', approved: 'bd-tg--green', rejected: 'bd-tg--red' };
 const activeGrants = computed(() => grants.value.filter(g => g.status === 'active' && g.expiresAt > nowSec.value));
 const pendingCount = computed(() => requests.value.filter(r => r.status === 'pending').length);
 
@@ -120,13 +154,17 @@ async function load() {
     requests.value = resp.requests ?? [];
     grants.value = resp.grants ?? [];
     live.value = true;
-  } catch {
-    // 降级：内置演示数据，页面完整可点
+    loadErr.value = '';
+  } catch (e) {
+    // 降级：内置演示数据，页面完整可点；后端原话经 loadErr 落到页面上的提示条里，
+    // 不在这里编一句归因（门户用户看到「网络异常」只会反复刷新）。
     requests.value = MOCK_REQUESTS;
     grants.value = MOCK_GRANTS;
     live.value = false;
+    loadErr.value = failReason(e);
   } finally {
     loading.value = false;
+    loaded.value = true;
   }
 }
 
@@ -145,61 +183,22 @@ onUnmounted(() => { if (timer) window.clearInterval(timer); });
 </script>
 
 <style scoped>
-.bd-portal { min-height: 100vh; background: var(--bd-fill-1); display: flex; flex-direction: column; }
-.bd-pacct { display: flex; align-items: center; gap: 9px; }
-.bd-pacct__av {
-  width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 13px; font-weight: 600;
-  background: linear-gradient(135deg, var(--bd-purple), var(--bd-primary));
-  display: flex; align-items: center; justify-content: center;
-}
-.bd-pacct__name { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
-.bd-pquit {
-  display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
-  border: 1px solid var(--bd-border); background: #fff; border-radius: 7px; cursor: pointer;
-  font-size: 13px; color: var(--bd-t2); transition: all .15s;
-}
-.bd-pquit:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
+/* 本页独有：授予卡片与申请表里的两处小样式。门户壳在 PortalBar.vue，表格 / 标签 / 空态 / 骨架是全局或共享件。 */
+.bd-pspin { display: block; }
+/* 门户页头与内容之间没有 PageHeader 的下间距，提示条自己补一档 */
+.bd-preq__warn { margin-bottom: var(--bd-sp-5); }
 
-.bd-pmain { flex: 1; padding: 40px 24px 64px; }
-.bd-pwrap { max-width: 1080px; margin: 0 auto; }
-.bd-phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 28px; flex-wrap: wrap; }
-.bd-phead__hi { margin: 0; font-size: 26px; font-weight: 700; color: var(--bd-t1); letter-spacing: .3px; }
-.bd-phead__sub { margin: 8px 0 0; font-size: 14px; color: var(--bd-t3); }
-.bd-phead__sub b { color: var(--bd-primary); font-weight: 700; font-size: 15px; }
-.bd-phead__sub i { color: var(--bd-warning); font-style: normal; font-weight: 700; font-size: 15px; }
-.bd-phead__sub .bd-dot { margin: 0 8px; color: var(--bd-t4); }
-
-.bd-sec { margin-bottom: 30px; }
-.bd-sec__t { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
-.bd-sec__t em { font-style: normal; font-size: 12px; color: var(--bd-t3); font-weight: 400; }
-
-/* 授予卡片 */
-.bd-glist { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: 14px; }
+/* 授予卡片：左侧绿色边表达「当前有效」 */
+.bd-glist { display: grid; grid-template-columns: repeat(auto-fill, minmax(320px, 1fr)); gap: var(--bd-sp-4); }
 .bd-gcard {
-  background: #fff; border: 1px solid var(--bd-border); border-left: 3px solid var(--bd-success);
-  border-radius: var(--bd-radius); padding: 16px 18px; display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  border-left: 3px solid var(--bd-success);
+  padding: var(--bd-sp-4) var(--bd-sp-5); display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-4);
 }
 .bd-gcard__name { font-size: 15px; font-weight: 600; color: var(--bd-t1); }
-.bd-gcard__meta { font-size: 12px; color: var(--bd-t3); margin-top: 5px; }
-.bd-remain {
-  display: inline-flex; align-items: center; gap: 5px; font-size: 12.5px; font-weight: 600;
-  color: var(--bd-success); background: var(--bd-tag-green-bg); padding: 5px 10px; border-radius: 7px; white-space: nowrap;
-}
-.bd-remain.soon { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
+.bd-gcard__meta { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 5px; }
+.bd-remain { display: inline-flex; align-items: center; gap: 5px; font-size: var(--bd-fs-sm); font-weight: 600; padding: 5px 10px; border-radius: var(--bd-radius-s); }
 
 /* 申请表 */
-.bd-rtable { width: 100%; border-collapse: collapse; background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); overflow: hidden; }
-.bd-rtable th, .bd-rtable td { text-align: left; padding: 12px 16px; font-size: 13px; border-bottom: 1px solid var(--bd-fill-1); }
-.bd-rtable th { font-size: 12px; font-weight: 600; color: var(--bd-t3); background: var(--bd-fill-1); }
-.bd-rtable tbody tr:last-child td { border-bottom: none; }
-.bd-rtable b { font-weight: 600; color: var(--bd-t1); }
-.bd-rreason { color: var(--bd-t2); max-width: 320px; }
-.bd-pill { display: inline-block; font-size: 11.5px; font-weight: 600; padding: 3px 10px; border-radius: 6px; }
-.bd-pill.s-pending { color: var(--bd-warning); background: var(--bd-tag-gold-bg); }
-.bd-pill.s-approved { color: var(--bd-success); background: var(--bd-tag-green-bg); }
-.bd-pill.s-rejected { color: var(--bd-danger); background: color-mix(in srgb, var(--bd-danger) 12%, #fff); }
-
-.bd-empty { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--bd-t3); padding: 32px 12px; justify-content: center; }
-.bd-inline { color: var(--bd-primary); cursor: pointer; margin: 0 3px; }
-.bd-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.bd-rres { font-weight: 600; color: var(--bd-t1); }
+.bd-rreason { max-width: 320px; }
 </style>

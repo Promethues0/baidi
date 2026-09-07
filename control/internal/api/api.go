@@ -103,6 +103,9 @@ type Server struct {
 	licenseKeys []ed25519.PublicKey
 	// oidcFlow OIDC 登录的服务端会话（state/nonce/verifier）与交接票据单次登记。
 	oidcFlow *oidcFlows
+	// extAuth 「这个账号刚刚由外部认证源完成过一次完整认证」的短时标记。
+	// 唯一消费方是首登强制改密（见 extAuthRounds 与 handleChangePassword 的注释）。
+	extAuth *extAuthRounds
 	// testRedirectAuth 测试注入缝：协议实现另有 30 条真密码学用例，
 	// 这里换桩测的是编排（state 单次性 / 重定向 / 票据交接）。生产恒 nil。
 	testRedirectAuth func(store.AuthSourceRec) (authsrc.RedirectAuthenticator, error)
@@ -342,6 +345,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 	s.upgradeKeys = parseUpgradeKeys(os.Getenv("BAIDI_UPGRADE_PUBKEY"))
 	s.licenseKeys = parseLicenseKeys(os.Getenv("BAIDI_LICENSE_PUBKEY"))
 	s.oidcFlow = newOIDCFlows()
+	s.extAuth = newExtAuthRounds()
 	// 消息通道派发器：sink 是 deliverNotice（读通道配置、解凭据、真发、记结果与审计）。
 	s.notices = notify.NewDispatcher(0, s.deliverNotice, slog.Default())
 	return s
@@ -784,6 +788,13 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 			slog.Warn("外部身份被准入闸拒绝", "账号", b.Username, "待批", d.Pending(), "原因", d.Error())
 			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": d.Error()})
 			return
+		case asAdminExtDenied(aerr) != nil:
+			// ★管理员闸在**绑定之前**又拦了一次（见 finishExternalAuth 里那段注释）：
+			// 审计与文案已在 denyAdminExternal 里产出（与签发前那道闸逐字同一句），
+			// 这里只负责原样转给用户。同准入闸：**不计爆破锁定**，也不再记一条
+			// 与事实不符的「口令错误」——外部源那边口令是对的。
+			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": asAdminExtDenied(aerr).Error()})
+			return
 		case aerr != nil:
 			// ★认证源故障绝不能回「用户名或密码错误」：那会让运维去查用户而不是查目录，
 			// 也不该计入账号锁定计数（用户什么都没做错）。
@@ -804,10 +815,25 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "用户名或密码错误"})
 			return
 		}
-		cred = ext.Cred
 		lc.Directory = ext.SrcKind // 认证策略按目录分组：这一步之后才知道是哪个目录认出的他
-		s.auditAs(r, cred.Account, "auth",
+		s.auditAs(r, ext.Cred.Account, "auth",
 			"经外部认证源「"+ext.SrcName+"」认证通过（"+extAuthTookZh(ext.Elapsed)+"）", "ok")
+		// ★外部认证通过 ≠ 可以签令牌：重读完整账号行 + 管理员一律拒，两件事收在同一道闸里，
+		// 与 OIDC 的两处签发共用（理由与症状写在 externalSessionCredential 上）。
+		full, deny, gerr := s.externalSessionCredential(r, ext.Cred.Account, "外部认证源「"+ext.SrcName+"」")
+		if gerr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
+			return
+		}
+		if deny != "" {
+			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": deny})
+			return
+		}
+		cred = full
+		// 本回合的第一因子来自外部认证源：登记一次短时标记，唯一消费方是首登强制改密
+		// （改密页不该再向他追问一个他不可能知道的**本地**旧口令，见 extAuthRounds）。
+		// 登记点必须在闸**之后**：被拒的那次不是一次可用的认证回合。
+		s.extAuth.mark(cred.Account)
 	}
 	// 账号状态门：禁用/锁定的目录账号口令对了也不放行（也不进 MFA 流程）
 	// ★外部源认证成功的账号同样要过这道闸：本地把某个外部用户禁用了，
@@ -836,6 +862,135 @@ func (s *Server) handlePortalLogin(w http.ResponseWriter, r *http.Request) {
 	// 显示名单独经响应体 displayName 回给前端。
 	tok := s.keys.Sign(auth.Claims{Sub: cred.Account, Role: cred.Role, Name: cred.Account}, tokenTTL)
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "token": tok, "displayName": cred.Name})
+}
+
+// externalSessionCredential 外部认证源认证通过之后、签任何令牌或票据之前的**唯一**一道闸。
+//
+// 三条路都过它，缺一条就是后门：
+//   - 门户口令路径（handlePortalLogin 的外部命中分支，LDAP/AD/RADIUS）；
+//   - OIDC 回调（handleOIDCCallback，签交接票据之前、也在二次认证之前——放在二次认证之后的话，
+//     passkey/TOTP 第二回合是各自签完整令牌的，闸就被绕过去了）；
+//   - OIDC 交接票据换会话（handleOIDCSession，60s 窗口内角色可能刚被改派）。
+//
+// 返回 (cred, denyReason, err)：
+//   - err != nil：读不到**完整**账号行——调用方回 5xx、**不签**（fail-closed）；
+//   - denyReason != ""：拒绝。审计已在闸内落 category=auth / verdict=deny，调用方只负责把这句话
+//     原样转给用户；**不计入爆破锁定**（外部源那边口令/断言是对的，与 handleAdminLogin
+//     「角色不符不计」同口径，计进去他连申诉的机会都没有）；
+//   - 否则 cred 是完整的 users 行，后续账号状态闸 / 二次认证 / 首登改密都从它取判据。
+//
+// 为什么要重读：ext.Cred / BindExternalUser 的返回值来自 store.UserBySubject 的窄 SELECT
+// （id/name/account/role/status/pass_hash），**没有 must_change_pw 与 pw_strength**——
+// 一个被管理员重置过本地口令的外部绑定账号，凭外部源口令登录时 MustChangePw 恒 false，
+// 直接拿到 8h 完整会话，「首登强制改密」对这条路径形同虚设。这里按账号重读（与
+// handlePortalLogin 开头同一个取数口 store.Credential），读不到就不签。
+//
+// 为什么拒管理员：管理员账号**不得经任何外部认证源换取会话**——管理员只认本地口令。
+// 这条路径原本被认为不存在（外部账号 role 恒 user），但 guardLocalCredentialForAdmin 的
+// 400 文案给出的补救路径正好造出它：「先为他重置一个本地口令，再来提权」——走完之后账号
+// 同时持有外部绑定 + 本地口令 + role=admin。此时凭 RADIUS/LDAP 口令登门户、或走一遍 OIDC
+// 授权码流，原样 Sign(Role: cred.Role) 就是一张 role=admin 的完整会话令牌：/auth/me 现算出
+// adminRole、管理 API 全通——管理台「只验本地口令」的收敛（handleAdminLogin 没有认证域路由）
+// 被门户与 OIDC 两条路整个绕开，而 RADIUS/LDAP 服务器的管理者（或持共享密钥的在途方）、
+// IdP 的管理者验证通过的一次认证，从此等于白帝管理员会话。与「先本地、后外部」那条注释
+// 同一个方向：管理员的认证权不外包。判据是 users.role='admin'（与 guardAdminTarget 同源），
+// 不看 admin_role 也不看页面文案。
+//
+// via 是给审计与用户文案看的路径名（「外部认证源「X」」/「OIDC 认证源「X」」/「OIDC 交接票据」）。
+// 拒绝要说清下一步：他该用的是本地口令（补救路径里管理员刚给他重置的那一个）。
+func (s *Server) externalSessionCredential(r *http.Request, account, via string) (store.Credential, string, error) {
+	cred, found, err := s.store.Credential(r.Context(), account)
+	if err != nil || !found {
+		slog.Error("外部认证通过后重读账号失败，拒绝签发令牌", "账号", account, "路径", via, "找到", found, "err", err)
+		if err == nil {
+			err = fmt.Errorf("账号 %q 不在目录中", account)
+		}
+		return store.Credential{}, "", err
+	}
+	if cred.Role == "admin" {
+		return store.Credential{}, s.denyAdminExternal(r, cred.Account, via), nil
+	}
+	return cred, "", nil
+}
+
+// denyAdminExternal 「管理员不得经外部路径换取任何凭证」这条拒绝的**唯一**产出口：
+// 落一条 category=auth / verdict=deny 的审计，返回给用户看的那句话。
+//
+// ★为什么要抽出来：这条拒绝现在有**两个判定时点**，两处必须同真同假、同一句话——
+//   - 绑定**之前**（finishExternalAuth / handleOIDCCallback 里的 cur.Role=="admin"）：
+//     拦的是「外部目录改写这个管理员账号的显示名 / 邮箱 / 外部组归属」；
+//   - 签发**之前**（externalSessionCredential）：拦的是会话本身，并顺带重读完整行。
+//
+// 两处各写一遍文案的话，用户在两条路上会看到两句不同的话去问管理员，而它们是同一件事；
+// 审计正文不同还会让「按事件文案检索」漏掉一半（assertAdminExtDenyAudited 正是这么查的）。
+//
+// via 是路径名（「外部认证源「X」」/「OIDC 认证源「X」」/「OIDC 交接票据」）。
+// **不计入爆破锁定**：外部源那边口令/断言是对的，与 handleAdminLogin「角色不符不计」同口径。
+func (s *Server) denyAdminExternal(r *http.Request, account, via string) string {
+	s.auditAs(r, account, "auth",
+		"登录被拒（管理员账号经"+via+"认证通过，但管理员只接受本地口令认证）", "deny")
+	return "该账号是管理员，管理员只接受本地口令认证、不经" + via + "登录；" +
+		"请改用本地口令登录，忘记本地口令请联系其他管理员重置"
+}
+
+// extAuthRoundTTL 外部认证回合标记的寿命：够覆盖「外部认证通过 → 二次因子第二回合
+// → 首登改密」这一整串动作（mfaTicketTTL 3min + pwResetTTL 15min），再多就没有意义了。
+const extAuthRoundTTL = mfaTicketTTL + pwResetTTL
+
+// extAuthRounds 记住「这个账号刚刚由外部认证源完成过一次完整认证」。
+//
+// ★它解的是一个把外部用户卡死的死循环：管理员为外部绑定账号重置本地口令（这是
+// guardLocalCredentialForAdmin 给出的补救路径，也是 License 席位/找回的常规动作）会置上
+// must_change_pw；该用户随后凭**外部**口令或走一遍 IdP 认证通过，拿到的是受限改密令牌，
+// 而改密页要他填「旧口令」——那是管理员刚设的**本地**口令，他多半根本不知道。
+// 每试错一次 handleChangePassword 都调 noteLoginFailure，账号维与 IP 维防爆破很快打满，
+// 于是连本来能用的外部登录也一起进不去了：他被自己的"忘记旧口令"锁在门外。
+//
+// 判据必须是「**本回合**的第一因子来自外部认证源」，而不是「这个账号有外部绑定」——
+// 后者会让一个同时持本地口令的账号在**本地**登录时也免填旧口令，那是白送的降级。
+//
+// 为什么是服务端内存而不是令牌里的一个 claim：claim 要改 auth.Claims（跨包），
+// 而这里要的语义正好是"短命的服务端事实"，与 oidcFlows.usedJTI 同款。
+// **重启即失效，方向是 fail-closed**：标记没了就回到"要求填旧口令"的原行为，
+// 只是那个 15 分钟窗口里的人得重登一次——绝不会反过来放宽。
+// 键是规范账号而非 jti：TOTP/passkey 第二回合会换一张令牌来签改密票据（handleTotpLogin →
+// mustChangeLogin），按 jti 记的话那一跳之后标记就找不着了，而那正是最需要它的路径。
+type extAuthRounds struct {
+	mu sync.Mutex
+	m  map[string]int64 // 规范账号 → 过期 Unix 秒（懒清理）
+}
+
+func newExtAuthRounds() *extAuthRounds { return &extAuthRounds{m: map[string]int64{}} }
+
+// mark 登记一次「外部认证源刚认过这个账号」。
+func (e *extAuthRounds) mark(account string) {
+	if e == nil {
+		return
+	}
+	key := normUser(account)
+	if key == "" {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	now := time.Now().Unix()
+	for k, exp := range e.m {
+		if exp <= now {
+			delete(e.m, k)
+		}
+	}
+	e.m[key] = now + int64(extAuthRoundTTL.Seconds())
+}
+
+// active 报告该账号此刻是否还在一次外部认证回合的窗口内。
+func (e *extAuthRounds) active(account string) bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	exp, ok := e.m[normUser(account)]
+	return ok && exp > time.Now().Unix()
 }
 
 // PortalTile 应用门户卡片。
@@ -1201,7 +1356,20 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load credential")
 		return
 	}
-	if !found || !auth.VerifyPassword(cred.PassHash, body.Old) {
+	// ★受限改密令牌 + 本回合第一因子来自外部认证源 → 不再追问旧口令。
+	//
+	//   条件是**两个**且缺一不可：
+	//   ① c.Use == UsePwReset——完整会话令牌的自助改密不受影响（那条路上"旧口令"
+	//      是防"会话被盗后被改密"的唯一一道，绝不能松）；
+	//   ② 本回合确实是外部认证源认过的（extAuthRounds，标记在闸之后登记、15+3min 过期、
+	//      重启即失效 = fail-closed 回到追问旧口令）。
+	//
+	//   为什么这不是放宽：走到这里意味着他刚刚完整通过了一次外部认证（并过了管理员闸、
+	//   账号状态闸与二次因子），那张 15 分钟受限令牌就是这次认证的凭证。再问一遍本地
+	//   旧口令，对他不构成任何额外证明，却是一个他答不出的问题——而每答错一次都会
+	//   计进账号维/IP 维防爆破，最终把他本来能用的外部登录也一起锁掉。
+	skipOld := c.Use == auth.UsePwReset && s.extAuth.active(c.Sub)
+	if !found || (!skipOld && !auth.VerifyPassword(cred.PassHash, body.Old)) {
 		s.noteLoginFailure(r, c.Sub)
 		s.audit(r, "auth", "自助改密失败（旧口令错误）", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "reason": "旧口令错误"})
@@ -1288,11 +1456,23 @@ func (s *Server) mustChangeLogin(w http.ResponseWriter, r *http.Request, cred st
 		Sub: cred.Account, Role: cred.Role, Name: cred.Account,
 		Jti: auth.RandJTI(), Use: auth.UsePwReset,
 	}, pwResetTTL)
-	httpx.JSON(w, http.StatusOK, map[string]any{
+	// ★文案必须点名「**本地**初始口令」：外部绑定账号在这一页上看到的"旧口令"，
+	// 指的既不是他刚输的那个域口令、也不是 IdP 那边的口令，而是管理员在白帝这侧
+	// 为他设的本地口令。不点名的话他会反复提交域口令，把两维防爆破一起打满。
+	resp := map[string]any{
 		"ok": true, "mustChangePassword": true, "token": tok,
 		"displayName": cred.Name, "role": cred.Role,
-		"reason": "首次登录须修改初始口令",
-	})
+		"reason": "首次登录须修改初始口令（旧口令 = 管理员为你设置的**本地**初始口令，不是你刚输入的域口令）",
+	}
+	if s.extAuth.active(cred.Account) {
+		// 本回合是外部认证源认过的：那张受限令牌本身已是一次完整认证的凭证，
+		// 再问一遍本地旧口令不增加任何保证，只会把不知道它的人挡在死路上。
+		// skipOldPassword 让门户改密页把"旧口令"输入框整个收起来——留着它而后端
+		// 又不校验，是另一种「配置面与执行方对不上」。
+		resp["skipOldPassword"] = true
+		resp["reason"] = "首次登录须修改初始口令（本次已由外部认证源完成认证，无需再填写旧口令）"
+	}
+	httpx.JSON(w, http.StatusOK, resp)
 }
 
 // handleMe 返回当前令牌身份 + **现算的**管理员角色与权限键。

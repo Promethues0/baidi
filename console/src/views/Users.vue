@@ -1,54 +1,54 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">用户与角色 · 访问者目录</div>
-        <div class="bd-page__sub">多身份源统一纳管 · 组织树与用户组维护 · 实时在线态与账号生命周期就地处置</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn bd-btn--ghost" @click="openIdle"><icon-clock-circle />闲置治理</button>
-        <button class="bd-btn bd-btn--ghost" :disabled="exporting" @click="exportUsers">
-          <icon-download />{{ exporting ? '导出中…' : '导出台账' }}
-        </button>
-        <button class="bd-btn bd-btn--ghost" @click="openImport"><icon-upload />批量导入</button>
-        <button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button>
-      </div>
-    </div>
+    <!-- 离线文案按 DESIGN.md §2 口径：本页拉不到就不画（load 失败时整份目录清空、无任何演示回落，
+         见 load() 的 catch），故不是「降级演示」而是「数据未读取」（红）。 -->
+    <PageHeader title="用户与角色 · 访问者目录" subtitle="多身份源统一纳管 · 组织树与用户组维护 · 实时在线态与账号生命周期就地处置" :live="live"
+      off-text="数据未读取" off-color="red">
+      <button class="bd-btn bd-btn--ghost" @click="openIdle"><icon-clock-circle />闲置治理</button>
+      <button class="bd-btn bd-btn--ghost" :disabled="exporting" @click="exportUsers">
+        <icon-download />{{ exporting ? '导出中…' : '导出台账' }}
+      </button>
+      <button class="bd-btn bd-btn--ghost" @click="openImport"><icon-upload />批量导入</button>
+      <button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button>
+    </PageHeader>
 
-    <!-- 身份源 tabs -->
-    <div class="bd-tabs">
-      <span v-for="d in directories" :key="d.key" class="bd-tab" :class="{ on: dir === d.key }" @click="dir = d.key">
+    <!-- 身份源 tabs：真 button（可 Tab、可回车） -->
+    <div class="bd-tabs" role="tablist">
+      <button v-for="d in directories" :key="d.key" type="button" class="bd-tab" role="tab" :aria-selected="dir === d.key" @click="dir = d.key">
         <icon-storage v-if="d.type === 'local'" /><icon-cloud v-else />
-        {{ d.name }} <em>{{ d.users }}</em>
-      </span>
+        <!-- 目录没读到时计数画「—」：清空后的 0 是个凭空的确定值，与下方「用户目录未读取」矛盾 -->
+        {{ d.name }} <em>{{ loadErr ? '—' : d.users }}</em>
+      </button>
     </div>
 
     <!-- 外部目录说明卡。★白帝不做目录周期同步，这里不许出现同步时间/进度/日志一类的字样：
          外部账号是首次登录时按 subject 绑定建号的。 -->
-    <div v-if="curDir && curDir.type !== 'local'" class="bd-sync">
-      <icon-info-circle class="bd-sync__ic" />
-      <span>
+    <div v-if="curDir && curDir.type !== 'local'" class="bd-notice">
+      <icon-info-circle />
+      <span class="bd-notice__body">
         <b>{{ curDir.name }}</b> 已绑定 {{ curDir.users }} 个账号 ——
-        白帝不做目录周期同步，外部账号在**首次登录**时按目录返回的 subject 绑定建号
+        白帝不做目录周期同步，外部账号在<b>首次登录</b>时按目录返回的 subject 绑定建号
       </span>
-      <div style="flex: 1" />
-      <router-link class="bd-link" to="/business/auth">认证源配置</router-link>
+      <router-link class="bd-link bd-notice__right" to="/business/auth">认证源配置</router-link>
     </div>
 
-    <!-- 聚合计数 -->
-    <div class="bd-agg">
-      <div v-for="s in agg" :key="s.label" class="bd-agg__c">
-        <span class="bd-agg__dot" :style="{ background: s.color }" /><b :class="{ unknown: s.n === UNKNOWN }">{{ s.n }}</b>{{ s.label }}
-      </div>
+    <!-- 聚合计数：跟随当前身份源。四格的三态与下方告警条共用 onlineSrc 一个判据（见 script）：
+         目录未读取 → 四格都是「—」（不是 0）；目录里零账号 → 在线/离线「—」（没有任何一行能证明网关在不在上报）；
+         网关心跳缺席 → 在线/离线「—」。不可判定的原因逐格给（unknownText），别用一句「无网关心跳」解释三种处境。 -->
+    <div v-if="!loaded" class="bd-users__kpis">
+      <div v-for="i in 4" :key="i" class="bd-card"><SkeletonBlock kind="stat" /></div>
+    </div>
+    <div v-else class="bd-users__kpis">
+      <StatCard v-for="s in agg" :key="s.label" :label="s.label" :value="s.value" :tone="s.tone" :foot="s.foot"
+        :unknown-text="s.unknownText" />
     </div>
 
     <!-- ★在线态没有数据源时必须当面说出来（后端把 online 整个字段缺席下发）。
          此前同样的处境下这一页是整表灰点「离线」+ 页头「在线 0」，一句提示都没有，
          而那时敲门与隧道照常，人是真连着的——管理员据此判断"要不要踢"就会判错。 -->
-    <div v-if="onlineUnknown" class="bd-unk">
-      <icon-exclamation-circle-fill class="bd-unk__ic" />
-      <span>
+    <div v-if="onlineUnknown" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <span class="bd-notice__body">
         <b>在线态当前不可判定</b>：控制面此刻收不到任何网关的心跳上报，「谁连着」这件事没有数据源
         （网关证书过期 / 控制面刚重启 / mTLS 端口不通都会这样）。
         此时<b>敲门与隧道并不受影响</b>，用户很可能正连着——不要据此认定"人已经离线了"。
@@ -96,10 +96,10 @@
 
         <!-- 组织树 -->
         <template v-if="mode === 'org'">
-          <div v-if="!curOrgNode" class="bd-otree__tip">选中下方任一部门，上方按钮即作用于它。</div>
+          <div v-if="!curOrgNode && !loadErr" class="bd-otree__tip">选中下方任一部门，上方按钮即作用于它。</div>
           <button class="bd-onode" :class="{ on: org === '' }" :aria-pressed="org === ''" @click="org = ''">
             <icon-apps class="bd-onode__ic" /><span class="bd-onode__t">全部用户</span>
-            <span class="bd-onode__n">{{ users.length }}</span>
+            <span class="bd-onode__n">{{ loadErr ? '—' : users.length }}</span>
           </button>
           <div v-for="n in flatOrg" :key="n.key" class="bd-onode-row" :class="{ sel: org === n.key }">
             <button class="bd-onode" :class="{ on: org === n.key }" :aria-pressed="org === n.key"
@@ -119,16 +119,19 @@
             </span>
           </div>
           <button class="bd-onode bd-onode--add" @click="openOrg(null, '')"><icon-plus />新建顶级组织</button>
-          <div v-if="!flatOrg.length" class="bd-otree__empty">尚无组织，先建一个。</div>
+          <!-- 组织树与用户表来自同一个 GET /users：读取失败时这里是「没读到」而不是「尚无组织」——
+               后者会把人引去建一个其实早就存在的部门。 -->
+          <EmptyState v-if="loadErr" size="sm" tone="danger" title="组织树未读取" desc="与用户目录同一请求，一并失败；这里显示的不是「尚无组织」" />
+          <EmptyState v-else-if="!flatOrg.length" size="sm" title="尚无组织" desc="先建一个。" />
         </template>
 
         <!-- 用户组 -->
         <template v-else>
-          <div v-if="!curGroup" class="bd-otree__tip">选中下方任一用户组，上方按钮即作用于它。</div>
+          <div v-if="!curGroup && !loadErr" class="bd-otree__tip">选中下方任一用户组，上方按钮即作用于它。</div>
           <button class="bd-onode" :class="{ on: groupSel === '' }" :aria-pressed="groupSel === ''"
             @click="groupSel = ''">
             <icon-apps class="bd-onode__ic" /><span class="bd-onode__t">全部用户</span>
-            <span class="bd-onode__n">{{ users.length }}</span>
+            <span class="bd-onode__n">{{ loadErr ? '—' : users.length }}</span>
           </button>
           <div v-for="g in groups" :key="g.id" class="bd-onode-row" :class="{ sel: groupSel === g.id }">
             <button class="bd-onode" :class="{ on: groupSel === g.id }" :aria-pressed="groupSel === g.id"
@@ -147,43 +150,59 @@
             </span>
           </div>
           <button class="bd-onode bd-onode--add" @click="openGroup(null)"><icon-plus />新建用户组</button>
-          <div v-if="!groups.length" class="bd-otree__empty">尚无用户组。角色组的成员由用户的展示角色派生，不用手工维护。</div>
+          <EmptyState v-if="loadErr" size="sm" tone="danger" title="用户组未读取" desc="用户目录读取失败时不再单独拉用户组清单；这里显示的不是「尚无用户组」" />
+          <EmptyState v-else-if="!groups.length" size="sm" title="尚无用户组" desc="角色组的成员由用户的展示角色派生，不用手工维护。" />
         </template>
       </div>
 
       <!-- 用户表 -->
-      <div class="bd-tablecard" style="flex: 1; min-width: 0">
+      <div class="bd-tablecard bd-two__main">
         <div class="bd-toolbar">
           <span class="bd-toolbar__c">{{ scopeTitle }} · {{ shown.length }} 人</span>
-          <div style="flex: 1" />
-          <div class="bd-searchbox" style="width: 240px">
+          <div class="bd-toolbar__spacer" />
+          <div class="bd-searchbox bd-users__search">
             <icon-search />
             <input v-model="kw" class="bd-searchbox__in" placeholder="按用户名 / 账号 / IP 搜索" />
           </div>
         </div>
-        <table class="bd-table">
+        <!-- 首屏骨架：load() 回来之前不画表头下面的空白 -->
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="6" :cols="6" />
+        <table v-else class="bd-table">
           <thead>
             <tr><th>用户</th><th>所属组织</th><th>用户组</th><th>终端 / 接入</th><th>状态</th><th class="r">操作</th></tr>
           </thead>
           <tbody>
+            <!-- 空态分处境：读取失败（不是「没有用户」）/ 搜索无命中 / 当前组织·用户组下没人 / 目录里还没有账号 -->
+            <tr v-if="!shown.length" class="bd-table__emptyrow">
+              <td colspan="6">
+                <EmptyState v-if="loadErr" size="md" tone="danger" title="用户目录未读取" :desc="`${loadErr}——这里显示的不是「没有用户」`" />
+                <EmptyState v-else-if="kw.trim()" size="md" title="没有匹配的用户" :desc="`在「${scopeTitle}」内按「${kw.trim()}」搜索用户名、账号与 IP 均无命中`" />
+                <EmptyState v-else-if="(mode === 'org' && org) || (mode === 'group' && groupSel)" size="md" :title="`「${scopeTitle}」下还没有用户`" desc="在用户详情里改「所属组织 / 用户组」即可归入，或直接新增到这里">
+                  <template #action><button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button></template>
+                </EmptyState>
+                <EmptyState v-else size="md" title="这个目录里还没有账号" :desc="curDir && curDir.type !== 'local' ? '外部账号在首次登录成功后按 subject 绑定建号，这里才会出现' : '新增本地口令账号，或用「批量导入」从 CSV 逐行创建'">
+                  <template v-if="!curDir || curDir.type === 'local'" #action><button class="bd-btn" @click="openCreateUser"><icon-plus />新增用户</button></template>
+                </EmptyState>
+              </td>
+            </tr>
             <tr v-for="u in shown" :key="u.id" :class="{ sel: sel?.id === u.id }">
               <td>
                 <div class="bd-cellname" @click="open(u)">
                   <span class="bd-avatar" :style="{ background: avBg(u) }">{{ u.name.slice(0, 1) }}</span>
-                  <span><b>{{ u.name }}<span v-if="u.risk === 'high'" class="bd-rk">高危</span></b><i class="bd-mono">{{ u.account }}</i></span>
+                  <span><b>{{ u.name }}<span v-if="u.risk === 'high'" class="bd-tg bd-tg--red bd-rk">高危</span></b><i class="bd-mono">{{ u.account }}</i></span>
                 </div>
               </td>
               <td>{{ u.org || '—' }}</td>
               <td>
                 <span v-if="!u.groups.length" class="bd-t4">—</span>
-                <span v-for="gid in u.groups" :key="gid" class="bd-tg bd-tg--sm" :style="tagStyle('#722ED1')">{{ groupName(gid) }}</span>
+                <span v-for="gid in u.groups" :key="gid" class="bd-tg bd-tg--purple bd-tg--sm">{{ groupName(gid) }}</span>
               </td>
               <td>
-                <span class="bd-st" :title="onlineHint(u.online)"><span class="d" :style="{ background: onlineDot(u.online) }" />{{ onlineText(u.online) }}</span>
-                <span class="bd-umono">{{ u.device }} · {{ u.ip }}</span>
+                <span class="bd-st" :class="onlineSt(u.online)" :title="onlineHint(u.online)"><span class="d" />{{ onlineText(u.online) }}</span>
+                <span class="bd-umono bd-mono">{{ u.device }} · {{ u.ip }}</span>
               </td>
-              <td><span class="bd-tg" :style="tagStyle(statusMeta(u.status).color)">{{ statusMeta(u.status).label }}</span></td>
-              <td class="r"><span class="bd-link" @click="open(u)">详情</span></td>
+              <td><span class="bd-tg" :class="statusMeta(u.status).tag">{{ statusMeta(u.status).label }}</span></td>
+              <td class="r"><span class="bd-acts"><button type="button" class="bd-link" @click="open(u)">详情</button></span></td>
             </tr>
           </tbody>
         </table>
@@ -195,15 +214,15 @@
       <template #title>访问者详情</template>
       <div v-if="sel" class="bd-ud">
         <div class="bd-ud__head">
-          <span class="bd-avatar" :style="{ background: avBg(sel), width: '46px', height: '46px', fontSize: '18px' }">{{ sel.name.slice(0, 1) }}</span>
+          <span class="bd-avatar bd-ud__av" :style="{ background: avBg(sel) }">{{ sel.name.slice(0, 1) }}</span>
           <div>
-            <div class="bd-ud__name">{{ sel.name }}<span class="bd-st" style="margin-left: 8px" :title="onlineHint(sel.online)"><span class="d" :style="{ background: onlineDot(sel.online) }" />{{ onlineText(sel.online) }}</span></div>
+            <div class="bd-ud__name">{{ sel.name }}<span class="bd-st bd-ud__st" :class="onlineSt(sel.online)" :title="onlineHint(sel.online)"><span class="d" />{{ onlineText(sel.online) }}</span></div>
             <div class="bd-ud__acct bd-mono">{{ sel.account }} · {{ sel.org || '无组织归属' }}</div>
           </div>
         </div>
 
         <!-- 账号生命周期状态机 -->
-        <div class="bd-ud__sec">账号生命周期</div>
+        <div class="bd-section-title">账号生命周期</div>
         <div class="bd-life">
           <div v-for="(st, i) in LIFE" :key="st.key" class="bd-life__step" :class="{ on: st.key === sel.status }">
             <span class="bd-life__dot" />{{ st.label }}<icon-right v-if="i < LIFE.length - 1" class="bd-life__arr" />
@@ -211,48 +230,48 @@
         </div>
 
         <!-- 组织归属与用户组（落库） -->
-        <div class="bd-ud__sec">组织与用户组</div>
-        <div class="bd-uform__f"><label>所属组织</label>
+        <div class="bd-section-title">组织与用户组</div>
+        <div class="bd-fld"><label>所属组织</label>
           <a-select v-model="memberForm.orgId" allow-clear placeholder="未归属任何组织">
             <a-option v-for="o in flatOrg" :key="o.key" :value="o.key">{{ '　'.repeat(o.depth) + o.title }}</a-option>
           </a-select>
         </div>
-        <div class="bd-uform__f"><label>用户组（仅显式成员组可改）</label>
+        <div class="bd-fld"><label>用户组（仅显式成员组可改）</label>
           <a-select v-model="memberForm.groups" multiple placeholder="未加入任何用户组">
             <a-option v-for="g in staticGroups" :key="g.id" :value="g.id">{{ g.name }}</a-option>
           </a-select>
-          <div v-if="derivedGroups.length" class="bd-uform__hint" style="margin: 8px 0 0">
-            按角色派生：<span v-for="g in derivedGroups" :key="g.id" class="bd-tg bd-tg--sm" :style="tagStyle('#722ED1')">{{ g.name }}</span>
+          <span v-if="derivedGroups.length" class="bd-fld__d">
+            按角色派生：<span v-for="g in derivedGroups" :key="g.id" class="bd-tg bd-tg--purple bd-tg--sm">{{ g.name }}</span>
             —— 由用户展示角色决定，改下面的「展示角色」才会变。
-          </div>
+          </span>
         </div>
         <!-- ★展示角色是「按角色派生」用户组**唯一**的成员写入路径，别把这一项去掉：
              那类组一旦恒为 0 人，用它授权的资源会因空展开下发 DenyAllSubject 而对所有人拒绝，
              策略/基线侧则永不命中（fail-open）。 -->
-        <div class="bd-uform__f"><label>展示角色（决定「按角色派生」用户组的成员）</label>
+        <div class="bd-fld"><label>展示角色（决定「按角色派生」用户组的成员）</label>
           <a-input-tag v-model="memberForm.roles" placeholder="回车添加，如：研发 / 销售 / 组长" allow-clear />
-          <div class="bd-uform__hint" style="margin: 6px 0 0">
+          <span class="bd-fld__d">
             组名与角色名相同的派生组会自动把该用户算作成员。空白与重复项保存时自动去掉。
-          </div>
+          </span>
         </div>
         <button class="bd-btn" :disabled="savingMember" @click="saveMembership">保存归属</button>
 
-        <div class="bd-ud__sec">接入信息</div>
+        <div class="bd-section-title">接入信息</div>
         <div class="bd-kv"><span>终端</span><b>{{ sel.device }}</b></div>
         <div class="bd-kv"><span>接入 IP</span><b class="bd-mono">{{ sel.ip }}</b></div>
         <div class="bd-kv"><span>邮箱</span><b>{{ sel.email || '—' }}</b></div>
         <div class="bd-kv"><span>认证方式</span><b>{{ sel.auth }}</b></div>
         <div class="bd-kv"><span>最后登录</span><b>{{ sel.lastLogin }}</b></div>
         <div class="bd-kv"><span>风险评估</span><b>
-          <span class="bd-tg" :style="tagStyle(riskColor(sel.risk))">{{ riskLabel(sel.risk) }}</span>
+          <span class="bd-tg" :class="riskTag(sel.risk)">{{ riskLabel(sel.risk) }}</span>
           <!-- 结论必须带依据：这一格是**账号级**的（跨该账号名下全部终端取最差判定）。 -->
           <span class="bd-riskwhy">{{ sel.risk === 'unknown'
             ? '该账号从未上报过终端环境（observe 准入模式下仍可接入）'
             : '来自终端合规判定，跨该账号名下全部终端取最差档' }}</span>
         </b></div>
 
-        <div class="bd-ud__sec">角色</div>
-        <div class="bd-roles"><span v-for="r in sel.roles" :key="r" class="bd-tg" :style="tagStyle('#165DFF')">{{ r }}</span></div>
+        <div class="bd-section-title">角色</div>
+        <div class="bd-roles"><span v-for="r in sel.roles" :key="r" class="bd-tg bd-tg--blue">{{ r }}</span></div>
 
         <div class="bd-ud__acts">
           <button v-if="sel.status === 'locked'" class="bd-btn" @click="setStatus('active', '已解锁账号')"><icon-unlock />解锁账号</button>
@@ -264,6 +283,8 @@
                认证器一丢账号就永久登不进来，唯一出路是运维删库。 -->
           <button class="bd-btn bd-btn--ghost" @click="askResetMfa('passkey')"><icon-safe />重置 passkey</button>
           <button class="bd-btn bd-btn--ghost" @click="openEditProfile"><icon-edit />编辑资料</button>
+          <!-- 次要的危险操作走描边 .bd-btn--ghost.bd-btn--danger（白底红边红字，叠加态在 app.css 里有专门一组规则），
+               与 Jit / Devices 审批页的「驳回」同形；实心红只留给确认弹窗里的那一步「确认删除」。 -->
           <button v-if="sel.status !== 'disabled'" class="bd-btn bd-btn--ghost bd-btn--danger" @click="setStatus('disabled', '已禁用账号')">禁用账号</button>
           <!-- ★删除是 License 席位的**唯一**释放路径（席位满时后端 409 文案与闲置治理弹窗
                都指向它）。点之前先问一次影响面：哪些资源还按账号名点着他。 -->
@@ -274,90 +295,86 @@
 
     <!-- 组织编辑（落库） -->
     <a-modal v-model:visible="orgOpen" :title="orgForm.id ? '编辑组织' : '新建组织'" :width="460" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__f"><label>组织名称</label><a-input v-model="orgForm.name" placeholder="如：华东大区" /></div>
-        <div class="bd-uform__f"><label>上级组织</label>
-          <a-select v-model="orgForm.parentId" allow-clear placeholder="不选＝作为顶级组织">
-            <a-option v-for="o in orgParentOptions" :key="o.key" :value="o.key">{{ '　'.repeat(o.depth) + o.title }}</a-option>
-          </a-select>
-        </div>
-        <div class="bd-uform__f"><label>排序值</label><a-input-number v-model="orgForm.sort" :min="0" :max="9999" /></div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="orgOpen = false">取消</button>
-          <button class="bd-btn" :disabled="orgSaving" @click="saveOrg">保存并落库</button>
-        </div>
+      <div class="bd-fld"><label>组织名称</label><a-input v-model="orgForm.name" placeholder="如：华东大区" /></div>
+      <div class="bd-fld"><label>上级组织</label>
+        <a-select v-model="orgForm.parentId" allow-clear placeholder="不选＝作为顶级组织">
+          <a-option v-for="o in orgParentOptions" :key="o.key" :value="o.key">{{ '　'.repeat(o.depth) + o.title }}</a-option>
+        </a-select>
+      </div>
+      <div class="bd-fld"><label>排序值</label><a-input-number v-model="orgForm.sort" :min="0" :max="9999" /></div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="orgOpen = false">取消</button>
+        <button class="bd-btn" :disabled="orgSaving" @click="saveOrg">保存并落库</button>
       </div>
     </a-modal>
 
     <!-- 用户组编辑（落库） -->
     <a-modal v-model:visible="groupOpen" :title="groupForm.id ? '编辑用户组' : '新建用户组'" :width="460" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__f"><label>组名称</label><a-input v-model="groupForm.name" placeholder="如：高敏访问组" /></div>
-        <div class="bd-uform__f"><label>成员来源</label>
-          <a-select v-model="groupForm.kind" :disabled="!!groupForm.id">
-            <a-option value="static">显式成员（管理员维护）</a-option>
-            <a-option value="role">按用户角色派生（成员只读）</a-option>
-          </a-select>
-          <div class="bd-uform__hint" style="margin: 8px 0 0">
-            角色派生组的成员 = 展示角色里含该组名的用户；组名即角色名，改不了成员，只能改角色。
-          </div>
-        </div>
-        <div class="bd-uform__f"><label>说明</label><a-input v-model="groupForm.description" placeholder="选填" /></div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="groupOpen = false">取消</button>
-          <button class="bd-btn" :disabled="groupSaving" @click="saveGroup">保存并落库</button>
-        </div>
+      <div class="bd-fld"><label>组名称</label><a-input v-model="groupForm.name" placeholder="如：高敏访问组" /></div>
+      <div class="bd-fld"><label>成员来源</label>
+        <a-select v-model="groupForm.kind" :disabled="!!groupForm.id">
+          <a-option value="static">显式成员（管理员维护）</a-option>
+          <a-option value="role">按用户角色派生（成员只读）</a-option>
+        </a-select>
+        <span class="bd-fld__d">
+          角色派生组的成员 = 展示角色里含该组名的用户；组名即角色名，改不了成员，只能改角色。
+        </span>
+      </div>
+      <div class="bd-fld"><label>说明</label><a-input v-model="groupForm.description" placeholder="选填" /></div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="groupOpen = false">取消</button>
+        <button class="bd-btn" :disabled="groupSaving" @click="saveGroup">保存并落库</button>
       </div>
     </a-modal>
 
     <!-- 组成员编辑（落库） -->
     <a-modal v-model:visible="memberOpen" title="编辑用户组成员" :width="480" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__hint">「{{ memberGroupName }}」的成员按账号维护，保存即全量覆写。</div>
-        <div class="bd-uform__f"><label>成员账号</label>
-          <a-select v-model="memberAccounts" multiple placeholder="选择账号">
-            <a-option v-for="u in users" :key="u.id" :value="u.account">{{ u.name }}（{{ u.account }}）</a-option>
-          </a-select>
-        </div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="memberOpen = false">取消</button>
-          <button class="bd-btn" :disabled="memberSaving" @click="saveMembers">保存成员</button>
-        </div>
+      <div class="bd-notice bd-notice--plain"><icon-info-circle /><span>「{{ memberGroupName }}」的成员按账号维护，保存即全量覆写。</span></div>
+      <div class="bd-fld"><label>成员账号</label>
+        <a-select v-model="memberAccounts" multiple placeholder="选择账号">
+          <a-option v-for="u in users" :key="u.id" :value="u.account">{{ u.name }}（{{ u.account }}）</a-option>
+        </a-select>
+      </div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="memberOpen = false">取消</button>
+        <button class="bd-btn" :disabled="memberSaving" @click="saveMembers">保存成员</button>
       </div>
     </a-modal>
 
     <!-- 新增用户（写入 SQLite） -->
     <a-modal v-model:visible="createOpen" title="新增用户" :width="460" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__f"><label>姓名</label><a-input v-model="form.name" placeholder="如：钱七" /></div>
-        <div class="bd-uform__f"><label>登录账号</label><a-input v-model="form.account" placeholder="如：qian.qi" /></div>
-        <div class="bd-uform__f"><label>所属组织</label>
-          <a-select v-model="form.orgId" allow-clear placeholder="不选＝暂不归属">
-            <a-option v-for="o in flatOrg" :key="o.key" :value="o.key">{{ '　'.repeat(o.depth) + o.title }}</a-option>
-          </a-select>
-        </div>
-        <div class="bd-uform__f"><label>用户组</label>
-          <a-select v-model="form.groups" multiple placeholder="选填">
-            <a-option v-for="g in staticGroups" :key="g.id" :value="g.id">{{ g.name }}</a-option>
-          </a-select>
-        </div>
-        <!-- ★别在建号表单里加「认证方式」选项：认证方式由后端按实算下发（口令来源 +
-             真注册过的 passkey / TOTP），在这里选只会落成一列零消费方的自由文本，
-             却在用户详情里被当作事实展示。改认证要求去「认证策略」，加第二因子由本人注册。 -->
-        <div class="bd-uform__note">
-          <icon-info-circle />
-          <span>
-            新建的是**本地口令**账号。认证方式不在这里选：它由真实事实算出来
-            （口令来源 + 是否注册过 passkey / TOTP），建号后在列表里可见。
-          </span>
-        </div>
-        <div class="bd-uform__f"><label>初始登录口令</label>
-          <a-input-password v-model="form.password" placeholder="留空则用默认 baidi@123（至少 6 位）" />
-        </div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
-          <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
-        </div>
+      <div class="bd-fld"><label>姓名</label><a-input v-model="form.name" placeholder="如：钱七" /></div>
+      <div class="bd-fld"><label>登录账号</label><a-input v-model="form.account" placeholder="如：qian.qi" /></div>
+      <div class="bd-fld"><label>所属组织</label>
+        <a-select v-model="form.orgId" allow-clear placeholder="不选＝暂不归属">
+          <a-option v-for="o in flatOrg" :key="o.key" :value="o.key">{{ '　'.repeat(o.depth) + o.title }}</a-option>
+        </a-select>
+      </div>
+      <div class="bd-fld"><label>用户组</label>
+        <a-select v-model="form.groups" multiple placeholder="选填">
+          <a-option v-for="g in staticGroups" :key="g.id" :value="g.id">{{ g.name }}</a-option>
+        </a-select>
+      </div>
+      <!-- ★别在建号表单里加「认证方式」选项：认证方式由后端按实算下发（口令来源 +
+           真注册过的 passkey / TOTP），在这里选只会落成一列零消费方的自由文本，
+           却在用户详情里被当作事实展示。改认证要求去「认证策略」，加第二因子由本人注册。 -->
+      <div class="bd-notice bd-notice--plain">
+        <icon-info-circle />
+        <span class="bd-notice__body">
+          新建的是**本地口令**账号。认证方式不在这里选：它由真实事实算出来
+          （口令来源 + 是否注册过 passkey / TOTP），建号后在列表里可见。
+        </span>
+      </div>
+      <div class="bd-fld"><label>初始登录口令</label>
+        <a-input-password v-model="form.password" placeholder="留空则用默认 baidi@123（至少 6 位）" />
+      </div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="createOpen = false">取消</button>
+        <button class="bd-btn" :disabled="creating" @click="createUser">创建并落库</button>
       </div>
     </a-modal>
 
@@ -365,201 +382,207 @@
          账号名是令牌主体，也是 JIT 授予 / 封禁名单 / 终端报告 / 用户组成员 /
          认证源绑定的关联键，改它会让这些关系整段挂空且不报错，后端显式拒收。 -->
     <a-modal v-model:visible="prof.open" title="编辑用户资料" :width="420" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__f"><label>账号</label>
-          <a-input :model-value="prof.account" disabled />
-          <span class="bd-uform__d">账号名不可修改：它是令牌主体与多张表的关联键。需要换账号请新建并迁移授权。</span>
-        </div>
-        <div class="bd-uform__f"><label>姓名</label>
-          <a-input v-model="prof.name" placeholder="显示名" allow-clear @keyup.enter="saveProfile" />
-        </div>
-        <div class="bd-uform__f"><label>邮箱</label>
-          <a-input v-model="prof.email" placeholder="留空即清除" allow-clear @keyup.enter="saveProfile" />
-        </div>
-        <div v-if="prof.err" class="bd-uform__err"><icon-close-circle-fill />{{ prof.err }}</div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="prof.open = false">取消</button>
-          <button class="bd-btn" :disabled="prof.busy" @click="saveProfile">{{ prof.busy ? '保存中…' : '保存' }}</button>
-        </div>
+      <div class="bd-fld"><label>账号</label>
+        <a-input :model-value="prof.account" disabled />
+        <span class="bd-fld__d">账号名不可修改：它是令牌主体与多张表的关联键。需要换账号请新建并迁移授权。</span>
+      </div>
+      <div class="bd-fld"><label>姓名</label>
+        <a-input v-model="prof.name" placeholder="显示名" allow-clear @keyup.enter="saveProfile" />
+      </div>
+      <div class="bd-fld"><label>邮箱</label>
+        <a-input v-model="prof.email" placeholder="留空即清除" allow-clear @keyup.enter="saveProfile" />
+      </div>
+      <div v-if="prof.err" class="bd-notice bd-notice--danger"><icon-close-circle-fill /><span class="bd-notice__body">{{ prof.err }}</span></div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="prof.open = false">取消</button>
+        <button class="bd-btn" :disabled="prof.busy" @click="saveProfile">{{ prof.busy ? '保存中…' : '保存' }}</button>
       </div>
     </a-modal>
 
     <!-- 删除账号：先给影响面，再让人点 -->
     <a-modal v-model:visible="del.open" title="删除账号" :width="480" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-delwarn">
-          <icon-exclamation-circle-fill />
-          <div>
-            将永久删除账号 <b>{{ del.name }}</b>（<span class="bd-mono">{{ del.account }}</span>）。
-            此操作<b>不可撤销</b>，并会释放一个 License 用户席位。
-          </div>
+      <div class="bd-notice bd-notice--danger">
+        <icon-exclamation-circle-fill />
+        <div class="bd-notice__body">
+          将永久删除账号 <b>{{ del.name }}</b>（<span class="bd-mono">{{ del.account }}</span>）。
+          此操作<b>不可撤销</b>，并会释放一个 License 用户席位。
         </div>
-        <div v-if="del.loading" class="bd-uform__d">正在核算影响面…</div>
-        <div v-else class="bd-delnote">{{ del.note || '（影响面未取到）' }}</div>
-        <div v-if="del.resources.length" class="bd-uform__d">
-          仍点名授权他的资源：<b class="bd-mono">{{ del.resources.join('、') }}</b>
-        </div>
-        <div v-if="del.err" class="bd-uform__err"><icon-close-circle-fill />{{ del.err }}</div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="del.open = false">取消</button>
-          <button class="bd-btn bd-btn--danger2" :disabled="del.busy" @click="doDeleteUser">
-            {{ del.busy ? '删除中…' : '确认删除' }}
-          </button>
-        </div>
+      </div>
+      <div v-if="del.loading" class="bd-fld__d">正在核算影响面…</div>
+      <div v-else class="bd-delnote">{{ del.note || '（影响面未取到）' }}</div>
+      <div v-if="del.resources.length" class="bd-fld__d">
+        仍点名授权他的资源：<b class="bd-mono">{{ del.resources.join('、') }}</b>
+      </div>
+      <div v-if="del.err" class="bd-notice bd-notice--danger bd-users__err"><icon-close-circle-fill /><span class="bd-notice__body">{{ del.err }}</span></div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="del.open = false">取消</button>
+        <button class="bd-btn bd-btn--danger" :disabled="del.busy" @click="doDeleteUser">
+          {{ del.busy ? '删除中…' : '确认删除' }}
+        </button>
       </div>
     </a-modal>
 
     <!-- 闲置账号治理：按 last_login 识别 + 批量锁定。判据是真实登录记录；
          ★「无记录」按建号时间估算并单独标注，绝不混同「从未登录」。 -->
     <a-modal v-model:visible="idleOpen" title="闲置账号治理" :width="640" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__hint">
+      <div class="bd-notice bd-notice--plain">
+        <icon-info-circle />
+        <span class="bd-notice__body">
           按最后登录时间识别闲置账号（仅 active 状态）。僵尸账号是最便宜的攻击面；
           锁定后可随时在用户详情里解锁，license 席位则需删除账号才释放。
+        </span>
+      </div>
+      <!-- 闲置治理**策略**（阈值 + 是否自动锁定）会落库并长期生效。
+           ★它与下面那个"超过 N 天"的预览输入框是两回事：后者只影响这一次识别。 -->
+      <div class="bd-idlepol">
+        <div class="bd-idlepol__h"><icon-settings />闲置治理策略<span>（保存后长期生效）</span></div>
+        <div class="bd-idlepol__row">
+          <span>判定为闲置：超过</span>
+          <a-input-number v-model="idlePolicy.thresholdDays" :min="idleMinDays" :max="idleMaxDays"
+                          class="bd-idle__num" size="small" />
+          <span>天未登录</span>
+          <div class="bd-toolbar__spacer" />
+          <span v-if="idleDirty" class="bd-idlepol__dirty">有未保存的改动</span>
+          <button class="bd-btn bd-btn--sm" :class="{ 'bd-btn--ghost': !idleDirty }" :disabled="idleSaving" @click="saveIdlePolicy">
+            {{ idleSaving ? '保存中…' : '保存策略' }}
+          </button>
         </div>
-        <!-- 闲置治理**策略**（阈值 + 是否自动锁定）会落库并长期生效。
-             ★它与下面那个"超过 N 天"的预览输入框是两回事：后者只影响这一次识别。 -->
-        <div class="bd-idlepol">
-          <div class="bd-idlepol__h"><icon-settings />闲置治理策略<span>（保存后长期生效）</span></div>
-          <div class="bd-idlepol__row">
-            <span>判定为闲置：超过</span>
-            <a-input-number v-model="idlePolicy.thresholdDays" :min="idleMinDays" :max="idleMaxDays"
-                            style="width: 110px" size="small" />
-            <span>天未登录</span>
-            <div style="flex:1" />
-            <span v-if="idleDirty" class="bd-idlepol__dirty">有未保存的改动</span>
-            <button class="bd-btn" :class="{ 'bd-btn--ghost': !idleDirty }" :disabled="idleSaving" @click="saveIdlePolicy">
-              {{ idleSaving ? '保存中…' : '保存策略' }}
-            </button>
-          </div>
-          <label class="bd-idlepol__row bd-idlepol__auto">
-            <a-switch v-model="idlePolicy.autoLock" size="small" />
-            <span>
-              <b>自动锁定闲置账号</b>
-              <i>后台每 {{ idleLoopHint }} 检查一轮；锁定与手工批量走同一条路径（含防自锁与数据面撤窗），
-                 并<b>永不处置管理员账号</b>——那条路径上没有调用方可以比对权限。</i>
-            </span>
-          </label>
-          <!-- 开着自动锁定就是一件会在没人看着的时候动别人账号的事，必须当面说清。
-               ★判据用**已落库**的那份：勾上开关还没保存时，后台并没有在锁人。 -->
-          <div v-if="idleSaved.autoLock" class="bd-idlepol__warn">
-            <icon-exclamation-circle-fill />
+        <label class="bd-idlepol__row bd-idlepol__auto">
+          <a-switch v-model="idlePolicy.autoLock" size="small" />
+          <span>
+            <b>自动锁定闲置账号</b>
+            <i>后台每 {{ idleLoopHint }} 检查一轮；锁定与手工批量走同一条路径（含防自锁与数据面撤窗），
+               并<b>永不处置管理员账号</b>——那条路径上没有调用方可以比对权限。</i>
+          </span>
+        </label>
+        <!-- 开着自动锁定就是一件会在没人看着的时候动别人账号的事，必须当面说清。
+             ★判据用**已落库**的那份：勾上开关还没保存时，后台并没有在锁人。 -->
+        <div v-if="idleSaved.autoLock" class="bd-notice bd-notice--warn bd-idlepol__warn">
+          <icon-exclamation-circle-fill />
+          <span class="bd-notice__body">
             自动锁定<b>已在生效</b>：后台按 {{ idleSaved.thresholdDays }} 天的阈值<b>自行锁定</b>
             符合条件的普通账号，并同步撤窗断隧道。每一次锁定都以 <code>system</code> 为行为人落审计。
-          </div>
-          <div v-if="!idleStoreReady" class="bd-idlepol__warn">
-            <icon-exclamation-circle-fill />
-            当前后端没有登录记录判据（内存种子模式），自动锁定不会有任何动作。
-          </div>
+          </span>
         </div>
+        <div v-if="!idleStoreReady" class="bd-notice bd-notice--warn bd-idlepol__warn">
+          <icon-exclamation-circle-fill />
+          <span class="bd-notice__body">当前后端没有登录记录判据（内存种子模式），自动锁定不会有任何动作。</span>
+        </div>
+      </div>
 
-        <div class="bd-idle__bar">
-          <span>本次识别按</span>
-          <a-input-number v-model="idleDays" :min="idleMinDays" :max="idleMaxDays" style="width: 110px" size="small" />
-          <span>天预览</span>
-          <button class="bd-btn" :disabled="idleLoading" @click="loadIdle">{{ idleLoading ? '识别中…' : '识别' }}</button>
-          <div style="flex:1" />
-          <span v-if="idleList.length" class="bd-idle__cnt">命中 {{ idleList.length }} 个，已选 {{ idleSel.length }} 个</span>
-        </div>
-        <!-- 预览天数与落库阈值不一致时必须说破：否则管理员会以为自己刚才配的就是这个数 -->
-        <div v-if="idleDays !== idleSaved.thresholdDays" class="bd-idle__preview">
+      <div class="bd-idle__bar">
+        <span>本次识别按</span>
+        <a-input-number v-model="idleDays" :min="idleMinDays" :max="idleMaxDays" class="bd-idle__num" size="small" />
+        <span>天预览</span>
+        <button class="bd-btn bd-btn--sm" :disabled="idleLoading" @click="loadIdle">{{ idleLoading ? '识别中…' : '识别' }}</button>
+        <div class="bd-toolbar__spacer" />
+        <span v-if="idleList.length" class="bd-idle__cnt">命中 {{ idleList.length }} 个，已选 {{ idleSel.length }} 个</span>
+      </div>
+      <!-- 预览天数与落库阈值不一致时必须说破：否则管理员会以为自己刚才配的就是这个数 -->
+      <div v-if="idleDays !== idleSaved.thresholdDays" class="bd-notice bd-notice--warn">
+        <icon-exclamation-circle-fill />
+        <span class="bd-notice__body">
           当前预览的是 {{ idleDays }} 天，而<b>已落库的策略阈值是 {{ idleSaved.thresholdDays }} 天</b>——
           <template v-if="idleSaved.autoLock">后台自动锁定按后者执行。</template>
           <template v-else>下面这份名单只是按预览天数算的，不代表策略。</template>
           要改策略请在上方修改并保存。
-        </div>
-        <div v-if="idleQueried && !idleList.length" class="bd-idle__empty">没有超过 {{ idleDays }} 天未登录的活跃账号。</div>
-        <div v-else-if="idleList.length" class="bd-idle__list">
-          <label v-for="a in idleList" :key="a.id" class="bd-idle__row">
-            <input type="checkbox" :value="a.id" v-model="idleSel" />
-            <span class="bd-idle__acct bd-mono">{{ a.account }}</span>
-            <span class="bd-idle__name">{{ a.name }}</span>
-            <span v-if="a.isAdmin" class="bd-tg" :style="tagStyle('#F53F3F')">管理员</span>
-            <span class="bd-idle__days">
-              <template v-if="a.neverRecorded">无登录记录 · 建号 {{ a.idleDays }} 天</template>
-              <template v-else>{{ a.idleDays }} 天未登录</template>
-            </span>
-          </label>
-        </div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="idleOpen = false">关闭</button>
-          <button class="bd-btn bd-btn--danger2" :disabled="!idleSel.length || idleLocking" @click="lockIdle">
-            {{ idleLocking ? '锁定中…' : `批量锁定（${idleSel.length}）` }}
-          </button>
-        </div>
+        </span>
+      </div>
+      <EmptyState v-if="idleQueried && !idleList.length" size="md" tone="ok" :title="`没有超过 ${idleDays} 天未登录的活跃账号`" />
+      <div v-else-if="idleList.length" class="bd-idle__list">
+        <label v-for="a in idleList" :key="a.id" class="bd-idle__row">
+          <input type="checkbox" :value="a.id" v-model="idleSel" />
+          <span class="bd-idle__acct bd-mono">{{ a.account }}</span>
+          <span class="bd-idle__name">{{ a.name }}</span>
+          <span v-if="a.isAdmin" class="bd-tg bd-tg--red">管理员</span>
+          <span class="bd-idle__days">
+            <template v-if="a.neverRecorded">无登录记录 · 建号 {{ a.idleDays }} 天</template>
+            <template v-else>{{ a.idleDays }} 天未登录</template>
+          </span>
+        </label>
+      </div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="idleOpen = false">关闭</button>
+        <button class="bd-btn bd-btn--danger" :disabled="!idleSel.length || idleLocking" @click="lockIdle">
+          {{ idleLocking ? '锁定中…' : `批量锁定（${idleSel.length}）` }}
+        </button>
       </div>
     </a-modal>
 
     <!-- 批量导入：CSV → 逐行建普通用户。★两条边界必须说在人点「开始导入」之前：
          ① 只能建普通用户（含角色列的文件整份拒收）；② 有行数与文件大小上限。 -->
     <a-modal v-model:visible="impOpen" title="批量导入用户" :width="680" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__hint">
+      <div class="bd-notice bd-notice--plain">
+        <icon-info-circle />
+        <span class="bd-notice__body">
           CSV 逐行创建<b>普通用户</b>：必填列「账号」「姓名」，可选列「组织」「组织ID」「用户组」「邮箱」「初始口令」。
           初始口令留空则用默认 {{ DEFAULT_PW }}，<b>所有导入账号一律置首登强制改密</b>。
           单次上限 {{ IMP_MAX_ROWS }} 行 / {{ IMP_MAX_KB }} KiB，超出请分批。
-        </div>
-        <div class="bd-imp__warn">
-          <icon-exclamation-circle-fill class="bd-imp__warnic" />
-          <span>
-            含「角色 / role / 管理员角色 / 状态」等列的文件会被<b>整份拒收</b>——导入不能创建管理员，
-            管理员账号请在「系统管理 → 管理员」页单独创建。导出的台账文件带这些列，
-            回传前需先删掉（或直接用下方模板）。
+        </span>
+      </div>
+      <div class="bd-notice bd-notice--warn">
+        <icon-exclamation-circle-fill />
+        <span class="bd-notice__body">
+          含「角色 / role / 管理员角色 / 状态」等列的文件会被<b>整份拒收</b>——导入不能创建管理员，
+          管理员账号请在「系统管理 → 管理员」页单独创建。导出的台账文件带这些列，
+          回传前需先删掉（或直接用下方模板）。
+        </span>
+      </div>
+      <div class="bd-imp__bar">
+        <input ref="impFileEl" type="file" accept=".csv,text/csv" @change="onPickImportFile" />
+        <div class="bd-toolbar__spacer" />
+        <button type="button" class="bd-link" @click="downloadTemplate">下载导入模板</button>
+      </div>
+      <div v-if="impFileName" class="bd-imp__file">
+        已选择 <b>{{ impFileName }}</b>（{{ (impFileSize / 1024).toFixed(1) }} KiB）
+      </div>
+
+      <!-- 逐行结果：成功多少、失败多少、每一行为什么失败 -->
+      <div v-if="impResult" class="bd-imp__res">
+        <div class="bd-imp__sum">
+          <span class="bd-tg bd-tg--green">成功 {{ impResult.created.length }} 条</span>
+          <span class="bd-tg" :class="impResult.failed.length ? 'bd-tg--red' : 'bd-tg--grey'">
+            失败 {{ impResult.failed.length }} 条
           </span>
+          <span class="bd-imp__total">共 {{ impResult.total }} 行</span>
         </div>
-        <div class="bd-imp__bar">
-          <input ref="impFileEl" type="file" accept=".csv,text/csv" @change="onPickImportFile" />
-          <div style="flex:1" />
-          <span class="bd-link" @click="downloadTemplate">下载导入模板</span>
+        <div v-if="impResult.ignoredColumns?.length" class="bd-imp__ign">
+          未识别的列（其内容未被导入）：{{ impResult.ignoredColumns.join('、') }}
         </div>
-        <div v-if="impFileName" class="bd-imp__file">
-          已选择 <b>{{ impFileName }}</b>（{{ (impFileSize / 1024).toFixed(1) }} KiB）
+        <div v-if="impResult.failed.length" class="bd-imp__list">
+          <div v-for="f in impResult.failed" :key="f.row" class="bd-imp__row">
+            <span class="bd-imp__rowno">第 {{ f.row }} 行</span>
+            <span class="bd-mono">{{ f.account || '—' }}</span>
+            <span class="bd-imp__reason">{{ f.reason }}</span>
+          </div>
         </div>
+        <div v-if="impResult.created.length" class="bd-imp__ok">
+          已创建：{{ impResult.created.map((c) => c.account).join('、') }}
+        </div>
+      </div>
 
-        <!-- 逐行结果：成功多少、失败多少、每一行为什么失败 -->
-        <div v-if="impResult" class="bd-imp__res">
-          <div class="bd-imp__sum">
-            <span class="bd-tg" :style="tagStyle('#00B42A')">成功 {{ impResult.created.length }} 条</span>
-            <span class="bd-tg" :style="tagStyle(impResult.failed.length ? '#F53F3F' : '#86909C')">
-              失败 {{ impResult.failed.length }} 条
-            </span>
-            <span class="bd-imp__total">共 {{ impResult.total }} 行</span>
-          </div>
-          <div v-if="impResult.ignoredColumns?.length" class="bd-imp__ign">
-            未识别的列（其内容未被导入）：{{ impResult.ignoredColumns.join('、') }}
-          </div>
-          <div v-if="impResult.failed.length" class="bd-imp__list">
-            <div v-for="f in impResult.failed" :key="f.row" class="bd-imp__row">
-              <span class="bd-imp__rowno">第 {{ f.row }} 行</span>
-              <span class="bd-mono">{{ f.account || '—' }}</span>
-              <span class="bd-imp__reason">{{ f.reason }}</span>
-            </div>
-          </div>
-          <div v-if="impResult.created.length" class="bd-imp__ok">
-            已创建：{{ impResult.created.map((c) => c.account).join('、') }}
-          </div>
-        </div>
-
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="impOpen = false">关闭</button>
-          <button class="bd-btn" :disabled="!impFileName || importing" @click="doImport">
-            {{ importing ? '导入中…' : '开始导入' }}
-          </button>
-        </div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="impOpen = false">关闭</button>
+        <button class="bd-btn" :disabled="!impFileName || importing" @click="doImport">
+          {{ importing ? '导入中…' : '开始导入' }}
+        </button>
       </div>
     </a-modal>
 
     <!-- 重置口令（管理员，落库改 bcrypt 哈希） -->
     <a-modal v-model:visible="resetOpen" title="重置登录口令" :width="420" :footer="false">
-      <div class="bd-uform">
-        <div class="bd-uform__hint">为「{{ sel?.name }}」({{ sel?.account }}) 设置新的登录口令，立即生效、旧口令失效。</div>
-        <div class="bd-uform__f"><label>新口令</label>
-          <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doReset" />
-        </div>
-        <div class="bd-uform__foot">
-          <button class="bd-btn bd-btn--ghost" @click="resetOpen = false">取消</button>
-          <button class="bd-btn" :disabled="resetting" @click="doReset">重置口令</button>
-        </div>
+      <div class="bd-notice bd-notice--plain"><icon-info-circle /><span class="bd-notice__body">为「{{ sel?.name }}」({{ sel?.account }}) 设置新的登录口令，立即生效、旧口令失效。</span></div>
+      <div class="bd-fld"><label>新口令</label>
+        <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doReset" />
+      </div>
+      <div class="bd-drawer__foot">
+        <div class="bd-drawer__foot-spacer" />
+        <button class="bd-btn bd-btn--ghost" @click="resetOpen = false">取消</button>
+        <button class="bd-btn" :disabled="resetting" @click="doReset">重置口令</button>
       </div>
     </a-modal>
   </div>
@@ -569,10 +592,24 @@
 import { ref, reactive, computed, onMounted } from 'vue';
 import { useRoute } from 'vue-router';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, getToken, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers, type UserImportResp, failReason } from '@/lib/api';
+import { api, getToken, ApiError, NetworkError, type UserDirBundle, type Directory, type OrgUnit, type DirUser, type Org, type GroupWithMembers, type UserImportResp, failReason } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-const live = ref(false);
-const directories = ref<Directory[]>([{ key: 'local', name: '本地目录', type: 'local', users: 0 }]);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false，落定在那句 return 之前）；随后的 /orgs、/groups 不参与判定（只影响能不能改，不影响整页连接态）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
+/** 首屏是否已完成第一次 load（成功或失败都算）：只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
+/** 用户目录读取失败时的后端原话：空态据此说「没读到」而不是「没有用户」——两者下一步动作相反。 */
+const loadErr = ref('');
+/** 目录页签的出厂形态（首屏 load 回来之前、以及 load 失败清空之后都是它）。 */
+const localOnlyDirs = (): Directory[] => [{ key: 'local', name: '本地目录', type: 'local', users: 0 }];
+const directories = ref<Directory[]>(localOnlyDirs());
 const orgTree = ref<OrgUnit[]>([]);
 const orgs = ref<Org[]>([]);
 const groups = ref<GroupWithMembers[]>([]);
@@ -674,13 +711,12 @@ function removeCurGroup() { if (curGroup.value) askRemoveGroup(curGroup.value); 
  *   渲染成一个确定结论。**绝不能在这里写 `?? false` 把缺席补回 false**——
  *   那时链路更长（后端如实缺席、前端偷偷塌回），更难查。
  *   缺席的成因见 lib/api.ts DirUser.online：网关心跳断了而隧道照常，人可能正连着。 */
-const UNKNOWN = '—';
 function onlineText(v: boolean | undefined) {
   return v === undefined || v === null ? '不可判定' : v ? '在线' : '离线';
 }
-function onlineDot(v: boolean | undefined) {
-  // 不可判定用与"离线"不同的灰：两者在处置上完全不同，不能长成一个样。
-  return v === undefined || v === null ? 'var(--bd-warning)' : v ? 'var(--bd-success)' : 'var(--bd-t4)';
+function onlineSt(v: boolean | undefined) {
+  // 不可判定用与"离线"不同的颜色（橙点）：两者在处置上完全不同，不能长成一个样。状态点只走 .bd-st--* 变体。
+  return v === undefined || v === null ? 'bd-st--warn' : v ? 'bd-st--ok' : 'bd-st--off';
 }
 function onlineHint(v: boolean | undefined) {
   return v === undefined || v === null
@@ -689,21 +725,46 @@ function onlineHint(v: boolean | undefined) {
       ? '在线网关正上报着这个账号的接入会话'
       : '有网关在上报，但其中没有这个账号的会话';
 }
-/** 只要有一行的 online 缺席，整页在线口径就不可判定（后端是整批下发的，不会半有半无）。 */
-const onlineUnknown = computed(() => users.value.some((u) => u.online === undefined || u.online === null));
+/* ── 在线态的数据源（四态）。告警条与顶部 KPI **共用这一个判据**，两处不会说出相反的话 ──
+ *  · unread：目录读取失败——四个聚合数一个都算不出来，KPI 全画「—」（不是 0）；
+ *  · empty ：目录里零账号——没有任何一行能告诉我们网关在不在上报，在线/离线不可判定（锁定/禁用是真 0）；
+ *  · absent：有行但 online 缺席——后端是整批缺席的（不会半有半无）= 无网关心跳；
+ *  · live  ：有行且 online 在。
+ *  ★判据看**全部** users 而不是当前目录 inDir：online 是整批下发的，别的目录有行就足以判定。
+ *    此前 agg 只看 inDir、用 `u.some(online 缺席)` 反推，对空数组恒 false——一个 0 账号的外部目录
+ *    （配了认证源、还没人登录过）会渲染成「在线 0 · 网关正在上报其接入会话」，而同屏上方告警条
+ *    正说着「在线态当前不可判定」；/users 回 5xx 时同样是四个确定的 0 + 「网关正在上报」，
+ *    下方表格却写着「用户目录未读取」。 */
+type OnlineSrc = 'unread' | 'empty' | 'absent' | 'live';
+const onlineSrc = computed<OnlineSrc>(() => {
+  if (loadErr.value) return 'unread';
+  if (!users.value.length) return 'empty';
+  return users.value.some((u) => u.online === undefined || u.online === null) ? 'absent' : 'live';
+});
+/** 告警条只在「有行、online 缺席」时亮：它那句「收不到任何网关心跳」是个具体断言，
+ *  零账号或目录没读到时说不出这句话（那两种处境由 KPI 的 unknownText 各自说明）。 */
+const onlineUnknown = computed(() => onlineSrc.value === 'absent');
 
 // ★顶部四个聚合数跟随当前身份源：用全库口径的话，它与刚点中的那个目录对不上。
 const agg = computed(() => {
   const u = inDir.value;
+  const src = onlineSrc.value;
   // 在线/离线两格必须跟着三态走：不可判定时这两个数一个都算不出来。
   // 写成 `filter(x => !x.online)` 的话，缺席的那批会被整体记进"离线"，
   // 页头就出现「在线 0 · 离线 312」——一个凭空的确定结论。
-  const unknown = u.some((x) => x.online === undefined || x.online === null);
+  // StatCard 对 value=null 画「—」并换上 unknownText，这里绝不写 `?? 0`。
+  const onlineKnown = src === 'live';
+  const unread = src === 'unread';
+  const unreadText = '用户目录未读取，无从统计';
+  const onlineUnknownText = src === 'unread' ? unreadText
+    : src === 'empty' ? '目录里没有账号，在线态无从判定'
+      : '无网关心跳上报，在线态不可判定';
+  type Tone = 'default' | 'success' | 'danger';
   return [
-    { label: '在线', n: unknown ? UNKNOWN : String(u.filter((x) => x.online === true).length), color: 'var(--bd-success)' },
-    { label: '离线', n: unknown ? UNKNOWN : String(u.filter((x) => x.online === false).length), color: 'var(--bd-t4)' },
-    { label: '锁定', n: String(u.filter((x) => x.status === 'locked').length), color: 'var(--bd-danger)' },
-    { label: '禁用', n: String(u.filter((x) => x.status === 'disabled').length), color: 'var(--bd-t3)' }
+    { label: '在线', value: onlineKnown ? u.filter((x) => x.online === true).length : null, tone: 'success' as Tone, foot: '网关正在上报其接入会话', unknownText: onlineUnknownText },
+    { label: '离线', value: onlineKnown ? u.filter((x) => x.online === false).length : null, tone: 'default' as Tone, foot: '有网关在上报，但没有其会话', unknownText: onlineUnknownText },
+    { label: '锁定', value: unread ? null : u.filter((x) => x.status === 'locked').length, tone: 'danger' as Tone, foot: '防爆破 / 闲置治理 / 手工锁定', unknownText: unreadText },
+    { label: '禁用', value: unread ? null : u.filter((x) => x.status === 'disabled').length, tone: 'default' as Tone, foot: '管理员手工禁用的账号', unknownText: unreadText }
   ];
 });
 
@@ -711,16 +772,17 @@ const LIFE = [
   { key: 'active', label: '正常' }, { key: 'idle', label: '闲置' },
   { key: 'locked', label: '锁定' }, { key: 'disabled', label: '禁用' }
 ];
+/* 标签色只走 .bd-tg--* 语义变体（不写十六进制、不写 inline style）。 */
 function statusMeta(s: string) {
-  return { active: { label: '正常', color: '#00B42A' }, idle: { label: '闲置', color: '#86909C' }, locked: { label: '锁定', color: '#F53F3F' }, disabled: { label: '禁用', color: '#86909C' } }[s] ?? { label: s, color: '#86909C' };
+  return { active: { label: '正常', tag: 'bd-tg--green' }, idle: { label: '闲置', tag: 'bd-tg--grey' }, locked: { label: '锁定', tag: 'bd-tg--red' }, disabled: { label: '禁用', tag: 'bd-tg--grey' } }[s] ?? { label: s, tag: 'bd-tg--grey' };
 }
-const AV = ['#165DFF', '#722ED1', '#00B42A', '#FF7D00', '#0FC6C2'];
+/* 头像底色按账号名稳定散列到几种品牌/语义色上（只用 token，不写十六进制）。 */
+const AV = ['var(--bd-primary)', 'var(--bd-purple)', 'var(--bd-success)', 'var(--bd-warning)', 'var(--bd-primary-d)'];
 function avBg(u: DirUser) { return AV[(u.account.charCodeAt(0) + u.account.length) % AV.length]; }
-function tagStyle(color: string) { return { color, background: color + '14' }; }
 /** ★unknown 必须单列成灰色的「不可判定」，绝不落进绿色的 else 那一支：从未上报过终端环境的
  *  账号在 observe 模式下照样能接入，把它显示成「正常」是替一台完全未知的机器打包票。 */
-function riskColor(r: string) {
-  return r === 'high' ? '#F53F3F' : r === 'low' ? '#FF7D00' : r === 'unknown' ? '#86909C' : '#00B42A';
+function riskTag(r: string) {
+  return r === 'high' ? 'bd-tg--red' : r === 'low' ? 'bd-tg--gold' : r === 'unknown' ? 'bd-tg--grey' : 'bd-tg--green';
 }
 function riskLabel(r: string) {
   return r === 'high' ? '高风险' : r === 'low' ? '低风险' : r === 'unknown' ? '不可判定' : '正常';
@@ -890,7 +952,23 @@ async function load() {
     orgTree.value = b.orgTree ?? [];
     users.value = (b.users ?? []).map((u) => ({ ...u, groups: u.groups ?? [] }));
     live.value = true;
-  } catch { live.value = false; return; }
+    loadErr.value = '';
+  } catch (e) {
+    live.value = false;
+    loadErr.value = failReason(e);
+    // ★拉不到就整份清空，不留上一次成功的那份（与 Apps / Gateway 同构）。load() 会被改状态 / 归属 /
+    //   建号 / 导入反复调用，第 N 次失败时若只置 loadErr 不清数据，屏幕上是：页头红色「数据未读取」、
+    //   KPI 四格「—」（onlineSrc 按 loadErr 判成 unread）、而表格仍列着旧行、在线点照旧、页签与组织树
+    //   还挂着旧计数——同一屏一半新鲜一半陈年，管理员分不出哪些是刚才的事实。清空之后 danger 空态
+    //   （「用户目录未读取」+ 后端原话）接管整张表，页签 / 组织树 / 用户组各自画「—」或「未读取」。
+    //   页签退回出厂形态而不是 []：至少留一个「本地目录 —」让人看出这一行是页签、只是没读到数。
+    directories.value = localOnlyDirs();
+    orgTree.value = [];
+    users.value = [];
+    orgs.value = [];
+    groups.value = [];
+    return;
+  } finally { loaded.value = true; }
   // 组织扁平清单（带 parentId/sort，编辑用）与用户组清单（带成员账号）都只有 admin 能读；
   // 拉不到就退化成"只能看树、不能改"，不把整页打成未连状态。
   try { orgs.value = (await api<{ orgs: Org[] }>('/orgs')).orgs ?? []; } catch { orgs.value = []; }
@@ -1154,8 +1232,17 @@ const exporting = ref(false);
 async function exportUsers() {
   exporting.value = true;
   try {
-    const res = await fetch('/api/v1/users/export', { headers: { Authorization: `Bearer ${getToken()}` } });
-    if (!res.ok) throw new Error(String(res.status));
+    // 走裸 fetch 是因为要拿 blob 与 Content-Disposition（api() 只回 JSON）；失败形状则照 api() 的口径造：
+    // 请求没到后端 → NetworkError，后端拒绝 → ApiError(后端原话, status)，好让下面的 failReason 原样转述。
+    let res: Response;
+    try { res = await fetch('/api/v1/users/export', { headers: { Authorization: `Bearer ${getToken()}` } }); }
+    catch (e) { throw new NetworkError(e); }
+    if (!res.ok) {
+      let msg = `${res.status} ${res.statusText}`.trim();
+      try { msg = ((await res.json()) as { error?: { message?: string } })?.error?.message || msg; }
+      catch { /* 非 JSON 应答（网关 502 之类）：退回状态行 */ }
+      throw new ApiError(msg, res.status);
+    }
     const blob = await res.blob();
     // 文件名跟随后端 Content-Disposition（带导出日期），解析不到才兜底
     const cd = res.headers.get('Content-Disposition') ?? '';
@@ -1166,10 +1253,9 @@ async function exportUsers() {
     URL.revokeObjectURL(url);
     Message.success(`已导出 ${name}（不含口令哈希）`);
   } catch (e) {
-    const msg = String((e as Error)?.message ?? '');
-    Message.error(msg === '403'
-      ? '权限不足：导出用户台账需要「安全策略」权限'
-      : '导出失败：请检查权限或后端连接');
+    // ★转述后端原话（如「角色「审计管理员」无权执行该操作（需要权限：security）」），不自拟归因：
+    //   此前这里按状态码猜成「需要「安全策略」权限」/「请检查权限或后端连接」，后端说的是哪一条守卫被整句丢掉。
+    Message.error(`导出失败：${failReason(e)}`);
   } finally { exporting.value = false; }
 }
 
@@ -1275,53 +1361,18 @@ onMounted(load);
 </script>
 
 <style scoped>
-/* 闲置治理策略区 */
-.bd-idlepol { border: 1px solid var(--bd-border); border-radius: 9px; padding: 12px 14px; margin-bottom: 14px; background: var(--bd-fill-1); }
-.bd-idlepol__h { display: flex; align-items: center; gap: 7px; font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
-.bd-idlepol__h span { font-weight: 400; font-size: 11.5px; color: var(--bd-t3); }
-.bd-idlepol__row { display: flex; align-items: center; gap: 9px; font-size: 12.5px; color: var(--bd-t2); }
-.bd-idlepol__auto { align-items: flex-start; margin-top: 11px; cursor: pointer; }
-.bd-idlepol__auto b { display: block; color: var(--bd-t1); font-weight: 500; }
-.bd-idlepol__auto i { display: block; font-style: normal; font-size: 11.5px; color: var(--bd-t3); line-height: 1.75; margin-top: 3px; }
-.bd-idlepol__warn {
-  display: flex; gap: 7px; align-items: flex-start; margin-top: 10px; padding: 8px 10px;
-  background: var(--bd-tag-gold-bg); border-radius: 7px; font-size: 11.5px; color: var(--bd-t2); line-height: 1.75;
-}
-.bd-idlepol__warn > :first-child { color: var(--bd-warning); flex: none; margin-top: 2px; }
-.bd-idlepol__dirty { font-size: 11.5px; color: var(--bd-warning); }
-.bd-idle__preview { margin-top: 8px; font-size: 11.5px; color: var(--bd-warning); line-height: 1.7; }
+/* 本页独有的布局：身份源页签、KPI 网格、组织树、抽屉里的生命周期与 kv、闲置治理/导入弹窗的行。
+   页头 / KPI 卡 / 空态 / 骨架 / 提示条 / 分栏 / 标签 / 操作列 / 表单字段 / 弹窗底栏都在共享件与 app.css 里。 */
 
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 14px; }
-.bd-tab { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
-.bd-tab em { font-style: normal; font-size: 11px; color: var(--bd-t3); }
-.bd-tab.on em { color: var(--bd-primary); }
 
-.bd-sync { display: flex; align-items: center; gap: 10px; font-size: 12.5px; color: var(--bd-t2); background: var(--bd-tag-blue-bg); border: 1px solid var(--bd-primary-b); border-radius: 8px; padding: 10px 14px; margin-bottom: 14px; }
-.bd-sync__ic { color: var(--bd-primary); font-size: 16px; }
+/* 聚合 KPI：一行 4 张，1280 下 2×2 */
+.bd-users__kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--bd-sp-4); margin-bottom: var(--bd-sp-4); }
 
-.bd-agg { display: flex; gap: 24px; padding: 0 2px 16px; }
-.bd-agg__c { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t3); }
-.bd-agg__c b { font-size: 20px; font-weight: 700; color: var(--bd-t1); }
-/* 不可判定：灰、细，明显不是一个读数——绝不让它长得像 0（同 DeviceStat 的 .bd-tile__value.unknown） */
-.bd-agg__c b.unknown { color: var(--bd-t4); font-weight: 500; }
-.bd-agg__dot { width: 8px; height: 8px; border-radius: 50%; }
-
-/* 在线态不可判定的横幅：橙色告警调，与蓝色的 .bd-sync 说明条区分开 */
-.bd-unk {
-  display: flex; align-items: flex-start; gap: 10px; font-size: 12.5px; line-height: 1.7;
-  color: var(--bd-t2); background: var(--bd-tag-gold-bg); border: 1px solid var(--bd-warning);
-  border-radius: 8px; padding: 10px 14px; margin: 0 0 14px;
-}
-.bd-unk__ic { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
-
-.bd-two { display: flex; gap: 16px; align-items: flex-start; }
+/* 左栏：组织树 / 用户组 */
 .bd-otree { width: 246px; flex: none; padding: 10px; }
-.bd-otree__empty { font-size: 12px; color: var(--bd-t3); line-height: 1.7; padding: 8px; }
-.bd-seg { display: flex; gap: 4px; padding: 2px; margin-bottom: 8px; background: var(--bd-fill-1); border-radius: 7px; }
-.bd-seg__b { flex: 1; height: 28px; border: none; background: transparent; border-radius: 5px; cursor: pointer; font-size: 12.5px; color: var(--bd-t2); }
-.bd-seg__b.on { background: var(--bd-bg-1, #fff); color: var(--bd-primary); font-weight: 600; box-shadow: 0 1px 3px rgba(0, 0, 0, .07); }
+.bd-seg { display: flex; gap: var(--bd-sp-1); padding: 2px; margin-bottom: var(--bd-sp-2); background: var(--bd-fill-1); border-radius: var(--bd-radius-s); }
+.bd-seg__b { flex: 1; height: 28px; border: none; background: transparent; font: inherit; border-radius: 5px; cursor: pointer; font-size: var(--bd-fs-sm); color: var(--bd-t2); transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease); }
+.bd-seg__b.on { background: var(--bd-bg-1); color: var(--bd-primary); font-weight: 600; box-shadow: var(--bd-shadow-1); }
 
 .bd-onode-row { position: relative; }
 /* hover 只是增强：选中行常驻显示，键盘 Tab 到行内任一按钮（含节点本身）也显示。
@@ -1329,111 +1380,106 @@ onMounted(load);
 .bd-onode-row:hover .bd-onode__acts,
 .bd-onode-row:focus-within .bd-onode__acts,
 .bd-onode-row.sel .bd-onode__acts { display: flex; }
-.bd-onode { width: 100%; display: flex; align-items: center; gap: 8px; height: 36px; padding-right: 10px; border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--bd-t2); }
+.bd-onode { width: 100%; display: flex; align-items: center; gap: var(--bd-sp-2); height: 36px; padding-right: 10px; border: none; background: transparent; font: inherit; border-radius: var(--bd-radius-s); cursor: pointer; font-size: var(--bd-fs-md); color: var(--bd-t2); transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease); }
 .bd-onode:hover { background: var(--bd-fill-2); }
 .bd-onode.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 500; }
-.bd-onode--add { color: var(--bd-primary); padding-left: 10px; gap: 6px; margin-top: 4px; }
+.bd-onode--add { color: var(--bd-primary); padding-left: 10px; gap: 6px; margin-top: var(--bd-sp-1); }
 .bd-onode__ic { font-size: 15px; flex: none; }
 .bd-onode__t { flex: 1; text-align: left; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bd-onode__n { font-size: 11px; color: var(--bd-t3); }
-.bd-onode__acts { display: none; position: absolute; right: 6px; top: 0; height: 36px; align-items: center; gap: 2px; background: var(--bd-fill-2); padding-left: 8px; border-radius: 0 7px 7px 0; }
+.bd-onode__n { font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-onode__acts { display: none; position: absolute; right: 6px; top: 0; height: 36px; align-items: center; gap: 2px; background: var(--bd-fill-2); padding-left: var(--bd-sp-2); border-radius: 0 var(--bd-radius-s) var(--bd-radius-s) 0; }
 .bd-onode-row.sel .bd-onode__acts { background: var(--bd-primary-1); }
 /* 选中行的操作面板是**常驻**的（.sel），而它绝对定位、背景不透明，正好压在行尾的成员数上：
    被选中的那个部门/用户组的人数会从此永远看不见。给节点按钮让出面板那点宽度
    （8 + 22×3 + 2×2 + right 6 ≈ 84px），计数就落在面板左侧仍然可读。
    hover / focus-within 不加这段：那两种是瞬时状态，加上去反而让计数左右跳。 */
 .bd-onode-row.sel .bd-onode { padding-right: 86px; }
-.bd-onode__act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; background: transparent; border-radius: 4px; font-size: 13px; color: var(--bd-t3); cursor: pointer; }
-.bd-onode__act:hover { color: var(--bd-primary); background: var(--bd-bg-1, #fff); }
+.bd-onode__act { display: inline-flex; align-items: center; justify-content: center; width: 22px; height: 22px; padding: 0; border: none; background: transparent; border-radius: var(--bd-radius-xs); font-size: var(--bd-fs-md); color: var(--bd-t3); cursor: pointer; }
+.bd-onode__act:hover { color: var(--bd-primary); background: var(--bd-bg-1); }
 .bd-onode__act--danger:hover { color: var(--bd-danger); }
-.bd-onode__act:focus-visible, .bd-iconbtn:focus-visible, .bd-onode:focus-visible, .bd-seg__b:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 1px; }
 
 /* 常驻操作条 */
-.bd-otree__bar { display: flex; align-items: center; gap: 2px; padding: 3px 4px 3px 9px; margin-bottom: 6px; background: var(--bd-fill-1); border-radius: 7px; }
-.bd-otree__cur { flex: 1; min-width: 0; font-size: 12px; color: var(--bd-t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.bd-otree__tip { font-size: 11.5px; color: var(--bd-t4); line-height: 1.6; padding: 0 4px 6px; }
-.bd-iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; background: transparent; border-radius: 5px; font-size: 14px; color: var(--bd-t2); cursor: pointer; }
-.bd-iconbtn:hover:not([disabled]) { background: var(--bd-bg-1, #fff); color: var(--bd-primary); }
+.bd-otree__bar { display: flex; align-items: center; gap: 2px; padding: 3px 4px 3px 9px; margin-bottom: 6px; background: var(--bd-fill-1); border-radius: var(--bd-radius-s); }
+.bd-otree__cur { flex: 1; min-width: 0; font-size: var(--bd-fs-sm); color: var(--bd-t2); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bd-otree__tip { font-size: var(--bd-fs-xs); color: var(--bd-t4); line-height: var(--bd-lh); padding: 0 var(--bd-sp-1) 6px; }
+.bd-iconbtn { display: inline-flex; align-items: center; justify-content: center; width: 24px; height: 24px; padding: 0; border: none; background: transparent; border-radius: 5px; font-size: var(--bd-fs-base); color: var(--bd-t2); cursor: pointer; }
+.bd-iconbtn:hover:not([disabled]) { background: var(--bd-bg-1); color: var(--bd-primary); }
 .bd-iconbtn--danger:hover:not([disabled]) { color: var(--bd-danger); }
 .bd-iconbtn[disabled] { color: var(--bd-t4); cursor: not-allowed; }
-.bd-kindtag { font-style: normal; font-size: 10px; color: #722ED1; background: #722ED114; padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+.bd-kindtag { font-style: normal; font-size: 10px; color: var(--bd-purple); background: var(--bd-tag-purple-bg); padding: 1px 5px; border-radius: 3px; margin-left: 6px; }
+.bd-kindtag--ext { color: var(--bd-info-t); background: var(--bd-info-1); }
 
-.bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
-.bd-table tr.sel { background: var(--bd-primary-1); }
-.bd-rk { font-size: 10px; color: var(--bd-danger); background: var(--bd-tag-red-bg); padding: 1px 5px; border-radius: 3px; margin-left: 6px; font-weight: 600; }
-.bd-umono { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 3px; font-family: ui-monospace, monospace; }
-.bd-tg--sm { font-size: 11px; padding: 1px 6px; margin-right: 4px; }
+/* 用户表 */
+.bd-users__search { width: 240px; }
+.bd-table tr.sel td { background: var(--bd-primary-1); }
+.bd-rk { margin-left: 6px; padding: 1px 5px; font-size: 10px; font-weight: 600; }
+.bd-umono { display: block; font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 3px; }
+.bd-tg--sm { font-size: var(--bd-fs-xs); padding: 1px 6px; margin-right: var(--bd-sp-1); }
 .bd-t4 { color: var(--bd-t4); }
 
 /* 抽屉 */
-.bd-ud__head { display: flex; align-items: center; gap: 14px; padding-bottom: 18px; border-bottom: 1px solid var(--bd-fill-2); }
-.bd-ud__name { font-size: 17px; font-weight: 700; display: flex; align-items: center; }
-.bd-ud__acct { font-size: 12px; color: var(--bd-t3); margin-top: 3px; }
-.bd-riskwhy { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 4px; line-height: 1.6; font-weight: 400; }
-.bd-ud__sec { font-size: 13px; font-weight: 600; margin: 20px 0 12px; }
-.bd-life { display: flex; align-items: center; gap: 4px; flex-wrap: wrap; }
-.bd-life__step { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-t4); }
+.bd-ud__head { display: flex; align-items: center; gap: 14px; padding-bottom: var(--bd-sp-4); border-bottom: 1px solid var(--bd-border-2); }
+.bd-ud__av { width: 46px; height: 46px; font-size: 18px; }
+.bd-ud__name { font-size: var(--bd-fs-lg); font-weight: 700; display: flex; align-items: center; }
+.bd-ud__st { margin-left: var(--bd-sp-2); font-weight: 400; }
+.bd-ud__acct { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 3px; }
+.bd-riskwhy { display: block; font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); line-height: var(--bd-lh); font-weight: 400; }
+.bd-ud .bd-section-title { font-size: var(--bd-fs-md); margin: var(--bd-sp-5) 0 var(--bd-sp-3); }
+.bd-life { display: flex; align-items: center; gap: var(--bd-sp-1); flex-wrap: wrap; }
+.bd-life__step { display: flex; align-items: center; gap: 6px; font-size: var(--bd-fs-sm); color: var(--bd-t4); }
 .bd-life__dot { width: 8px; height: 8px; border-radius: 50%; background: var(--bd-t4); }
 .bd-life__step.on { color: var(--bd-t1); font-weight: 600; }
 .bd-life__step.on .bd-life__dot { background: var(--bd-primary); box-shadow: 0 0 0 3px var(--bd-primary-1); }
-.bd-life__arr { color: var(--bd-t4); font-size: 13px; margin: 0 4px; }
-.bd-kv { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--bd-fill-1); font-size: 13px; }
-.bd-kv span { color: var(--bd-t3); }
-.bd-kv b { font-weight: 500; color: var(--bd-t1); }
-.bd-roles { display: flex; gap: 8px; flex-wrap: wrap; }
-.bd-ud__acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 24px; }
+.bd-life__arr { color: var(--bd-t4); font-size: var(--bd-fs-md); margin: 0 var(--bd-sp-1); }
+.bd-kv { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-4); padding: 9px 0; border-bottom: 1px solid var(--bd-border-2); font-size: var(--bd-fs-md); }
+.bd-kv span { color: var(--bd-t3); flex: none; }
+.bd-kv b { font-weight: 500; color: var(--bd-t1); text-align: right; }
+.bd-roles { display: flex; gap: var(--bd-sp-2); flex-wrap: wrap; }
+.bd-ud__acts { display: flex; flex-wrap: wrap; gap: 10px; margin-top: var(--bd-sp-6); }
 
-.bd-uform__hint { font-size: 12.5px; color: var(--bd-t3); line-height: 1.6; margin-bottom: 16px; }
-.bd-uform__note {
-  display: flex; gap: 8px; align-items: flex-start; padding: 9px 11px; margin-bottom: 16px;
-  background: var(--bd-fill-1); border-radius: 7px; font-size: 12px; color: var(--bd-t2); line-height: 1.7;
-}
-.bd-uform__d { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 5px; line-height: 1.7; }
-.bd-uform__err {
-  display: flex; gap: 6px; align-items: flex-start; margin-top: 12px; padding: 8px 10px;
-  background: var(--bd-tag-red-bg); color: var(--bd-danger); border-radius: 7px; font-size: 12px; line-height: 1.65;
-}
-.bd-delwarn {
-  display: flex; gap: 9px; align-items: flex-start; padding: 11px 13px; margin-bottom: 12px;
-  background: var(--bd-tag-red-bg); border: 1px solid #FFCDC7; border-radius: 8px;
-  font-size: 12.5px; color: var(--bd-t1); line-height: 1.8;
-}
-.bd-delwarn > :first-child { color: var(--bd-danger); flex: none; margin-top: 2px; }
-.bd-delnote { font-size: 12.5px; color: var(--bd-t2); line-height: 1.85; }
-.bd-uform__f { margin-bottom: 16px; }
-.bd-uform__f > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
-.bd-uform__f :deep(.arco-input-wrapper), .bd-uform__f :deep(.arco-select-view) { width: 100%; }
-.bd-uform__foot { display: flex; justify-content: flex-end; gap: 10px; margin-top: 22px; }
-.bd-uform__foot .bd-btn[disabled] { opacity: .6; cursor: not-allowed; }
-.bd-kindtag--ext { color: #0FC6C2; background: #0FC6C214; }
+/* 删除账号弹窗 */
+.bd-delnote { font-size: var(--bd-fs-sm); color: var(--bd-t2); line-height: var(--bd-lh-loose); }
+.bd-users__err { margin-top: var(--bd-sp-3); }
 
 /* 闲置治理弹窗 */
-.bd-idle__bar { display: flex; align-items: center; gap: 8px; margin: 12px 0; font-size: 13px; color: var(--color-text-2); }
-.bd-idle__cnt { font-size: 12px; color: var(--color-text-3); }
-.bd-idle__empty { padding: 22px 0; text-align: center; font-size: 13px; color: var(--color-text-3); }
-.bd-idle__list { max-height: 320px; overflow: auto; border: 1px solid var(--color-border-2); border-radius: 8px; padding: 4px 0; }
-.bd-idle__row { display: flex; align-items: center; gap: 10px; padding: 7px 12px; cursor: pointer; font-size: 13px; }
-.bd-idle__row:hover { background: var(--color-fill-1); }
-.bd-idle__acct { font-weight: 600; color: var(--color-text-1); }
-.bd-idle__name { color: var(--color-text-2); }
-.bd-idle__days { margin-left: auto; font-size: 12px; color: var(--color-text-3); white-space: nowrap; }
+.bd-idlepol { border: 1px solid var(--bd-border); border-radius: var(--bd-radius); padding: var(--bd-sp-3) 14px; margin-bottom: 14px; background: var(--bd-fill-1); }
+.bd-idlepol__h { display: flex; align-items: center; gap: 7px; font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); margin-bottom: 10px; }
+.bd-idlepol__h span { font-weight: 400; font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-idlepol__row { display: flex; align-items: center; gap: 9px; font-size: var(--bd-fs-sm); color: var(--bd-t2); }
+.bd-idlepol__auto { align-items: flex-start; margin-top: 11px; cursor: pointer; }
+/* 只把开关旁的标题 <b> 变块；说明句里内嵌的 <b>（「永不处置管理员账号」）保持行内——此前选择器过宽把它顶成了独立一行。 */
+.bd-idlepol__auto > span > b { display: block; color: var(--bd-t1); font-weight: 500; }
+.bd-idlepol__auto i { display: block; font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); line-height: var(--bd-lh-loose); margin-top: 3px; }
+.bd-idlepol__auto i b { color: var(--bd-t2); font-weight: 600; }
+.bd-idlepol__warn { margin: 10px 0 0; }
+.bd-idlepol__dirty { font-size: var(--bd-fs-xs); color: var(--bd-warning-t); }
+.bd-idle__num { width: 110px; }
+.bd-idle__bar { display: flex; align-items: center; gap: var(--bd-sp-2); margin: var(--bd-sp-3) 0; font-size: var(--bd-fs-md); color: var(--bd-t2); }
+.bd-idle__cnt { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-idle__list { max-height: 320px; overflow: auto; border: 1px solid var(--bd-border-2); border-radius: var(--bd-radius-s); padding: var(--bd-sp-1) 0; }
+.bd-idle__row { display: flex; align-items: center; gap: 10px; padding: 7px var(--bd-sp-3); cursor: pointer; font-size: var(--bd-fs-md); }
+.bd-idle__row:hover { background: var(--bd-fill-1); }
+.bd-idle__acct { font-weight: 600; color: var(--bd-t1); }
+.bd-idle__name { color: var(--bd-t2); }
+.bd-idle__days { margin-left: auto; font-size: var(--bd-fs-sm); color: var(--bd-t3); white-space: nowrap; }
+
 /* 批量导入弹窗 */
-.bd-imp__warn { display: flex; gap: 8px; align-items: flex-start; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2); background: var(--bd-tag-gold-bg); border: 1px solid var(--bd-warning); border-radius: 8px; padding: 10px 12px; margin-bottom: 14px; }
-.bd-imp__warnic { color: var(--bd-warning); font-size: 15px; flex: none; margin-top: 2px; }
-.bd-imp__bar { display: flex; align-items: center; gap: 10px; font-size: 13px; }
-.bd-imp__file { margin-top: 8px; font-size: 12.5px; color: var(--bd-t3); }
-.bd-imp__res { margin-top: 16px; border-top: 1px solid var(--bd-fill-2); padding-top: 14px; }
-.bd-imp__sum { display: flex; align-items: center; gap: 8px; }
-.bd-imp__total { font-size: 12px; color: var(--bd-t3); }
-.bd-imp__ign { margin-top: 10px; font-size: 12.5px; color: var(--bd-warning); }
-.bd-imp__list { margin-top: 10px; max-height: 240px; overflow: auto; border: 1px solid var(--bd-fill-2); border-radius: 8px; }
-.bd-imp__row { display: flex; align-items: baseline; gap: 10px; padding: 7px 12px; font-size: 12.5px; border-bottom: 1px solid var(--bd-fill-1); }
+.bd-imp__bar { display: flex; align-items: center; gap: 10px; font-size: var(--bd-fs-md); }
+.bd-imp__file { margin-top: var(--bd-sp-2); font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-imp__res { margin-top: var(--bd-sp-4); border-top: 1px solid var(--bd-border-2); padding-top: 14px; }
+.bd-imp__sum { display: flex; align-items: center; gap: var(--bd-sp-2); }
+.bd-imp__total { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-imp__ign { margin-top: 10px; font-size: var(--bd-fs-sm); color: var(--bd-warning-t); }
+.bd-imp__list { margin-top: 10px; max-height: 240px; overflow: auto; border: 1px solid var(--bd-border-2); border-radius: var(--bd-radius-s); }
+.bd-imp__row { display: flex; align-items: baseline; gap: 10px; padding: 7px var(--bd-sp-3); font-size: var(--bd-fs-sm); border-bottom: 1px solid var(--bd-border-2); }
 .bd-imp__row:last-child { border-bottom: none; }
 .bd-imp__rowno { flex: none; width: 66px; color: var(--bd-t3); }
-.bd-imp__reason { margin-left: auto; color: var(--bd-danger, #F53F3F); text-align: right; }
-.bd-imp__ok { margin-top: 10px; font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; word-break: break-all; }
+.bd-imp__reason { margin-left: auto; color: var(--bd-danger-t); text-align: right; }
+.bd-imp__ok { margin-top: 10px; font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); word-break: break-all; }
 
-.bd-btn--danger2 { background: var(--bd-danger, #F53F3F); }
-.bd-btn--danger2:hover:not(:disabled) { background: #d92b2b; }
-.bd-btn--danger2:disabled { opacity: .5; cursor: not-allowed; }
+@media (max-width: 1320px) {
+  .bd-users__kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bd-otree { width: 220px; }
+  .bd-users__search { width: 200px; }
+}
 </style>

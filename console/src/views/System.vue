@@ -1,29 +1,23 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">系统管理</div>
-        <div class="bd-page__sub">三权分立 · 分级分权 · 消息通道 · 集群</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '未连控制中心' }}</a-tag>
-      </div>
-    </div>
-
-    <!-- Tab 切换 -->
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'admin' }" @click="tab = 'admin'">管理员与三权分立</span>
-      <span class="bd-tab" :class="{ on: tab === 'notify' }" @click="tab = 'notify'">消息通道</span>
-      <span class="bd-tab" :class="{ on: tab === 'forward' }" @click="tab = 'forward'">日志外送</span>
-      <span class="bd-tab" :class="{ on: tab === 'cluster' }" @click="tab = 'cluster'">集群</span>
-      <span class="bd-tab" :class="{ on: tab === 'license' }" @click="tab = 'license'">License</span>
-    </div>
+    <!-- 本页没有降级演示数据（一屏编造的管理组与管理员是最容易被误读成「已实现」的东西），
+         所以离线态按 DESIGN.md 第 2 节的口径标「数据未读取」而不是「降级演示」。 -->
+    <PageHeader title="系统管理" subtitle="三权分立 · 分级分权 · 消息通道 · 集群" :live="live" off-text="数据未读取" off-color="red">
+      <!-- Tab 切换：真 button（可 Tab、可回车），选中态只由 aria-selected 表达（全局 .bd-tab 认它）；
+           放在页头 #below 里，故加 --flush 免得与页头下间距叠加 -->
+      <template #below>
+        <div class="bd-tabs bd-tabs--flush" role="tablist">
+          <button v-for="t in TABS" :key="t.key" type="button" role="tab" class="bd-tab"
+            :aria-selected="tab === t.key" @click="tab = t.key">{{ t.label }}</button>
+        </div>
+      </template>
+    </PageHeader>
 
     <!-- ============ 管理员与三权分立 ============ -->
     <div v-show="tab === 'admin'">
       <!-- ① 角色卡片行 -->
       <div class="bd-section-title">管理员角色 · 三权分立</div>
-      <div class="bd-sep__note">
+      <div class="bd-notice">
         <icon-safe />
         <span>
           <b>系统 / 安全 / 审计</b> 三组互不越权，权限由后端 <i class="bd-mono">requirePerm</i> 逐端点执行：
@@ -31,23 +25,27 @@
           卡片上的权限键就是判定用的那份，不是文案。
         </span>
       </div>
-      <div v-if="err" class="bd-warn"><icon-exclamation-circle-fill />{{ err }}</div>
-      <div class="bd-groups">
+      <div v-if="err" class="bd-notice bd-notice--danger"><icon-exclamation-circle-fill /><span>{{ err }}</span></div>
+      <!-- 首屏骨架：第一次 load() 回来之前不画空卡片行（角色为零与还没读到是两回事） -->
+      <div v-if="!loaded" class="bd-groups">
+        <div v-for="i in 4" :key="i" class="bd-card"><SkeletonBlock kind="card" :rows="3" /></div>
+      </div>
+      <div v-else class="bd-groups">
         <div
           v-for="g in roles"
           :key="g.key"
           class="bd-card bd-gcard"
-          :style="{ '--pc': powerColor(g.power) }"
+          :class="`bd-gcard--${powerTone(g.power)}`"
         >
           <span class="bd-gcard__bar" />
           <div class="bd-gcard__top">
             <span class="bd-gcard__dot" />
             <span class="bd-gcard__name">{{ g.name }}</span>
-            <a-tag v-if="g.builtin" size="small" :style="tagStyle(powerColor(g.power))">内置</a-tag>
-            <a-tag v-else size="small" :style="tagStyle('#86909C')">自定义</a-tag>
+            <span v-if="g.builtin" class="bd-tg" :class="`bd-tg--${toneTag(powerTone(g.power))}`">内置</span>
+            <span v-else class="bd-tg bd-tg--grey">自定义</span>
           </div>
           <div class="bd-gcard__meta">
-            <span class="bd-gcard__power" :style="{ color: powerColor(g.power) }">{{ powerText(g.power) }}</span>
+            <span class="bd-gcard__power">{{ powerText(g.power) }}</span>
             <span class="bd-gcard__members"><b>{{ g.members }}</b> 人</span>
           </div>
           <div class="bd-gcard__perms">
@@ -56,9 +54,9 @@
           <div class="bd-gcard__scope">{{ g.scope }}</div>
           <!-- ★「编辑」不可省：角色有成员时删不掉，少了它，收缩某个角色的权限在控制台上
                就无路可走（只能把人全改派走、删角色、重建、再改派回来）。 -->
-          <div v-if="!g.builtin" class="bd-gcard__ops">
-            <span class="bd-link" @click="openRole(g)">编辑</span>
-            <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeRole(g)">删除角色</span>
+          <div v-if="!g.builtin" class="bd-gcard__ops bd-acts">
+            <button type="button" class="bd-link" @click="openRole(g)">编辑</button>
+            <button type="button" class="bd-link bd-link--danger" @click="removeRole(g)">删除角色</button>
           </div>
         </div>
       </div>
@@ -68,19 +66,19 @@
       </div>
 
       <!-- ② 管理员账号表 -->
-      <div class="bd-section-title" style="margin-top: 26px">管理员账号</div>
+      <div class="bd-section-title">管理员账号</div>
       <div class="bd-tablecard">
         <div class="bd-toolbar">
-          <div class="bd-searchbox" style="flex: 1; max-width: 280px">
+          <div class="bd-searchbox bd-sys__search">
             <icon-search />
-            <input v-model="kw" placeholder="搜索账号 / 姓名" />
+            <input v-model="kw" class="bd-searchbox__in" placeholder="搜索账号 / 姓名" />
           </div>
-          <div style="margin-left: auto; display: flex; gap: 10px">
-            <button class="bd-btn bd-btn--ghost" @click="reload"><icon-refresh />刷新</button>
-            <button class="bd-btn" @click="openAdmin"><icon-plus />新建管理员</button>
-          </div>
+          <div class="bd-toolbar__spacer" />
+          <button class="bd-btn bd-btn--ghost" @click="reload"><icon-refresh />刷新</button>
+          <button class="bd-btn" @click="openAdmin"><icon-plus />新建管理员</button>
         </div>
-        <table class="bd-table">
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="7" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th>账号</th>
@@ -96,7 +94,7 @@
             <tr v-for="a in filteredAdmins" :key="a.account">
               <td>
                 <div class="bd-cellname">
-                  <span class="bd-avatar" :style="{ background: avatarBg(a.name) }">{{ a.name.slice(0, 1) }}</span>
+                  <span class="bd-avatar" :class="avatarClass(a.name)">{{ a.name.slice(0, 1) }}</span>
                   <span>
                     <b>{{ a.name }}</b>
                     <i class="bd-mono">{{ a.account }}</i>
@@ -105,29 +103,35 @@
               </td>
               <td>
                 <span class="bd-st">
-                  <span class="d" :style="{ background: powerColor(a.power) }" />{{ a.roleName }}
+                  <span class="d" :class="`bd-pdot--${powerTone(a.power)}`" />{{ a.roleName }}
                 </span>
               </td>
               <td>{{ a.auth }}</td>
               <td>
                 <!-- ★因子清单只能来自后端 factors，不许从 twoFa 猜：TOTP 有管理员侧重置
                      通道、passkey 没有，猜错一种就把补救路径指反了。 -->
-                <template v-if="a.factors?.length">
-                  <span v-for="f in a.factors" :key="f" class="bd-tg" :style="tagStyle('#00B42A')"
-                        style="margin-right: 5px">{{ factorZh(f) }}</span>
-                </template>
-                <span v-else-if="a.twoFa" class="bd-tg" :style="tagStyle('#00B42A')">已注册</span>
-                <span v-else class="bd-tg" :style="tagStyle('#86909C')">未注册</span>
+                <span v-if="a.factors?.length" class="bd-sys__factors">
+                  <span v-for="f in a.factors" :key="f" class="bd-tg bd-tg--green">{{ factorZh(f) }}</span>
+                </span>
+                <span v-else-if="a.twoFa" class="bd-tg bd-tg--green">已注册</span>
+                <span v-else class="bd-tg bd-tg--grey">未注册</span>
               </td>
               <td>{{ statusText(a.status) }}</td>
               <td class="bd-mono">{{ a.lastLogin || '—' }}</td>
               <td class="r">
-                <span class="bd-link" @click="openRoleChange(a)">改派角色</span>
-                <span class="bd-link bd-link--danger" style="margin-left: 14px" @click="removeAdmin(a)">撤销管理员</span>
+                <span class="bd-acts">
+                  <button type="button" class="bd-link" @click="openRoleChange(a)">改派角色</button>
+                  <button type="button" class="bd-link bd-link--danger" @click="removeAdmin(a)">撤销管理员</button>
+                </span>
               </td>
             </tr>
-            <tr v-if="!filteredAdmins.length">
-              <td colspan="7" class="bd-empty">{{ kw ? '无匹配管理员' : '暂无管理员账号' }}</td>
+            <!-- 空态分三种处境：读取失败（这不是「没有」）/ 搜索无命中 / 库里确实没有 -->
+            <tr v-if="!filteredAdmins.length" class="bd-table__emptyrow">
+              <td colspan="7">
+                <EmptyState v-if="err" size="md" tone="danger" title="管理员列表未读取" :desc="err" />
+                <EmptyState v-else-if="kw" size="md" title="无匹配管理员" :desc="`按「${kw.trim()}」搜索账号与姓名均无命中`" />
+                <EmptyState v-else size="md" title="暂无管理员账号" />
+              </td>
             </tr>
           </tbody>
         </table>
@@ -140,7 +144,7 @@
     <!-- ============ 消息通道（PRD ch15.2）============ -->
     <div v-show="tab === 'notify'">
       <div class="bd-section-title">消息通道</div>
-      <div class="bd-sep__note">
+      <div class="bd-notice">
         <icon-notification />
         <span>
           安全事件（<b>账号被爆破锁定</b>、<b>终端被判不合规</b>）会向下面每一条<b>已启用</b>的通道各发一份。
@@ -148,37 +152,40 @@
           保存配置不会把它刷成绿色。
         </span>
       </div>
-      <div v-if="smsNote" class="bd-warn">
-        <icon-exclamation-circle-fill />{{ smsNote }}
+      <div v-if="smsNote" class="bd-notice bd-notice--warn">
+        <icon-exclamation-circle-fill /><span>{{ smsNote }}</span>
       </div>
       <!-- 哪些事件真的会发通知。★必须逐条列出触发源，否则「没收到」与「这类事件根本
            没接线」在页面上完全同形。 -->
-      <div v-if="notifyEvents.length" class="bd-nev">
-        <div class="bd-nev__h">会触发通知的安全事件</div>
-        <div v-for="e in notifyEvents" :key="e.event" class="bd-nev__i" :class="{ off: !e.wired }">
-          <span class="bd-nev__n">
-            <icon-check-circle-fill v-if="e.wired" class="bd-nev__ok" />
-            <icon-minus-circle v-else class="bd-nev__no" />
-            {{ e.name }}
-          </span>
-          <span class="bd-nev__s">{{ e.wired ? e.signal : (e.reason || '本版本未接线') }}</span>
+      <div v-if="notifyEvents.length" class="bd-notice bd-notice--plain bd-nev">
+        <icon-info-circle />
+        <div class="bd-notice__body">
+          <div class="bd-nev__h">会触发通知的安全事件</div>
+          <div v-for="e in notifyEvents" :key="e.event" class="bd-nev__i" :class="{ off: !e.wired }">
+            <span class="bd-nev__n">
+              <icon-check-circle-fill v-if="e.wired" class="bd-nev__ok" />
+              <icon-minus-circle v-else class="bd-nev__no" />
+              {{ e.name }}
+            </span>
+            <span class="bd-nev__s">{{ e.wired ? e.signal : (e.reason || '本版本未接线') }}</span>
+          </div>
         </div>
       </div>
-      <div v-if="notifyErr" class="bd-warn"><icon-exclamation-circle-fill />{{ notifyErr }}</div>
-      <div v-if="dropped > 0" class="bd-warn">
+      <div v-if="notifyErr" class="bd-notice bd-notice--danger"><icon-exclamation-circle-fill /><span>{{ notifyErr }}</span></div>
+      <div v-if="dropped > 0" class="bd-notice bd-notice--warn">
         <icon-exclamation-circle-fill />
-        通知队列已累计丢弃 <b>{{ dropped }}</b> 条（队列满时丢新保旧）。安全处置本身不受影响，但这段时间的告警确实没发出去。
+        <span>通知队列已累计丢弃 <b>{{ dropped }}</b> 条（队列满时丢新保旧）。安全处置本身不受影响，但这段时间的告警确实没发出去。</span>
       </div>
 
       <div class="bd-tablecard">
         <div class="bd-toolbar">
           <span class="bd-hint">凭据（SMTP 口令 / 请求头 token）加密独立存放，<b>只写不读</b>——界面只能看到指纹前 8 位。</span>
-          <div style="margin-left: auto; display: flex; gap: 10px">
-            <button class="bd-btn bd-btn--ghost" @click="reloadNotify"><icon-refresh />刷新</button>
-            <button class="bd-btn" @click="openChannel()"><icon-plus />新建通道</button>
-          </div>
+          <div class="bd-toolbar__spacer" />
+          <button class="bd-btn bd-btn--ghost" @click="reloadNotify"><icon-refresh />刷新</button>
+          <button class="bd-btn" @click="openChannel()"><icon-plus />新建通道</button>
         </div>
-        <table class="bd-table">
+        <SkeletonBlock v-if="!notifyLoaded" kind="table" :rows="3" :cols="7" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th>名称</th>
@@ -192,14 +199,14 @@
           </thead>
           <tbody>
             <tr v-for="c in channels" :key="c.id">
-              <td><b>{{ c.name }}</b><i class="bd-mono" style="display: block">{{ c.id }}</i></td>
+              <td><b>{{ c.name }}</b><i class="bd-mono bd-sys__sub">{{ c.id }}</i></td>
               <td>
-                <span class="bd-tg" :style="tagStyle(kindColor(c.kind))">{{ kindText(c.kind) }}</span>
+                <span class="bd-tg" :class="`bd-tg--${kindTag(c.kind)}`">{{ kindText(c.kind) }}</span>
               </td>
               <td class="bd-mono bd-target">{{ channelTarget(c) }}</td>
               <td>
-                <span v-if="c.enabled" class="bd-tg" :style="tagStyle('#00B42A')">已启用</span>
-                <span v-else class="bd-tg" :style="tagStyle('#86909C')">已停用</span>
+                <span v-if="c.enabled" class="bd-tg bd-tg--green">已启用</span>
+                <span v-else class="bd-tg bd-tg--grey">已停用</span>
               </td>
               <td>
                 <span v-if="c.hasSecret" class="bd-mono">已配置 · {{ c.secretFingerprint }}</span>
@@ -208,23 +215,29 @@
               <td>
                 <span v-if="!c.lastStatus" class="bd-hint">从未发送</span>
                 <span v-else>
-                  <span class="bd-tg" :style="tagStyle(c.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                  <span class="bd-tg" :class="c.lastStatus === 'ok' ? 'bd-tg--green' : 'bd-tg--red'">
                     {{ c.lastStatus === 'ok' ? '成功' : '失败' }}
                   </span>
-                  <i class="bd-mono" style="display: block">{{ lastAtText(c.lastAt) }} · {{ c.lastEvent }}</i>
+                  <i class="bd-mono bd-sys__sub">{{ lastAtText(c.lastAt) }} · {{ c.lastEvent }}</i>
                   <i class="bd-lastdetail">{{ c.lastDetail }}</i>
                 </span>
               </td>
               <td class="r">
-                <span class="bd-link" @click="testChannel(c)">测试</span>
-                <span class="bd-link" style="margin-left: 12px" @click="openChannel(c)">编辑</span>
-                <span class="bd-link" style="margin-left: 12px" @click="openSecret(c)">设凭据</span>
-                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeChannel(c)">删除</span>
+                <span class="bd-acts">
+                  <button type="button" class="bd-link" @click="testChannel(c)">测试</button>
+                  <button type="button" class="bd-link" @click="openChannel(c)">编辑</button>
+                  <button type="button" class="bd-link" @click="openSecret(c)">设凭据</button>
+                  <button type="button" class="bd-link bd-link--danger" @click="removeChannel(c)">删除</button>
+                </span>
               </td>
             </tr>
-            <tr v-if="!channels.length">
-              <td colspan="7" class="bd-empty">
-                还没有任何消息通道——安全事件目前只落审计，不会主动通知任何人。
+            <tr v-if="!channels.length" class="bd-table__emptyrow">
+              <td colspan="7">
+                <!-- 读取失败时不许说「还没有任何通道」：那句话在这里是一个我们无从验证的断言 -->
+                <EmptyState v-if="notifyErr" size="md" tone="danger" title="消息通道列表未读取" :desc="notifyErr" />
+                <EmptyState v-else size="md" tone="warn" title="还没有任何消息通道" desc="安全事件目前只落审计，不会主动通知任何人。">
+                  <template #action><button class="bd-btn" @click="openChannel()"><icon-plus />新建通道</button></template>
+                </EmptyState>
               </td>
             </tr>
           </tbody>
@@ -290,9 +303,10 @@
             :help="chanForm.kind === 'sms' ? '多个用逗号分隔；为空时发送直接报错' : '多个用逗号分隔'">
             <a-input v-model="chanForm.recipients" :placeholder="chanForm.kind === 'sms' ? '13800000000' : 'soc@corp.example'" />
           </a-form-item>
-          <div v-if="chanForm.kind === 'sms'" class="bd-hint" style="margin-bottom: 12px; line-height: 1.7">
-            短信通道<b>就是一次 webhook 调用</b>：白帝把 <i class="bd-mono">{{ '{ mobiles, text }' }}</i> POST 给这个 URL，
-            由你自己搭的一跳转成运营商 / 云厂商的请求。白帝<b>不实现</b>任何短信网关协议。
+          <div v-if="chanForm.kind === 'sms'" class="bd-notice bd-notice--plain">
+            <icon-info-circle />
+            <span>短信通道<b>就是一次 webhook 调用</b>：白帝把 <i class="bd-mono">{{ '{ mobiles, text }' }}</i> POST 给这个 URL，
+            由你自己搭的一跳转成运营商 / 云厂商的请求。白帝<b>不实现</b>任何短信网关协议。</span>
           </div>
         </template>
       </a-form>
@@ -313,7 +327,7 @@
     <!-- ============ 日志外送（PRD ch16 + ch21.6）============ -->
     <div v-show="tab === 'forward'">
       <div class="bd-section-title">审计日志外送 · Syslog / SIEM</div>
-      <div class="bd-sep__note">
+      <div class="bd-notice">
         <icon-export />
         <span>
           每条审计落库时会同步入一个<b>持久化队列</b>，后台按批投递到下面每一条<b>已启用</b>的出口：
@@ -322,14 +336,15 @@
           <i class="bd-mono">mac</i>——这是 SIEM 侧能<b>独立验真</b>的依据，也是这个功能真正的价值。
         </span>
       </div>
-      <div v-if="fwdNote" class="bd-sep__note">
+      <div v-if="fwdNote" class="bd-notice bd-notice--plain">
         <icon-info-circle /><span>{{ fwdNote }}</span>
       </div>
-      <div v-if="fwdErr" class="bd-warn"><icon-exclamation-circle-fill />{{ fwdErr }}</div>
-      <div v-for="t in droppingTargets" :key="'drop-' + t.id" class="bd-warn">
+      <div v-if="fwdErr" class="bd-notice bd-notice--danger"><icon-exclamation-circle-fill /><span>{{ fwdErr }}</span></div>
+      <!-- 溢出 = 已经丢了、且不会送达：这是数据缺失，走 danger 而不是 warn -->
+      <div v-for="t in droppingTargets" :key="'drop-' + t.id" class="bd-notice bd-notice--danger">
         <icon-exclamation-circle-fill />
-        出口「<b>{{ t.name }}</b>」队列已溢出，累计丢弃 <b>{{ t.dropped }}</b> 条待外送记录（上界 {{ fwdQueueMax }}）。
-        这些审计已落库，但<b>不会</b>送达 SIEM——请先修复对端再考虑补导 CSV。
+        <span>出口「<b>{{ t.name }}</b>」队列已溢出，累计丢弃 <b>{{ t.dropped }}</b> 条待外送记录（上界 {{ fwdQueueMax }}）。
+        这些审计已落库，但<b>不会</b>送达 SIEM——请先修复对端再考虑补导 CSV。</span>
       </div>
 
       <div class="bd-tablecard">
@@ -337,12 +352,12 @@
           <span class="bd-hint">
             凭据（HTTP 出口的请求头 token）加密独立存放，<b>只写不读</b>；syslog 出口<b>没有</b>可设的凭据。
           </span>
-          <div style="margin-left: auto; display: flex; gap: 10px">
-            <button class="bd-btn bd-btn--ghost" @click="reloadForward"><icon-refresh />刷新</button>
-            <button class="bd-btn" @click="openForward()"><icon-plus />新建出口</button>
-          </div>
+          <div class="bd-toolbar__spacer" />
+          <button class="bd-btn bd-btn--ghost" @click="reloadForward"><icon-refresh />刷新</button>
+          <button class="bd-btn" @click="openForward()"><icon-plus />新建出口</button>
         </div>
-        <table class="bd-table">
+        <SkeletonBlock v-if="!fwdLoaded" kind="table" :rows="3" :cols="7" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th>名称</th>
@@ -358,47 +373,52 @@
             <tr v-for="t in fwdTargets" :key="t.id">
               <td>
                 <b>{{ t.name }}</b>
-                <i class="bd-mono" style="display: block">{{ t.id }}</i>
-                <i class="bd-hint" style="display: block">自审计 #{{ t.startAuditId }} 起外送（更早的历史不补发）</i>
+                <i class="bd-mono bd-sys__sub">{{ t.id }}</i>
+                <i class="bd-hint bd-sys__sub">自审计 #{{ t.startAuditId }} 起外送（更早的历史不补发）</i>
               </td>
-              <td><span class="bd-tg" :style="tagStyle(fwdKindColor(t.kind))">{{ fwdKindText(t.kind) }}</span></td>
+              <td><span class="bd-tg" :class="t.kind === 'syslog' ? 'bd-tg--blue' : 'bd-tg--green'">{{ fwdKindText(t.kind) }}</span></td>
               <td class="bd-mono bd-target">{{ fwdTarget(t) }}</td>
               <td>
-                <span v-if="t.enabled" class="bd-tg" :style="tagStyle('#00B42A')">已启用</span>
-                <span v-else class="bd-tg" :style="tagStyle('#86909C')">已停用</span>
+                <span v-if="t.enabled" class="bd-tg bd-tg--green">已启用</span>
+                <span v-else class="bd-tg bd-tg--grey">已停用</span>
               </td>
               <td>
-                <span :style="{ color: t.queued > 0 ? '#FF7D00' : 'var(--bd-t2)' }">
+                <span :class="{ 'bd-sys__warn': t.queued > 0 }">
                   积压 <b>{{ t.queued }}</b> / {{ fwdQueueMax }}
                 </span>
-                <i v-if="t.dropped > 0" class="bd-mono" style="display: block; color: #F53F3F">
+                <i v-if="t.dropped > 0" class="bd-mono bd-sys__sub bd-sys__bad">
                   已丢弃 {{ t.dropped }} 条
                 </i>
               </td>
               <td>
                 <span v-if="!t.lastStatus" class="bd-hint">从未投递</span>
                 <span v-else>
-                  <span class="bd-tg" :style="tagStyle(t.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                  <span class="bd-tg" :class="t.lastStatus === 'ok' ? 'bd-tg--green' : 'bd-tg--red'">
                     {{ t.lastStatus === 'ok' ? '成功' : '失败' }}
                   </span>
-                  <i class="bd-mono" style="display: block">{{ lastAtText(t.lastAt) }}</i>
+                  <i class="bd-mono bd-sys__sub">{{ lastAtText(t.lastAt) }}</i>
                   <!-- 上次**成功**单列一行：外送断了之后 lastAt 会一直被失败刷新，
                        只看它会误以为"刚刚还通着" -->
-                  <i class="bd-mono" style="display: block">上次成功：{{ lastAtText(t.lastOkAt) }}</i>
+                  <i class="bd-mono bd-sys__sub">上次成功：{{ lastAtText(t.lastOkAt) }}</i>
                   <i class="bd-lastdetail">{{ t.lastDetail }}</i>
                 </span>
               </td>
               <td class="r">
-                <span class="bd-link" @click="testForward(t)">测试</span>
-                <span class="bd-link" style="margin-left: 12px" @click="flushForward(t)">立即投递</span>
-                <span class="bd-link" style="margin-left: 12px" @click="openForward(t)">编辑</span>
-                <span v-if="t.kind === 'http'" class="bd-link" style="margin-left: 12px" @click="openFwdSecret(t)">设凭据</span>
-                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="removeForward(t)">删除</span>
+                <span class="bd-acts">
+                  <button type="button" class="bd-link" @click="testForward(t)">测试</button>
+                  <button type="button" class="bd-link" @click="flushForward(t)">立即投递</button>
+                  <button type="button" class="bd-link" @click="openForward(t)">编辑</button>
+                  <button v-if="t.kind === 'http'" type="button" class="bd-link" @click="openFwdSecret(t)">设凭据</button>
+                  <button type="button" class="bd-link bd-link--danger" @click="removeForward(t)">删除</button>
+                </span>
               </td>
             </tr>
-            <tr v-if="!fwdTargets.length">
-              <td colspan="7" class="bd-empty">
-                还没有任何外送出口——审计目前只留在本机库里，外部 SIEM 拿不到、也无法独立验真。
+            <tr v-if="!fwdTargets.length" class="bd-table__emptyrow">
+              <td colspan="7">
+                <EmptyState v-if="fwdErr" size="md" tone="danger" title="外送出口列表未读取" :desc="fwdErr" />
+                <EmptyState v-else size="md" tone="warn" title="还没有任何外送出口" desc="审计目前只留在本机库里，外部 SIEM 拿不到、也无法独立验真。">
+                  <template #action><button class="bd-btn" @click="openForward()"><icon-plus />新建出口</button></template>
+                </EmptyState>
               </td>
             </tr>
           </tbody>
@@ -459,9 +479,10 @@
             <a-textarea v-model="fwdForm.caCert" :auto-size="{ minRows: 2, maxRows: 5 }"
               placeholder="-----BEGIN CERTIFICATE-----" />
           </a-form-item>
-          <div class="bd-hint" style="margin-bottom: 12px; line-height: 1.7">
-            载荷是一批记录：<i class="bd-mono">{{ '{ source, kind, sentAt, count, chain, records[] }' }}</i>，
-            其中每条 record 的字段与 <i class="bd-mono">GET /api/v1/audit</i> 返回的条目<b>完全一致</b>（含 seq / mac）。
+          <div class="bd-notice bd-notice--plain">
+            <icon-info-circle />
+            <span>载荷是一批记录：<i class="bd-mono">{{ '{ source, kind, sentAt, count, chain, records[] }' }}</i>，
+            其中每条 record 的字段与 <i class="bd-mono">GET /api/v1/audit</i> 返回的条目<b>完全一致</b>（含 seq / mac）。</span>
           </div>
         </template>
       </a-form>
@@ -486,88 +507,118 @@
       <div class="bd-section-title">License · 容量与有效期</div>
 
       <!-- 状态行：demo 是正常形态（研究/演示项目），不当成缺陷渲染 -->
-      <div class="bd-card" style="padding: 16px 18px; margin-bottom: 12px">
-        <div style="display: flex; align-items: center; gap: 10px">
-          <a-tag :color="licModeColor" bordered>{{ licModeLabel }}</a-tag>
-          <span v-if="lic?.manifest" style="color: var(--bd-t2)">
-            {{ lic.manifest.licensee }} · 到期 <b>{{ lic.manifest.expiresAt }}</b>
-          </span>
-          <span v-if="lic?.reason" style="color: var(--bd-danger); font-size: 13px">{{ lic.reason }}</span>
-        </div>
-        <!-- 席位：-1 = 读不出（显示 —，绝不显示 0）；超限亮红 -->
-        <div v-if="lic" class="lic-usage">
-          <div class="lic-usage__item">
-            <span>用户席位</span>
-            <b :style="lic.usage.overUsers ? 'color: var(--bd-danger)' : ''">
-              {{ seat(lic.usage.users) }} / {{ cap(lic.usage.maxUsers) }}
-              <template v-if="lic.usage.overUsers">（已超限）</template>
-            </b>
+      <div class="bd-card bd-lic">
+        <div class="bd-card__b">
+          <div class="bd-lic__row">
+            <a-tag :color="licModeColor" bordered>{{ licModeLabel }}</a-tag>
+            <span v-if="lic?.manifest" class="bd-lic__who">
+              {{ lic.manifest.licensee }} · 到期 <b>{{ lic.manifest.expiresAt }}</b>
+            </span>
+            <span v-if="lic?.reason" class="bd-lic__reason">{{ lic.reason }}</span>
           </div>
-          <div class="lic-usage__item">
-            <span>网关席位（未吊销证书的去重网关数）</span>
-            <b :style="lic.usage.overGateways ? 'color: var(--bd-danger)' : ''">
-              {{ seat(lic.usage.gateways) }} / {{ cap(lic.usage.maxGateways) }}
-              <template v-if="lic.usage.overGateways">（已超限）</template>
-            </b>
+          <!-- 席位：-1 = 读不出（显示 —，绝不显示 0）；超限亮红 -->
+          <div v-if="lic" class="lic-usage">
+            <div class="lic-usage__item">
+              <span>用户席位</span>
+              <b :class="{ 'is-over': lic.usage.overUsers }">
+                {{ seat(lic.usage.users) }} / {{ cap(lic.usage.maxUsers) }}
+                <template v-if="lic.usage.overUsers">（已超限）</template>
+              </b>
+            </div>
+            <div class="lic-usage__item">
+              <span>网关席位（未吊销证书的去重网关数）</span>
+              <b :class="{ 'is-over': lic.usage.overGateways }">
+                {{ seat(lic.usage.gateways) }} / {{ cap(lic.usage.maxGateways) }}
+                <template v-if="lic.usage.overGateways">（已超限）</template>
+              </b>
+            </div>
           </div>
         </div>
       </div>
 
       <!-- 导入（PermSystem；无发行公钥时如实说明为什么导不了，而不是让人贴完才 400） -->
-      <div class="bd-card" style="padding: 16px 18px; margin-bottom: 12px">
-        <div class="bd-card__title" style="margin-bottom: 8px">导入 / 替换 License</div>
-        <div v-if="lic && !lic.keysConfigured" class="bd-hint" style="color: var(--bd-warning)">
-          控制面未配置发行公钥（BAIDI_LICENSE_PUBKEY）：任何 license 都无法验证，导入会被拒绝。
-          公钥由发行方 <i class="bd-mono">baidi-license -genkey</i> 产出，经部署期配置分发。
-        </div>
-        <template v-else>
-          <a-textarea v-model="licPaste" :auto-size="{ minRows: 3, maxRows: 8 }"
-            placeholder='粘贴 license 文件内容（{"manifest":…,"signature":…}）' />
-          <div style="margin-top: 10px">
-            <a-button type="primary" :loading="saving" :disabled="!licPaste.trim()" @click="importLicense">
-              验证并导入
-            </a-button>
-            <span class="bd-hint" style="margin-left: 10px">导入后立刻生效（判定现算不缓存）；没有"删除回演示模式"的入口。</span>
+      <div class="bd-card bd-lic">
+        <div class="bd-card__h">导入 / 替换 License</div>
+        <div class="bd-card__b">
+          <div v-if="lic && !lic.keysConfigured" class="bd-notice bd-notice--warn bd-lic__last">
+            <icon-exclamation-circle-fill />
+            <span>控制面未配置发行公钥（BAIDI_LICENSE_PUBKEY）：任何 license 都无法验证，导入会被拒绝。
+            公钥由发行方 <i class="bd-mono">baidi-license -genkey</i> 产出，经部署期配置分发。</span>
           </div>
-        </template>
+          <template v-else>
+            <a-textarea v-model="licPaste" :auto-size="{ minRows: 3, maxRows: 8 }"
+              placeholder='粘贴 license 文件内容（{"manifest":…,"signature":…}）' />
+            <div class="bd-lic__act">
+              <a-button type="primary" :loading="saving" :disabled="!licPaste.trim()" @click="importLicense">
+                验证并导入
+              </a-button>
+              <span class="bd-hint">导入后立刻生效（判定现算不缓存）；没有"删除回演示模式"的入口。</span>
+            </div>
+          </template>
+        </div>
       </div>
 
-      <div class="bd-card" style="padding: 16px 18px">
-        <div class="bd-card__title" style="margin-bottom: 8px">边界（照实说）</div>
-        <ul class="lic-bounds">
-          <li v-for="(b, i) in lic?.boundaries ?? []" :key="i">{{ b }}</li>
-        </ul>
+      <div class="bd-card">
+        <div class="bd-card__h">边界（照实说）</div>
+        <div class="bd-card__b">
+          <ul class="lic-bounds">
+            <li v-for="(b, i) in lic?.boundaries ?? []" :key="i">{{ b }}</li>
+          </ul>
+        </div>
       </div>
     </div>
 
     <div v-show="tab === 'cluster'">
-      <!-- ① 未配置备机（单机形态）-->
-      <div v-if="!cluster.deployed" class="bd-card bd-empty bd-empty--lg">
-        <icon-storage />
-        <div class="bd-empty__t">{{ cluster.summary || '未配置备机（当前为单机形态）' }}</div>
-        <div class="bd-empty__d">{{ cluster.note }}</div>
-        <div class="bd-empty__d">
-          运维体检（/diag）里这一项同样记为
-          <i class="bd-mono">{{ cluster.status || 'skip' }}</i>——未部署的能力不参与健康分。
-        </div>
+      <!-- 首屏骨架：/system 回来之前既不说「没配备机」，也不停在一句「正在读取…」。 -->
+      <div v-if="!loaded" class="bd-card"><SkeletonBlock kind="card" :rows="4" /></div>
+
+      <!-- ① 读不到 = 不可判定。★这一格此前把一次读取失败画成三句**确定结论**：
+           「未配置备机（当前为单机形态）」（summary 为空时的兜底）、永久停在那里的
+           「正在读取备机同步状态…」、以及替 /diag 背书的「同样记为 skip」——读不到时
+           三句全是假的，而它们盖住的正是切换那天唯一要紧的事实：手上到底有没有一份够新的备份。 -->
+      <div v-else-if="clusterErr" class="bd-card">
+        <EmptyState size="lg" tone="danger" title="备机同步状态未读取">
+          <template #icon><icon-storage /></template>
+          <div>后端原话：{{ clusterErr }}</div>
+          <div>
+            这里显示的<b>不是</b>「没有备机」，也不代表 /diag 会把这一项记为
+            <i class="bd-mono">skip</i>——集群形态此刻<b>不可判定</b>：可能没配备机，也可能备机
+            正常同步着而这一跳没答话，两者下一步动作完全不同。
+          </div>
+        </EmptyState>
       </div>
 
-      <!-- ② / ③ 已配备机：新鲜 or 落后 -->
+      <!-- ② 后端明确答复「未部署备机」。标题 / 说明 / diag 判定一律照抄下发值，不再兜底：
+           兜底那句正是注释想防的结论。 -->
+      <div v-else-if="!cluster.deployed" class="bd-card">
+        <EmptyState size="lg" :tone="cluster.summary ? 'neutral' : 'warn'"
+          :title="cluster.summary || '控制面未给出集群状态摘要（summary 为空）'">
+          <template #icon><icon-storage /></template>
+          <div v-if="cluster.note">{{ cluster.note }}</div>
+          <div v-if="cluster.status">
+            运维体检（/diag）里这一项同样记为
+            <i class="bd-mono">{{ cluster.status }}</i>——未部署的能力不参与健康分。
+          </div>
+        </EmptyState>
+      </div>
+
+      <!-- ③ / ④ 已配备机：新鲜 or 落后 -->
       <template v-else>
         <div class="bd-section-title">控制面温备 · 备机同步状态</div>
-        <div class="bd-cl__head" :class="cluster.status === 'pass' ? 'ok' : 'bad'">
+        <div class="bd-notice" :class="cluster.status === 'pass' ? 'bd-notice--success' : 'bd-notice--danger'">
           <icon-check-circle-fill v-if="cluster.status === 'pass'" />
           <icon-exclamation-circle-fill v-else />
-          <div>
+          <div class="bd-notice__body">
             <div class="bd-cl__sum">{{ cluster.summary }}</div>
             <div class="bd-cl__note">{{ cluster.note }}</div>
           </div>
         </div>
-        <div class="bd-sep__note">
+        <div class="bd-notice bd-notice--plain">
           <icon-clock-circle />
           <span><b>{{ cluster.rpo }}</b>　落后阈值：逐台取 max(全局 {{ Math.round(cluster.staleAfterSec / 60) }} 分钟, 3×该备机自报间隔)。</span>
         </div>
 
+        <div class="bd-tablecard">
         <table class="bd-table">
           <thead>
             <tr>
@@ -583,14 +634,14 @@
             <tr v-for="n in cluster.nodes" :key="n.nodeId">
               <td>
                 <b>{{ n.nodeId }}</b>
-                <i class="bd-mono" style="display: block">{{ n.addr || '落点未报' }}</i>
+                <i class="bd-mono bd-sys__sub">{{ n.addr || '落点未报' }}</i>
               </td>
-              <td><span class="bd-tg" :style="tagStyle(stateColor(n.state))">{{ stateText(n.state) }}</span></td>
+              <td><span class="bd-tg" :class="n.state === 'fresh' ? 'bd-tg--green' : 'bd-tg--red'">{{ stateText(n.state) }}</span></td>
               <td>
                 <!-- lagSeconds < 0 = 不可判定（从未成功同步过）。绝不显示成"0 秒"——
                      那是"刚刚同步过"的意思，与事实恰好相反。 -->
-                <span :style="{ color: n.state === 'fresh' ? 'var(--bd-t2)' : '#F53F3F' }">{{ n.lagText }}</span>
-                <i class="bd-hint" style="display: block">阈值 {{ Math.round(n.thresholdSec / 60) }} 分钟</i>
+                <span :class="{ 'bd-sys__bad': n.state !== 'fresh' }">{{ n.lagText }}</span>
+                <i class="bd-hint bd-sys__sub">阈值 {{ Math.round(n.thresholdSec / 60) }} 分钟</i>
               </td>
               <td>
                 <span v-if="n.intervalSec > 0">{{ Math.round(n.intervalSec / 60) }} 分钟</span>
@@ -598,19 +649,19 @@
               </td>
               <td>
                 <span v-if="n.lastSyncAt">
-                  <i class="bd-mono" style="display: block">{{ n.lastSyncAt }} 落盘</i>
-                  <i class="bd-mono" style="display: block">版本 {{ n.backupVersion || '未知' }} · 生成于 {{ n.backupCreatedAt || '未知' }}</i>
+                  <i class="bd-mono bd-sys__sub">{{ n.lastSyncAt }} 落盘</i>
+                  <i class="bd-mono bd-sys__sub">版本 {{ n.backupVersion || '未知' }} · 生成于 {{ n.backupCreatedAt || '未知' }}</i>
                   <i class="bd-mono bd-lastdetail">sha256 {{ (n.backupSha256 || '').slice(0, 16) || '—' }}…</i>
                 </span>
                 <span v-else class="bd-hint">
                   从未成功同步——现在提升它只会得到一套空系统
-                  <i v-if="n.lastPullAt" class="bd-mono" style="display: block">但来拉过：{{ n.lastPullAt }}</i>
+                  <i v-if="n.lastPullAt" class="bd-mono bd-sys__sub">但来拉过：{{ n.lastPullAt }}</i>
                 </span>
               </td>
               <td>
                 <span v-if="!n.lastStatus" class="bd-hint">从未回报</span>
                 <span v-else>
-                  <span class="bd-tg" :style="tagStyle(n.lastStatus === 'ok' ? '#00B42A' : '#F53F3F')">
+                  <span class="bd-tg" :class="n.lastStatus === 'ok' ? 'bd-tg--green' : 'bd-tg--red'">
                     {{ n.lastStatus === 'ok' ? '成功' : '失败' }}
                   </span>
                   <i v-if="n.lastDetail" class="bd-lastdetail">{{ n.lastDetail }}</i>
@@ -619,21 +670,31 @@
             </tr>
           </tbody>
         </table>
+        </div>
       </template>
 
       <!-- 诚实边界 + 切换命令：两块都由后端下发，页面照抄不自己编 -->
       <div class="bd-card bd-cl__box">
-        <div class="bd-cl__boxt">这套温备做到哪、没做哪</div>
-        <ul class="bd-cl__list">
-          <li v-for="(b, i) in cluster.boundaries" :key="i">{{ b }}</li>
-        </ul>
-        <div class="bd-cl__boxt" style="margin-top: 14px">切换（提升备机为主机）</div>
-        <div class="bd-hint" style="line-height: 1.8">
-          在<b>备机</b>上执行下面这条；它会先校验备份完整性再动手，<i class="bd-mono">--dry-run</i>
-          只校验与打印覆盖清单、不碰任何现网文件。切换前务必确认<b>老主机确已停机</b>——
-          两台同时跑等于两个控制面同时签发令牌、下发相反的策略，而现场没有任何一处会显示这件事。
+        <div class="bd-card__h">这套温备做到哪、没做哪</div>
+        <div class="bd-card__b">
+          <ul v-if="cluster.boundaries.length" class="bd-cl__list">
+            <li v-for="(b, i) in cluster.boundaries" :key="i">{{ b }}</li>
+          </ul>
+          <!-- 边界声明由控制面下发。读不到时说清"没读到"，绝不让这一栏空着——
+               一份空的边界清单会被读成「这套温备没有边界」。 -->
+          <div v-else class="bd-hint">{{ clusterErr ? '边界声明随集群状态由控制面下发，本次未读到（不是「没有边界」）。' : '控制面本次未下发边界声明。' }}</div>
+          <div class="bd-cl__boxt">切换（提升备机为主机）</div>
+          <div class="bd-hint bd-cl__how">
+            在<b>备机</b>上执行下面这条；它会先校验备份完整性再动手，<i class="bd-mono">--dry-run</i>
+            只校验与打印覆盖清单、不碰任何现网文件。切换前务必确认<b>老主机确已停机</b>——
+            两台同时跑等于两个控制面同时签发令牌、下发相反的策略，而现场没有任何一处会显示这件事。
+          </div>
+          <!-- 命令原文由控制面下发（脚本路径与参数随部署形态变）。空着就不画代码条：
+               一个空的 <pre> 会被当成"这条命令是空的 / 复制了个寂寞"。 -->
+          <pre v-if="cluster.promoteCmd" class="bd-cl__cmd">{{ cluster.promoteCmd }}</pre>
+          <div v-else class="bd-hint">切换命令由控制面随集群状态下发，本次未读到——脚本仍在
+            <i class="bd-mono">deploy/promote-standby.sh</i>，具体参数以该机部署为准。</div>
         </div>
-        <pre class="bd-cl__cmd">{{ cluster.promoteCmd }}</pre>
       </div>
     </div>
 
@@ -678,7 +739,7 @@
         </a-form-item>
         <!-- 编辑态当面说清影响面：改权限对**已经在这个角色下的人**立刻生效
              （requirePerm 现算角色，不看令牌）。 -->
-        <a-alert v-if="roleForm.editing && roleForm.members > 0" type="warning" style="margin-bottom: 14px">
+        <a-alert v-if="roleForm.editing && roleForm.members > 0" type="warning" class="bd-sys__alert">
           该角色下有 <b>{{ roleForm.members }}</b> 名管理员。改动权限后**立即生效**——
           控制面每次请求都现算角色，不等他们重新登录。
         </a-alert>
@@ -709,30 +770,56 @@ import {
   type SyslogTargetConfig, type HttpTargetConfig,
   type LicenseInfo
 } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 // 支持从审计中心深链过来（/system/manage?tab=forward）：那一页的「日志外送」
 // 入口指到这里，而不是在审计页上另放一份假的开关。
+type TabKey = 'admin' | 'notify' | 'forward' | 'cluster' | 'license';
+const TABS: ReadonlyArray<{ key: TabKey; label: string }> = [
+  { key: 'admin', label: '管理员与三权分立' },
+  { key: 'notify', label: '消息通道' },
+  { key: 'forward', label: '日志外送' },
+  { key: 'cluster', label: '集群' },
+  { key: 'license', label: 'License' }
+];
 const route = useRoute();
-const initialTab = (['admin', 'notify', 'forward', 'cluster', 'license'] as const)
-  .find((k) => k === route.query.tab) ?? 'admin';
-const tab = ref<'admin' | 'notify' | 'forward' | 'cluster' | 'license'>(initialTab);
-const live = ref(false);
+const initialTab = TABS.map((t) => t.key).find((k) => k === route.query.tab) ?? 'admin';
+const tab = ref<TabKey>(initialTab);
+/** 连接态**三态**：undefined = 首轮请求还在路上（页头不画标签）；true = 读到了；
+ *  false = 这一轮确实失败。初值 false 会让进页面的第一帧就宣告「数据未读取」——
+ *  那是在说一件还没发生的事。 */
+const live = ref<boolean | undefined>(undefined);
 const err = ref('');
 const kw = ref('');
 const saving = ref(false);
+/* 三张表各自的首屏标志：只决定骨架屏何时让位（成功 / 失败都算完成），不改任何数据流。
+ * 分开记是因为三个接口独立拉取、权限也不同（消息通道 / 外送归 PermSystem），
+ * 一个 403 不该让另外两张表一直停在骨架上。 */
+const loaded = ref(false);
+const notifyLoaded = ref(false);
+const fwdLoaded = ref(false);
 
 /* 全部数据来自 GET /api/v1/system（admin_roles 表 + users 表）。
  * ★拉不到就空着并显式报错，不许放降级演示数据：一屏编造的管理组与管理员是全项目
  * 最容易被误读成「已实现」的东西。 */
 const roles = ref<AdminRole[]>([]);
 const admins = ref<AdminAccount[]>([]);
-/* 集群 = 控制面温备（PRD 15.5）。初值刻意是「不可判定」而不是「未配置备机」：
- * 后端还没答话时，说"没配备机"是在替它下结论——而这两件事下一步动作完全不同。 */
+/* 集群 = 控制面温备（PRD 15.5）。四态由后端 api.clusterView **一处**产出（System 页与
+ * /diag checkCluster 同源），前端只排版。初值是个**空壳、且一格都不渲染**：首屏由 loaded
+ * 的骨架顶着，读取失败由 clusterErr 顶着——「后端还没答话」既不等于「没配备机」，
+ * 也不该长成一句永久的「正在读取…」，这两件事下一步动作完全不同。
+ * （status 的类型是三值联合，这里只能填一个占位值；它在 clusterErr 为空**且**读到过
+ *   cluster 段之前不会被渲染，模板里另有 v-if 兜住空串。） */
 const cluster = ref<ClusterInfo>({
   mode: 'single', deployed: false, status: 'skip',
-  summary: '', note: '正在读取备机同步状态…', rpo: '—',
+  summary: '', note: '', rpo: '—',
   staleAfterSec: 900, nodes: [], boundaries: [], promoteCmd: '',
 });
+/** 集群状态「读不到」的后端原话（空 = 这一轮读到了）。★与 err 分开记：管理员表
+ *  与集群是同一次请求的两块内容，但集群那块此前连一个能显示原话的位置都没有。 */
+const clusterErr = ref('');
 
 const filteredAdmins = computed(() => {
   const q = kw.value.trim().toLowerCase();
@@ -740,15 +827,22 @@ const filteredAdmins = computed(() => {
   return admins.value.filter((a) => a.name.toLowerCase().includes(q) || a.account.toLowerCase().includes(q));
 });
 
-/* ── 颜色 / 文案 ── */
-function powerColor(power: string) {
+/* ── 颜色 / 文案 ──
+ * 权力档位只映射到语义色**名**，颜色值在 tokens.css 里（root 红 / system 蓝 / security 橙 /
+ * audit 绿 / 自定义紫），页面里不再出现十六进制。 */
+type PowerTone = 'danger' | 'primary' | 'warning' | 'success' | 'purple';
+function powerTone(power: string): PowerTone {
   switch (power) {
-    case 'root': return '#F53F3F';
-    case 'system': return '#165DFF';
-    case 'security': return '#FF7D00';
-    case 'audit': return '#00B42A';
-    default: return '#722ED1'; // custom / 未分配
+    case 'root': return 'danger';
+    case 'system': return 'primary';
+    case 'security': return 'warning';
+    case 'audit': return 'success';
+    default: return 'purple'; // custom / 未分配
   }
+}
+/** 语义色名 → .bd-tg 的颜色变体名（标签族用的是颜色词而不是语义词）。 */
+function toneTag(t: PowerTone) {
+  return ({ danger: 'red', primary: 'blue', warning: 'gold', success: 'green', purple: 'purple' } as const)[t];
 }
 function powerText(power: string) {
   switch (power) {
@@ -768,11 +862,8 @@ function statusText(status: string) {
     default: return status || '—';
   }
 }
-/* 备机三态的配色与文案。fresh 之外一律红——「落后」与「从未同步」在切换那天
+/* 备机三态的文案。配色在模板里：fresh 之外一律红——「落后」与「从未同步」在切换那天
  * 的后果是同一个：手上没有一份足够新的备份。 */
-function stateColor(state: string) {
-  return state === 'fresh' ? '#00B42A' : '#F53F3F';
-}
 function stateText(state: string) {
   switch (state) {
     case 'fresh': return '同步新鲜';
@@ -781,12 +872,12 @@ function stateText(state: string) {
     default: return state || '—';
   }
 }
-function tagStyle(color: string) { return { color, background: color + '14', border: 'none' }; }
-function avatarBg(name: string) {
-  const palette = ['#165DFF', '#722ED1', '#00B42A', '#FF7D00', '#F53F3F'];
+/** 头像底色按姓名散列到五档语义色之一（类名，颜色在样式里走 --bd-* token）。 */
+function avatarClass(name: string) {
+  const palette = ['primary', 'purple', 'success', 'warning', 'danger'];
   let h = 0;
   for (const ch of name) h = (h + ch.charCodeAt(0)) % palette.length;
-  return palette[h];
+  return `bd-av--${palette[h]}`;
 }
 
 /* ── 读取 ── */
@@ -795,7 +886,10 @@ async function load(toast = false) {
     const b = await api<SystemBundle>('/system');
     roles.value = b.roles ?? [];
     admins.value = b.admins ?? [];
-    cluster.value = b.cluster ?? cluster.value;
+    // ★没下发 cluster 段也是「不可判定」，不能沿用上一份或初值：那会把一次缺席
+    //   渲染成一个看起来很确定的「单机形态」。
+    if (b.cluster) { cluster.value = b.cluster; clusterErr.value = ''; }
+    else clusterErr.value = '本次 /system 应答里没有 cluster 段，集群形态不可判定';
     live.value = true;
     err.value = '';
     if (toast) Message.success('已刷新');
@@ -803,8 +897,13 @@ async function load(toast = false) {
     live.value = false;
     roles.value = [];
     admins.value = [];
-    err.value = '未连控制中心，管理员与角色数据不可用：' + (e instanceof Error ? e.message : String(e));
-    if (toast) Message.error('刷新失败');
+    // ★归因不许自己编：403（角色被降权）与 503（存储故障）都会走到这里，
+    //   而「未连控制中心」这句会把前者说成断网，管理员照着去查网络。
+    err.value = '管理员与角色未读取：' + failReason(e);
+    clusterErr.value = failReason(e);
+    if (toast) Message.error('刷新失败：' + failReason(e));
+  } finally {
+    loaded.value = true;
   }
 }
 function reload() { void load(true); }
@@ -884,6 +983,8 @@ async function loadNotify(toast = false) {
       ? failReason(e) + '（消息通道归系统管理员一权）'
       : '消息通道读取失败：' + failReason(e);
     if (toast) Message.error('刷新失败：' + failReason(e));
+  } finally {
+    notifyLoaded.value = true;
   }
 }
 function reloadNotify() { void loadNotify(true); }
@@ -897,8 +998,9 @@ function kindText(k: string) {
     default: return k;
   }
 }
-function kindColor(k: string) {
-  return k === 'smtp' ? '#165DFF' : k === 'sms' ? '#722ED1' : '#00B42A';
+/** 通道类型 → 标签颜色变体（smtp 蓝 / sms 紫 / webhook 绿）。 */
+function kindTag(k: string) {
+  return k === 'smtp' ? 'blue' : k === 'sms' ? 'purple' : 'green';
 }
 function parseCfg<T>(raw: string): Partial<T> {
   try { return JSON.parse(raw || '{}') as Partial<T>; } catch { return {}; }
@@ -1090,6 +1192,8 @@ async function loadForward(toast = false) {
       ? failReason(e) + '（审计外送归系统管理员一权）'
       : '审计外送配置读取失败：' + failReason(e);
     if (toast) Message.error('刷新失败：' + failReason(e));
+  } finally {
+    fwdLoaded.value = true;
   }
 }
 function reloadForward() { void loadForward(true); }
@@ -1097,7 +1201,6 @@ function reloadForward() { void loadForward(true); }
 function fwdKindText(k: string) {
   return k === 'syslog' ? 'Syslog（RFC 5424 / TCP）' : k === 'http' ? 'HTTP JSON' : k;
 }
-function fwdKindColor(k: string) { return k === 'syslog' ? '#165DFF' : '#00B42A'; }
 /** 目标列显示的是配置里真实要拨过去的那个地址，不是出口名。 */
 function fwdTarget(t: AuditForwardTarget) {
   if (t.kind === 'syslog') {
@@ -1365,96 +1468,93 @@ function removeRole(g: AdminRole) {
 </script>
 
 <style scoped>
-/* tabs */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
+/* 本页独有：tab 条 / 角色卡 / 通道表小字 / 温备块 / License。
+   页头、提示条、空态、骨架、表格、按钮、标签、区块标题都在共享件与 app.css 里。 */
 
-.bd-section-title { font-size: 15px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
 
-/* 三权分立说明条 */
-.bd-sep__note {
-  display: flex; align-items: flex-start; gap: 9px; margin-bottom: 16px;
-  background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: var(--bd-radius);
-  padding: 12px 14px; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2);
-}
-.bd-sep__note :deep(svg) { color: var(--bd-primary); font-size: 16px; flex: none; margin-top: 2px; }
-.bd-sep__note b { color: var(--bd-t1); font-weight: 600; }
-
-.bd-warn {
-  display: flex; align-items: center; gap: 8px; margin-bottom: 14px; padding: 10px 14px;
-  border-radius: var(--bd-radius); background: #fff3e8; color: #ad4b00; font-size: 12.5px;
-}
-
-/* 角色卡片行 */
-.bd-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 14px; }
-.bd-gcard { position: relative; padding: 16px 16px 16px 20px; overflow: hidden; }
+/* 角色卡片行：--pc 是本卡的权力档位色，由 .bd-gcard--<tone> 从 token 取值 */
+.bd-groups { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: var(--bd-sp-4); }
+.bd-gcard { position: relative; padding: var(--bd-sp-4) var(--bd-sp-4) var(--bd-sp-4) var(--bd-sp-5); overflow: clip; }
+.bd-gcard--danger  { --pc: var(--bd-danger); }
+.bd-gcard--primary { --pc: var(--bd-primary); }
+.bd-gcard--warning { --pc: var(--bd-warning); }
+.bd-gcard--success { --pc: var(--bd-success); }
+.bd-gcard--purple  { --pc: var(--bd-purple); }
 .bd-gcard__bar { position: absolute; left: 0; top: 0; bottom: 0; width: 4px; background: var(--pc); }
-.bd-gcard__top { display: flex; align-items: center; gap: 8px; }
+.bd-gcard__top { display: flex; align-items: center; gap: var(--bd-sp-2); }
 .bd-gcard__dot { width: 9px; height: 9px; border-radius: 50%; background: var(--pc); flex: none; }
-.bd-gcard__name { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
-.bd-gcard__meta { display: flex; align-items: center; gap: 10px; margin: 12px 0 8px; }
-.bd-gcard__power { font-size: 12px; font-weight: 600; }
-.bd-gcard__members { margin-left: auto; font-size: 12px; color: var(--bd-t3); }
-.bd-gcard__members b { font-size: 16px; font-weight: 700; color: var(--bd-t1); margin-right: 2px; }
-.bd-gcard__perms { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 8px; }
-.bd-perm { font-size: 11px; padding: 1px 7px; border-radius: 5px; background: var(--bd-fill-2); color: var(--bd-t2); }
-.bd-gcard__scope { font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
-.bd-gcard__ops { margin-top: 10px; font-size: 12px; }
+.bd-gcard__name { font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); }
+.bd-gcard__meta { display: flex; align-items: center; gap: var(--bd-sp-3); margin: var(--bd-sp-3) 0 var(--bd-sp-2); }
+.bd-gcard__power { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--pc); }
+.bd-gcard__members { margin-left: auto; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-gcard__members b { font-size: var(--bd-fs-lg); font-weight: 700; color: var(--bd-t1); margin-right: 2px; }
+.bd-gcard__perms { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: var(--bd-sp-2); }
+.bd-perm { font-size: var(--bd-fs-xs); padding: 1px 7px; border-radius: var(--bd-radius-xs); background: var(--bd-fill-2); color: var(--bd-t2); }
+.bd-gcard__scope { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh); }
+.bd-gcard__ops { margin-top: var(--bd-sp-3); font-size: var(--bd-fs-sm); }
 
-.bd-rolebar { display: flex; align-items: center; gap: 12px; margin-top: 14px; }
-.bd-hint { font-size: 12px; color: var(--bd-t3); }
+.bd-rolebar { display: flex; align-items: center; gap: var(--bd-sp-3); margin-top: var(--bd-sp-4); flex-wrap: wrap; }
+.bd-hint { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); }
+.bd-sys__search { flex: 1; max-width: 280px; }
+.bd-sys__factors { display: inline-flex; gap: 5px; flex-wrap: wrap; }
+.bd-sys__alert { margin-bottom: var(--bd-sp-4); }
 
-/* 搜索框内 input 复位 */
-.bd-searchbox input { border: none; background: transparent; outline: none; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
-.bd-btn--ghost :deep(svg), .bd-btn :deep(svg) { font-size: 14px; }
+/* 角色点 / 头像：颜色只走 token */
+.bd-pdot--danger  { background: var(--bd-danger) !important; }
+.bd-pdot--primary { background: var(--bd-primary) !important; }
+.bd-pdot--warning { background: var(--bd-warning) !important; }
+.bd-pdot--success { background: var(--bd-success) !important; }
+.bd-pdot--purple  { background: var(--bd-purple) !important; }
+.bd-av--primary { background: var(--bd-primary); }
+.bd-av--purple  { background: var(--bd-purple); }
+.bd-av--success { background: var(--bd-success); }
+.bd-av--warning { background: var(--bd-warning); }
+.bd-av--danger  { background: var(--bd-danger); }
 
-/* 消息通道表 */
+/* 表格里的第二行小字 / 语义色字 */
+.bd-sys__sub { display: block; }
+.bd-sys__warn { color: var(--bd-warning); }
+.bd-sys__bad { color: var(--bd-danger); }
 .bd-target { max-width: 260px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bd-lastdetail {
-  display: block; max-width: 320px; font-size: 11.5px; color: var(--bd-t3);
-  line-height: 1.5; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  display: block; max-width: 320px; font-size: var(--bd-fs-xs); color: var(--bd-t3);
+  line-height: var(--bd-lh); overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 
-/* 集群（控制面温备） */
-.bd-cl__head {
-  display: flex; gap: 10px; align-items: flex-start;
-  padding: 14px 16px; border-radius: 8px; margin-bottom: 14px;
-}
-.bd-cl__head.ok { background: rgb(0 180 42 / 8%); }
-.bd-cl__head.bad { background: rgb(245 63 63 / 8%); }
-.bd-cl__head :deep(svg) { font-size: 17px; flex: none; margin-top: 1px; }
-.bd-cl__head.ok :deep(svg) { color: #00B42A; }
-.bd-cl__head.bad :deep(svg) { color: #F53F3F; }
-.bd-cl__sum { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
-.bd-cl__note { font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; margin-top: 4px; }
-.bd-cl__box { margin-top: 16px; padding: 16px; }
-.bd-cl__boxt { font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 8px; }
-.bd-cl__list { margin: 0 0 0 18px; padding: 0; }
-.bd-cl__list li { font-size: 12.5px; color: var(--bd-t3); line-height: 1.9; }
-.bd-cl__cmd {
-  margin: 8px 0 0; padding: 10px 12px; border-radius: 7px;
-  background: var(--bd-fill-2); color: var(--bd-t2);
-  font-family: var(--bd-mono-font, ui-monospace, SFMono-Regular, Menlo, monospace);
-  font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all;
-}
-
-/* 空态 */
-.bd-empty { text-align: center; color: var(--bd-t3); padding: 28px 0; }
-.bd-empty--lg {
-  display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px;
-  min-height: 300px; padding: 32px 24px;
-}
-.bd-empty--lg :deep(svg) { font-size: 30px; color: var(--bd-t4); }
-.bd-empty__t { font-size: 15px; font-weight: 600; color: var(--bd-t2); }
-.bd-empty__d { font-size: 12.5px; color: var(--bd-t3); line-height: 1.8; max-width: 620px; }
-.bd-nev { margin: 10px 0 4px; padding: 10px 12px; border-radius: 6px; background: var(--bd-fill-1); }
-.bd-nev__h { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); margin-bottom: 7px; }
-.bd-nev__i { display: flex; gap: 10px; align-items: flex-start; padding: 4px 0; font-size: 12px; line-height: 1.6; }
-.bd-nev__i.off { opacity: 0.72; }
+/* 会触发通知的事件清单（挂在 plain 提示条里） */
+.bd-nev__h { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t2); margin-bottom: 6px; }
+.bd-nev__i { display: flex; gap: var(--bd-sp-3); align-items: flex-start; padding: 3px 0; font-size: var(--bd-fs-sm); line-height: var(--bd-lh); }
+.bd-nev__i.off { opacity: .72; }
 .bd-nev__n { flex: none; width: 168px; display: flex; align-items: center; gap: 5px; color: var(--bd-t1); }
 .bd-nev__ok { color: var(--bd-success); }
 .bd-nev__no { color: var(--bd-t3); }
 .bd-nev__s { flex: 1; color: var(--bd-t3); }
+
+/* 集群（控制面温备） */
+.bd-cl__sum { font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); }
+.bd-cl__note { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); margin-top: var(--bd-sp-1); }
+.bd-cl__box { margin-top: var(--bd-sp-4); }
+.bd-cl__boxt { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); margin: var(--bd-sp-4) 0 var(--bd-sp-2); }
+.bd-cl__list { margin: 0 0 0 18px; padding: 0; }
+.bd-cl__list li { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: 1.9; }
+.bd-cl__how { line-height: 1.8; }
+.bd-cl__cmd {
+  margin: var(--bd-sp-2) 0 0; padding: 10px var(--bd-sp-3); border-radius: var(--bd-radius-s);
+  background: var(--bd-fill-2); color: var(--bd-t2); font-family: var(--bd-font-mono);
+  font-size: var(--bd-fs-sm); line-height: var(--bd-lh-loose); white-space: pre-wrap; word-break: break-all;
+}
+
+/* License */
+.bd-lic { margin-bottom: var(--bd-sp-3); }
+.bd-lic__row { display: flex; align-items: center; gap: var(--bd-sp-3); flex-wrap: wrap; }
+.bd-lic__who { color: var(--bd-t2); }
+.bd-lic__reason { color: var(--bd-danger); font-size: var(--bd-fs-md); }
+.bd-lic__last { margin-bottom: 0; }
+.bd-lic__act { margin-top: var(--bd-sp-3); display: flex; align-items: center; gap: var(--bd-sp-3); flex-wrap: wrap; }
+.lic-usage { display: flex; gap: var(--bd-sp-6); flex-wrap: wrap; margin-top: var(--bd-sp-3); }
+.lic-usage__item { display: flex; flex-direction: column; gap: 2px; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.lic-usage__item b { font-size: var(--bd-fs-lg); color: var(--bd-t1); font-variant-numeric: tabular-nums; }
+.lic-usage__item b.is-over { color: var(--bd-danger); }
+.lic-bounds { margin: 0 0 0 18px; padding: 0; }
+.lic-bounds li { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: 1.9; }
 </style>

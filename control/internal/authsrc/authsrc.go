@@ -1,4 +1,4 @@
-// Package authsrc 是外部认证源的接入层：把 LDAP/AD、OIDC 这类"别人家的身份系统"
+// Package authsrc 是外部认证源的接入层：把 LDAP/AD、OIDC、RADIUS 这类"别人家的身份系统"
 // 收敛成两个接口，让登录链路不必知道对面到底是什么。
 //
 // # 为什么这一层要单独存在
@@ -12,8 +12,8 @@
 // 本项目对 IKEv2/ESP 选择了自研，因为那是**白帝↔白帝**的协议，两端都归我们；
 // LDAP 恰恰相反——它的全部价值就在于能连上**别人的** Active Directory。
 // 自研一个 BER 编解码器在这里没有任何收益，只会把「能不能互通」变成新的风险，
-// 所以 LDAP 客户端直接用 go-ldap。OIDC 则是纯 HTTP+JWT，用标准库实现即可，
-// 反倒是引库要额外审它的校验完整性（下面列的那些校验漏一条就是认证绕过）。
+// 所以 LDAP 客户端直接用 go-ldap，RADIUS 同理用 layeh.com/radius。OIDC 则是纯 HTTP+JWT，
+// 用标准库实现即可，反倒是引库要额外审它的校验完整性（下面列的那些校验漏一条就是认证绕过）。
 package authsrc
 
 import (
@@ -24,7 +24,14 @@ import (
 
 // Identity 一次成功认证之后，从认证源拿回来的身份。
 type Identity struct {
-	// Subject 是认证源侧的**权威标识**：OIDC 的 sub、LDAP 的 entryDN。
+	// Subject 是认证源侧的**权威标识**：OIDC 的 sub、LDAP 的 entryDN、
+	// RADIUS 的 `radius:<源 id>:<User-Name>`（协议本身没有权威标识，靠源 id 隔离，
+	// 推理见 radiussrc 包注释）。
+	//
+	// ★注意 RADIUS 那份里的 User-Name 是**实际发给服务器认证的那个字符串**：只去首尾
+	// 空白、**不改大小写**，与下面 Normalized() 对 Username 的小写口径**刻意分家**。
+	// 绑定键必须等于被认证方真正认过的字符串——对大小写敏感的后端，"Alice" 与 "alice"
+	// 是两个各有口令的账号，归一成一个 Subject 会让后登者继承先登者的授权/JIT/封禁。
 	//
 	// ★账号映射必须以它为准，绝不能只按 Username 匹配。只按用户名匹配的话，
 	// 谁能在外部目录里新建一个与本地管理员同名的账号，谁就能登录成管理员——
@@ -50,7 +57,7 @@ func (i Identity) Normalized() Identity {
 	return i
 }
 
-// PasswordAuthenticator 用「账号 + 口令」直接认证的源（LDAP / AD）。
+// PasswordAuthenticator 用「账号 + 口令」直接认证的源（LDAP / AD / RADIUS）。
 type PasswordAuthenticator interface {
 	// Authenticate 校验凭据并返回身份。凭据错误返回包裹 ErrInvalidCredentials 的错误；
 	// 源本身不可用（网络、TLS、配置）返回包裹 ErrSourceUnavailable 的错误。
@@ -127,17 +134,64 @@ const (
 	KindLDAP  Kind = "ldap"  // 通用 LDAP
 	KindAD    Kind = "ad"    // Active Directory（LDAP 的一种方言，见 ldap 包的差异说明）
 	KindOIDC  Kind = "oidc"  // OpenID Connect
+	// KindRADIUS RADIUS 口令认证（RFC 2865，PAP/CHAP）。
+	//
+	// ★它此前是「明拒」的，理由是「没有稳定 Subject → 只能按用户名绑 → 冒充漏洞」。
+	// 那条推理的后半句不成立，正面回答写在 radiussrc 的包注释里：Subject 定义为
+	// `radius:<源 id>:<实际发给服务器认证的那个 User-Name>`（只去首尾空白、不改大小写；
+	// 源内稳定、按源隔离），加上外部账号 role 恒 user /
+	// pass_hash 恒空 / 撞名加后缀 / 提权被 guardLocalCredentialForAdmin 拒——RADIUS
+	// 服务器的管理者最多造出该源的普通外部身份，永远拿不到本地管理员。
+	KindRADIUS Kind = "radius"
 )
+
+// supportedKinds 已真实实现的类型清单。**全仓只此一份**：API 的 supportedKinds 响应、
+// 保存时的拒绝文案、Supported() 三处都从它取——各写一份迟早有一处落后，
+// 症状是"控制台说支持、保存却被拒"或反过来。
+var supportedKinds = []Kind{KindLocal, KindLDAP, KindAD, KindOIDC, KindRADIUS}
+
+// SupportedKinds 返回已实现类型的副本（调用方可随意改）。
+func SupportedKinds() []Kind {
+	out := make([]Kind, len(supportedKinds))
+	copy(out, supportedKinds)
+	return out
+}
+
+// SupportedKindsZh 供拒绝文案用的 "local / ldap / …" 串。
+func SupportedKindsZh() string {
+	parts := make([]string, 0, len(supportedKinds))
+	for _, k := range supportedKinds {
+		parts = append(parts, string(k))
+	}
+	return strings.Join(parts, " / ")
+}
+
+// ProbeReport 一次连通性自检的说明。Method 是探测方法（各实现自定义常量），
+// Detail 是给管理员看的中文结论。
+//
+// ★为什么需要它：Probe 只回 error，成功时控制台只能写一句「连接正常」。RADIUS 的
+// 自检有两条路（Status-Server / 回退到探测用 Access-Request），后者会在对面日志里
+// 留一条失败登录——管理员必须知道是哪一种，才能解释那条日志是谁打的。
+type ProbeReport struct {
+	Method string
+	Detail string
+}
+
+// DetailedProber 能说清"用什么方法探到的"的源。可选接口：API 层有则用，没有回落到 Probe。
+type DetailedProber interface {
+	ProbeDetail(ctx context.Context) (ProbeReport, error)
+}
 
 // Supported 报告某类型是否已真实实现。
 //
-// ★控制台上那些「RADIUS / 短信网关 / 商密证书」的磁贴是历史种子，背后什么都没有。
-// 与其让它们看起来可选，不如在这里集中定义"什么是真的"，由 API 层据此把未实现的
-// 类型明确拒掉——本项目反复吃亏的就是「界面上能选、后端静默不生效」。
+// ★控制台上「短信网关 / 商密证书」两类磁贴是历史种子，背后什么都没有（RADIUS 此前
+// 也在此列，现已真实现）。与其让它们看起来可选，不如在这里集中定义"什么是真的"，
+// 由 API 层据此把未实现的类型明确拒掉——本项目反复吃亏的就是「界面上能选、后端静默不生效」。
 func (k Kind) Supported() bool {
-	switch k {
-	case KindLocal, KindLDAP, KindAD, KindOIDC:
-		return true
+	for _, s := range supportedKinds {
+		if k == s {
+			return true
+		}
 	}
 	return false
 }

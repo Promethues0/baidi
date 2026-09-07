@@ -103,43 +103,49 @@ function ago(ts: number): string {
 </script>
 
 <style scoped>
+/* 与 GlobalSearch 同理：铃铛也在顶栏，21 个管理页每页都渲染。尺度全部走 tokens.css。
+   保留的裸像素只有版面尺寸（面板宽 340、列表限高 340）与两条 hairline（1px 分隔线、
+   角标 1.5px 描边）——描边是把角标从顶栏底色上"抠"出来的一道细边，不属于间距阶梯。 */
 .bd-bell {
-  position: relative; width: 34px; height: 34px; border: none; background: transparent; border-radius: 8px;
-  display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--bd-t2); font-size: 18px;
+  position: relative; width: 34px; height: 34px; border: none; background: transparent; border-radius: var(--bd-radius-s);
+  display: flex; align-items: center; justify-content: center; cursor: pointer; color: var(--bd-t2); font-size: var(--bd-fs-lg);
 }
 .bd-bell:hover, .bd-bell.on { background: var(--bd-fill-2); }
-.bd-bell:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 1px; }
+.bd-bell:focus-visible { outline: var(--bd-focus-outline); outline-offset: 1px; }
+/* 角标：实底语义色上的字用 --bd-on-color（不是 --bd-bg-1，那是底色）；
+   描边取顶栏底色 --bd-bg-1（AppLayout 的 .bd-top 就是它），角标才像"浮在顶栏上"。 */
 .bd-bell__dot {
-  position: absolute; top: 4px; right: 5px; min-width: 15px; height: 15px; padding: 0 4px;
-  background: var(--bd-danger); color: #fff; border-radius: 8px; font-size: 10px; font-weight: 600;
-  display: flex; align-items: center; justify-content: center; border: 1.5px solid #fff;
+  position: absolute; top: var(--bd-sp-1); right: var(--bd-sp-1); min-width: 15px; height: 15px; padding: 0 var(--bd-sp-1);
+  background: var(--bd-danger); color: var(--bd-on-color); border-radius: var(--bd-radius-pill);
+  font-size: var(--bd-fs-xs); font-weight: 600;
+  display: flex; align-items: center; justify-content: center; border: 1.5px solid var(--bd-bg-1);
 }
 
 .bd-noti {
-  width: 340px; background: #fff; border: 1px solid var(--bd-border); border-radius: 10px;
-  box-shadow: 0 6px 24px rgba(0, 0, 0, .1); overflow: hidden;
+  width: 340px; background: var(--bd-bg-1); border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
+  box-shadow: var(--bd-shadow-2); overflow: hidden;
 }
 .bd-noti__h {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 11px 14px; border-bottom: 1px solid var(--bd-border); font-size: 13px;
+  padding: var(--bd-sp-3) var(--bd-sp-4); border-bottom: 1px solid var(--bd-border); font-size: var(--bd-fs-md);
 }
-.bd-noti__all { font-size: 12px; color: var(--bd-primary); text-decoration: none; }
+.bd-noti__all { font-size: var(--bd-fs-sm); color: var(--bd-primary); text-decoration: none; }
 .bd-noti__all:hover { text-decoration: underline; }
-.bd-noti__msg { padding: 22px 14px; text-align: center; font-size: 12.5px; color: var(--bd-t3); }
+.bd-noti__msg { padding: var(--bd-sp-6) var(--bd-sp-4); text-align: center; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 .bd-noti__msg--ok { color: var(--bd-success); }
-.bd-noti__msg--err { color: var(--bd-danger); text-align: left; line-height: 1.7; }
-.bd-noti__list { list-style: none; margin: 0; padding: 4px 0; max-height: 340px; overflow-y: auto; }
-.bd-noti__it { display: flex; gap: 9px; padding: 9px 14px; cursor: pointer; }
+.bd-noti__msg--err { color: var(--bd-danger); text-align: left; line-height: var(--bd-lh-loose); }
+.bd-noti__list { list-style: none; margin: 0; padding: var(--bd-sp-1) 0; max-height: 340px; overflow-y: auto; }
+.bd-noti__it { display: flex; gap: var(--bd-sp-2); padding: var(--bd-sp-2) var(--bd-sp-4); cursor: pointer; }
 .bd-noti__it:hover { background: var(--bd-fill-1); }
 .bd-noti__sev { width: 6px; height: 6px; border-radius: 50%; margin-top: 6px; flex: none; background: var(--bd-t4); }
 .bd-noti__sev.warning { background: var(--bd-warning); }
 .bd-noti__sev.critical { background: var(--bd-danger); }
 .bd-noti__sev.info { background: var(--bd-primary); }
 .bd-noti__body { min-width: 0; }
-.bd-noti__t { font-size: 12.5px; color: var(--bd-t1); line-height: 1.5; }
-.bd-noti__m { font-size: 11px; color: var(--bd-t3); margin-top: 3px; }
+.bd-noti__t { font-size: var(--bd-fs-sm); color: var(--bd-t1); line-height: var(--bd-lh); }
+.bd-noti__m { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); }
 .bd-noti__more {
-  padding: 8px 14px; border-top: 1px solid var(--bd-border);
-  font-size: 11px; color: var(--bd-t3); background: var(--bd-fill-1);
+  padding: var(--bd-sp-2) var(--bd-sp-4); border-top: 1px solid var(--bd-border);
+  font-size: var(--bd-fs-xs); color: var(--bd-t3); background: var(--bd-fill-1);
 }
 </style>

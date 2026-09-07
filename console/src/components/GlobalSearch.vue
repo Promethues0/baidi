@@ -92,7 +92,10 @@ const TTL_MS = 60_000;
 const SOURCES = [
   { kind: 'page' as const, label: '页面', icon: 'IconApps' },
   { kind: 'user' as const, label: '用户', icon: 'IconUser' },
-  { kind: 'app' as const, label: '应用', icon: 'IconAppstore' },
+  // ★此前写的是 'IconAppstore'——Arco 图标集里没有它：搜到应用时每条结果左侧是一块空白 +
+  //   一条 Vue warn，type-check 不报（字面量对 tsc 只是字符串）。IconCommon 是应用管理页
+  //   给「Web 应用」用的那枚通用应用图标；IconApps 已被上面「页面」占用，不重复。
+  { kind: 'app' as const, label: '应用', icon: 'IconCommon' },
   { kind: 'res' as const, label: '资源', icon: 'IconRelation' },
   { kind: 'gw' as const, label: '网关', icon: 'IconStorage' }
 ];
@@ -229,57 +232,70 @@ onUnmounted(() => window.removeEventListener('keydown', onKey));
 </script>
 
 <style scoped>
+/* 全部尺度走 tokens.css。★这是管理台外壳，21 个管理页每页都渲染它——
+   这里留一个半档字号（此前 10.5 / 11.5 / 12.5 各有若干）或一个裸 #fff，就是 21 页同时不合规。
+   保留的裸像素只有两处布局尺寸（顶栏搜索框 240px 宽、结果区 420px 限高），它们与
+   --bd-sider-w / --bd-page-max 同类：是版面尺寸不是尺度阶梯，token 表里本就没有这一档。 */
 .bd-search {
-  display: flex; align-items: center; height: 32px; background: var(--bd-fill-2); border: none;
-  border-radius: 6px; padding: 0 8px 0 10px; gap: 8px; width: 240px; color: var(--bd-t3);
-  font-size: 13px; cursor: pointer; text-align: left;
+  display: flex; align-items: center; height: var(--bd-ctl-h); background: var(--bd-fill-2); border: none;
+  border-radius: var(--bd-radius-s); padding: 0 var(--bd-sp-2) 0 var(--bd-sp-3); gap: var(--bd-sp-2);
+  width: 240px; color: var(--bd-t3); font-size: var(--bd-fs-md); cursor: pointer; text-align: left;
 }
 .bd-search:hover { background: var(--bd-fill-1); box-shadow: inset 0 0 0 1px var(--bd-border); }
-.bd-search:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 1px; }
+.bd-search:focus-visible { outline: var(--bd-focus-outline); outline-offset: 1px; }
 .bd-search__ph { flex: 1; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
 .bd-search__kbd {
-  font-size: 10.5px; color: var(--bd-t3); background: #fff; border: 1px solid var(--bd-border);
-  border-radius: 4px; padding: 1px 5px; font-family: inherit; flex: none;
+  font-size: var(--bd-fs-xs); color: var(--bd-t3); background: var(--bd-bg-1); border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-xs); padding: 1px var(--bd-sp-1); font-family: inherit; flex: none;
 }
 
-.bd-gs__title { display: flex; align-items: center; gap: 8px; font-size: 14px; }
-.bd-gs__box { margin-bottom: 12px; }
-.bd-searchbox {
-  display: flex; align-items: center; gap: 8px; height: 38px; padding: 0 12px;
-  background: var(--bd-fill-2); border-radius: 8px; color: var(--bd-t3);
+.bd-gs__title { display: flex; align-items: center; gap: var(--bd-sp-2); font-size: var(--bd-fs-base); }
+/* ★这块此前直接重写了全局类 .bd-searchbox / .bd-searchbox__in（app.css 里已有定义），
+   是 DESIGN.md 明令禁止的"页内再定义已全局的类"——命令面板要一个比表格工具栏更大的输入框，
+   正确写法是给全局类加一个修饰类，而不是把全局类改掉：那样改全局定义时这里会静默不跟。 */
+.bd-gs__box {
+  margin-bottom: var(--bd-sp-3); height: var(--bd-ctl-h-l); padding: 0 var(--bd-sp-3);
+  background: var(--bd-fill-2); border-radius: var(--bd-radius-s);
 }
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 14px; color: var(--bd-t1); }
-.bd-searchbox__in::placeholder { color: var(--bd-t3); }
-.bd-gs__loading { font-size: 11.5px; color: var(--bd-t3); flex: none; }
+.bd-gs__box .bd-searchbox__in { font-size: var(--bd-fs-base); }
+.bd-gs__loading { font-size: var(--bd-fs-xs); color: var(--bd-t3); flex: none; }
 
+/* 取数失败提示条：底色与 --bd-tag-gold-bg 同值，但改用 warning 语义族的 底/边/字 配套
+   （DESIGN.md §1「三组各自成对」），图标也跟着是 warning 色而不是继承正文灰。 */
 .bd-gs__warn {
-  display: flex; align-items: center; gap: 8px; padding: 9px 12px; margin-bottom: 10px;
-  background: var(--bd-tag-gold-bg); border-radius: 8px; font-size: 12px; color: var(--bd-t2); line-height: 1.6;
+  display: flex; align-items: center; gap: var(--bd-sp-2);
+  padding: var(--bd-sp-2) var(--bd-sp-3); margin-bottom: var(--bd-sp-3);
+  background: var(--bd-warning-1); border: 1px solid var(--bd-warning-b); border-radius: var(--bd-radius-s);
+  font-size: var(--bd-fs-sm); color: var(--bd-t2); line-height: var(--bd-lh-loose);
 }
+.bd-gs__warn > svg { flex: none; color: var(--bd-warning); }
 .bd-gs__warn > span { flex: 1; }
-.bd-gs__retry { border: none; background: transparent; color: var(--bd-primary); cursor: pointer; font-size: 12px; flex: none; }
+.bd-gs__retry { border: none; background: transparent; color: var(--bd-primary); cursor: pointer; font-size: var(--bd-fs-sm); flex: none; }
 
-.bd-gs__hint { padding: 26px 6px; text-align: center; font-size: 12.5px; color: var(--bd-t3); line-height: 1.9; }
-.bd-gs__hint2 { display: block; font-size: 11.5px; color: var(--bd-t4); }
+.bd-gs__hint { padding: var(--bd-sp-6) var(--bd-sp-2); text-align: center; font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); }
+.bd-gs__hint2 { display: block; font-size: var(--bd-fs-xs); color: var(--bd-t4); }
 
 .bd-gs__list { list-style: none; margin: 0; padding: 0; max-height: 420px; overflow-y: auto; }
 .bd-gs__grp {
-  display: flex; align-items: center; gap: 6px; font-size: 11px; color: var(--bd-t3);
-  font-weight: 600; padding: 8px 6px 5px; letter-spacing: .4px;
+  display: flex; align-items: center; gap: var(--bd-sp-2); font-size: var(--bd-fs-xs); color: var(--bd-t3);
+  font-weight: 600; padding: var(--bd-sp-2) var(--bd-sp-2) var(--bd-sp-1); letter-spacing: .4px;
 }
 .bd-gs__grp i { font-style: normal; color: var(--bd-t4); font-weight: 400; }
 .bd-gs__it {
-  display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: 7px; cursor: pointer;
+  display: flex; align-items: center; gap: var(--bd-sp-3); padding: var(--bd-sp-2) var(--bd-sp-3);
+  border-radius: var(--bd-radius-s); cursor: pointer;
 }
 .bd-gs__it.on { background: var(--bd-primary-1); }
-.bd-gs__icon { font-size: 16px; color: var(--bd-t3); flex: none; }
+.bd-gs__icon { font-size: var(--bd-fs-lg); color: var(--bd-t3); flex: none; }
 .bd-gs__it.on .bd-gs__icon { color: var(--bd-primary); }
 .bd-gs__body { flex: 1; min-width: 0; }
-.bd-gs__t { font-size: 13px; color: var(--bd-t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.bd-gs__s { font-size: 11.5px; color: var(--bd-t3); margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-gs__t { font-size: var(--bd-fs-md); color: var(--bd-t1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.bd-gs__s { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: var(--bd-sp-1); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .bd-gs__t :deep(em), .bd-gs__s :deep(em) { font-style: normal; color: var(--bd-primary); font-weight: 600; }
-.bd-gs__go { font-size: 11px; color: var(--bd-t4); flex: none; }
+.bd-gs__go { font-size: var(--bd-fs-xs); color: var(--bd-t4); flex: none; }
 .bd-gs__it.on .bd-gs__go { color: var(--bd-primary); }
-.bd-gs__more { font-size: 11px; color: var(--bd-t3); padding: 3px 10px 6px 36px; }
-.bd-gs__hr { height: 1px; background: var(--bd-border); margin: 6px 4px; }
+/* 左内边距 40 = 条目左内边距 12 + 图标 16 + 图标与正文间距 12，让"还有 N 条"与标题左对齐；
+   跟着上面三个尺度走，改了 gap 忘了改这里就会错位。 */
+.bd-gs__more { font-size: var(--bd-fs-xs); color: var(--bd-t3); padding: var(--bd-sp-1) var(--bd-sp-3) var(--bd-sp-2) var(--bd-sp-8); }
+.bd-gs__hr { height: 1px; background: var(--bd-border); margin: var(--bd-sp-2) var(--bd-sp-1); }
 </style>

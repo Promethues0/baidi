@@ -1,48 +1,41 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">设备状态</div>
-        <div class="bd-page__sub">数据面网关宿主机的资源水位与吞吐 · 采不到的指标如实标「不可判定」，不补 0</div>
-      </div>
-      <div class="bd-head__right">
-        <a-radio-group v-model="range" type="button" size="small" @change="load">
-          <a-radio value="hour">小时</a-radio>
-          <a-radio value="day">天</a-radio>
-          <a-radio value="week">周</a-radio>
-        </a-radio-group>
-        <a-tag :color="live ? 'green' : 'red'" bordered>
-          <template #icon><icon-cloud /></template>
-          {{ live ? '已连 baidi-control' : '未连控制面' }}
-        </a-tag>
-        <a-button :loading="loading" @click="load">
-          <template #icon><icon-refresh /></template>刷新
-        </a-button>
-      </div>
-    </div>
+    <!-- 离线文案「数据未读取」+ 红：本页刻意没有降级演示数据（见下方说明），拉不到就一条线都不画。 -->
+    <PageHeader title="设备状态" subtitle="数据面网关宿主机的资源水位与吞吐 · 采不到的指标如实标「不可判定」，不补 0" :live="live" off-text="数据未读取" off-color="red">
+      <a-radio-group v-model="range" type="button" size="small" @change="load">
+        <a-radio value="hour">小时</a-radio>
+        <a-radio value="day">天</a-radio>
+        <a-radio value="week">周</a-radio>
+      </a-radio-group>
+      <a-button :loading="loading" @click="load">
+        <template #icon><icon-refresh /></template>刷新
+      </a-button>
+    </PageHeader>
+
+    <!-- 首屏骨架：第一次 load() 回来之前占位，不画空白也不画任何假曲线 -->
+    <div v-if="!loaded" class="bd-card"><SkeletonBlock kind="card" :rows="4" /></div>
 
     <!--
       ★这一页刻意**没有降级演示数据**（与控制台其余页不同）：它的全部意义是
       「这台机器现在什么水位」，编造的曲线与真实采集在读者眼里无从分辨。
       连不上控制面就说连不上，一条线都不画。
     -->
-    <div v-if="err" class="bd-tip bd-tip--err">
-      <icon-exclamation-circle-fill class="bd-tip__ic" />
+    <div v-else-if="err" class="bd-notice bd-notice--danger">
+      <icon-exclamation-circle-fill />
       <span>无法从控制面读取设备状态：{{ err }}。本页不提供演示数据——编造的曲线无法与真实采集区分。</span>
     </div>
 
     <template v-else>
       <!-- 时间窗被留存期截断：如实说明，否则左侧一大片空白看起来像采集坏了 -->
-      <div v-if="resp && resp.truncated" class="bd-tip">
-        <icon-info-circle class="bd-tip__ic" />
+      <div v-if="resp && resp.truncated" class="bd-notice">
+        <icon-info-circle />
         <span>{{ resp.rangeLabel }}的窗口已按留存策略截断到最近 {{ resp.retentionHours }} 小时（BAIDI_METRICS_RETENTION_HOURS）：更早的采样点已被清理。</span>
       </div>
 
-      <!-- 空态一：一台上报指标的网关都没有 -->
-      <div v-if="!series.length" class="bd-card bd-empty bd-empty--lg">
-        <icon-storage />
-        <div class="bd-empty__main">无数据面上报</div>
-        <div class="bd-empty__sub">
+      <!-- 空态一：一台上报指标的网关都没有（缺上报 = warn，不是「没有网关」的中性空） -->
+      <div v-if="!series.length" class="bd-card">
+        <EmptyState size="lg" tone="warn" title="无数据面上报">
+          <template #icon><icon-storage /></template>
           <template v-if="silent.length">
             当前有 {{ resp?.onlineGateways ?? 0 }} 台网关在线，但它们都没有上报宿主机指标：
             <b class="bd-mono">{{ silent.join('、') }}</b>。
@@ -52,12 +45,12 @@
             还没有任何数据面网关向控制面注册并上报指标。网关需以 mTLS 客户端证书接入
             （<span class="bd-mono">-control</span> + <span class="bd-mono">-mtls-*</span>），心跳会自动带上设备状态。
           </template>
-        </div>
+        </EmptyState>
       </div>
 
       <!-- 空态二：有网关在报，但另有网关在线却不报——两种处境要分开讲 -->
-      <div v-else-if="silent.length" class="bd-tip bd-tip--warn">
-        <icon-exclamation-circle class="bd-tip__ic" />
+      <div v-else-if="silent.length" class="bd-notice bd-notice--warn">
+        <icon-exclamation-circle />
         <span>
           另有 {{ silent.length }} 台在线网关未上报设备指标（<span class="bd-mono">{{ silent.join('、') }}</span>）：
           多半是网关版本过旧。它们不会出现在下方图表里——这里不为它们补零线。
@@ -65,7 +58,7 @@
       </div>
 
       <!-- 每台网关一块 -->
-      <a-card v-for="g in series" :key="g.gatewayId" class="bd-card bd-gw" :bordered="false">
+      <div v-for="g in series" :key="g.gatewayId" class="bd-card bd-card--pad bd-gw">
         <div class="bd-gw__head">
           <div class="bd-gw__id">
             <icon-storage />
@@ -80,18 +73,14 @@
           </div>
         </div>
 
-        <!-- 当前值：取的是最新一条**原始采样**，不是最后一个桶的均值 -->
+        <!-- 当前值：取的是最新一条**原始采样**，不是最后一个桶的均值。
+             ★StatCard 对 null 画「—」并把 hint 当脚注——不可判定绝不塌成 0。 -->
         <div class="bd-tiles">
-          <div v-for="t in tiles(g)" :key="t.key" class="bd-tile">
-            <div class="bd-tile__label">{{ t.label }}</div>
-            <div class="bd-tile__value" :class="{ unknown: t.text === UNKNOWN }" :style="{ color: t.text === UNKNOWN ? '' : t.color }">
-              {{ t.text }}
-            </div>
-            <div v-if="t.pct !== null" class="bd-tile__bar">
-              <span :style="{ width: t.pct + '%', background: t.color }" />
-            </div>
-            <div v-else class="bd-tile__hint">{{ t.hint }}</div>
-          </div>
+          <StatCard v-for="t in tiles(g)" :key="t.key" :label="t.label" :value="t.value" :unit="t.unit" :tone="t.tone" :unknown-text="t.hint">
+            <template v-if="t.pct !== null" #extra>
+              <div class="bd-tile__bar"><span :class="`bd-tile__fill--${t.tone}`" :style="{ width: t.pct + '%' }" /></div>
+            </template>
+          </StatCard>
         </div>
 
         <!-- 趋势图 -->
@@ -108,7 +97,7 @@
             <ChartBody :chart="c" :series="g" :view="viewBox" />
           </div>
         </div>
-      </a-card>
+      </div>
     </template>
   </div>
 </template>
@@ -128,9 +117,13 @@
  */
 import { ref, computed, onMounted, h, type PropType, type VNode } from 'vue';
 import { api, type DeviceStatResp, type DeviceMetricSeries, type DeviceStatRange, type MetricValue } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-/** 不可判定的统一呈现。整页只有这一处字面量，避免有人某处写成 0。 */
-const UNKNOWN = '—';
+/** 不可判定的统一呈现：null 交给 StatCard 画「—」。整页只有这一处字面量，避免有人某处写成 0。 */
+const UNKNOWN = null;
 
 type MetricKey = 'cpu' | 'mem' | 'disk' | 'load' | 'rxBps' | 'txBps';
 interface ChartLine { key: MetricKey; label: string; color: string }
@@ -146,21 +139,21 @@ const CHARTS: ChartSpec[] = [
   {
     title: '资源占用（%）', fixedMax: 100, format: (v) => v.toFixed(0) + '%',
     lines: [
-      { key: 'cpu', label: 'CPU', color: '#165DFF' },
-      { key: 'mem', label: '内存', color: '#00B42A' },
-      { key: 'disk', label: '磁盘', color: '#FF7D00' }
+      { key: 'cpu', label: 'CPU', color: 'var(--bd-primary)' },
+      { key: 'mem', label: '内存', color: 'var(--bd-success)' },
+      { key: 'disk', label: '磁盘', color: 'var(--bd-warning)' }
     ]
   },
   {
     title: '网络吞吐', format: fmtBps,
     lines: [
-      { key: 'rxBps', label: '接收', color: '#722ED1' },
-      { key: 'txBps', label: '发送', color: '#F53F3F' }
+      { key: 'rxBps', label: '接收', color: 'var(--bd-purple)' },
+      { key: 'txBps', label: '发送', color: 'var(--bd-danger)' }
     ]
   },
   {
     title: '系统负载', format: (v) => v.toFixed(2),
-    lines: [{ key: 'load', label: '1 分钟平均', color: '#0E42D2' }]
+    lines: [{ key: 'load', label: '1 分钟平均', color: 'var(--bd-primary-d)' }]
   }
 ];
 
@@ -170,8 +163,14 @@ const viewBox = { w: 480, h: 120, padL: 34, padR: 6, padT: 8, padB: 16 };
 const range = ref<DeviceStatRange>('hour');
 const resp = ref<DeviceStatResp | null>(null);
 const loading = ref(false);
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
 const err = ref('');
+/** 首屏是否已完成第一次加载：只决定骨架屏何时让位（成功 / 失败都算完成），不改任何数据流。 */
+const loaded = ref(false);
 
 const series = computed<DeviceMetricSeries[]>(() => resp.value?.gateways ?? []);
 const silent = computed<string[]>(() => resp.value?.silentGateways ?? []);
@@ -213,14 +212,16 @@ function fmtBps(v: number): string {
   return `${(v / 1024 / 1024 / 1024).toFixed(2)} GB/s`;
 }
 
-/** 水位配色：越接近满越红。只影响观感，不参与任何判定。 */
-function pctColor(v: number) {
-  if (v >= 90) return '#F53F3F';
-  if (v >= 75) return '#FF7D00';
-  return '#165DFF';
+type TileTone = 'default' | 'primary' | 'warning' | 'danger';
+/** 水位语义档：越接近满越红（≥90 danger / ≥75 warning / 其余 primary）。只影响观感，不参与任何判定。 */
+function pctTone(v: number): TileTone {
+  if (v >= 90) return 'danger';
+  if (v >= 75) return 'warning';
+  return 'primary';
 }
 
-interface Tile { key: string; label: string; text: string; color: string; pct: number | null; hint: string }
+/** value 为 null = 不可判定（StatCard 画「—」、hint 当脚注）；unit 是数值后的单位（KB/s 之类，六格并排时不与数值挤同一行）；pct 为 null = 不画水位条。 */
+interface Tile { key: string; label: string; value: string | null; unit?: string; tone: TileTone; pct: number | null; hint: string }
 
 /**
  * 当前值磁贴。★数据源固定是 latest（最新原始采样），并且 null 一律走 UNKNOWN 分支——
@@ -231,16 +232,18 @@ function tiles(g: DeviceMetricSeries): Tile[] {
   const pct = (key: 'cpu' | 'mem' | 'disk', label: string, hint: string): Tile => {
     const v: MetricValue = l ? l[key] : null;
     if (v === null || v === undefined) {
-      return { key, label, text: UNKNOWN, color: '', pct: null, hint };
+      return { key, label, value: UNKNOWN, tone: 'default', pct: null, hint };
     }
-    return { key, label, text: v.toFixed(1) + '%', color: pctColor(v), pct: Math.min(100, Math.max(0, v)), hint: '' };
+    return { key, label, value: v.toFixed(1) + '%', tone: pctTone(v), pct: Math.min(100, Math.max(0, v)), hint: '' };
   };
   const plain = (key: 'load' | 'rxBps' | 'txBps', label: string, fmt: (v: number) => string, hint: string): Tile => {
     const v: MetricValue = l ? l[key] : null;
     if (v === null || v === undefined) {
-      return { key, label, text: UNKNOWN, color: '', pct: null, hint };
+      return { key, label, value: UNKNOWN, tone: 'default', pct: null, hint };
     }
-    return { key, label, text: fmt(v), color: 'var(--bd-t1)', pct: null, hint: '' };
+    // 「1.34 MB/s」拆成数值 + 单位两段交给 StatCard；负载这类没有单位的原样一段。
+    const [num, ...unit] = fmt(v).split(' ');
+    return { key, label, value: num, unit: unit.join(' ') || undefined, tone: 'default', pct: null, hint: '' };
   };
   return [
     pct('cpu', 'CPU 使用率', '该网关采不到 CPU（如 macOS 宿主机：取 CPU 时间片需 cgo）'),
@@ -384,6 +387,7 @@ async function load() {
     err.value = e instanceof Error ? e.message : String(e);
   } finally {
     loading.value = false;
+    loaded.value = true;
   }
 }
 
@@ -391,62 +395,37 @@ onMounted(load);
 </script>
 
 <style scoped>
-.bd-tip {
-  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 16px;
-  padding: 10px 14px; border-radius: var(--bd-radius);
-  background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b);
-  font-size: 12.5px; color: var(--bd-t2); line-height: 1.6;
-}
-.bd-tip__ic { color: var(--bd-primary); font-size: 16px; flex: none; margin-top: 2px; }
-.bd-tip--warn { background: var(--bd-tag-gold-bg); border-color: #FFCF8B; }
-.bd-tip--warn .bd-tip__ic { color: var(--bd-warning); }
-.bd-tip--err { background: var(--bd-tag-red-bg); border-color: #FBACA3; }
-.bd-tip--err .bd-tip__ic { color: var(--bd-danger); }
-
-.bd-empty {
-  display: flex; flex-direction: column; align-items: center; gap: 6px;
-  padding: 44px 24px; text-align: center; color: var(--bd-t3);
-}
-.bd-empty :deep(svg) { font-size: 30px; color: var(--bd-t4); }
-.bd-empty__main { font-size: 15px; font-weight: 600; color: var(--bd-t2); }
-.bd-empty__sub { font-size: 12.5px; line-height: 1.7; max-width: 620px; }
-
-.bd-gw { margin-bottom: 14px; border-radius: var(--bd-radius); }
+/* 本页独有的布局与自绘折线。页头 / 提示条 / 空态 / 骨架 / KPI 磁贴 / 卡片 / 等宽字都在共享件与 app.css 里。 */
+.bd-gw { margin-bottom: var(--bd-sp-4); }
 .bd-gw__head {
   display: flex; align-items: center; justify-content: space-between;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 14px;
+  gap: var(--bd-sp-3); flex-wrap: wrap; margin-bottom: var(--bd-sp-4);
 }
-.bd-gw__id { display: flex; align-items: center; gap: 7px; font-size: 14px; font-weight: 600; color: var(--bd-t1); }
+.bd-gw__id { display: flex; align-items: center; gap: 7px; font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); }
 .bd-gw__id :deep(svg) { color: var(--bd-primary); }
-.bd-gw__ts { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--bd-t3); }
+.bd-gw__ts { display: flex; align-items: center; gap: var(--bd-sp-2); font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 
-/* 当前值磁贴 */
-.bd-tiles {
-  display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
-  gap: 10px; margin-bottom: 16px;
-}
-.bd-tile { padding: 10px 12px; border-radius: var(--bd-radius-s); background: var(--bd-fill-1); }
-.bd-tile__label { font-size: 12px; color: var(--bd-t3); }
-.bd-tile__value {
-  font-size: 20px; font-weight: 700; line-height: 1.5;
-  font-variant-numeric: tabular-nums; color: var(--bd-t1);
-}
-/* 不可判定：灰、细、明显不是一个读数——绝不让它长得像 0 */
-.bd-tile__value.unknown { color: var(--bd-t4); font-weight: 500; }
-.bd-tile__bar { height: 4px; border-radius: 2px; background: var(--bd-fill-2); overflow: hidden; }
-.bd-tile__bar span { display: block; height: 100%; border-radius: 2px; transition: width .2s; }
-.bd-tile__hint { font-size: 11px; color: var(--bd-t4); line-height: 1.5; }
+/* 当前值磁贴：一台网关六格，1280 下收成 3×2 */
+.bd-tiles { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: var(--bd-sp-3); margin-bottom: var(--bd-sp-4); }
+.bd-tile__bar { height: 4px; border-radius: 2px; background: var(--bd-fill-3); overflow: hidden; }
+.bd-tile__bar span { display: block; height: 100%; border-radius: 2px; transition: width var(--bd-dur-slow) var(--bd-ease); }
+.bd-tile__fill--primary { background: var(--bd-primary); }
+.bd-tile__fill--warning { background: var(--bd-warning); }
+.bd-tile__fill--danger { background: var(--bd-danger); }
+.bd-tile__fill--default { background: var(--bd-t3); }
 
 /* 趋势图 */
-.bd-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: 14px; }
-.bd-chart { border: 1px solid var(--bd-border); border-radius: var(--bd-radius-s); padding: 10px 12px 6px; }
-.bd-chart__head { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; margin-bottom: 4px; }
-.bd-chart__title { font-size: 12.5px; font-weight: 600; color: var(--bd-t2); }
+.bd-charts { display: grid; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); gap: var(--bd-sp-4); }
+.bd-chart { border: 1px solid var(--bd-border); border-radius: var(--bd-radius-s); padding: 10px var(--bd-sp-3) 6px; }
+.bd-chart__head { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-2); flex-wrap: wrap; margin-bottom: var(--bd-sp-1); }
+.bd-chart__title { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t2); }
 .bd-chart__legend { display: flex; gap: 10px; }
-.bd-lg { display: inline-flex; align-items: center; gap: 4px; font-size: 11px; color: var(--bd-t3); }
+.bd-lg { display: inline-flex; align-items: center; gap: 4px; font-size: var(--bd-fs-xs); color: var(--bd-t3); }
 .bd-lg i { width: 8px; height: 2.5px; border-radius: 2px; display: inline-block; }
 .bd-chart__svg { display: block; height: 120px; }
-.bd-chart__empty { padding: 34px 8px; text-align: center; font-size: 12px; color: var(--bd-t4); line-height: 1.6; }
+.bd-chart__empty { padding: 34px var(--bd-sp-2); text-align: center; font-size: var(--bd-fs-sm); color: var(--bd-t4); line-height: var(--bd-lh-loose); }
 
-.bd-mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+@media (max-width: 1320px) {
+  .bd-tiles { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
 </style>

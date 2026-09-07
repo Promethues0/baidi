@@ -1,62 +1,55 @@
 <template>
   <div class="bd-page">
-    <!-- 页头 -->
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">在线用户</div>
-        <div class="bd-page__sub">实时接入会话 · 就近处置（强制下线）· 数据时间 {{ stamp }}</div>
+    <PageHeader title="在线用户" :live="live" off-text="降级演示">
+      <template #subtitle>实时接入会话 · 就近处置（强制下线）· 数据时间 {{ stamp }}</template>
+      <!-- source 恒为 live：后端只有网关上报这一个来源，无网关即空态（演示种子已删除）。
+           留着这个标记是为了在对接旧后端时仍能看出数据从哪来。 -->
+      <a-tag v-if="live" :color="source === 'live' ? 'arcoblue' : 'gray'" bordered>
+        {{ source === 'live' ? '真实接入 · 网关上报' : '旧版后端演示数据' }}
+      </a-tag>
+      <a-button @click="load">
+        <template #icon><icon-refresh /></template>刷新
+      </a-button>
+    </PageHeader>
+
+    <!-- 首屏骨架：第一次 load() 回来之前不画 MOCK——那一瞬间 8 条演示会话闪一下再变成真数，显示的是假数。 -->
+    <template v-if="!loaded">
+      <div class="bd-ol__kpis">
+        <div v-for="i in 4" :key="i" class="bd-card"><SkeletonBlock kind="stat" /></div>
       </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <!-- source 恒为 live：后端只有网关上报这一个来源，无网关即空态（演示种子已删除）。
-             留着这个标记是为了在对接旧后端时仍能看出数据从哪来。 -->
-        <a-tag v-if="live" :color="source === 'live' ? 'arcoblue' : 'gray'" bordered>
-          {{ source === 'live' ? '真实接入 · 网关上报' : '旧版后端演示数据' }}
-        </a-tag>
-        <a-button @click="load">
-          <template #icon><icon-refresh /></template>刷新
-        </a-button>
+      <div class="bd-tablecard bd-ol__table"><SkeletonBlock kind="table" :rows="5" :cols="8" /></div>
+    </template>
+
+    <template v-else>
+    <!-- ★读取失败时，后端那句原话必须在页面上有地方看。改造前唯一的线索是页头右上
+         那枚橙色「降级演示」标签——看得出"出事了"，看不到"是什么事"。而这一页的
+         八条演示会话与真实会话在结构上一模一样，误当成现场就会去处置不存在的人。 -->
+    <div v-if="live === false" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">
+        在线会话未读取（后端原话：<b>{{ loadErr }}</b>），下面这些会话是<b>内置演示数据</b>，
+        <b>不代表现场情况</b>——此刻真实的接入既不在这张表里，也不受这里的「强制下线」影响。
       </div>
     </div>
 
-    <!-- P10 聚合头 -->
-    <a-grid :cols="{ xs: 1, sm: 2, lg: 4 }" :col-gap="16" :row-gap="16">
-      <a-grid-item>
-        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'all' }" :bordered="false" hoverable @click="setFilter('all')">
-          <div class="bd-kpi__label">在线会话总数</div>
-          <div class="bd-kpi__value">{{ onlineCount }}</div>
-          <div class="bd-kpi__foot">当前活跃接入会话</div>
-        </a-card>
-      </a-grid-item>
-      <a-grid-item>
-        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'high' }" :bordered="false" hoverable @click="setFilter('high')">
-          <div class="bd-kpi__label">高风险会话</div>
-          <div class="bd-kpi__value" :style="{ color: C.danger }">{{ highCount }}</div>
-          <div class="bd-kpi__foot">risk = high · 建议优先处置</div>
-        </a-card>
-      </a-grid-item>
+    <!-- P10 聚合头：四张 KPI 同时是筛选入口，选中态由 StatCard 的 :active 承接 -->
+    <div class="bd-ol__kpis">
+      <StatCard label="在线会话总数" :value="onlineCount" foot="当前活跃接入会话" clickable
+        :active="filter === 'all'" @click="setFilter('all')" />
+      <StatCard label="高风险会话" :value="highCount" foot="risk = high · 建议优先处置" tone="danger" clickable
+        :active="filter === 'high'" @click="setFilter('high')" />
       <!-- ★这一格原来是「异地·公网接入」，判据是 location 含「异地」或「公网」——
            而 location 对每条真实会话恒为 "—"，于是它**结构性恒为 0**、筛选页签永远空。
            一个永远匹配不到东西的筛选比没有筛选更坏：它让人以为「查过了，没有异地接入」。
            白帝没有 GeoIP 库（SCOPE 也不打算做），故整格换成一个真有数的读数。 -->
-      <a-grid-item>
-        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'unknown' }" :bordered="false" hoverable @click="setFilter('unknown')">
-          <div class="bd-kpi__label">风险不可判定</div>
-          <div class="bd-kpi__value" :style="{ color: C.warning }">{{ unknownCount }}</div>
-          <div class="bd-kpi__foot">未登记终端 / 从未上报环境</div>
-        </a-card>
-      </a-grid-item>
-      <a-grid-item>
-        <a-card class="bd-kpi" :class="{ 'bd-kpi--on': filter === 'untrusted' }" :bordered="false" hoverable @click="setFilter('untrusted')">
-          <div class="bd-kpi__label">未授信终端</div>
-          <div class="bd-kpi__value" :style="{ color: C.warning }">{{ untrustedCount }}</div>
-          <div class="bd-kpi__foot">trust = untrusted</div>
-        </a-card>
-      </a-grid-item>
-    </a-grid>
+      <StatCard label="风险不可判定" :value="unknownCount" foot="未登记终端 / 从未上报环境" tone="warning" clickable
+        :active="filter === 'unknown'" @click="setFilter('unknown')" />
+      <StatCard label="未授信终端" :value="untrustedCount" foot="trust = untrusted" tone="warning" clickable
+        :active="filter === 'untrusted'" @click="setFilter('untrusted')" />
+    </div>
 
     <!-- 会话表 -->
-    <div class="bd-tablecard">
+    <div class="bd-tablecard bd-ol__table">
       <!-- 过滤条 -->
       <div class="bd-toolbar">
         <a-radio-group v-model="filter" type="button" size="small">
@@ -65,8 +58,8 @@
           <a-radio value="untrusted">未授信</a-radio>
           <a-radio value="unknown">不可判定</a-radio>
         </a-radio-group>
-        <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 260px">
+        <div class="bd-toolbar__spacer" />
+        <div class="bd-searchbox bd-ol__search">
           <icon-search />
           <input v-model="keyword" class="bd-searchbox__in" placeholder="按用户 / 账号 / 组织 / IP / 网关搜索" />
         </div>
@@ -114,33 +107,36 @@
                    只给结论不给依据，管理员没法判断该不该处置。
                    ★risk=unknown 也必须显示——此前只在 risk!=='none' 时渲染，
                    于是「不可判定」与「无风险」在页面上长得一模一样。 -->
-              <span class="bd-tg" :style="tagStyle(trustColor(s.trust))" :title="s.trustNote">{{ trustLabel(s.trust) }}</span>
-              <span v-if="s.risk !== 'none'" class="bd-tg" :style="[tagStyle(riskColor(s.risk)), { marginLeft: '6px' }]" :title="s.riskNote">{{ riskLabel(s.risk) }}</span>
+              <span class="bd-ol__tags">
+                <span class="bd-tg" :class="`bd-tg--${trustTg(s.trust)}`" :title="s.trustNote">{{ trustLabel(s.trust) }}</span>
+                <span v-if="s.risk !== 'none'" class="bd-tg" :class="`bd-tg--${riskTg(s.risk)}`" :title="s.riskNote">{{ riskLabel(s.risk) }}</span>
+              </span>
             </td>
             <td class="r">
               <template v-if="s.status === 'online'">
                 <a-popconfirm content="确认强制下线该会话？将立即断开隧道并要求重新认证。" type="warning" @ok="kick(s)">
-                  <span class="bd-link bd-link--danger">强制下线</span>
+                  <button type="button" class="bd-link bd-link--danger">强制下线</button>
                 </a-popconfirm>
               </template>
               <template v-else>
-                <span class="bd-tg" :style="tagStyle(C.grey)">已下线</span>
+                <span class="bd-tg bd-tg--grey">已下线</span>
                 <div v-if="s.kickReason" class="bd-cellsub">{{ s.kickReason }}</div>
               </template>
             </td>
           </tr>
           <!-- 空态要区分"筛没了"和"根本没有人在线"：后者是安全读数，
                含义是数据面此刻没有任何接入，不该和筛选结果为空混为一谈。 -->
-          <tr v-if="!shown.length">
-            <td colspan="10" class="bd-empty">
-              <template v-if="sessions.length">无匹配会话（当前筛选条件下）</template>
-              <template v-else-if="live">尚无网关上报在线会话：数据面网关未注册，或当前无人接入</template>
-              <template v-else>无匹配会话</template>
+          <tr v-if="!shown.length" class="bd-table__emptyrow">
+            <td colspan="8">
+              <EmptyState v-if="sessions.length" size="md" title="无匹配会话（当前筛选条件下）" />
+              <EmptyState v-else-if="live" size="md" tone="warn" title="尚无网关上报在线会话" desc="数据面网关未注册，或当前无人接入" />
+              <EmptyState v-else size="md" title="无匹配会话" />
             </td>
           </tr>
         </tbody>
       </table>
     </div>
+    </template>
   </div>
 </template>
 
@@ -148,19 +144,15 @@
 import { ref, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, type OnlineSession, type OnlineResp, failReason } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 type Filter = 'all' | 'high' | 'untrusted' | 'unknown';
 
-const C = {
-  brand: '#165DFF',
-  success: '#00B42A',
-  warning: '#FF7D00',
-  danger: '#F53F3F',
-  purple: '#722ED1',
-  grey: '#86909C'
-} as const;
-
-const PALETTE = [C.brand, C.success, C.warning, C.danger, C.purple, '#0FC6C2'];
+/* 头像底色色板（按用户名哈希取色，只服务头像；KPI / 标签的语义色一律走 --bd-* 类）。 */
+const PALETTE = ['#165DFF', '#00B42A', '#FF7D00', '#F53F3F', '#722ED1', '#0FC6C2'];
 
 // 降级演示数据（仅在**连不上后端**时渲染，页头会打「降级演示」标）。
 // 字段与真实响应同构：location/device/os/app 四列已随后端一并删除——
@@ -181,10 +173,17 @@ const MOCK: OnlineResp = {
 
 const sessions = ref<OnlineSession[]>(MOCK.sessions);
 const generatedAt = ref<string>(MOCK.generatedAt);
-const live = ref<boolean>(false);
+/** 连接态三态：undefined = 首轮请求还在路上（判不出来，PageHeader 此时不画标签）/
+ *  true 已连 / false 降级演示。★初值写 false 的话，首屏那一瞬页头就挂上一枚橙色
+ *  「降级演示」——把"还没探过"说成"确定离线"，而那一刻什么都还没发生。 */
+const live = ref<boolean | undefined>(undefined);
+/** 读取失败时后端那句原话（failReason 收口，前端不编造归因）。 */
+const loadErr = ref('');
 const source = ref<'live' | 'demo'>('demo'); // live=数据面网关上报的真实敲门会话；demo=演示种子
 const filter = ref<Filter>('all');
 const keyword = ref<string>('');
+/** 首屏是否已完成第一次加载：只决定骨架屏何时让位（成功 / 降级都算完成），不改任何数据流。 */
+const loaded = ref(false);
 
 const stamp = computed<string>(() => (generatedAt.value ? generatedAt.value.replace('T', ' ').slice(0, 19) : '—'));
 
@@ -216,9 +215,6 @@ function setFilter(f: Filter): void {
   filter.value = f;
 }
 
-function tagStyle(c: string): { color: string; background: string } {
-  return { color: c, background: c + '14' };
-}
 function initial(name: string): string {
   return name ? name.trim().charAt(0).toUpperCase() : '?';
 }
@@ -227,16 +223,17 @@ function avatarColor(name: string): string {
   for (let i = 0; i < name.length; i++) h = (h * 31 + name.charCodeAt(i)) >>> 0;
   return PALETTE[h % PALETTE.length];
 }
-function trustColor(t: OnlineSession['trust']): string {
-  return t === 'trusted' ? C.success : t === 'untrusted' ? C.danger : C.grey;
+/** 标签语义色走 .bd-tg--* 浅色对：trusted 绿 / untrusted 红 / 不可判定 灰。 */
+function trustTg(t: OnlineSession['trust']): string {
+  return t === 'trusted' ? 'green' : t === 'untrusted' ? 'red' : 'grey';
 }
 function trustLabel(t: OnlineSession['trust']): string {
   return t === 'trusted' ? '已授信' : t === 'untrusted' ? '未授信' : '终端不可判定';
 }
 /** ★unknown 用灰色而不是橙色：它不是"低风险"，是"我们不知道"。
  *  用暖色会让人以为已经评估过、只是不严重。 */
-function riskColor(r: OnlineSession['risk']): string {
-  return r === 'high' ? C.danger : r === 'unknown' ? C.grey : C.warning;
+function riskTg(r: OnlineSession['risk']): string {
+  return r === 'high' ? 'red' : r === 'unknown' ? 'grey' : 'gold';
 }
 function riskLabel(r: OnlineSession['risk']): string {
   return r === 'high' ? '高风险' : r === 'unknown' ? '风险不可判定' : '低风险';
@@ -252,11 +249,15 @@ async function load(): Promise<void> {
     generatedAt.value = r.generatedAt;
     source.value = r.source ?? 'demo';
     live.value = true;
-  } catch {
+    loadErr.value = '';
+  } catch (e) {
     sessions.value = MOCK.sessions;
     generatedAt.value = MOCK.generatedAt;
     source.value = 'demo';
     live.value = false;
+    loadErr.value = failReason(e);
+  } finally {
+    loaded.value = true;
   }
 }
 
@@ -278,16 +279,17 @@ onMounted(load);
 </script>
 
 <style scoped>
-.bd-kpi { border-radius: var(--bd-radius); cursor: pointer; transition: box-shadow .15s, transform .15s; }
-.bd-kpi--on { box-shadow: 0 0 0 2px var(--bd-primary) inset; }
-.bd-kpi__label { font-size: 13px; color: var(--bd-t3); }
-.bd-kpi__value { font-size: 30px; font-weight: 700; line-height: 1.4; color: var(--bd-t1); }
-.bd-kpi__foot { font-size: 12px; color: var(--bd-t3); margin-top: 6px; }
-
-.bd-tablecard { margin-top: 16px; }
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
-.bd-searchbox__in::placeholder { color: var(--bd-t3); }
-.bd-cellsub { font-size: 11px; color: var(--bd-t3); margin-top: 2px; }
+/* 本页独有的布局。页头 / KPI 卡 / 表格卡 / 搜索框 / 标签 / 空态 / 骨架都在共享件与 app.css 里。 */
+.bd-ol__kpis { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--bd-sp-4); }
+/* KPI 卡兼作筛选入口：选中态主色描边 */
+.bd-ol__table { margin-top: var(--bd-sp-4); }
+.bd-ol__search { width: 260px; }
+.bd-ol__tags { display: inline-flex; flex-wrap: wrap; gap: 6px; }
+.bd-cellsub { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 2px; }
 .bd-row--off { opacity: .5; }
-.bd-row--off:hover { background: transparent; }
+.bd-row--off:hover td { background: transparent; }
+@media (max-width: 1320px) {
+  .bd-ol__kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .bd-ol__search { width: 220px; }
+}
 </style>

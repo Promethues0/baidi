@@ -1,15 +1,11 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">应用管理</div>
-        <div class="bd-page__sub">把内网业务注册为受控资源 · 隧道应用与 WEB 应用 · 以资源为最小授权单元</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn" @click="openWizard"><icon-plus />新增应用</button>
-      </div>
-    </div>
+    <!-- 本页没有任何演示回落：/apps 拉不到时左栏分类与右侧列表都是空的、空态走 danger 分支，
+         离线标签按 DESIGN.md §2 口径用「数据未读取」（红）而不是默认的「降级演示」（橙）——
+         否则页头说"在画演示数据"、正文说"未读取"，同一屏两句相反。 -->
+    <PageHeader title="应用管理" subtitle="把内网业务注册为受控资源 · 隧道应用与 WEB 应用 · 以资源为最小授权单元" :live="live" off-text="数据未读取" off-color="red">
+      <button class="bd-btn" @click="openWizard"><icon-plus />新增应用</button>
+    </PageHeader>
 
     <div class="bd-two">
       <!-- 分类 -->
@@ -28,22 +24,36 @@
       </div>
 
       <!-- 应用表 -->
-      <div class="bd-tablecard" style="flex: 1; min-width: 0">
+      <div class="bd-tablecard bd-two__main">
         <div class="bd-toolbar">
           <span class="bd-toolbar__c">共 {{ filtered.length }} 个应用</span>
-          <div style="flex: 1" />
-          <div class="bd-searchbox" style="width: 240px">
+          <div class="bd-toolbar__spacer" />
+          <div class="bd-searchbox bd-apps__search">
             <icon-search />
             <input v-model="kw" class="bd-searchbox__in" placeholder="按名称 / 地址搜索" />
           </div>
         </div>
-        <table class="bd-table">
+        <!-- 首屏骨架：load() 回来之前不画表头下面的空白，也不画任何假行 -->
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="5" :cols="6" />
+        <table v-else class="bd-table">
           <thead>
             <tr>
               <th>应用名称</th><th>发布模式</th><th>关联资源</th><th>已授权</th><th>状态</th><th class="r">操作</th>
             </tr>
           </thead>
           <tbody>
+            <!-- 空态分三种处境：搜索无命中 / 该分类下没有 / 库里一个应用都没有——
+                 三者下一步动作不同（清关键词 / 换分类 / 发布第一个），一句"暂无数据"分不开。 -->
+            <tr v-if="!filtered.length" class="bd-table__emptyrow">
+              <td colspan="6">
+                <EmptyState v-if="loadErr" size="md" tone="danger" title="应用列表未读取" :desc="`${loadErr}——这里显示的不是「没有应用」`" />
+                <EmptyState v-else-if="kw.trim()" size="md" title="没有匹配的应用" :desc="`当前分类内按「${kw.trim()}」搜索名称与地址均无命中`" />
+                <EmptyState v-else-if="cat !== 'all'" size="md" title="该分类下还没有应用" desc="发布向导里选择这个分类即可归入；分类只影响归类与筛选，不参与授权判定" />
+                <EmptyState v-else size="md" title="尚未发布任何应用" desc="把内网业务注册为受控资源后，门户与客户端剖面才会出现它的磁贴">
+                  <template #action><button class="bd-btn" @click="openWizard"><icon-plus />新增应用</button></template>
+                </EmptyState>
+              </td>
+            </tr>
             <tr v-for="a in filtered" :key="a.id">
               <td>
                 <div class="bd-cellname">
@@ -67,8 +77,10 @@
               <!-- ★「编辑」必须走编辑抽屉（PUT /apps/{id}），不能复用发布向导：
                    向导发的是 POST，点一次就多出一条同名应用。 -->
               <td class="r">
-                <span class="bd-link" @click="openEdit(a)">编辑</span>
-                <span class="bd-link bd-link--danger" style="margin-left: 12px" @click="confirmDelete(a)">下架</span>
+                <span class="bd-acts">
+                  <button type="button" class="bd-link" @click="openEdit(a)">编辑</button>
+                  <button type="button" class="bd-link bd-link--danger" @click="confirmDelete(a)">下架</button>
+                </span>
               </td>
             </tr>
           </tbody>
@@ -79,10 +91,10 @@
     <!-- ============ 分类维护（增删改 + 排序）============ -->
     <a-modal v-model:visible="mgr.open" :width="680" title="管理应用分类" :footer="false" unmount-on-close>
       <div class="bd-catmgr">
-        <div class="bd-catmgr__hint">
-          <icon-info-circle />分类只影响管理台上的归类与筛选，不参与任何访问授权判定——授权在「安全防护 → 资源策略」按资源配置。
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle /><span>分类只影响管理台上的归类与筛选，不参与任何访问授权判定——授权在「安全防护 → 资源策略」按资源配置。</span>
         </div>
-        <div v-if="mgr.err" class="bd-catmgr__err">{{ mgr.err }}</div>
+        <div v-if="mgr.err" class="bd-notice bd-notice--danger"><icon-exclamation-circle-fill /><span>{{ mgr.err }}</span></div>
 
         <table class="bd-table bd-catmgr__t">
           <thead>
@@ -123,8 +135,7 @@
         <div class="bd-catmgr__add">
           <a-input v-model="mgr.newKey" placeholder="key（小写字母/数字/连字符）" class="bd-mono" :max-length="32" :disabled="mgr.busy" />
           <a-input v-model="mgr.newLabel" placeholder="显示名称" :max-length="64" :disabled="mgr.busy" @press-enter="create" />
-          <button class="bd-btn" :disabled="mgr.busy || !mgr.newKey || !mgr.newLabel"
-            :style="{ opacity: mgr.busy || !mgr.newKey || !mgr.newLabel ? 0.5 : 1 }" @click="create"><icon-plus />新增</button>
+          <button class="bd-btn" :disabled="mgr.busy || !mgr.newKey || !mgr.newLabel" @click="create"><icon-plus />新增</button>
         </div>
         <div class="bd-catmgr__foot">key 落库后不可更改（既有应用按 key 引用分类）；名称随时可改，应用页与发布向导立即跟随。</div>
       </div>
@@ -164,10 +175,15 @@
             <span class="bd-fld__d">填完整 URL 门户里可以直接点开；填泛域名（<code>*.cnki.net</code>）则只作为说明文字展示。</span>
           </div>
           <!-- ★这条告警是这张模式卡保留下来的前提：不说的话，它在向导里与两条真链路
-               平级摆着，管理员会合理推断「已发布并受控」。 -->
-          <div class="bd-wz__warn">
+               平级摆着，管理员会合理推断「已发布并受控」。
+               ★只在 global 模式下画（与下方编辑抽屉那条 `v-if="ed.f.mode === 'global'"` 同口径）：
+               它此前是上面 tunnel / web / 直连书签三分支之外的兄弟节点，没带任何条件，
+               于是发布一条隧道应用或 Web 应用时也顶着一句「直连书签不受访问控制」——
+               对着一条真受控链路说它不受控，管理员要么怀疑自己选错了模式、要么学会忽略
+               这条告警，到真选直连书签时它就再也起不到作用了。 -->
+          <div v-if="wz.mode === 'global'" class="bd-notice bd-notice--warn">
             <icon-exclamation-circle-fill />
-            <div>
+            <div class="bd-notice__body">
               <b>直连书签不受访问控制。</b>
               它不经网关、不进隧道路由、不做鉴权——门户与客户端对它一律标为可访问，
               <b>凡是能登录的人都看得到、点得开</b>。资源策略页的 ACL、JIT 审批、降权、
@@ -203,9 +219,9 @@
                 实际路由按 <code>/app/&lt;资源id&gt;/</code> 路径前缀分流，与域名无关。
               </span>
             </div>
-            <div class="bd-wz__warn">
+            <div class="bd-notice bd-notice--warn">
               <icon-exclamation-circle-fill />
-              <div>
+              <div class="bd-notice__body">
                 <b>七层入口不受 SPA 服务隐身保护。</b>
                 浏览器做不了 SPA 敲门，所以该端口必须对浏览器可达——它是一个真实的入站攻击面，
                 与地址转换（NAT）绕过隐身是同性质的取舍。请确认已由前置 HTTPS 暴露，
@@ -225,14 +241,14 @@
               （这两项会写进资源「{{ wz.f.resourceId }}」）
             </div>
           </div>
-          <div class="bd-wz__note"><icon-info-circle />访问授权在「安全防护 → 资源策略」按资源配置（角色/用户白名单），时限授予走「JIT 即时访问」审批流。</div>
+          <div class="bd-notice bd-notice--plain"><icon-info-circle /><span>访问授权在「安全防护 → 资源策略」按资源配置（角色/用户白名单），时限授予走「JIT 即时访问」审批流。</span></div>
         </div>
 
-        <div class="bd-wz__foot">
+        <div class="bd-drawer__foot">
           <button v-if="wz.step > 0" class="bd-btn bd-btn--ghost" @click="wz.step--">上一步</button>
-          <div style="flex: 1" />
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="wz.open = false">取消</button>
-          <button class="bd-btn" :disabled="!canNext" :style="{ opacity: canNext ? 1 : 0.5 }" @click="next">
+          <button class="bd-btn" :disabled="!canNext" @click="next">
             {{ wz.step < 2 ? '下一步' : '发布应用' }}
           </button>
         </div>
@@ -251,9 +267,9 @@
           </a-select>
           <span class="bd-fld__d">{{ modeMeta(ed.f.mode).desc }}</span>
         </div>
-        <div v-if="ed.f.mode === 'global'" class="bd-wz__warn">
+        <div v-if="ed.f.mode === 'global'" class="bd-notice bd-notice--warn">
           <icon-exclamation-circle-fill />
-          <div><b>直连书签不受访问控制。</b>不经网关、不进隧道路由、不做鉴权，凡是能登录的人都看得到、点得开。</div>
+          <div class="bd-notice__body"><b>直连书签不受访问控制。</b>不经网关、不进隧道路由、不做鉴权，凡是能登录的人都看得到、点得开。</div>
         </div>
         <div class="bd-fld"><label>{{ ed.f.mode === 'global' ? '链接地址' : '内网地址' }}</label>
           <a-input v-model="ed.f.addr" class="bd-mono" />
@@ -277,10 +293,10 @@
             <a-option value="stopped">已停用（不下发给任何终端）</a-option>
           </a-select>
         </div>
-        <div class="bd-wz__foot">
-          <div style="flex: 1" />
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="ed.open = false">取消</button>
-          <button class="bd-btn" :disabled="!canSaveEdit || ed.busy" :style="{ opacity: canSaveEdit && !ed.busy ? 1 : 0.5 }" @click="saveEdit">保存</button>
+          <button class="bd-btn" :disabled="!canSaveEdit || ed.busy" @click="saveEdit">保存</button>
         </div>
       </div>
     </a-drawer>
@@ -291,8 +307,19 @@
 import { ref, reactive, computed, watch, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import { api, type AppBundle, type App, type AppCategory, type AppCategoryDef, type AppCategoriesResp, type Resource, type ResourcesResp, failReason } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false）；同一个 load() 里第二次 /resources 读取不参与判定（拉不到只是选不出资源）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
+/** 首屏是否已完成一次加载（成功或失败都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
+/** 应用列表读取失败时的后端原话：空态据此说「没读到」而不是「没有应用」——两者下一步动作相反。 */
+const loadErr = ref('');
 const categories = ref<AppCategory[]>([{ key: 'all', label: '全部应用', count: 0 }]);
 const apps = ref<App[]>([]);
 const cat = ref('all');
@@ -367,10 +394,15 @@ async function load() {
   try {
     const b = await api<AppBundle>('/apps');
     categories.value = b.categories; apps.value = b.apps; live.value = true;
+    // 成功必须清掉上一次的失败原话：load() 会被发布/编辑/下架/分类增删反复调用，首屏那次失败
+    // 若留着，之后搜索无命中时空态会优先命中 danger 分支，显示「未读取 + 早已过期的错误」，
+    // 而页头同时是绿色「已连」——两处互相矛盾（Users/Audit/Devices 三页同款写法）。
+    loadErr.value = '';
     // 当前筛选的分类可能刚被删掉（自己删的，或另一个管理员删的）：不重置的话左栏一项都不高亮、
     // 右侧列表恒空，看起来像"这个分类下没有应用"，而实际是筛选卡在了一个不存在的 key 上。
     if (cat.value !== 'all' && !b.categories.some((c) => c.key === cat.value)) cat.value = 'all';
-  } catch { live.value = false; }
+  } catch (e) { live.value = false; loadErr.value = failReason(e); }
+  finally { loaded.value = true; }
   try {
     const r = await api<ResourcesResp>('/resources');
     resources.value = r.resources ?? [];
@@ -566,74 +598,65 @@ onMounted(load);
 </script>
 
 <style scoped>
-.bd-link--danger { color: var(--bd-danger); }
-.bd-two { display: flex; gap: 16px; align-items: flex-start; }
-.bd-cats { width: 210px; flex: none; padding: 12px; }
-.bd-cats__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
-.bd-cats__mgr { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; }
-.bd-cat { width: 100%; display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 12px; border: none; background: transparent; border-radius: 7px; cursor: pointer; font-size: 13px; color: var(--bd-t2); }
+/* 本页独有的布局。按钮 / 链接 / 表格 / 提示条 / 表单节奏 / 抽屉底栏都在 app.css，这里不再抄。 */
+.bd-cats { width: 210px; flex: none; padding: var(--bd-sp-3); }
+.bd-cats__h { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t3); padding: var(--bd-sp-1) var(--bd-sp-2) 10px; display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-2); }
+.bd-cats__mgr { display: inline-flex; align-items: center; gap: 3px; font-weight: 500; font-size: var(--bd-fs-sm); }
+.bd-cat {
+  width: 100%; display: flex; align-items: center; gap: 9px; height: 36px; padding: 0 var(--bd-sp-3); border: none; background: transparent;
+  border-radius: var(--bd-radius-s); cursor: pointer; font-size: var(--bd-fs-md); color: var(--bd-t2);
+  transition: background var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease);
+}
 .bd-cat:hover { background: var(--bd-fill-2); }
 .bd-cat.on { background: var(--bd-primary-1); color: var(--bd-primary); font-weight: 500; }
 .bd-cat__ic { font-size: 15px; }
 .bd-cat__t { flex: 1; text-align: left; }
-.bd-cat__n { font-size: 11px; color: var(--bd-t3); }
+.bd-cat__n { font-size: var(--bd-fs-xs); color: var(--bd-t3); font-variant-numeric: tabular-nums; }
+.bd-cat.on .bd-cat__n { color: var(--bd-primary); }
+.bd-apps__search { width: 240px; }
 /* 未关联资源不是「授权了 0 人」而是「根本进不去」，用弱化色与虚线下划线区分开。 */
-.bd-auth--none { color: var(--bd-t3); border-bottom: 1px dashed var(--bd-line); cursor: help; }
-.bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
-.bd-appic { width: 34px; height: 34px; border-radius: 8px; display: inline-flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
-
-/* 链接样式的 <button>：外观沿用 .bd-link，但可聚焦、可回车触发、有禁用态。 */
-button.bd-link { border: none; background: transparent; padding: 0; font: inherit; line-height: inherit; }
-button.bd-link[disabled] { color: var(--bd-t4); cursor: not-allowed; text-decoration: none; }
-button.bd-link[disabled]:hover { text-decoration: none; }
-button.bd-link:focus-visible { outline: 2px solid var(--bd-primary); outline-offset: 2px; border-radius: 3px; }
+.bd-auth--none { color: var(--bd-t3); border-bottom: 1px dashed var(--bd-border); cursor: help; }
+.bd-appic { width: 34px; height: 34px; border-radius: var(--bd-radius-s); display: inline-flex; align-items: center; justify-content: center; font-size: 17px; flex: none; }
 
 /* 分类维护弹窗 */
-.bd-catmgr__hint { display: flex; align-items: flex-start; gap: 8px; font-size: 12.5px; color: var(--bd-t3); background: var(--bd-fill-1); border-radius: 8px; padding: 10px 12px; margin-bottom: 12px; }
-.bd-catmgr__err { font-size: 12.5px; color: var(--bd-danger); background: var(--bd-danger-1, rgba(245, 63, 63, .08)); border-radius: 8px; padding: 9px 12px; margin-bottom: 12px; }
 .bd-catmgr__t td { vertical-align: middle; }
-.bd-catmgr__mv { display: inline-flex; margin-right: 8px; font-size: 13px; }
-.bd-catmgr__bi { margin-left: 8px; color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-catmgr__mv { display: inline-flex; margin-right: var(--bd-sp-2); font-size: var(--bd-fs-md); }
+.bd-catmgr__bi { margin-left: var(--bd-sp-2); color: var(--bd-t3); background: var(--bd-fill-2); }
 .bd-catmgr__no { color: var(--bd-t4); }
-.bd-catmgr__empty { color: var(--bd-t3); text-align: center; padding: 22px 0; }
-.bd-catmgr__add { display: flex; gap: 10px; align-items: center; margin-top: 14px; }
+.bd-catmgr__empty { color: var(--bd-t3); text-align: center; padding: var(--bd-sp-5) 0; }
+.bd-catmgr__add { display: flex; gap: 10px; align-items: center; margin-top: var(--bd-sp-4); }
 .bd-catmgr__add :deep(.arco-input-wrapper) { flex: 1; }
-.bd-catmgr__foot { font-size: 12px; color: var(--bd-t3); margin-top: 10px; }
+.bd-catmgr__foot { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 10px; line-height: var(--bd-lh-loose); }
 
 /* 向导 */
 .bd-wz { display: flex; flex-direction: column; height: 100%; }
-.bd-wz__steps { padding: 6px 0 18px; }
+.bd-wz__steps { padding: 6px 0 var(--bd-sp-5); }
 .bd-wz__body { flex: 1; overflow-y: auto; padding-right: 2px; }
-.bd-wz__hint { font-size: 13px; color: var(--bd-t3); margin-bottom: 14px; }
-.bd-wz__note { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--bd-t3); background: var(--bd-fill-1); border-radius: 8px; padding: 12px 14px; }
-/* 隐身互斥告警：与 NAT 页那条同性质，必须当面说而不是藏进文档 */
-.bd-wz__warn {
-  display: flex; gap: 10px; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2);
-  background: var(--bd-tag-gold-bg); border-radius: 8px; padding: 12px 14px; margin-bottom: 16px;
+.bd-wz__hint { font-size: var(--bd-fs-md); color: var(--bd-t3); margin-bottom: var(--bd-sp-4); }
+.bd-wz__summary-sub { margin-top: 6px; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-mode-card {
+  width: 100%; display: flex; align-items: center; gap: 14px; padding: var(--bd-sp-4); margin-bottom: var(--bd-sp-3);
+  border: 1.5px solid var(--bd-border); border-radius: var(--bd-radius); background: var(--bd-bg-1); cursor: pointer; text-align: left;
+  transition: border-color var(--bd-dur-fast) var(--bd-ease), background var(--bd-dur-fast) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease);
 }
-.bd-wz__warn > :first-child { color: var(--bd-warning); font-size: 16px; flex: none; margin-top: 2px; }
-.bd-wz__warn b { color: var(--bd-t1); font-weight: 600; }
-.bd-wz__summary-sub { margin-top: 6px; font-size: 12.5px; color: var(--bd-t3); }
-.bd-mode-card { width: 100%; display: flex; align-items: center; gap: 14px; padding: 16px; margin-bottom: 12px; border: 1.5px solid var(--bd-border); border-radius: 10px; background: #fff; cursor: pointer; text-align: left; transition: all .15s; }
-.bd-mode-card:hover { border-color: var(--bd-primary-b); }
+.bd-mode-card:hover { border-color: var(--bd-primary-b); box-shadow: var(--bd-shadow-1); }
 .bd-mode-card.on { border-color: var(--bd-primary); background: var(--bd-primary-1); }
-.bd-mode-card__ic { width: 44px; height: 44px; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 22px; flex: none; }
-.bd-mode-card__txt b { font-size: 14px; display: block; color: var(--bd-t1); }
-.bd-mode-card__txt i { font-style: normal; font-size: 12px; color: var(--bd-t3); }
+.bd-mode-card__ic { width: 44px; height: 44px; border-radius: var(--bd-radius); display: flex; align-items: center; justify-content: center; font-size: 22px; flex: none; }
+.bd-mode-card__txt b { font-size: var(--bd-fs-base); display: block; color: var(--bd-t1); }
+.bd-mode-card__txt i { font-style: normal; font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 .bd-mode-card__chk { margin-left: auto; color: var(--bd-primary); font-size: 20px; }
 
-.bd-fld { margin-bottom: 16px; }
-.bd-fld > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
-.bd-fld :deep(.arco-input-wrapper), .bd-fld :deep(.arco-select-view), .bd-fld :deep(.arco-input-number) { width: 100%; }
-.bd-fld--row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.bd-fld--row label { margin-bottom: 2px; }
-.bd-fld__d { font-size: 12px; color: var(--bd-t3); }
-.bd-sec2 { font-size: 13px; font-weight: 600; margin: 18px 0 12px; }
-.bd-chk-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; }
-.bd-wz__sub { font-size: 12px; color: var(--bd-t3); margin: -6px 0 14px; }
-.bd-wm { background: var(--bd-fill-2); padding: 2px 8px; border-radius: 4px; color: var(--bd-t2); }
-.bd-wz__summary { margin-top: 8px; background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: 8px; padding: 12px 14px; font-size: 13px; }
+.bd-sec2 { font-size: var(--bd-fs-md); font-weight: 600; margin: var(--bd-sp-5) 0 var(--bd-sp-3); }
+.bd-chk-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: var(--bd-sp-3); }
+.bd-wz__sub { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin: -6px 0 var(--bd-sp-4); }
+.bd-wm { background: var(--bd-fill-2); padding: 2px 8px; border-radius: var(--bd-radius-xs); color: var(--bd-t2); }
+.bd-wz__summary { margin-top: var(--bd-sp-2); margin-bottom: var(--bd-sp-4); background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: var(--bd-radius-s); padding: var(--bd-sp-3) 14px; font-size: var(--bd-fs-md); }
 .bd-wz__summary b { display: block; margin-bottom: 6px; }
-.bd-wz__summary div { color: var(--bd-t2); font-size: 12.5px; }
-.bd-wz__foot { display: flex; align-items: center; gap: 10px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
+.bd-wz__summary div { color: var(--bd-t2); font-size: var(--bd-fs-sm); }
+
+/* 1280 视口：左栏收窄，搜索框跟随 */
+@media (max-width: 1320px) {
+  .bd-cats { width: 184px; }
+  .bd-apps__search { width: 200px; }
+}
 </style>

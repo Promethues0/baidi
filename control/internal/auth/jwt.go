@@ -58,6 +58,21 @@ type Claims struct {
 	// 入口来自 res.WebEntry / BAIDI_WEB_ENTRY_BASE（前置 nginx，可能转发到任意一台）时
 	// 留空——那条路上控制面确实不知道票会落到哪台，写一个猜的值只会让正常访问被拒。
 	Gw string `json:"gw,omitempty"`
+	// Dir 本回合**第一因子来自哪个用户目录**（local = 本地口令；其余 = 外部认证源的 kind，
+	// 如 ldap/ad/oidc/radius）。**只出现在二次认证的半程票据（role=mfa）上**，
+	// 会话令牌与敲门/L7 票据都不填——它不是身份的一部分，只是这一回合的来路。
+	//
+	// ★为什么半程票据必须记住来路：TOTP / passkey 的第二回合（handleTotpLogin /
+	// handleWebauthnLoginFinish）是**各自按重读的 users 行签 8h 完整令牌**的，
+	// 它们只知道"票据说这是谁"，不知道第一因子是谁验的。于是「管理员的认证权不外包」
+	// 这条纪律在二次认证这条腿上只剩下一个先后顺序在守（闸排在 secondFactor 之前）——
+	// 顺序一旦被挪动（重构、加一道新闸、把闸下沉到签发处），一名注册了 TOTP 的
+	// 外部绑定管理员走一遍 IdP 就能拿到 role=admin 的完整会话，而两条腿各自看都自洽。
+	// 带上来路之后，第二回合能独立复判，纵深不再依赖顺序。
+	//
+	// 空 = 不可判定（升级瞬间尚在飞行的旧票据）：消费方按 fail-closed 处理，
+	// 见 api.denyExternalMfaAdmin。
+	Dir string `json:"dir,omitempty"`
 }
 
 var b64 = base64.RawURLEncoding

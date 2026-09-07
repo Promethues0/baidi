@@ -3,12 +3,14 @@ module baidi.dev/control
 go 1.25.0
 
 require (
+	github.com/emmansun/gmsm v0.43.0
 	github.com/fxamacker/cbor/v2 v2.9.2
 	github.com/go-ldap/ldap/v3 v3.4.14
 	github.com/go-webauthn/webauthn v0.17.4
 	github.com/google/uuid v1.6.0
 	github.com/jimlambrt/gldap v0.1.14
 	golang.org/x/crypto v0.54.0
+	layeh.com/radius v0.0.0-20231213012653-1006025d24f8
 	modernc.org/sqlite v1.53.0
 )
 
@@ -16,7 +18,6 @@ require (
 	github.com/Azure/go-ntlmssp v0.1.1 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect
 	github.com/dustin/go-humanize v1.0.1 // indirect
-	github.com/emmansun/gmsm v0.43.0 // indirect
 	github.com/fatih/color v1.17.0 // indirect
 	github.com/go-asn1-ber/asn1-ber v1.5.8 // indirect
 	github.com/go-viper/mapstructure/v2 v2.5.0 // indirect

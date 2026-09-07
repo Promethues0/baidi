@@ -1,39 +1,32 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">终端管理</div>
-        <div class="bd-page__sub">授信终端台账 · 硬件指纹准入 · 设备生命周期</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '未连控制中心' }}</a-tag>
-        <button class="bd-btn bd-btn--ghost" @click="openSettings"><icon-settings />准入设置</button>
-      </div>
-    </div>
+    <!-- 离线文案「数据未读取」+ 红色（DESIGN.md §2 口径）：本页拉不到就什么都不画（不编造设备），与「降级演示」是两种处境。 -->
+    <PageHeader title="终端管理" subtitle="授信终端台账 · 硬件指纹准入 · 设备生命周期" :live="live" off-text="数据未读取" off-color="red">
+      <button class="bd-btn bd-btn--ghost" @click="openSettings"><icon-settings />准入设置</button>
+    </PageHeader>
+
+    <!-- 首屏骨架：第一次 load() 回来之前，既不画「未连接」（那一瞬 live 还是 undefined，页头也不画标签），也不画表头下的空白。 -->
+    <div v-if="!loaded" class="bd-tablecard"><SkeletonBlock kind="table" :rows="5" :cols="7" /></div>
 
     <!-- 未连后端：如实说，不编造设备。
          「哪些终端被允许接入」是安全声明，不是装饰性数据——降级演示会让人以为设备纳管正在运行。 -->
-    <div v-if="!live" class="bd-card bd-offline">
-      <icon-exclamation-circle-fill />
-      <div>
-        <div class="bd-offline__t">未连接控制中心，本页不展示任何演示数据</div>
-        <div class="bd-offline__d">
-          终端授信台账决定谁的哪台设备能接入，编造的清单会让人以为设备纳管正在运行。
-          请确认 baidi-control 已启动（默认 :8090）后重试。
-          <span v-if="loadErr" class="bd-mono">（{{ loadErr }}）</span>
-        </div>
-      </div>
-      <button class="bd-btn bd-btn--ghost" @click="load">重试</button>
+    <div v-else-if="!live" class="bd-card">
+      <EmptyState size="lg" tone="danger" title="未连接控制中心，本页不展示任何演示数据">
+        终端授信台账决定谁的哪台设备能接入，编造的清单会让人以为设备纳管正在运行。
+        请确认 baidi-control 已启动（默认 :8090）后重试。
+        <span v-if="loadErr" class="bd-mono">（{{ loadErr }}）</span>
+        <template #action><button class="bd-btn bd-btn--ghost" @click="load"><icon-refresh />重试</button></template>
+      </EmptyState>
     </div>
 
     <template v-else>
       <!-- 准入模式横幅：观察模式下这一页的"吊销/待批准"对接入意味着什么，必须写在脸上 -->
-      <div class="bd-mode" :class="settings.mode === 'strict' ? 'bd-mode--strict' : 'bd-mode--observe'">
+      <div class="bd-notice" :class="settings.mode === 'strict' ? 'bd-notice--success' : 'bd-notice--plain'">
         <icon-safe />
-        <div v-if="settings.mode === 'strict'">
+        <div v-if="settings.mode === 'strict'" class="bd-notice__body">
           <b>严格准入</b>：只有 <b>已授信</b> 的终端能取得敲门令牌。待批准 / 未登记 / 不上报指纹的终端一律拒绝接入。
         </div>
-        <div v-else>
+        <div v-else class="bd-notice__body">
           <b>观察准入</b>（默认）：待批准与未登记的终端<b>照常接入</b>，仅记录审计；
           <b>已吊销</b>的终端两种模式下都会被拒。切到严格模式前请先把在用终端批准完。
         </div>
@@ -41,9 +34,9 @@
 
       <!-- 个人资产策略横幅：只在它真的会改变判定时才出现（inherit 什么都不做，
            画一条"当前无影响"的横幅只会挤占注意力）。 -->
-      <div v-if="settings.personalPolicy !== 'inherit'" class="bd-mode bd-mode--asset">
+      <div v-if="settings.personalPolicy !== 'inherit'" class="bd-notice bd-notice--warn">
         <icon-user />
-        <div>
+        <div class="bd-notice__body">
           <b>个人资产策略：{{ personalPolicyMeta(settings.personalPolicy).label }}</b>
           —— {{ personalPolicyMeta(settings.personalPolicy).desc }}
           判定粒度是<b>（账号，设备指纹）</b>：同一个人的<b>企业资产</b>终端不受影响；
@@ -51,13 +44,13 @@
         </div>
       </div>
 
-      <!-- Tab 切换 -->
-      <div class="bd-tabs">
-        <span class="bd-tab" :class="{ on: tab === 'list' }" @click="tab = 'list'">设备清单 <em>{{ devices.length }}</em></span>
-        <span class="bd-tab" :class="{ on: tab === 'approval' }" @click="tab = 'approval'">
+      <!-- Tab 切换：真 button（可 Tab、可回车） -->
+      <div class="bd-tabs" role="tablist">
+        <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'list'" @click="tab = 'list'">设备清单 <em>{{ devices.length }}</em></button>
+        <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'approval'" @click="tab = 'approval'">
           绑定审批
           <span v-if="pendingCount" class="bd-badge">{{ pendingCount }}</span>
-        </span>
+        </button>
       </div>
 
       <!-- ============ 设备清单 ============ -->
@@ -67,24 +60,27 @@
             共 {{ devices.length }} 台 · 已授信 {{ countBy('trusted') }} · 待批准 {{ countBy('pending') }} · 已吊销 {{ countBy('revoked') }}
             <template v-if="staleCount"> · 陈旧 {{ staleCount }}</template>
           </span>
-          <div style="flex: 1" />
-          <a-input v-model="kw" allow-clear size="small" style="width: 260px" placeholder="按账号 / 设备名 / 指纹 / 标签搜索">
+          <div class="bd-toolbar__spacer" />
+          <a-input v-model="kw" allow-clear size="small" class="bd-dev__search" placeholder="按账号 / 设备名 / 指纹 / 标签搜索">
             <template #prefix><icon-search /></template>
           </a-input>
-          <a-select v-model="classFilter" size="small" style="width: 150px">
-            <a-option value="">全部资产分类</a-option>
-            <a-option value="enterprise">企业资产</a-option>
-            <a-option value="personal">个人资产</a-option>
-            <a-option value="managed">企业纳管个人</a-option>
-          </a-select>
-          <button class="bd-btn bd-btn--ghost" :disabled="exp.busy" @click="doExport">
+          <span class="bd-dev__class">
+            <a-select v-model="classFilter" size="small">
+              <a-option value="">全部资产分类</a-option>
+              <a-option value="enterprise">企业资产</a-option>
+              <a-option value="personal">个人资产</a-option>
+              <a-option value="managed">企业纳管个人</a-option>
+            </a-select>
+          </span>
+          <button class="bd-btn bd-btn--ghost bd-btn--sm" :disabled="exp.busy" @click="doExport">
             <icon-download />{{ exp.busy ? '导出中…' : '导出 CSV' }}
           </button>
-          <button class="bd-btn bd-btn--ghost" @click="openImport"><icon-upload />批量预登记</button>
-          <button class="bd-btn bd-btn--ghost" :disabled="!staleCount" @click="cleanupOpen = true">
+          <button class="bd-btn bd-btn--ghost bd-btn--sm" @click="openImport"><icon-upload />批量预登记</button>
+          <button class="bd-btn bd-btn--ghost bd-btn--sm" :disabled="!staleCount" @click="cleanupOpen = true">
             <icon-delete />清理陈旧（{{ staleCount }}）
           </button>
         </div>
+        <div class="bd-dev__scroll">
         <table class="bd-table">
           <thead>
             <tr>
@@ -94,19 +90,19 @@
           <tbody>
             <tr v-for="d in shown" :key="d.id">
               <td>
-                <div class="bd-cellname">
+                <div class="bd-cellname bd-dev__cell">
                   <span>
                     <b>{{ d.name }}</b>
                     <i class="bd-mono">{{ d.fingerprint }}</i>
                   </span>
                   <span class="bd-tg bd-tg--grey">{{ d.platform || '平台未知' }}</span>
-                  <span v-if="d.stale" class="bd-tg" :style="tagStyle('var(--bd-warning)')">陈旧</span>
+                  <span v-if="d.stale" class="bd-tg bd-tg--gold">陈旧</span>
                 </div>
-                <div v-if="d.os || d.clientVersion" class="bd-dmono">{{ d.os }} · 客户端 {{ d.clientVersion || '—' }}</div>
+                <div v-if="d.os || d.clientVersion" class="bd-sub bd-mono bd-dev__os">{{ d.os }} · 客户端 {{ d.clientVersion || '—' }}</div>
               </td>
               <td>{{ d.account }}</td>
               <td>
-                <span class="bd-tg" :style="tagStyle(classMeta(d.assetClass).color)">{{ classMeta(d.assetClass).label }}</span>
+                <span class="bd-tg" :class="classMeta(d.assetClass).tag">{{ classMeta(d.assetClass).label }}</span>
                 <!-- 当前策略下这台机器会被怎么处置，写在它旁边。分类本身不说明后果：
                      同一个「个人资产」在 inherit 下什么都没发生、在 deny 下等于连不上。 -->
                 <div v-if="assetEffect(d)" class="bd-sub bd-sub--warn">{{ assetEffect(d) }}</div>
@@ -115,7 +111,7 @@
                 </div>
               </td>
               <td>
-                <span class="bd-tg" :style="tagStyle(statusMeta(d.status).color)">{{ statusMeta(d.status).label }}</span>
+                <span class="bd-tg" :class="statusMeta(d.status).tag">{{ statusMeta(d.status).label }}</span>
                 <div v-if="d.status === 'trusted'" class="bd-sub">{{ approverText(d) }}</div>
                 <div v-else-if="d.status === 'revoked' && d.revokeReason" class="bd-sub">{{ d.revokeReason }}</div>
               </td>
@@ -123,50 +119,53 @@
                 <!-- ★空判定必须显示「从未上报」而不是绿色的"合规"：
                      把缺报画成合规是本项目在 posture 三态上早就写死的纪律。 -->
                 <span v-if="!d.verdict" class="bd-sub">从未上报</span>
-                <span v-else class="bd-tg" :style="tagStyle(verdictMeta(d.verdict).color)">{{ verdictMeta(d.verdict).label }}</span>
+                <span v-else class="bd-tg" :class="verdictMeta(d.verdict).tag">{{ verdictMeta(d.verdict).label }}</span>
               </td>
               <td class="bd-mono bd-sub">{{ fmtTime(d.lastSeen) }}</td>
+              <!-- 操作列有五个动作：真 <button>（可 Tab、可回车），窄屏下允许在按钮之间换行，词内不断。 -->
               <td class="r">
-                <span v-if="d.status !== 'trusted'" class="bd-link" @click="doApprove(d)">批准</span>
-                <span v-if="d.status !== 'revoked'" class="bd-link bd-link--danger" style="margin-left: 14px" @click="askRevoke(d)">吊销</span>
-                <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askAsset(d)">分类/标签</span>
-                <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askRename(d)">重命名</span>
-                <span class="bd-link bd-link--grey" style="margin-left: 14px" @click="askDelete(d)">删除</span>
+                <span class="bd-acts bd-dev__acts">
+                  <button v-if="d.status !== 'trusted'" type="button" class="bd-link" @click="doApprove(d)">批准</button>
+                  <button v-if="d.status !== 'revoked'" type="button" class="bd-link bd-link--danger" @click="askRevoke(d)">吊销</button>
+                  <button type="button" class="bd-link bd-link--grey" @click="askAsset(d)">分类/标签</button>
+                  <button type="button" class="bd-link bd-link--grey" @click="askRename(d)">重命名</button>
+                  <button type="button" class="bd-link bd-link--grey" @click="askDelete(d)">删除</button>
+                </span>
               </td>
             </tr>
-            <tr v-if="!shown.length">
-              <td colspan="7" class="bd-sub" style="padding: 28px; text-align: center">
-                {{ devices.length ? '没有匹配的设备' : '尚无终端登记：终端首次上报环境报告（posture）时自动入账' }}
+            <tr v-if="!shown.length" class="bd-table__emptyrow">
+              <td colspan="7">
+                <EmptyState v-if="devices.length" size="md" title="没有匹配的设备" desc="按当前关键词与资产分类筛选均无命中" />
+                <EmptyState v-else size="md" title="尚无终端登记" desc="终端首次上报环境报告（posture）时自动入账；也可用「批量预登记」导入资产清单" />
               </td>
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
 
       <!-- ============ 绑定审批（P9 时间线）============ -->
       <div v-show="tab === 'approval'" class="bd-two">
         <div class="bd-card bd-aplist">
           <div class="bd-aplist__h">待审批申请 <em>{{ approvals.length }}</em></div>
-          <div v-if="!approvals.length" class="bd-empty">
-            <icon-check-circle-fill />当前没有待处理的绑定申请
-          </div>
-          <button v-for="a in approvals" :key="a.id" class="bd-apitem" :class="{ on: a.id === selId }" @click="selId = a.id">
+          <EmptyState v-if="!approvals.length" size="sm" tone="ok" title="当前没有待处理的绑定申请" />
+          <button v-for="a in approvals" :key="a.id" type="button" class="bd-apitem" :class="{ on: a.id === selId }" @click="selId = a.id">
             <div class="bd-apitem__row">
               <span class="bd-apitem__user">{{ a.user }}</span>
-              <span class="bd-apitem__time">{{ a.submittedAt }}</span>
+              <span class="bd-apitem__time bd-mono">{{ a.submittedAt }}</span>
             </div>
             <div class="bd-apitem__dev">{{ a.device }}</div>
           </button>
         </div>
 
-        <div class="bd-card bd-apdetail">
+        <div class="bd-card bd-card--pad bd-two__main bd-apdetail">
           <template v-if="cur">
             <div class="bd-apd__head">
               <div>
                 <div class="bd-apd__dev">{{ cur.device }}</div>
                 <div class="bd-apd__fp bd-mono">{{ cur.fingerprint }}</div>
               </div>
-              <span class="bd-tg" :style="tagStyle('var(--bd-warning)')">待审批</span>
+              <span class="bd-tg bd-tg--gold">待审批</span>
             </div>
 
             <div class="bd-apd__meta">
@@ -175,7 +174,7 @@
               <div class="bd-kv"><span>说明</span><b>{{ cur.reason }}</b></div>
             </div>
 
-            <div class="bd-apd__sec">绑定与风险时间线</div>
+            <div class="bd-section-title">绑定与风险时间线</div>
             <a-timeline class="bd-tl">
               <a-timeline-item
                 v-for="(e, i) in cur.timeline"
@@ -196,9 +195,9 @@
               <button class="bd-btn bd-btn--ghost bd-btn--danger" @click="rejectOpen = true"><icon-close />驳回</button>
             </div>
           </template>
-          <div v-else class="bd-empty bd-empty--lg">
-            <icon-info-circle />请从左侧选择一条待审批申请查看详情
-          </div>
+          <EmptyState v-else size="lg" title="请从左侧选择一条待审批申请查看详情">
+            <template #icon><icon-info-circle /></template>
+          </EmptyState>
         </div>
       </div>
     </template>
@@ -250,7 +249,7 @@
           <div class="bd-setrow__label">陈旧阈值（天）</div>
           <div class="bd-setrow__desc">超过这么多天没有上报终端环境即标记为陈旧，可批量清理（已吊销设备不在清理范围内）。</div>
         </div>
-        <a-input-number v-model="form.staleDays" :min="1" :max="3650" size="small" style="width: 110px" />
+        <a-input-number v-model="form.staleDays" :min="1" :max="3650" size="small" class="bd-setrow__num" />
       </div>
       <div class="bd-setrow">
         <div class="bd-setrow__main">
@@ -258,35 +257,39 @@
           <!-- 置灰而不是给一个改了不生效的输入框：上限判定写死在原子 SQL 里。 -->
           <div class="bd-setrow__desc">内置上限，本版本不可配置（判定与写入在同一条原子语句内完成）。</div>
         </div>
-        <a-input-number :model-value="settings.perUserQuota" disabled size="small" style="width: 110px" />
+        <a-input-number :model-value="settings.perUserQuota" disabled size="small" class="bd-setrow__num" />
       </div>
     </a-modal>
 
     <!-- 吊销确认：影响面用后端下发的同一份文本，界面与实际行为不许各写一套 -->
     <a-modal v-model:visible="revokeOpen" title="吊销授信终端" :width="560" @ok="doRevoke" ok-text="确认吊销" cancel-text="取消">
-      <div class="bd-reject">
-        <icon-exclamation-circle-fill class="bd-reject__ic" />
-        <div>
+      <div class="bd-notice bd-notice--danger">
+        <icon-exclamation-circle-fill />
+        <div class="bd-notice__body">
           将吊销 <b>{{ target?.account }}</b> 的终端 <b>「{{ target?.name }}」</b>
           （<span class="bd-mono">{{ target?.fingerprint }}</span>）。
         </div>
       </div>
-      <div class="bd-blast">
-        <div class="bd-blast__t">影响面（请读完再确认）</div>
-        <div class="bd-blast__d">{{ blastRadius }}</div>
+      <div class="bd-notice bd-notice--plain bd-blast">
+        <div class="bd-notice__body">
+          <div class="bd-blast__t">影响面（请读完再确认）</div>
+          <div class="bd-blast__d">{{ blastRadius }}</div>
+        </div>
       </div>
       <a-textarea v-model="revokeReason" placeholder="吊销理由（会落审计，并在该终端再次尝试接入时作为拒绝原因）" :max-length="200" allow-clear :auto-size="{ minRows: 2, maxRows: 4 }" />
     </a-modal>
 
     <!-- 驳回理由 -->
     <a-modal v-model:visible="rejectOpen" title="驳回绑定申请" :width="560" @ok="reject" ok-text="确认驳回" cancel-text="取消">
-      <div class="bd-reject">
-        <icon-exclamation-circle-fill class="bd-reject__ic" />
-        <div>将驳回 <b>{{ cur?.user }}</b> 对 <b>「{{ cur?.device }}」</b> 的绑定申请，该终端会被置为<b>已吊销</b>。</div>
+      <div class="bd-notice bd-notice--danger">
+        <icon-exclamation-circle-fill />
+        <div class="bd-notice__body">将驳回 <b>{{ cur?.user }}</b> 对 <b>「{{ cur?.device }}」</b> 的绑定申请，该终端会被置为<b>已吊销</b>。</div>
       </div>
-      <div class="bd-blast">
-        <div class="bd-blast__t">影响面（请读完再确认）</div>
-        <div class="bd-blast__d">{{ blastRadius }}</div>
+      <div class="bd-notice bd-notice--plain bd-blast">
+        <div class="bd-notice__body">
+          <div class="bd-blast__t">影响面（请读完再确认）</div>
+          <div class="bd-blast__d">{{ blastRadius }}</div>
+        </div>
       </div>
       <a-textarea v-model="rejectReason" placeholder="例如：指纹与历史记录不符，疑似设备克隆，请联系 IT 现场核验" :max-length="200" allow-clear :auto-size="{ minRows: 2, maxRows: 4 }" />
     </a-modal>
@@ -298,15 +301,13 @@
 
     <!-- 资产分类与标签 -->
     <a-modal v-model:visible="assetOpen" title="终端资产分类与标签" :width="580" @ok="doSetAsset" ok-text="保存" cancel-text="取消">
-      <div class="bd-reject" style="margin-bottom: 10px">
-        <div>
-          <b>{{ target?.account }}</b> 的终端 <b>「{{ target?.name }}」</b>
-          （<span class="bd-mono">{{ target?.fingerprint }}</span>）
-        </div>
+      <div class="bd-asset__who">
+        <b>{{ target?.account }}</b> 的终端 <b>「{{ target?.name }}」</b>
+        （<span class="bd-mono">{{ target?.fingerprint }}</span>）
       </div>
       <div class="bd-setrow">
         <div class="bd-setrow__main">
-          <div class="bd-setrow__label">资产分类<span class="bd-real">真实判据</span></div>
+          <div class="bd-setrow__label">资产分类<span class="bd-tg bd-tg--blue bd-setrow__mark">真实判据</span></div>
           <div class="bd-setrow__desc">
             分类由<b>管理员标注</b>——白帝不自动识别设备归属（没有 MDM / 资产系统对接，
             硬件指纹只能说明"是同一台机器"）。标错就是标错。
@@ -320,13 +321,13 @@
         </a-radio-group>
       </div>
       <!-- 改成个人资产时，当前策略下的**实际后果**要在保存之前就说清楚。 -->
-      <div v-if="assetWarn" class="bd-warnbox" :class="{ 'bd-warnbox--red': settings.personalPolicy === 'deny' }">
+      <div v-if="assetWarn" class="bd-notice" :class="settings.personalPolicy === 'deny' ? 'bd-notice--danger' : 'bd-notice--warn'">
         <icon-exclamation-circle-fill />
-        <div>{{ assetWarn }}</div>
+        <div class="bd-notice__body">{{ assetWarn }}</div>
       </div>
-      <div class="bd-setrow" style="display: block">
-        <div class="bd-setrow__label">标签<span class="bd-fake">仅台账属性，不参与判定</span></div>
-        <div class="bd-setrow__desc" style="margin-bottom: 8px">
+      <div class="bd-setrow bd-setrow--block">
+        <div class="bd-setrow__label">标签<span class="bd-tg bd-tg--grey bd-setrow__mark">仅台账属性，不参与判定</span></div>
+        <div class="bd-setrow__desc bd-setrow__desc--gap">
           用于筛选、导出与资产盘点。<b>标签没有任何执行方</b>：不影响准入、不影响授权、
           不影响风险评分——给一台机器打上「禁止外网」不会限制它任何东西。
           要让某个维度真能控制访问，得给它做一个执行点（像资产分类那样落在准入闸上）。
@@ -338,9 +339,9 @@
 
     <!-- 删除确认 -->
     <a-modal v-model:visible="deleteOpen" title="删除终端登记" :width="540" @ok="doDelete" ok-text="确认删除" cancel-text="取消">
-      <div class="bd-reject">
-        <icon-exclamation-circle-fill class="bd-reject__ic" />
-        <div>
+      <div class="bd-notice bd-notice--danger">
+        <icon-exclamation-circle-fill />
+        <div class="bd-notice__body">
           将删除 <b>{{ target?.account }}</b> 的终端 <b>「{{ target?.name }}」</b> 及其终端环境报告，并释放一个设备名额。
           <template v-if="target?.status === 'revoked'">
             <br><b>该终端当前为已吊销状态</b>：删除记录后，同一指纹再次上报会作为新设备重新登记，吊销将不再生效。
@@ -358,33 +359,35 @@
           从资产系统导出「账号 + 硬件指纹」清单，一次性完成预授信——这是切换到<b>严格准入</b>之前
           把在用终端纳管完的唯一批量路径（否则只能等每台终端自己上报、再逐台批准）。
         </div>
-        <div class="bd-blast">
-          <div class="bd-blast__t">格式（第一行必须是表头，认列名不认列序）</div>
-          <div class="bd-blast__d">
-            必需列：<b>账号</b>（account/user）、<b>指纹</b>（fingerprint/device）；
-            可选列：<b>设备名</b>、<b>平台</b>（Windows|macOS|Linux）、<b>状态</b>（待批准 / 已授信，
-            <b>留空按「待批准」处理</b>）、<b>资产分类</b>（企业资产 / 个人资产 / 企业纳管个人，
-            <b>留空按「企业资产」</b>）、<b>标签</b>（分号分隔）。「已吊销」不接受——那是对既有设备的处置动作。
-            <br>单批上限 <b>{{ MAX_ROWS }}</b> 行 / <b>{{ MAX_KIB }} KiB</b>，超限整批拒绝（不会导一半）。
-            <br>「导出 CSV」出来的文件可直接当模板：改完再导入，<b>已登记的行会被逐行跳过</b>，
-            导入<b>永不改写</b>既有设备的状态（否则一次上传就能静默撤销一条吊销）。
+        <div class="bd-notice bd-notice--plain bd-blast">
+          <div class="bd-notice__body">
+            <div class="bd-blast__t">格式（第一行必须是表头，认列名不认列序）</div>
+            <div class="bd-blast__d">
+              必需列：<b>账号</b>（account/user）、<b>指纹</b>（fingerprint/device）；
+              可选列：<b>设备名</b>、<b>平台</b>（Windows|macOS|Linux）、<b>状态</b>（待批准 / 已授信，
+              <b>留空按「待批准」处理</b>）、<b>资产分类</b>（企业资产 / 个人资产 / 企业纳管个人，
+              <b>留空按「企业资产」</b>）、<b>标签</b>（分号分隔）。「已吊销」不接受——那是对既有设备的处置动作。
+              <br>单批上限 <b>{{ MAX_ROWS }}</b> 行 / <b>{{ MAX_KIB }} KiB</b>，超限整批拒绝（不会导一半）。
+              <br>「导出 CSV」出来的文件可直接当模板：改完再导入，<b>已登记的行会被逐行跳过</b>，
+              导入<b>永不改写</b>既有设备的状态（否则一次上传就能静默撤销一条吊销）。
+            </div>
           </div>
         </div>
-        <div class="bd-warnbox">
+        <div class="bd-notice bd-notice--warn">
           <icon-exclamation-circle-fill />
-          <div>
+          <div class="bd-notice__body">
             <b>预登记不等于这台终端就能连上。</b>它只写设备台账，不产生终端环境报告（posture）：
             若控制面开着 <span class="bd-mono">BAIDI_POSTURE_ENFORCE=strict</span>（缺报即拒），
             这些终端在用客户端真正上报一次环境之前，敲门令牌<b>依然会被拒</b>——
             设备闸与终端合规闸各判各的。导入完成后回执里会显示当前实际取值。
           </div>
         </div>
-        <input ref="fileEl" type="file" accept=".csv,text/csv,text/plain" style="display: none" @change="onPick">
-        <div class="bd-picker">
+        <input ref="fileEl" type="file" accept=".csv,text/csv,text/plain" class="bd-picker__file" @change="onPick">
+        <div class="bd-drawer__foot">
           <button class="bd-btn bd-btn--ghost" @click="fileEl?.click()"><icon-folder />选择 CSV 文件</button>
           <span v-if="imp.name" class="bd-sub">{{ imp.name }} · 约 {{ imp.rows }} 行数据</span>
           <span v-else class="bd-sub">尚未选择文件</span>
-          <div style="flex: 1" />
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn" :disabled="!imp.text || imp.busy" @click="doImport">
             <icon-upload />{{ imp.busy ? '导入中…' : '开始导入' }}
           </button>
@@ -394,29 +397,29 @@
       <!-- 回执：逐行可见。成功与跳过分列，跳过必须带行号与原话理由。 -->
       <template v-else>
         <div class="bd-impsum">
-          <span class="bd-tg" :style="tagStyle('var(--bd-success)')">已预登记 {{ imp.result.imported.length }} 台</span>
-          <span class="bd-tg" :style="tagStyle('var(--bd-primary)')">其中直接授信 {{ imp.result.trusted }} 台</span>
-          <span v-if="imp.result.personal" class="bd-tg" :style="tagStyle('var(--bd-warning)')">
+          <span class="bd-tg bd-tg--green">已预登记 {{ imp.result.imported.length }} 台</span>
+          <span class="bd-tg bd-tg--blue">其中直接授信 {{ imp.result.trusted }} 台</span>
+          <span v-if="imp.result.personal" class="bd-tg bd-tg--gold">
             个人资产 {{ imp.result.personal }} 台
           </span>
-          <span class="bd-tg" :style="tagStyle(imp.result.skipped.length ? 'var(--bd-warning)' : 'var(--bd-t3)')">
+          <span class="bd-tg" :class="imp.result.skipped.length ? 'bd-tg--gold' : 'bd-tg--grey'">
             跳过 {{ imp.result.skipped.length }} 行
           </span>
         </div>
         <!-- 与 postureEnforce 同一条理由：在 deny 下这批个人资产导进去照样连不上，
              不说的话又是一个「台账是绿的、就是连不上」。 -->
         <div v-if="imp.result.personal && imp.result.personalPolicy && imp.result.personalPolicy !== 'inherit'"
-             class="bd-warnbox" :class="{ 'bd-warnbox--red': imp.result.personalPolicy === 'deny' }">
+             class="bd-notice" :class="imp.result.personalPolicy === 'deny' ? 'bd-notice--danger' : 'bd-notice--warn'">
           <icon-exclamation-circle-fill />
-          <div>
+          <div class="bd-notice__body">
             本批有 <b>{{ imp.result.personal }}</b> 台标为<b>个人资产</b>，而当前个人资产策略是
             <b>{{ personalPolicyMeta(imp.result.personalPolicy).label }}</b>：
             {{ personalPolicyMeta(imp.result.personalPolicy).desc }}
           </div>
         </div>
-        <div class="bd-warnbox" :class="{ 'bd-warnbox--red': imp.result.postureEnforce === 'strict' }">
+        <div class="bd-notice" :class="imp.result.postureEnforce === 'strict' ? 'bd-notice--danger' : 'bd-notice--warn'">
           <icon-exclamation-circle-fill />
-          <div>
+          <div class="bd-notice__body">
             <b>当前 BAIDI_POSTURE_ENFORCE = {{ imp.result.postureEnforce }}</b>
             <template v-if="imp.result.postureEnforce === 'strict'">
               ：这些终端在<b>首次成功上报终端环境之前仍连不进来</b>（缺报即拒）。
@@ -446,8 +449,8 @@
             </span>
           </div>
         </div>
-        <div class="bd-picker">
-          <div style="flex: 1" />
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="resetImport">再导一批</button>
           <button class="bd-btn" @click="imp.open = false">完成</button>
         </div>
@@ -456,9 +459,9 @@
 
     <!-- 批量清理陈旧 -->
     <a-modal v-model:visible="cleanupOpen" title="清理陈旧终端" :width="520" @ok="doCleanup" ok-text="确认清理" cancel-text="取消">
-      <div class="bd-reject">
-        <icon-exclamation-circle-fill class="bd-reject__ic" />
-        <div>
+      <div class="bd-notice bd-notice--danger">
+        <icon-exclamation-circle-fill />
+        <div class="bd-notice__body">
           将删除超过 <b>{{ settings.staleDays }}</b> 天未上报终端环境的设备（连同其环境报告）。
           <br><b>已吊销的终端不在清理范围内</b>——清掉吊销记录等于让该指纹可以重新登记，吊销会失效。
         </div>
@@ -471,13 +474,22 @@
 import { ref, computed, reactive, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import {
-  api, getToken,
+  api, getToken, failReason, ApiError, NetworkError,
   type DeviceBundle, type Device, type TrustApproval, type DeviceTrustSetting, type DeviceImportResult,
   type AssetClass, type PersonalAssetPolicy
 } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const tab = ref<'list' | 'approval'>('list');
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
+/** 首屏是否已完成第一次 load（成功或失败都算）：只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 const loadErr = ref('');
 const setOpen = ref(false);
 const rejectOpen = ref(false);
@@ -531,28 +543,29 @@ const shown = computed(() => {
 
 function countBy(s: Device['status']) { return devices.value.filter((d) => d.status === s).length; }
 
+/* 三组元数据里的 tag 是 .bd-tg--* 语义变体类名（不写十六进制、不写 inline style）。 */
 function statusMeta(s: Device['status']) {
   return {
-    trusted: { label: '已授信', color: 'var(--bd-success)' },
-    pending: { label: '待批准', color: 'var(--bd-warning)' },
-    revoked: { label: '已吊销', color: 'var(--bd-danger)' }
+    trusted: { label: '已授信', tag: 'bd-tg--green' },
+    pending: { label: '待批准', tag: 'bd-tg--gold' },
+    revoked: { label: '已吊销', tag: 'bd-tg--red' }
   }[s];
 }
 function verdictMeta(v: Device['verdict']) {
   return {
-    allow: { label: '合规', color: 'var(--bd-success)' },
-    gray: { label: '灰度观察', color: 'var(--bd-t3)' },
-    degrade: { label: '已降权', color: 'var(--bd-warning)' },
-    block: { label: '不合规', color: 'var(--bd-danger)' },
-    '': { label: '从未上报', color: 'var(--bd-t3)' }
-  }[v] ?? { label: v, color: 'var(--bd-t3)' };
+    allow: { label: '合规', tag: 'bd-tg--green' },
+    gray: { label: '灰度观察', tag: 'bd-tg--grey' },
+    degrade: { label: '已降权', tag: 'bd-tg--gold' },
+    block: { label: '不合规', tag: 'bd-tg--red' },
+    '': { label: '从未上报', tag: 'bd-tg--grey' }
+  }[v] ?? { label: v, tag: 'bd-tg--grey' };
 }
 /** 资产分类的显示口径与后端 store.AssetClassZh 同源（导出件、审计、页面必须是同一套说法）。 */
 function classMeta(c: AssetClass | undefined) {
   return {
-    enterprise: { label: '企业资产', color: 'var(--bd-t3)' },
-    personal: { label: '个人资产', color: 'var(--bd-warning)' },
-    managed: { label: '企业纳管个人', color: 'var(--bd-primary)' }
+    enterprise: { label: '企业资产', tag: 'bd-tg--grey' },
+    personal: { label: '个人资产', tag: 'bd-tg--gold' },
+    managed: { label: '企业纳管个人', tag: 'bd-tg--blue' }
   }[c || 'enterprise'];
 }
 function personalPolicyMeta(p: PersonalAssetPolicy | '') {
@@ -577,10 +590,9 @@ function assetEffect(d: Device): string {
 /** managed 按企业资产处理——与后端 store.IsPersonalAsset 同一条判据。 */
 function isPersonal(c: AssetClass | undefined) { return (c || 'enterprise') === 'personal'; }
 
-function tagStyle(color: string) { return { color, background: `color-mix(in srgb, ${color} 12%, #fff)` }; }
 type ApprovalKind = TrustApproval['timeline'][number]['kind'];
 function dotColor(kind: ApprovalKind): string {
-  return { submit: '#165DFF', risk: '#FF7D00', login: '#C9CDD4', review: '#165DFF', notify: '#00B42A' }[kind];
+  return { submit: 'var(--bd-primary)', risk: 'var(--bd-warning)', login: 'var(--bd-t4)', review: 'var(--bd-primary)', notify: 'var(--bd-success)' }[kind];
 }
 function fmtTime(ts: number): string {
   if (!ts) return '—';
@@ -608,7 +620,7 @@ async function saveSettings() {
     setOpen.value = false;
     Message.success(saved.mode === 'strict' ? '已切换为严格准入：非授信终端将无法接入' : '已保存：观察准入（放行并留痕）');
     await load();
-  } catch (e) { Message.error(`保存失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`保存失败：${failReason(e)}`); }
 }
 
 async function setStatus(d: Device, status: Device['status'], reason: string) {
@@ -624,7 +636,7 @@ async function doApprove(d: Device) {
   try {
     await setStatus(d, 'trusted', '');
     Message.success(`已批准「${d.name}」，该终端即可在严格准入模式下接入`);
-  } catch (e) { Message.error(`批准失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`批准失败：${failReason(e)}`); }
 }
 
 function askRevoke(d: Device) { target.value = d; revokeReason.value = ''; revokeOpen.value = true; }
@@ -635,7 +647,7 @@ async function doRevoke() {
   try {
     await setStatus(d, 'revoked', revokeReason.value);
     Message.warning(`已吊销「${d.name}」，并已按账号撤销 ${d.account} 的接入（影响其全部终端，5 分钟内不可重连）`);
-  } catch (e) { Message.error(`吊销失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`吊销失败：${failReason(e)}`); }
 }
 
 function askRename(d: Device) { target.value = d; renameVal.value = d.name; renameOpen.value = true; }
@@ -650,7 +662,7 @@ async function doRename() {
     });
     Message.success('已重命名');
     await load();
-  } catch (e) { Message.error(`重命名失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`重命名失败：${failReason(e)}`); }
 }
 
 /* ── 资产分类与标签 ── */
@@ -696,7 +708,7 @@ async function doSetAsset() {
     });
     Message.success(`已保存「${d.name}」的资产分类：${classMeta(assetForm.assetClass).label}`);
     await load();
-  } catch (e) { Message.error(`保存失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`保存失败：${failReason(e)}`); }
 }
 
 function askDelete(d: Device) { target.value = d; deleteOpen.value = true; }
@@ -708,7 +720,7 @@ async function doDelete() {
     await api(`/devices/${d.id}`, { method: 'DELETE' });
     Message.success(`已删除「${d.name}」的登记与环境报告`);
     await load();
-  } catch (e) { Message.error(`删除失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`删除失败：${failReason(e)}`); }
 }
 
 async function doCleanup() {
@@ -717,7 +729,7 @@ async function doCleanup() {
     const out = await api<{ removed: number; staleDays: number }>('/devices/cleanup-stale', { method: 'POST' });
     Message.success(`已清理 ${out.removed} 台超过 ${out.staleDays} 天未上报的终端（已吊销设备未动）`);
     await load();
-  } catch (e) { Message.error(`清理失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`清理失败：${failReason(e)}`); }
 }
 
 async function decide(decision: 'approved' | 'rejected', reason: string) {
@@ -734,7 +746,7 @@ async function decide(decision: 'approved' | 'rejected', reason: string) {
     else if (decision === 'approved') Message.success(`已通过 ${a.user} 对「${a.device}」的绑定，终端已置为授信`);
     else Message.warning(`已驳回并将该终端置为吊销${reason ? `：${reason}` : ''}`);
     await load();
-  } catch (e) { Message.error(`处置失败：${(e as Error).message}`); }
+  } catch (e) { Message.error(`处置失败：${failReason(e)}`); }
 }
 function reject() {
   rejectOpen.value = false;
@@ -751,11 +763,21 @@ const exp = reactive({ busy: false });
 async function doExport() {
   exp.busy = true;
   try {
-    const res = await fetch('/api/v1/devices/export', { headers: { Authorization: `Bearer ${getToken()}` } });
+    let res: Response;
+    try {
+      res = await fetch('/api/v1/devices/export', { headers: { Authorization: `Bearer ${getToken()}` } });
+    } catch (e) {
+      // 请求压根没到后端：与 api() 同款地包成 NetworkError，failReason 才会说「连不上控制面」
+      // 而不是把浏览器那句英文 TypeError（"Failed to fetch"）原样贴给管理员。
+      throw new NetworkError(e);
+    }
     if (!res.ok) {
-      // 403 的原话（"需要权限 security"）是唯一能指导下一步的信息，不要吞掉。
-      const msg = await res.text().catch(() => '');
-      throw new Error(msg || `${res.status}`);
+      // 403 的原话（「…需要权限：security」）是唯一能指导下一步的信息，不要吞掉。
+      // ★后端错误体是 httpx.Error 的 {"error":{"message":…}}：此前 res.text() 整段 JSON 当 message 抛出，
+      //   管理员看到的是一串花括号；这里解出 message 再包成 ApiError（与 api() 的 errText 同一条口径）。
+      let msg = '';
+      try { msg = ((await res.json()) as { error?: { message?: string } })?.error?.message ?? ''; } catch { /* 非 JSON 应答：退回状态行 */ }
+      throw new ApiError(msg || `${res.status} ${res.statusText}`, res.status);
     }
     const blob = await res.blob();
     const cd = res.headers.get('Content-Disposition') ?? '';
@@ -768,7 +790,9 @@ async function doExport() {
     URL.revokeObjectURL(url);
     Message.success(`已导出 ${name}`);
   } catch (e) {
-    Message.error(`导出失败：${(e as Error).message}（需已连 baidi-control，且当前管理员持有「安全策略」权限）`);
+    // 原样转述：403 时后端那句话本身就点名了缺哪个权限，连不上时 failReason 说的是「连不上控制面」——
+    // 此前无论哪种失败都追加一句「需已连 baidi-control，且持有安全策略权限」，对 5xx / 网络断开是编造的归因。
+    Message.error(`导出失败：${failReason(e)}`);
   } finally {
     exp.busy = false;
   }
@@ -811,7 +835,7 @@ async function doImport() {
     await load();
   } catch (e) {
     // 整批被拒（超限 / 表头不合法）时后端一台都没写，文案里已说明，原样透出。
-    Message.error(`导入失败：${(e as Error).message}`);
+    Message.error(`导入失败：${failReason(e)}`);
   } finally {
     imp.busy = false;
   }
@@ -828,125 +852,101 @@ async function load() {
     loadErr.value = '';
   } catch (e) {
     live.value = false;
-    loadErr.value = (e as Error).message;
+    loadErr.value = failReason(e);
+  } finally {
+    loaded.value = true;
   }
 }
 onMounted(load);
 </script>
 
 <style scoped>
-.bd-head__right { margin-left: auto; }
+/* 本页独有的布局。页头 / 空态 / 骨架 / 提示条 / 分栏 / 标签 / 操作列 / 弹窗底栏都在共享件与 app.css 里。 */
 
-/* 未连提示 */
-.bd-offline { display: flex; align-items: center; gap: 14px; padding: 18px 20px; }
-.bd-offline :deep(svg) { color: var(--bd-warning); font-size: 20px; flex: none; }
-.bd-offline__t { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
-.bd-offline__d { font-size: 12.5px; color: var(--bd-t3); line-height: 1.7; margin-top: 3px; }
-.bd-offline .bd-btn { margin-left: auto; flex: none; }
 
-/* 准入模式横幅 */
-.bd-mode { display: flex; align-items: flex-start; gap: 10px; padding: 11px 14px; border-radius: 8px; font-size: 12.5px; line-height: 1.7; margin-bottom: 16px; }
-.bd-mode :deep(svg) { font-size: 16px; flex: none; margin-top: 2px; }
-.bd-mode--observe { background: var(--bd-fill-1); color: var(--bd-t2); }
-.bd-mode--observe :deep(svg) { color: var(--bd-t3); }
-.bd-mode--strict { background: color-mix(in srgb, var(--bd-success) 10%, #fff); color: var(--bd-t1); }
-.bd-mode--strict :deep(svg) { color: var(--bd-success); }
-.bd-mode--asset { background: color-mix(in srgb, var(--bd-warning) 10%, #fff); color: var(--bd-t1); margin-top: -8px; }
-.bd-mode--asset :deep(svg) { color: var(--bd-warning); }
-
-/* tabs */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { display: flex; align-items: center; gap: 7px; font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
-.bd-tab em { font-style: normal; font-size: 11px; color: var(--bd-t3); }
-.bd-tab.on em { color: var(--bd-primary); }
-.bd-badge { min-width: 16px; height: 16px; padding: 0 5px; border-radius: 8px; background: var(--bd-danger); color: #fff; font-size: 11px; font-weight: 600; display: inline-flex; align-items: center; justify-content: center; line-height: 1; }
-
-/* 设备清单 */
-.bd-toolbar__c { font-size: 12.5px; color: var(--bd-t3); }
-.bd-tg--grey { background: var(--bd-fill-2); color: var(--bd-t3); font-weight: 400; }
-.bd-cellname { gap: 9px; flex-wrap: wrap; cursor: default; }
-.bd-dmono { display: block; font-size: 11px; color: var(--bd-t3); margin-top: 3px; font-family: ui-monospace, monospace; }
-.bd-sub { font-size: 11.5px; color: var(--bd-t3); }
-.bd-sub--warn { color: var(--bd-warning); }
-.bd-tagrow { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 4px; }
-/* 操作列有五个动作，窄屏下允许在链接之间换行，但不许把一个词拆开（「重命 名」）。 */
-.bd-table .bd-link { white-space: nowrap; }
-.bd-link--danger { color: var(--bd-danger); }
+/* 设备清单：工具栏控件宽度与表格横向滚动容器（七列在 1280 下由容器滚，不让整页滚） */
+.bd-dev__search { width: 240px; }
+.bd-dev__class { width: 150px; flex: none; display: inline-block; }
+.bd-dev__scroll { overflow-x: auto; }
+.bd-dev__cell { gap: 9px; flex-wrap: wrap; cursor: default; }
+.bd-dev__os { display: block; margin-top: 3px; }
+.bd-sub { font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-sub--warn { color: var(--bd-warning-t); }
+.bd-tagrow { display: flex; flex-wrap: wrap; gap: var(--bd-sp-1); margin-top: var(--bd-sp-1); }
+/* 操作列有五个动作，窄屏下允许在按钮之间换行（.bd-acts 全局是 nowrap），词内不断。 */
+.bd-dev__acts { flex-wrap: wrap; justify-content: flex-end; white-space: normal; row-gap: 2px; }
+.bd-dev__acts .bd-link { white-space: nowrap; }
 
 /* 「真实判据」与「仅台账属性」两枚角标：界面上任何一个勾都必须真能生效，
    反过来说，不生效的东西要当面标明它只是标签。 */
-.bd-real, .bd-fake { font-size: 10.5px; font-weight: 500; padding: 1px 6px; border-radius: 4px; margin-left: 7px; }
-.bd-real { color: var(--bd-primary); background: var(--bd-primary-1); }
-.bd-fake { color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-setrow__mark { margin-left: 7px; font-weight: 500; }
 
-/* 审批两栏 */
-.bd-two { display: flex; gap: 16px; align-items: flex-start; }
+/* 审批两栏：左列表 */
 .bd-aplist { width: 300px; flex: none; padding: 10px; }
-.bd-aplist__h { font-size: 12px; font-weight: 600; color: var(--bd-t3); padding: 4px 8px 10px; }
-.bd-aplist__h em { font-style: normal; margin-left: 4px; }
-.bd-apitem { width: 100%; display: block; text-align: left; border: 1px solid transparent; background: transparent; border-radius: 8px; cursor: pointer; padding: 11px 12px; margin-bottom: 4px; transition: background .12s, border-color .12s; }
+.bd-aplist__h { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t3); padding: var(--bd-sp-1) var(--bd-sp-2) 10px; }
+.bd-aplist__h em { font-style: normal; margin-left: var(--bd-sp-1); }
+.bd-apitem {
+  width: 100%; display: block; text-align: left; border: 1px solid transparent; background: transparent; font: inherit;
+  border-radius: var(--bd-radius-s); cursor: pointer; padding: 11px var(--bd-sp-3); margin-bottom: var(--bd-sp-1);
+  transition: background var(--bd-dur-fast) var(--bd-ease), border-color var(--bd-dur-fast) var(--bd-ease);
+}
 .bd-apitem:hover { background: var(--bd-fill-1); }
 .bd-apitem.on { background: var(--bd-primary-1); border-color: var(--bd-primary-b); }
-.bd-apitem__row { display: flex; align-items: center; justify-content: space-between; }
-.bd-apitem__user { font-size: 13.5px; font-weight: 600; color: var(--bd-t1); }
+.bd-apitem__row { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-2); }
+.bd-apitem__user { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); }
 .bd-apitem.on .bd-apitem__user { color: var(--bd-primary); }
-.bd-apitem__time { font-size: 11px; color: var(--bd-t3); font-family: ui-monospace, monospace; }
-.bd-apitem__dev { font-size: 12px; color: var(--bd-t2); margin-top: 4px; }
+.bd-apitem__time { font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-apitem__dev { font-size: var(--bd-fs-sm); color: var(--bd-t2); margin-top: var(--bd-sp-1); }
 
-.bd-apdetail { flex: 1; min-width: 0; padding: 20px 22px 22px; }
-.bd-apd__head { display: flex; align-items: flex-start; justify-content: space-between; padding-bottom: 16px; border-bottom: 1px solid var(--bd-fill-2); }
-.bd-apd__dev { font-size: 16px; font-weight: 700; color: var(--bd-t1); }
-.bd-apd__fp { font-size: 12px; color: var(--bd-t3); margin-top: 4px; }
-.bd-apd__meta { padding: 6px 0 4px; }
-.bd-kv { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-bottom: 1px solid var(--bd-fill-1); font-size: 13px; }
-.bd-kv span { color: var(--bd-t3); }
-.bd-kv b { font-weight: 500; color: var(--bd-t1); }
-.bd-apd__sec { font-size: 13px; font-weight: 600; margin: 20px 0 14px; }
+/* 右详情 */
+.bd-apd__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--bd-sp-3); padding-bottom: var(--bd-sp-4); border-bottom: 1px solid var(--bd-border-2); }
+.bd-apd__dev { font-size: var(--bd-fs-lg); font-weight: 700; color: var(--bd-t1); }
+.bd-apd__fp { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: var(--bd-sp-1); word-break: break-all; }
+.bd-apd__meta { padding: 6px 0 var(--bd-sp-1); }
+.bd-kv { display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-4); padding: 9px 0; border-bottom: 1px solid var(--bd-border-2); font-size: var(--bd-fs-md); }
+.bd-kv span { color: var(--bd-t3); flex: none; }
+.bd-kv b { font-weight: 500; color: var(--bd-t1); text-align: right; }
+.bd-apdetail .bd-section-title { margin: var(--bd-sp-5) 0 var(--bd-sp-4); }
 
 /* 时间线 */
 .bd-tl { padding-left: 2px; }
-.bd-tl__row { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.bd-tl__title { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
-.bd-tl__time { font-size: 11.5px; color: var(--bd-t3); flex: none; }
-.bd-tl__detail { font-size: 12px; color: var(--bd-t3); line-height: 1.6; margin-top: 3px; }
+.bd-tl__row { display: flex; align-items: baseline; justify-content: space-between; gap: var(--bd-sp-3); }
+.bd-tl__title { font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); }
+.bd-tl__time { font-size: var(--bd-fs-xs); color: var(--bd-t3); flex: none; }
+.bd-tl__detail { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh); margin-top: 3px; }
+.bd-apd__acts { display: flex; gap: 10px; margin-top: var(--bd-sp-5); }
 
-.bd-apd__acts { display: flex; gap: 10px; margin-top: 22px; }
-
-/* 空态 */
-.bd-empty { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--bd-t3); padding: 16px 12px; }
-.bd-empty :deep(svg) { color: var(--bd-success); }
-.bd-empty--lg { justify-content: center; min-height: 280px; flex-direction: column; gap: 12px; color: var(--bd-t4); }
-.bd-empty--lg :deep(svg) { font-size: 28px; color: var(--bd-t4); }
-
-/* 设置 modal */
-.bd-setrow { display: flex; align-items: center; gap: 12px; padding: 14px 0; border-bottom: 1px solid var(--bd-fill-1); }
+/* 设置 modal：左说明 + 右控件 */
+.bd-setrow { display: flex; align-items: center; gap: var(--bd-sp-3); padding: 14px 0; border-bottom: 1px solid var(--bd-border-2); }
 .bd-setrow:last-child { border-bottom: none; }
+.bd-setrow--block { display: block; }
 .bd-setrow__main { flex: 1; min-width: 0; }
-.bd-setrow__label { font-size: 13.5px; font-weight: 500; color: var(--bd-t1); }
-.bd-setrow__desc { font-size: 12px; color: var(--bd-t3); margin-top: 3px; line-height: 1.6; }
+.bd-setrow__label { font-size: var(--bd-fs-md); font-weight: 500; color: var(--bd-t1); }
+.bd-setrow__desc { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 3px; line-height: var(--bd-lh); }
+.bd-setrow__desc--gap { margin-bottom: var(--bd-sp-2); }
+.bd-setrow__num { width: 110px; }
+.bd-asset__who { font-size: var(--bd-fs-md); line-height: var(--bd-lh-loose); color: var(--bd-t2); margin-bottom: 10px; }
+.bd-asset__who b { color: var(--bd-t1); }
 
 /* 批量预登记 modal */
-.bd-wdesc { font-size: 13px; color: var(--bd-t2); line-height: 1.75; margin-bottom: 14px; }
-.bd-warnbox { display: flex; gap: 10px; background: color-mix(in srgb, var(--bd-warning) 10%, #fff); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; font-size: 12.5px; color: var(--bd-t2); line-height: 1.75; }
-.bd-warnbox :deep(svg) { color: var(--bd-warning); font-size: 17px; flex: none; margin-top: 2px; }
-.bd-warnbox--red { background: color-mix(in srgb, var(--bd-danger) 10%, #fff); }
-.bd-warnbox--red :deep(svg) { color: var(--bd-danger); }
-.bd-impnote { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--bd-fill-2); font-size: 12px; color: var(--bd-t3); }
-.bd-picker { display: flex; align-items: center; gap: 12px; margin-top: 16px; }
-.bd-impsum { display: flex; gap: 8px; margin-bottom: 14px; }
-.bd-implist { margin-bottom: 14px; max-height: 220px; overflow: auto; border: 1px solid var(--bd-fill-2); border-radius: 8px; }
-.bd-implist__h { position: sticky; top: 0; background: var(--bd-fill-1); font-size: 12px; font-weight: 600; color: var(--bd-t2); padding: 8px 12px; }
-.bd-improw { display: flex; gap: 10px; align-items: baseline; padding: 8px 12px; border-top: 1px solid var(--bd-fill-1); font-size: 12px; }
+.bd-wdesc { font-size: var(--bd-fs-md); color: var(--bd-t2); line-height: var(--bd-lh-loose); margin-bottom: 14px; }
+.bd-picker__file { display: none; }
+.bd-impnote { margin-top: 7px; padding-top: 7px; border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm); color: var(--bd-t3); }
+.bd-impsum { display: flex; flex-wrap: wrap; gap: var(--bd-sp-2); margin-bottom: 14px; }
+.bd-implist { margin-bottom: 14px; max-height: 220px; overflow: auto; border: 1px solid var(--bd-border-2); border-radius: var(--bd-radius-s); }
+.bd-implist__h { position: sticky; top: 0; background: var(--bd-fill-1); font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t2); padding: var(--bd-sp-2) var(--bd-sp-3); }
+.bd-improw { display: flex; gap: 10px; align-items: baseline; padding: var(--bd-sp-2) var(--bd-sp-3); border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm); }
 .bd-improw__ln { flex: none; color: var(--bd-t3); width: 66px; }
 .bd-improw__id { flex: none; max-width: 46%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--bd-t1); }
-.bd-improw__why { flex: 1; color: var(--bd-t3); line-height: 1.6; }
+.bd-improw__why { flex: 1; color: var(--bd-t3); line-height: var(--bd-lh); }
 
-/* 危险确认 modal */
-.bd-reject { display: flex; gap: 12px; font-size: 13.5px; line-height: 1.7; color: var(--bd-t2); margin-bottom: 14px; }
-.bd-reject__ic { color: var(--bd-danger); font-size: 20px; flex: none; margin-top: 2px; }
-.bd-blast { background: var(--bd-fill-1); border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; }
-.bd-blast__t { font-size: 12px; font-weight: 600; color: var(--bd-t2); margin-bottom: 5px; }
-.bd-blast__d { font-size: 12px; color: var(--bd-t3); line-height: 1.75; }
+/* 危险确认 modal 里的影响面块（口径说明，中性底） */
+.bd-blast__t { font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t2); margin-bottom: 5px; }
+.bd-blast__d { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); }
+
+@media (max-width: 1320px) {
+  .bd-aplist { width: 260px; }
+  .bd-dev__search { width: 200px; }
+  .bd-dev__class { width: 130px; }
+}
 </style>

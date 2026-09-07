@@ -145,12 +145,20 @@ func TestBuildArtifactsPlaceholdersMatchServer(t *testing.T) {
 		}
 	}
 
-	// 「敬请期待」只能出现在真的会被构建出来、且装了能用的平台上。
-	// ★linux 在这张名单里补得晚了一步：它与 windows 同处境（CI 出得来 .deb/.AppImage、
-	// 标 UNVERIFIED、刻意不下发），文案改过来了但没人守着，改回去不会有任何东西报警。
-	for _, p := range []string{"ios", "harmony", "windows", "linux"} {
-		if strings.Contains(got[p].Note, "敬请期待") {
-			t.Errorf("%s 的占位文案不该说「敬请期待」——那是给一个不会到来的版本许诺：%q", p, got[p].Note)
+	// 「敬请期待」在**任何**平台上都不许出现：它断言"有个构建正在进行"，而 manifest 缺失
+	// 只说明这台部署机上没人铺过包，此刻什么都没在构建——控制面没有任何执行方能替这句话背书。
+	// ★这张名单曾是四个平台（ios/harmony/windows/linux），macOS 与 Android 因"包能出"被豁免，
+	//   于是本机起栈、没跑过 build-artifacts.sh 时下载中心照样对这两行说「构建中」。
+	//   名单不齐的守卫等于给漏掉的那几行发了通行证，所以这里遍历 placeholderManifest 的全部平台，
+	//   将来加第七个平台也自动进名单。
+	// 没有包的占位还必须**给得出下一步**（找谁）：只说"没有"与「敬请期待」是同一种没用。
+	for _, w := range want.Clients {
+		n := got[w.Platform].Note
+		if strings.Contains(n, "敬请期待") || strings.Contains(n, "构建中") {
+			t.Errorf("%s 的占位文案不该说「构建中 / 敬请期待」——没有执行方能证明有构建在进行，那是给一个不会自己到来的版本许诺：%q", w.Platform, n)
+		}
+		if !strings.Contains(n, "联系管理员") {
+			t.Errorf("%s 的占位文案要给得出下一步（找谁）：%q", w.Platform, n)
 		}
 	}
 	// Windows 那句必须给得出真实的下一步，否则与「敬请期待」是同一种没用。

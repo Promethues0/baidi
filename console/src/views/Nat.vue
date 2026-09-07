@@ -1,76 +1,80 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">地址转换</div>
-        <div class="bd-page__sub">
-          把网关复用为出口 / 发布路由设备 · SNAT 代理上网与 DNAT 资源发布 · 规则由控制面编译后灌入网关内核
-        </div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '未连' }}</a-tag>
-        <!-- ★这一页最要紧的两列（网关回执、命中计数）是**运行态**：网关每个心跳周期上报一次。
-             此前没有任何刷新入口，也不显示数据时间——页面上那份回执定格在打开那一刻，
-             管理员改完规则盯着看，会以为网关一直没装上。 -->
-        <span v-if="fetchedAt" class="bd-natts">数据时间 {{ fetchedAt }}</span>
-        <button class="bd-btn bd-btn--ghost" :disabled="busy" @click="load()"><icon-refresh />刷新</button>
-        <button class="bd-btn" :disabled="!ifaceReady" :style="{ opacity: ifaceReady ? 1 : .5 }" @click="openWizard()">
-          <icon-plus />新增策略
-        </button>
-      </div>
-    </div>
+    <PageHeader title="地址转换" :live="live" off-text="数据未读取" off-color="red"
+      subtitle="把网关复用为出口 / 发布路由设备 · SNAT 代理上网与 DNAT 资源发布 · 规则由控制面编译后灌入网关内核">
+      <!-- ★这一页最要紧的两列（网关回执、命中计数）是**运行态**：网关每个心跳周期上报一次。
+           此前没有任何刷新入口，也不显示数据时间——页面上那份回执定格在打开那一刻，
+           管理员改完规则盯着看，会以为网关一直没装上。 -->
+      <span v-if="fetchedAt" class="bd-natts">数据时间 {{ fetchedAt }}</span>
+      <button class="bd-btn bd-btn--ghost" :disabled="busy" @click="load()"><icon-refresh />刷新</button>
+      <button class="bd-btn" :disabled="!ifaceReady" @click="openWizard()">
+        <icon-plus />新增策略
+      </button>
+    </PageHeader>
 
     <!-- 风险提示（FR-NAT-12/11/16）：文案由后端下发，前端不自行编写——
          这几条是安全结论，写在前端就会与后端的实际行为脱节。 -->
-    <div v-for="(w, i) in warnings" :key="i" class="bd-natwarn">
+    <div v-for="(w, i) in warnings" :key="i" class="bd-notice bd-notice--warn">
       <icon-exclamation-circle-fill /><span>{{ w }}</span>
     </div>
 
-    <div v-if="err" class="bd-natwarn bd-natwarn--err"><icon-close-circle-fill /><span>{{ err }}</span></div>
+    <div v-if="err" class="bd-notice bd-notice--danger"><icon-close-circle-fill /><span>{{ err }}</span></div>
 
     <div class="bd-two">
       <!-- 网卡台账 -->
       <div class="bd-card bd-ifaces">
-        <div class="bd-ifaces__h">
-          <span>网关网卡</span>
-          <i>实测上报</i>
+        <div class="bd-card__h">
+          网关网卡
+          <span class="bd-card__h-sub">实测上报</span>
         </div>
-        <div v-if="!ifaces.length" class="bd-ifaces__empty">
-          还没有网关上报网卡。<br />网卡清单随网关 mTLS 心跳上报，需网关运行 v0.4 及以上版本。
-        </div>
-        <div v-for="g in ifaceGroups" :key="g.gatewayId" class="bd-ifgrp">
-          <div class="bd-ifgrp__h"><icon-storage />{{ g.gatewayId }}</div>
-          <div v-for="f in g.list" :key="f.name" class="bd-ifrow">
-            <div class="bd-ifrow__l">
-              <b class="bd-mono">{{ f.name }}</b>
-              <span v-if="!f.up" class="bd-tg bd-tg--sm bd-ifdown">未启用</span>
-              <i class="bd-mono">{{ f.addrs.join(' · ') || '无 IPv4 地址' }}</i>
-            </div>
-            <!-- 用包裹层定宽而不是给 a-select 加 class：Arco 的 .arco-select 自带
-                 width:100% 且选择器特异性更高，直接写 .bd-iftype{width:116px} 会被顶掉，
-                 后果是下拉框撑满整行、把左边的网卡名与 IP 压成 0 宽（本页第一版就是这样）。 -->
-            <div class="bd-iftype">
-              <a-select :model-value="f.type" size="mini" :disabled="busy"
-                @update:model-value="(v: unknown) => setType(f, String(v))">
-                <a-option value="">未定性</a-option>
-                <a-option value="lan">LAN 口（对内）</a-option>
-                <a-option value="wan">WAN 口（对外）</a-option>
-              </a-select>
+        <div class="bd-card__b">
+          <SkeletonBlock v-if="!loaded" kind="text" :rows="4" />
+          <!-- ★读取失败必须排在「还没有网关上报网卡」之前：/nat 拉不到时 ifaces 被清空，与「一张网卡都没报」
+               完全同形；落进下面那个 warn 空态，管理员会照着它去升级网关、查心跳——而读不出来的是控制面这一侧，
+               网关有没有报网卡此刻根本不可判定。tone=danger + 转述后端原话（与 Gateway 页同款）。 -->
+          <EmptyState v-else-if="loadErr" size="sm" tone="danger" title="网卡清单未读取"
+            :desc="`${loadErr}——网卡与策略来自同一次 GET /api/v1/nat，这里显示的不是「没有网关上报网卡」。`" />
+          <EmptyState v-else-if="!ifaces.length" size="sm" tone="warn" title="还没有网关上报网卡。"
+            desc="网卡清单随网关 mTLS 心跳上报，需网关运行 v0.4 及以上版本。" />
+          <div v-for="g in ifaceGroups" :key="g.gatewayId" class="bd-ifgrp">
+            <div class="bd-ifgrp__h"><icon-storage />{{ g.gatewayId }}</div>
+            <div v-for="f in g.list" :key="f.name" class="bd-ifrow">
+              <div class="bd-ifrow__l">
+                <b class="bd-mono">{{ f.name }}</b>
+                <span v-if="!f.up" class="bd-tg bd-tg--grey">未启用</span>
+                <i class="bd-mono">{{ f.addrs.join(' · ') || '无 IPv4 地址' }}</i>
+              </div>
+              <!-- 用包裹层定宽而不是给 a-select 加 class：Arco 的 .arco-select 自带
+                   width:100% 且选择器特异性更高，直接写 .bd-iftype{width:116px} 会被顶掉，
+                   后果是下拉框撑满整行、把左边的网卡名与 IP 压成 0 宽（本页第一版就是这样）。 -->
+              <div class="bd-iftype">
+                <a-select :model-value="f.type" size="mini" :disabled="busy"
+                  @update:model-value="(v: unknown) => setType(f, String(v))">
+                  <a-option value="">未定性</a-option>
+                  <a-option value="lan">LAN 口（对内）</a-option>
+                  <a-option value="wan">WAN 口（对外）</a-option>
+                </a-select>
+              </div>
             </div>
           </div>
-        </div>
-        <div class="bd-ifaces__note">
-          LAN/WAN 由管理员指定：网关没有可靠依据自动分辨哪张卡对公网（有默认路由 ≠ 对公网）。
-          未定性的网卡不能出现在策略里。
+          <div class="bd-notice bd-notice--plain bd-ifaces__note">
+            <icon-info-circle />
+            <span>LAN/WAN 由管理员指定：网关没有可靠依据自动分辨哪张卡对公网（有默认路由 ≠ 对公网）。
+            未定性的网卡不能出现在策略里。</span>
+          </div>
         </div>
       </div>
 
       <!-- 策略表 -->
-      <div class="bd-tablecard" style="flex: 1; min-width: 0">
+      <div class="bd-tablecard bd-two__main">
         <div class="bd-toolbar">
-          <span class="bd-toolbar__c">共 {{ policies.length }} 条策略</span>
-          <div style="flex: 1" />
+          <span v-if="loadErr" class="bd-toolbar__c">策略数未读取</span>
+          <span v-else class="bd-toolbar__c">共 {{ policies.length }} 条策略</span>
+          <div class="bd-toolbar__spacer" />
         </div>
+        <!-- 首屏骨架：load() 回来之前不画表头下面的空白，也不画任何假行 -->
+        <SkeletonBlock v-if="!loaded" kind="table" :rows="4" :cols="9" />
+        <div v-else class="bd-tablewrap">
         <table class="bd-table">
           <thead>
             <tr>
@@ -85,7 +89,7 @@
             <tr v-for="p in policies" :key="p.id">
               <td><b>{{ p.name }}</b></td>
               <td>
-                <span class="bd-tg" :style="tagStyle(p.type === 'snat' ? '#165DFF' : '#722ED1')">
+                <span class="bd-tg" :class="p.type === 'snat' ? 'bd-tg--blue' : 'bd-tg--purple'">
                   {{ p.type === 'snat' ? 'SNAT 代理上网' : 'DNAT 资源发布' }}
                 </span>
               </td>
@@ -94,7 +98,7 @@
                 {{ p.srcIface }} {{ p.srcAddr }}
                 <icon-arrow-right />
                 {{ p.dstIface }} {{ p.dstAddr }}<template v-if="p.type === 'dnat' && p.dstPort">:{{ p.dstPort }}</template>
-                <span v-if="p.type === 'dnat'" class="bd-tg bd-tg--sm" style="margin-left: 6px">{{ p.protocol.toUpperCase() }}</span>
+                <span v-if="p.type === 'dnat'" class="bd-tg bd-tg--grey bd-natproto">{{ p.protocol.toUpperCase() }}</span>
               </td>
               <td class="bd-mono">
                 <template v-if="p.type === 'dnat'">
@@ -110,7 +114,7 @@
                    策略停用时不渲染回执——管理员本来就不指望它生效，报「没生效」是噪声。 -->
               <td>
                 <span v-if="!p.enabled" class="bd-dim">—</span>
-                <span v-else class="bd-tg" :style="tagStyle(rcptColor(p))" :title="rcptSay(p)">
+                <span v-else class="bd-tg" :class="rcptTagClass(p)" :title="rcptSay(p)">
                   {{ rcptText(p) }}
                 </span>
               </td>
@@ -122,17 +126,31 @@
                 <span v-else class="bd-dim" title="网关报得出计数，但这条规则一次都没被命中">0 包</span>
               </td>
               <td class="r">
-                <button type="button" class="bd-link" @click="openWizard(p)">编辑</button>
-                <button type="button" class="bd-link bd-link--danger" style="margin-left: 12px" @click="askRemove(p)">删除</button>
+                <span class="bd-acts">
+                  <button type="button" class="bd-link" @click="openWizard(p)">编辑</button>
+                  <button type="button" class="bd-link bd-link--danger" @click="askRemove(p)">删除</button>
+                </span>
               </td>
             </tr>
-            <tr v-if="!policies.length">
-              <td colspan="9" class="bd-natempty">
-                尚无地址转换策略。<template v-if="!ifaceReady">先在左侧给网关网卡指定 LAN/WAN 类型，才能新增策略。</template>
+            <tr v-if="!policies.length" class="bd-table__emptyrow">
+              <td colspan="9">
+                <!-- 读取失败 ≠ 没有策略：这一页决定的是「哪些内网端口对公网可达」，把「拉不到」画成
+                     「尚无策略」等于替一份根本没读到的配置背书。原话 + 重试，不编造归因。 -->
+                <EmptyState v-if="loadErr" size="md" tone="danger" title="地址转换配置未读取">
+                  <div>{{ loadErr }}——这里显示的不是「没有策略」。</div>
+                  <div class="bd-natempty__p">
+                    本页读的是控制面 <code>GET /api/v1/nat</code>，这次请求失败了：库里有多少条策略、网关内核里
+                    此刻灌着什么规则都<b>不可判定</b>。请按上面那句原话排查控制面这一侧。
+                  </div>
+                  <template #action><button class="bd-btn bd-btn--ghost" :disabled="busy" @click="load()"><icon-refresh />重试</button></template>
+                </EmptyState>
+                <EmptyState v-else size="md" title="尚无地址转换策略。"
+                  :desc="ifaceReady ? '' : '先在左侧给网关网卡指定 LAN/WAN 类型，才能新增策略。'" />
               </td>
             </tr>
           </tbody>
         </table>
+        </div>
       </div>
     </div>
 
@@ -195,7 +213,7 @@
                 <a-input-number v-model="wz.dstPort" :min="1" :max="65535" placeholder="9999" />
               </div>
             </template>
-            <div class="bd-sec2">转换后数据</div>
+            <div class="bd-form-sec">转换后数据</div>
             <div class="bd-fld"><label>目的地址转换为</label>
               <a-input v-model="wz.translatedAddr" class="bd-mono" placeholder="155.155.235.212（业务系统真实内网 IP）" />
             </div>
@@ -209,15 +227,15 @@
             <a-switch v-model="wz.enabled" />
           </div>
 
-          <div class="bd-wz__note">
+          <div class="bd-notice bd-notice--plain">
             <icon-info-circle />
-            保存后规则由网关编译进内核（需网关以 -nat 启动且具备 root）。零信任隧道与敲门流量已自动从 SNAT 中排除。
+            <span>保存后规则由网关编译进内核（需网关以 -nat 启动且具备 root）。零信任隧道与敲门流量已自动从 SNAT 中排除。</span>
           </div>
         </div>
-        <div class="bd-wz__foot">
-          <div style="flex: 1" />
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="wz.open = false">取消</button>
-          <button class="bd-btn" :disabled="busy || !canSave" :style="{ opacity: busy || !canSave ? .5 : 1 }" @click="save">保存</button>
+          <button class="bd-btn" :disabled="busy || !canSave" @click="save">保存</button>
         </div>
       </div>
     </a-drawer>
@@ -227,13 +245,27 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
-import { api, type NATBundle, type NATPolicy, type NATReceipt, type NATHit, type GatewayIface, type NATType, type NATProto } from '@/lib/api';
+import { api, failReason, type NATBundle, type NATPolicy, type NATReceipt, type NATHit, type GatewayIface, type NATType, type NATProto } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false）。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
 const busy = ref(false);
+/** 首屏是否已完成一次加载（成功或失败都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 /** 本页数据的取回时刻（运行态列的口径）。 */
 const fetchedAt = ref('');
 const err = ref('');
+/** 最近一次 /nat 读取失败的后端原话（failReason）；空串 = 最近一次读成功。
+ *  ★它是「读取失败」与「真没有策略 / 真没有网卡」在页面上唯一的分野：失败时数据被清空，
+ *  两栏与"全新部署一条都没有"完全同形，此前只靠顶部一条红条区分，两个空态照样用「确实为空」的语气说话。
+ *  写操作（保存 / 切换 / 删除 / 定性）的失败仍走 err 顶部红条，不混用。 */
+const loadErr = ref('');
 const policies = ref<NATPolicy[]>([]);
 const ifaces = ref<GatewayIface[]>([]);
 const warnings = ref<string[]>([]);
@@ -262,12 +294,12 @@ function rcptText(p: NATPolicy): string {
   if (!r.online) return base + ' · 网关离线';
   return base;
 }
-function rcptColor(p: NATPolicy): string {
+function rcptTagClass(p: NATPolicy): string {
   const r = rcptOf(p);
-  if (!r || r.status === 'unreported') return '#86909C';  // 灰 = 不可判定
-  if (r.status === 'applied' && r.forwarding !== false && r.online) return '#00B42A'; // 绿 = 真的生效了
-  if (r.status === 'dryrun') return '#FF7D00';            // 橙 = 有意的自检模式
-  return '#F53F3F';                                        // 红 = 配了但不会生效
+  if (!r || r.status === 'unreported') return 'bd-tg--grey';  // 灰 = 不可判定
+  if (r.status === 'applied' && r.forwarding !== false && r.online) return 'bd-tg--green'; // 绿 = 真的生效了
+  if (r.status === 'dryrun') return 'bd-tg--gold';            // 橙 = 有意的自检模式
+  return 'bd-tg--red';                                        // 红 = 配了但不会生效
 }
 
 /* 这一页刻意没有降级演示数据：编造的 NAT 策略与真实规则在页面上无法区分，
@@ -286,7 +318,6 @@ const ifaceReady = computed(() => gatewayIds.value.some((id) => {
 function pickable(want: 'lan' | 'wan'): GatewayIface[] {
   return ifaces.value.filter((f) => f.gatewayId === wz.gatewayId && f.type === want);
 }
-function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 const wz = reactive({
   open: false, id: '', name: '', type: 'snat' as NATType, gatewayId: '',
@@ -341,7 +372,7 @@ async function save() {
     if (w.length) Modal.warning({ title: '策略已保存，请注意以下影响', content: w.join('\n\n'), width: 560 });
     await load();
   } catch (e) {
-    err.value = (e as Error).message || '保存失败';
+    err.value = failReason(e);
   } finally { busy.value = false; }
 }
 
@@ -354,7 +385,7 @@ async function toggle(p: NATPolicy, v: boolean) {
     });
     await load();
   } catch (e) {
-    err.value = (e as Error).message || '切换失败';
+    err.value = failReason(e);
   } finally { busy.value = false; }
 }
 
@@ -368,7 +399,7 @@ function askRemove(p: NATPolicy) {
         await api(`/nat/policies/${encodeURIComponent(p.id)}`, { method: 'DELETE' });
         Message.success(`已删除策略「${p.name}」`);
         await load();
-      } catch (e) { err.value = (e as Error).message || '删除失败'; }
+      } catch (e) { err.value = failReason(e); }
     }
   });
 }
@@ -381,7 +412,7 @@ async function setType(f: GatewayIface, t: string) {
     });
     await load();
   } catch (e) {
-    err.value = (e as Error).message || '设置网卡类型失败';
+    err.value = failReason(e);
   } finally { busy.value = false; }
 }
 
@@ -398,58 +429,48 @@ async function load() {
     // 显示「0 包」等于替一份我们根本没有的读数背书。
     hitsKnown.value = b.hitsKnown === true;
     live.value = true;
+    loadErr.value = '';
   } catch (e) {
+    // 拉不到就是拉不到：清空而不是留着上一次读到的那份——留着的话表格里还是旧行、左栏还是旧网卡，
+    // 上面两个「未读取」空态根本不会出现，页面唯一的异常信号只剩页头一个红标签；
+    // 「数据时间」也一并清掉，否则空表配着一个时刻，像是那一刻确实读到了零条。
     live.value = false;
-    err.value = (e as Error).message || '无法读取地址转换配置';
-  }
+    loadErr.value = failReason(e);
+    policies.value = []; ifaces.value = []; warnings.value = [];
+    receipts.value = {}; hits.value = {}; hitsKnown.value = false;
+    fetchedAt.value = '';
+  } finally { loaded.value = true; }
 }
 onMounted(load);
 </script>
 
 <style scoped>
-/* 表单与抽屉的排版类在本项目里是**每个视图各自 scoped 定义**的（不是全局）：
-   只写类名不写样式，页面会渲染成「说明文字挤在控件同一行」的样子——本页第一版就是。
-   与 Apps.vue 的定义保持一致，避免两页表单看起来不像同一个产品。 */
+/* 本页独有：网卡台账的行排布、策略表匹配列。表单节奏 / 抽屉底栏 / 提示条 / 空态都在共享件与 app.css 里。 */
 .bd-wz { display: flex; flex-direction: column; height: 100%; }
 .bd-wz__body { flex: 1; overflow-y: auto; padding-right: 2px; }
-.bd-wz__foot { display: flex; align-items: center; gap: 10px; padding-top: 16px; border-top: 1px solid var(--bd-fill-2); }
-.bd-fld { margin-bottom: 16px; }
-.bd-fld > label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 7px; }
-.bd-fld :deep(.arco-input-wrapper), .bd-fld :deep(.arco-select-view), .bd-fld :deep(.arco-input-number) { width: 100%; }
-.bd-fld--row { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
-.bd-fld--row label { display: block; margin-bottom: 2px; }
-/* block 而非 inline：说明文字必须换行到控件下方，否则会和单选按钮挤在一行。 */
-.bd-fld__d { display: block; margin-top: 6px; font-size: 12px; color: var(--bd-t3); line-height: 1.6; }
 .bd-fld--row .bd-fld__d { margin-top: 0; }
 
-.bd-natwarn {
-  display: flex; align-items: flex-start; gap: 8px; margin-bottom: 10px; padding: 10px 12px;
-  border-radius: 8px; font-size: 12.5px; line-height: 1.6;
-  color: #A8620E; background: #FFF7E8; border: 1px solid #FFD08A;
-}
-.bd-natwarn--err { color: var(--bd-danger); background: var(--bd-tag-red-bg); border-color: #FFC2C2; }
-.bd-natwarn > :first-child { flex: none; margin-top: 2px; font-size: 14px; }
+.bd-natts { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 
-.bd-ifaces { width: 320px; flex: none; padding: 14px; }
-.bd-ifaces__h { display: flex; align-items: baseline; gap: 8px; font-size: 13px; font-weight: 600; margin-bottom: 10px; }
-.bd-ifaces__h i { font-style: normal; font-size: 11px; color: var(--bd-t3); }
-.bd-ifaces__empty, .bd-natempty { color: var(--bd-t3); font-size: 12.5px; line-height: 1.8; padding: 18px 4px; text-align: center; }
-.bd-ifgrp { margin-bottom: 12px; }
-.bd-ifgrp__h { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-t2); margin-bottom: 6px; }
-.bd-ifrow { display: flex; align-items: center; gap: 8px; padding: 6px 0; border-top: 1px solid var(--bd-line); }
+.bd-ifaces { width: 320px; flex: none; }
+.bd-ifaces__note { margin: var(--bd-sp-3) 0 0; }
+.bd-ifgrp { margin-bottom: var(--bd-sp-3); }
+.bd-ifgrp__h { display: flex; align-items: center; gap: 6px; font-size: var(--bd-fs-sm); color: var(--bd-t2); margin-bottom: 6px; }
+.bd-ifrow { display: flex; align-items: center; gap: var(--bd-sp-2); padding: 6px 0; border-top: 1px solid var(--bd-border-2); }
 .bd-ifrow__l { flex: 1; min-width: 0; }
-.bd-ifrow__l b { font-size: 12.5px; }
-.bd-ifrow__l i { display: block; font-style: normal; font-size: 11px; color: var(--bd-t3); margin-top: 2px; }
-.bd-ifdown { color: var(--bd-t3); background: var(--bd-fill-2); }
+.bd-ifrow__l b { font-size: var(--bd-fs-sm); }
+.bd-ifrow__l > .bd-tg { margin-left: 6px; }
+.bd-ifrow__l i { display: block; font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 2px; }
 .bd-iftype { width: 116px; flex: none; }
-.bd-ifaces__note { margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--bd-line); font-size: 11px; color: var(--bd-t3); line-height: 1.7; }
-.bd-natmatch { font-size: 11.5px; }
+.bd-tablewrap { overflow-x: auto; }
+.bd-natmatch { font-size: var(--bd-fs-xs); }
 .bd-natmatch svg { margin: 0 4px; color: var(--bd-t3); }
+.bd-natproto { margin-left: 6px; }
 .bd-dim { color: var(--bd-t3); }
-.bd-sec2 { font-size: 12px; font-weight: 600; color: var(--bd-t2); margin: 14px 0 8px; padding-top: 12px; border-top: 1px solid var(--bd-line); }
-.bd-wz__note {
-  display: flex; align-items: flex-start; gap: 7px; margin-top: 16px; padding: 10px;
-  border-radius: 8px; font-size: 12px; line-height: 1.6; color: var(--bd-t2); background: var(--bd-fill-2);
+.bd-natempty__p { margin-top: var(--bd-sp-2); }
+
+/* 1280 视口：左栏收窄 */
+@media (max-width: 1320px) {
+  .bd-ifaces { width: 280px; }
 }
-.bd-wz__note svg { flex: none; margin-top: 2px; }
 </style>

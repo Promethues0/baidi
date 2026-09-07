@@ -616,7 +616,7 @@ PRD 8.3.3 / FR-INTRO-09/12。改造前网关只有 L4 CONNECT 隧道，全库没
 - **两端的 UDP 封装端口必须一致（生产恒为 4500）**，否则须在站点上显式配 `peerNatPort`。IKEv2 **没有**通告对端封装端口的机制，RFC 3948 直接把它定死为 4500，实现只能按对称假设推算。配错的症状极具迷惑性：**IKE 协商全绿、隧道显示 up、协商结果正常，但字节数恒为 0 且没有任何报错**。
 - **认证方式只有 PSK**。证书认证（RFC 7427 数字签名 AUTH、CERT/CERTREQ）本轮不实现；控制台的 `cert`/`sm2cert` 在装载期被**显式拒绝并回报原因**，不会静默降级成 PSK。
 - **国密套件（`suite=gm`：SM4-GCM/SM4-CBC、HMAC-SM3、sm2p256v1）走 IANA 私有使用段码点（1024+），只承诺白帝↔白帝互通，与 GM/T 0022 无关**。GM/T 0022 是 IKEv1 血统 + 数字信封的另一套协议栈，与 RFC 7296 结构性不兼容；且 IANA 从未为 SM 系列分配 IKEv2 码点。**因此绝不可对外称「国密 IPSec」或宣称 GM/T 合规。** 纯软件实现也不具备商用密码产品认证的资格（GM/T 0028 要求密码运算在硬件密码模块内完成）。
-- **不实现**：EAP、IKEv1、MOBIKE、IKE 分片、配置载荷 CP/虚拟 IP 下发、ESN、传输模式、AH、IPComp、TFC padding、多 TS 对与 narrowing、窗口 >1、后量子混合（`pqHybrid` 字段保留但无效，装载期告警）。
+- **不实现**：EAP、MOBIKE、IKE 分片、配置载荷 CP/虚拟 IP 下发、ESN、传输模式、AH、IPComp、TFC padding、多 TS 对与 narrowing、窗口 >1。**后量子混合（RFC 9370 / PPK）与 IKEv1 同 `cert`/`sm2cert` 走同一条装载期拒绝路径**：`config.go` 的 `checkExtra` 对 `pqHybrid=true` 与非 IKEv2 的 `ikeVersion` **拒绝整条站点配置并回报原因**（与上一条逐字同款，不是告警、更不会静默降级）——`pqHybrid` 在控制台是保留字段，打开它站点直接起不来，而不是"跑着但没有后量子保护"。装载期拒绝规则的唯一集中地就是 `config.go`（见第六节代码地图）。
 - **不做 PMTUD**：内层包超过隧道 MTU 直接丢弃并计数（可见），不静默截断。
 - **自实现的密码学协议，未经安全审计**。与项目整体定位一致（README 已声明研究/演示用途）。
 
@@ -713,7 +713,7 @@ PRD FR-ARCH-03/04、第 19 章多数据中心。改造前剖面结构上**只装
 
 **运维约束**：业务后端应使用**专用内网域**。分流域是从域名后端推导的父域（`oa.corp.internal` → `corp.internal`），若有人配了 `shop.example.com`，`example.com` 会成为分流域，其兄弟名字在隧道期间会因「不转发」而解析不了。公共后缀（`com`/`co.uk` 这类）已被显式挡住，但可公开注册的二级域挡不住。
 
-### ✅ 认证源接入 LDAP/AD + OIDC（真，但未与真实目录/IdP 实机互通）
+### ✅ 认证源接入 LDAP/AD + OIDC + RADIUS（真，但未与真实目录/IdP/RADIUS 服务器实机互通）
 
 此前「认证源接入」页是**一整页内存种子**：6 条硬编码认证源，连「总部 AD 域 1160 用户」这个数字都是凭空写的，「接入认证源 / 同步」按钮背后没有任何东西；登录只查本地 SQLite + bcrypt。
 
@@ -722,12 +722,16 @@ PRD FR-ARCH-03/04、第 19 章多数据中心。改造前剖面结构上**只装
 **能声称**：协议实现是真的，且**验证方式不是 mock 接口**——
 - LDAP/AD 用 `gldap` 起**进程内 LDAP 服务端**做真实 BER 协议往返（含 LDAPS 与 StartTLS 握手），覆盖率 93.6%；
 - OIDC 用 `httptest` 起 mock IdP（发现文档 + JWKS + 令牌端点，真 RSA-2048/P-256 私钥签 ID Token），30 个用例。
+- RADIUS（FR-INT-03）用 `layeh.com/radius` 的 `PacketServer` 起**进程内 RADIUS 服务端**做真实 UDP 报文往返（PAP 的 User-Password 混淆、CHAP 的 MD5 挑战应答、Message-Authenticator 的 HMAC-MD5、Status-Server 探测），加上一组走完「保存源 → 设共享密钥 → 门户登录 → 建号绑定 → 提权被拒」的 API 级用例。
+
+**RADIUS 为什么从「明拒」变成「已实现」**（此前的理由是「没有稳定 Subject → 绑定只能退回按用户名 → 冒充漏洞」，推理写在 `radiussrc` 包注释里）：那条理由的**前半句对、后半句不成立**。RADIUS 应答里确实没有 entryDN / sub 那样的权威标识，但"按用户名绑"并不会绑到本地账号上——`Identity.Subject` 对 RADIUS 定义为 **`radius:<认证源 id>:<实际发给服务器认证的那个 User-Name>`**（**只去首尾空白，不改大小写**），在该源内稳定、且绑定表主键 `(source_id, subject)` 让两条 RADIUS 源里的同名用户互不串号；外部账号 `role` 恒 user、`pass_hash` 恒空；与本地账号撞名**加来源后缀**（`admin@<源 id>`）而不复用；提升为管理员被 `guardLocalCredentialForAdmin` 拒绝；而照那条 400 文案的补救路径（先重置本地口令再提权）把他提上去之后，**凭外部源口令/断言换会话又被 `externalSessionCredential` 拒绝**（门户口令路径与 OIDC 回调、OIDC 交接票据换会话三处同一道闸，见下文第三条硬约束）。于是 RADIUS 服务器的管理者最多能造出**这个源的普通外部身份**——那正是他本来就管着的东西——"冒充本地管理员"那条路在 Subject 之外的三道机制上各断了一次。「没有稳定 Subject」的真实代价只剩「目录侧改名 = 白帝这边当新人重建号」，与 LDAP 的 entryDN 随改名/移动而变是同一种代价。**Subject 里的 User-Name 刻意不做小写归一**（与 `Identity.Normalized()` 只归一 Username / Email 的口径分家，`radiussrc.Subject` 的注释写死了这一点）：绑定键必须**等于被认证方真正认过的那个字符串**。对大小写敏感的 RADIUS 后端（FreeRADIUS 接 files/SQL 的默认姿态），`Alice` 与 `alice` 是**两个各有口令的账号**——按小写归一会把它们绑成同一个 Subject，后登的那个直接继承先登者的授权 / JIT 授予 / 封禁状态，而审计里看到的是一次完全正常的登录。反方向的代价是「同一人换大小写登录会建出两个账号」：可见（用户目录页上就是两行）、可清理，比「两个人合并成一个」便宜得多。**部署建议**：服务器侧不区分大小写的部署（接 AD 的 FreeRADIUS 等）请在 RADIUS 侧规范化 User-Name（`rewrite_user_name` / unlang 里 tolower），白帝这边刻意不替它做这件事——替它做就等于替它决定"哪两个账号是同一个人"。**错误分层与 ldapsrc 逐字同款**：只有 Access-Reject 映射到「凭据错」（计锁定），超时 / UDP 不可达 / 共享密钥不匹配（应答校验失败）/ Access-Challenge 一律「认证源不可用」（不计锁定、不回"密码错误"）。「测试连接」优先 Status-Server（RFC 5997），服务器不应答时退到一次探测用 Access-Request 并把 Access-Reject 判成"可达"——控制台会说清是哪一种，因为回退那次会在对面日志里留一条失败登录。
 
 守住的**认证绕过**（每条都有对应测试）：LDAP 注入（RFC 4515 转义，带"未转义会被骗到"的漏洞对照组）、**空口令 bind**（LDAP 经典绕过：有 DN + 空口令会被许多目录当成匿名 bind 并返回成功）、空 DN 条目、命中多条即拒、StartTLS 失败不得降级明文、OIDC 的 `alg=none` 与 HS256（且算法由**我们的白名单**决定而非令牌自称）、iss/aud/azp/exp/nonce 全验、伪造 kid 不会打成 JWKS 拉取风暴。
 
 账号映射的两条硬约束（`login_authsrc.go` 与 `authsrc_sqlite.go` 里都写了症状）：
 - **绑定以 `Subject`（OIDC 的 `sub` / LDAP 的 `entryDN`）为键，不是用户名**。按用户名绑的话，谁能在 AD 里新建一个叫 `admin` 的账号谁就是本地管理员，而审计日志里是一次完全正常的「admin 登录成功」。撞名时给外部账号加来源后缀，绝不复用本地账号；外部账号 `role` 恒为 `user`。
 - **外部账号的 `pass_hash` 恒为空**。不置空的话，认证源被停用/删除后那个账号会退回成「用某个本地口令也能登录」，而那个口令是谁设的没人说得清。
+- **管理员账号不得经任何外部认证源换取会话**（`api.externalSessionCredential`，门户口令路径的外部命中分支 / OIDC 回调 / OIDC 交接票据换会话三处共用）。前两条挡住的是「外部账号天生是 user」，这一条挡的是**补救路径造出来的形态**：`guardLocalCredentialForAdmin` 的拒绝文案说「先为他重置一个本地口令再提权」，走完之后账号同时持有外部绑定 + 本地口令 + `role=admin`——此前门户与 OIDC 两处签发都原样 `Sign(Role: cred.Role)`，于是 RADIUS/LDAP 服务器的管理者（或持共享密钥的在途方）、IdP 的管理者验证通过的一次口令/断言就等于一张白帝管理员会话，管理台「只验本地口令」的收敛被绕开。闸做两件事：按账号**重读完整 `users` 行**（`UserBySubject`/`BindExternalUser` 回的是没有 `must_change_pw` 的窄 SELECT，此前「首登强制改密」对外部路径形同虚设；读不到就不签）；`role=admin` 一律拒、落 `auth/deny` 审计、**不计爆破锁定**（外部源那边是对的）、文案说清「管理员只接受本地口令认证」。OIDC 侧闸排在二次认证之前——passkey/TOTP 第二回合各自签完整令牌，放在签交接票据那一行会被一名注册了 TOTP 的管理员绕过；交接票据换会话时按重读的行**再判一次**，票据里的角色是签发那一刻的快照。同批修掉 `handleSetAdminRole` 里目录读失败时跳过守卫直接提权的 fail-open（改成与 `handleCreateAdmin` 同形：读失败 500、不存在 404）。
 
 **认证源故障 ≠ 密码错误**：目录不可用时回「认证服务暂时不可用」而非「用户名或密码错误」，也不计入账号锁定——不区分的症状是「AD 挂了，所有人看到的都是密码错误」，运维被误导去查用户而不是查目录。
 
@@ -736,7 +740,19 @@ PRD FR-ARCH-03/04、第 19 章多数据中心。改造前剖面结构上**只装
 - **LDAP 不支持 referral 追踪**（AD 多域林会表现为「某些域的人登不上」）、**不支持 SASL/GSSAPI/Kerberos**（只做 simple bind）、**嵌套组不展开**（按组授权时嵌套组成员会被判成不在组里）。
 - **`Subject = entryDN` 有代价**：用户改名或跨 OU 移动时 DN 会变，绑定需要重建。AD 的 `objectGUID` 才是真正不变的标识，但它是 AD 专有。
 - **外部账号状态回验已补上 LDAP/AD 半边**（wave7 行动 3）：后台循环按 `entryDN` 直查目录（AD 读 `userAccountControl`/`accountExpires`，通用 LDAP 只有存在性——协议里没有更多语义），目录侧禁用/过期/删除即禁用本地账号并入撤销通道（撤窗断隧道+拒敲门），失效窗从 8h 压到回验周期（`BAIDI_EXTAUTH_RECHECK`，默认 5 分钟）。三条方向纪律：**源不可用绝不动手**（AD 抖一下禁光全员是比 8h 窗大得多的自伤）、只单向禁用不自动恢复（自动恢复会撤销本地管理员的显式禁用）、幂等不刷审计。**OIDC 那半仍是洞**：标准 OIDC 没有"按 sub 查状态"的通道（RP-initiated / back-channel logout 也没做），IdP 禁号后该源账号的 8h 会话照用到自然过期——协议边界如实标注，接了支持 back-channel logout 的 IdP 再补。
-- **RADIUS / 短信网关 / 商密证书三种类型没有实现**，`Kind.Supported()` 会在保存时明确拒绝，控制台上置灰——不再是「能选但静默不生效」。
+- **短信网关 / 商密证书两种类型没有实现**，`Kind.Supported()` 会在保存时明确拒绝，控制台上置灰——不再是「能选但静默不生效」。清单只有 `authsrc.SupportedKinds` 一份（API 的 `supportedKinds` 响应、拒绝文案、`Supported()` 三处同源）。
+- **RADIUS 的边界**：只做 **PAP 与 CHAP**，**不做 EAP**（EAP-TLS / PEAP / EAP-TTLS）与 MS-CHAPv2；**不做 Access-Challenge 多轮应答**（动态令牌"再输一次"那类交互，收到即归为源不可用并写明原因）；**不做「RADIUS 作为二次认证令牌」**——认证策略里的「Radius 动态令牌」仍按 `authpolicy.SecondaryMethods` 冻结，它与「RADIUS 作为口令认证源」是两件事；**未与 FreeRADIUS / 商用 RADIUS 设备实机互通验证**，所有往返都是对进程内的 layeh 服务端，Message-Authenticator 的取舍按 RFC 2869/5080/5997 写、不是抓包抄的；应答里没有邮箱与显示名，故**准入闸的邮箱域白名单对 RADIUS 源恒 fail-closed，保存接口直接拒收 `allowedDomains`**；无账号状态回验通道（与 OIDC 同一条边界）；**组只从 Class / Filter-Id / Reply-Message 三个标准属性之一映射，不做 VSA，且组值只读不建组**——单次登录最多考察报文里**前 32 个**值、单个 ≤**128 字节**（超出的整个丢弃并节流记日志：截断会造出一个谁也不认识的组名），这些值只用于**准入闸的 `allowedGroups` 比对**与**「白帝里已存在的、属于本源的外部用户组」的成员同步**（`api.radiusSyncableGroups` 按 `kind=external` + 描述里带本源 id + 名字大小写不敏感三元匹配，读用户组失败时 fail-closed，一个组都不同步），**绝不据此自动新建用户组**：`BindExternalUser` 对传进去的每个组名都会 `INSERT OR IGNORE` 一行永久 `user_groups`，而 Class 常被服务器用作**逐会话标识**（Cisco ISE 的 `CACS:<session>…`、FreeRADIUS 的会话状态 Class），原样传等于让对面决定我们这边建多少行、直到把表写爆（`TestRadiusClassNeverCreatesGroups` 钉着它）。★**LDAP / OIDC 的组同步仍会从 `memberOf` / `groups` claim 自动建组**（DN 维度、无条数上限），本波刻意只收口了 RADIUS 这一条路，**不能说成「组同步已统一」**；**重发次数 `retries`**：缺席 = 默认 1（共发两次），**显式 0 = 只发一次**（此前 0 被当成"取默认"），保存时把缺席归一成显式 1 落库、取值限 0~5——显式 0 时库的重发计时器必须一并关掉（`client.Retry = 0`），靠"总预算到期"去拦会与计时器**同时**触发，Go 的 `select` 二选一是随机的，约一半概率在退出前多发一份，管理员选了「重发 0 次」而实际发出两份就是没兑现；传输是明文 UDP（User-Password 仅 MD5 混淆），RadSec（RFC 6614）不做。**共享密钥不匹配在真实服务器上多表现为超时**（FreeRADIUS 对 MA 校验不过 / 未登记客户端一律静默丢包），超时文案把这两种成因都列了出来。
+
+### ⚠️ LDAP / OIDC 的组同步：自动建组且无条数上限（**本波刻意不修**，别读成「组同步已统一」）
+
+RADIUS 那半边 wave10 收口了（前 32 个值 / 单值 ≤128 字节 / **绝不建组**，见上一节）。**LDAP 与 OIDC 那半边一个闸都没有**，写在这里是因为 RADIUS 的收口很容易被读成"组同步这件事已经统一了"——它没有。
+
+- **取数侧无闸**：`ldapsrc.go:398` 把 `entry.GetAttributeValues(GroupAttr)`（默认 `memberOf`）**整份**放进 `Identity.Groups`；`oidc.go:524` 把 `groups` claim 整份放进去。两处都不限条数、不限单值长度。
+- **落库侧自动建组**：`store.refreshExternalProfile`（`authsrc_sqlite.go:378 起`）对每个组名 `INSERT OR IGNORE` 一行 `user_groups`（`kind=external`，id = `extGroupID(sourceID, 组名)`），再同步 `user_group_members`。**没有任何上界**。
+- **风险面**：能控制 IdP 的一方（或在 AD 里能给自己加组的普通用户），每次登录回一批新的随机组名，就能把 `user_groups` 无界撑大——与 RADIUS 那条「Class 常被用作逐会话标识」是同一形状的问题，只是这里连"值会变"都不用推测，直接可控。
+- **更硬的一面是授权面**：这些组是**一等 `user_groups` 行**，`api.validateSubjectRefs` 只校验"这个 id 存在"、**不按 `kind` 过滤**，于是外部组可以被 `resources.allow_groups`（资源授权，经 `store.SubjectIndex` 展开进 `AllowUsers`）与 `auth_policies.scopeGroups`（认证策略适用范围）**直接引用**。一旦被引用，**"谁是这个组的成员"这件事就由对面的目录管理员说了算**——白帝这边每次登录照着刷新，不复核。
+- **为什么本波不修**：LDAP/OIDC 的 DN 维度组同步是既有能力（wave7 行动 2 起就在跑），外部组已经可能被存量资源 ACL / 认证策略引用；加条数上限或改成"只同步已存在的组"（RADIUS 那条路）都会**改变存量部署的授权结果**，属于要单独立轨 + 迁移评估的改动，不能顺手塞进一波文档/UI 打磨里。
+- **现阶段的处置**：把它当作"外部目录是这些组的权威"来运维——**给外部组授权前先确认该目录的加组权限收敛在谁手上**；用户组页面上外部组是只读的（`kind=external`），删得掉，但下次该账号登录会按目录再建回来。
 
 ### ✅ 认证策略 → 二次认证（真接进登录链路，判不了的两条已冻结）
 
@@ -760,7 +776,7 @@ PRD FR-ARCH-03/04、第 19 章多数据中心。改造前剖面结构上**只装
 
 **不能声称 / 刻意不做**：
 
-- **异地登录（GeoAnomaly）判不了**：没有接入任何 IP 地理库。该开关被**冻结**——保存接口拒绝开启、控制台按后端下发的 `capabilities` 置灰并写明原因、迁移回填清掉存量为 true 的行。选择"置灰+注明"而不是从模型删掉，与 RADIUS/短信/证书三类认证源的处理一致：删掉会让人以为"白帝不支持"，置灰才说清是"本版本判不了"。
+- **异地登录（GeoAnomaly）判不了**：没有接入任何 IP 地理库。该开关被**冻结**——保存接口拒绝开启、控制台按后端下发的 `capabilities` 置灰并写明原因、迁移回填清掉存量为 true 的行。选择"置灰+注明"而不是从模型删掉，与短信/证书两类认证源的处理一致：删掉会让人以为"白帝不支持"，置灰才说清是"本版本判不了"。
 - **Windows 域环境（WinDomain）判不了**：posture 六个基线键里没有域信息，也不校验机器票据。同样冻结。
 - **一键上线（OneClick）已从模型与 UI 删除**：它需要一整套设备绑定的长效免认证票据（签发/存储/吊销/与强制下线联动），本轮不做。`auth_policies.one_click` 列冻结（不读不写，旧库可直接启动）。
 - **授信终端豁免建立在客户端自报的指纹上，指纹不是秘密**。因此它只用来降低二次认证要求，**绝不放宽任何授权**——授权闸始终在网关侧 `resource.Authorize`。
@@ -1120,7 +1136,11 @@ UAC 提升执行一段 PowerShell launcher）→ 以管理员权限拉起 sideca
   「ARM64 一台真机：UAC 提权与建卡已跑通，隧道端到端与 NRPT 分离式 DNS 未验；x64 全部未实机…请联系管理员」，两处文案
   （`clients/build-artifacts.sh` 与 `api.placeholderManifest`）由 Go 用例真跑脚本比对，逐字一致。
 
-### ⚠️ 移动端原生壳（安卓 VpnService / iOS PacketTunnelProvider：源码级修复，两端均未实机）
+### ⚠️ 移动端原生壳（安卓 VpnService：2026-09-03 真机**分段**验过、整链未通；iOS PacketTunnelProvider：源码级修复、**未实机**）
+
+> ★标题此前写的是「两端均未实机」，与本节自己的正文（下面那条 2026-09-03 安卓真机复验）相反。改成分段口径：
+> 安卓那半**有**真机证据但只覆盖到「引擎起得来、`tun` 真建出、系统报 VPN CONNECTED」，
+> **不覆盖**「敲门取令牌 → 隧道承载真实业务」，所以仍然**不许**写成「移动端数据面可用」。
 
 
 **★2026-09-03 安卓真机：数据面建卡曾在 Android 上必然失败，当日已修并真机复验。**
@@ -1535,7 +1555,7 @@ wave7 删掉的是「无网关上报时回退 10 条演示会话」那条**种�
 |---|---|---|
 | 解密流量旁路镜像 | FR-AUDIT-16/17 | 依赖硬件化网关与专用镜像口，与白帝的进程形态不匹配。SIEM 深度审计的需求已由带 `seq`/`mac` 的审计外送承接——**那还多给了旁路镜像给不了的东西：SIEM 侧能独立验真** |
 | SNMP | NFR-OPS-03 / OBS-03 | 网关指标 + 业务告警 + syslog/SIEM 外送已覆盖可观测性主诉求。真有 NMS 生态需求，再评估只读暴露 `gateway_metrics`，而不是补一套 MIB |
-| 自定义 HTTPS 认证目录 | FR-USER-05 | 私有认证服务器**没有稳定 Subject**，绑定只能退回按用户名——那正是本项目在认证源实现里指认过的冒充漏洞（外部目录里新建一个同名 admin 即可冒充本地管理员，且审计看起来完全正常）。与已明拒的 RADIUS / 短信 / 证书同一条理由 |
+| 自定义 HTTPS 认证目录 | FR-USER-05 | 私有认证服务器**没有标准可依**（每家一套 HTTP 形状与错误语义），写得出代码但**无实机可验**，与企微/钉钉连接器同一条理由。★此前这里写的理由是「没有稳定 Subject → 只能按用户名绑 → 冒充本地管理员」，**该理由已在 RADIUS 接入时被证伪**（Subject 按源 id 隔离 + 外部账号恒 user / pass_hash 恒空 / 撞名加后缀 / 提权入口拒绝 / 提权后经外部源换会话被 `externalSessionCredential` 拒绝，见上文认证源段），不再作为拒绝依据；短信 / 证书两类仍明拒 |
 | 企微/钉钉/浙政钉/飞书目录连接器 | FR-USER-08 后半 | 依赖外部平台租户与实机验证，本项目环境**无法诚实交付**（写得出代码，但验不了，那就只是一份看起来能用的东西）。标准路径是这些平台的 OIDC 出口，行动 1 落地后已可达 |
 | LDAP 手机号字段映射 | FR-AUTH-08 子项 | 短信网关已明拒，手机号在系统内**没有任何消费方**，映射进来即孤儿数据——一个只会在导出里出现、谁也不敢删的字段 |
 | **终端日志远程收集**（记档延后，非否决） | FR-EP-17/18/19 | 需要新造**服务端→客户端的指令下发通道**（现架构客户端只拉不收），改造面大于收益；桌面端本地一键诊断报告（wave7 行动 10）落地后价值进一步降低。措辞与上面五条不同：这一条是**延后**，不是永久边界 |

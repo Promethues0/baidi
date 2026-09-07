@@ -1,39 +1,62 @@
 <template>
   <div class="bd-portal">
-    <PortalBar title="白帝 · 我的安全">
+    <PortalBar title="白帝 · 我的安全" :user="displayName">
       <button class="bd-pquit" @click="router.push('/portal/apps')">
         <icon-apps /><span>返回应用</span>
       </button>
-      <div class="bd-pacct">
-        <span class="bd-pacct__av">{{ avatarText }}</span>
-        <span class="bd-pacct__name">{{ displayName }}</span>
-      </div>
     </PortalBar>
 
     <main class="bd-pmain">
-      <div class="bd-pwrap">
+      <div class="bd-pwrap bd-pwrap--narrow">
         <div class="bd-phead">
           <div class="bd-phead__l">
             <h1 class="bd-phead__hi">二次认证</h1>
+            <!-- ★读取失败 / 尚未读到时画「—」，不画 0 / 未启用：那两个值只有接口回来才有依据。
+                 「passkey 0 个 · TOTP 未启用」在控制面 5xx 时与「用户确实没开二次认证」完全同形，
+                 已启用 TOTP 的人会被告知自己没开，进而去重新注册——而重新注册会让正在用的密钥作废。 -->
             <p class="bd-phead__sub">
-              passkey <b>{{ creds.length }}</b> 个
+              <template v-if="credsErr || !loaded">passkey <b>—</b></template>
+              <template v-else>passkey <b>{{ creds.length }}</b> 个</template>
               <span class="bd-dot">·</span>
-              TOTP <b>{{ totp.confirmed ? '已启用' : '未启用' }}</b>
+              TOTP <b>{{ totpErr || !totpLoaded ? '—' : (totp.confirmed ? '已启用' : '未启用') }}</b>
               <span class="bd-dot">·</span>
               <span class="bd-sub2">任一注册后，登录即强制二次认证</span>
             </p>
           </div>
-          <a-tag :color="enabled ? 'green' : 'orange'" bordered>
+          <!-- enabled 来自 /webauthn/credentials 同一份应答：读不到它就判不出服务端配没配 WebAuthn -->
+          <a-tag v-if="credsErr || !loaded" color="gray" bordered>
+            {{ credsErr ? 'WebAuthn 状态未读取' : 'WebAuthn 状态读取中' }}
+          </a-tag>
+          <a-tag v-else :color="enabled ? 'green' : 'orange'" bordered>
             {{ enabled ? 'WebAuthn 已启用' : 'WebAuthn 未配置' }}
           </a-tag>
         </div>
 
-        <!-- 未配置 RP 的说明（裸 IP 演示站会走到这里） -->
-        <div v-if="!enabled && !loading" class="bd-warnbox">
-          <icon-exclamation-circle-fill class="bd-warnbox__ic" />
-          <div>
+        <!-- 读取失败：转述后端原话，并说清两个注册入口为什么停用。
+             ★这条与下面两段 tone=danger 的空态是同一件事的两处呈现：这里给原因与重试，
+             段内的空态负责把「未读取」与「没有注册 / 未启用」在版式上分开。 -->
+        <div v-if="credsErr || totpErr" class="bd-notice bd-notice--danger" role="alert">
+          <icon-exclamation-circle-fill />
+          <div class="bd-notice__body">
+            <b>二次认证状态未读取</b>
+            <p class="bd-warnbox__p">
+              <template v-if="credsErr">passkey 列表：{{ credsErr }}<br v-if="totpErr" /></template>
+              <template v-if="totpErr">TOTP 状态：{{ totpErr }}</template>
+              <br />下方显示的不是「没有注册 / 未启用」。
+              重试成功之前「添加 passkey」与「启用 TOTP」已置灰：读不到当前状态时重新注册 TOTP，会让正在用的密钥立刻作废。
+            </p>
+          </div>
+          <div class="bd-notice__right">
+            <button class="bd-btn bd-btn--sm" :disabled="loading" @click="retry">重试</button>
+          </div>
+        </div>
+
+        <!-- 未配置 RP 的说明（裸 IP 演示站会走到这里）。★读取失败时不画：enabled=false 那会儿只是没读到，不是「服务端未启用」 -->
+        <div v-if="loaded && !credsErr && !enabled" class="bd-notice bd-notice--warn">
+          <icon-exclamation-circle-fill />
+          <div class="bd-notice__body">
             <b>服务端未启用 WebAuthn</b>
-            <p>
+            <p class="bd-warnbox__p">
               passkey 需要服务端配置 <code>BAIDI_WEBAUTHN_RPID</code> /
               <code>BAIDI_WEBAUTHN_ORIGIN</code>，且 RP ID 必须是<b>可注册域名或 localhost</b>——
               浏览器规范不允许用裸 IP 作 RP ID。本站可改用下方的 <b>TOTP 动态口令</b>：
@@ -42,27 +65,37 @@
           </div>
         </div>
 
-        <a-spin :loading="loading" style="display:block">
-          <div class="bd-sec">
-            <div class="bd-sec__t">
+        <!-- 两段各自分四态：骨架（接口没回来）/ 未读取（回了但失败）/ 确实没有 / 有。
+             ★骨架与未读取按段分开而不共用一个标志：两个接口独立，/totp 慢半拍时 passkey 段不该陪着等，
+             /totp 失败时 passkey 段也不该陪着红。「还没有注册」只在自己那段的接口成功回来后才画——那之前是一句没有依据的话。 -->
+        <a-spin :loading="loading && loaded" class="bd-pspin">  <!-- 首屏由骨架承担，转圈只给之后的重载 / 重试 -->
+          <div class="bd-psec">
+            <div class="bd-psec__t">
               <icon-safe />我的 passkey
-              <div style="flex:1" />
-              <button class="bd-addbtn" :disabled="!enabled || registering" @click="register">
+              <div class="bd-psec__spacer" />
+              <button class="bd-btn" :disabled="!loaded || !!credsErr || !enabled || registering"
+                :title="credsErr ? 'passkey 列表未读取，重试成功前不可添加' : undefined" @click="register">
                 <icon-plus />{{ registering ? '请完成设备验证…' : '添加 passkey' }}
               </button>
             </div>
 
-            <div v-if="!creds.length && !loading" class="bd-empty">
-              <icon-fingerprint class="bd-empty__ic" />
-              <div class="bd-empty__t">还没有注册 passkey</div>
-              <div class="bd-empty__s">
-                注册后，登录将使用 Touch ID / Windows Hello / 安全密钥完成抗钓鱼二次认证
-              </div>
+            <div v-if="!loaded" class="bd-card"><SkeletonBlock kind="card" :rows="2" /></div>
+
+            <div v-else-if="credsErr" class="bd-card">
+              <EmptyState size="md" tone="danger" title="passkey 列表未读取"
+                :desc="`${credsErr}——这里显示的不是「没有注册」`" />
+            </div>
+
+            <div v-else-if="!creds.length && !loading" class="bd-card">
+              <EmptyState size="md" title="还没有注册 passkey"
+                desc="注册后，登录将使用 Touch ID / Windows Hello / 安全密钥完成抗钓鱼二次认证">
+                <template #icon><icon-idcard /></template>
+              </EmptyState>
             </div>
 
             <div v-else class="bd-clist">
-              <div v-for="c in creds" :key="c.id" class="bd-ccard">
-                <span class="bd-ccard__ic"><icon-fingerprint /></span>
+              <div v-for="c in creds" :key="c.id" class="bd-card bd-ccard">
+                <span class="bd-ccard__ic"><icon-idcard /></span>
                 <div class="bd-ccard__m">
                   <div class="bd-ccard__name">{{ c.name || 'passkey' }}</div>
                   <div class="bd-ccard__meta bd-mono">
@@ -70,8 +103,9 @@
                     <template v-if="c.lastUsedAt"> · 最近使用 {{ c.lastUsedAt }}</template>
                   </div>
                 </div>
-                <span class="bd-ccard__tag">{{ transportLabel(c.transports) }}</span>
-                <button class="bd-del" :disabled="creds.length <= 1" :title="creds.length <= 1 ? '不能删除最后一个 passkey' : '删除'" @click="remove(c)">
+                <span class="bd-tg bd-tg--purple">{{ transportLabel(c.transports) }}</span>
+                <button class="bd-del" :disabled="creds.length <= 1" :title="creds.length <= 1 ? '不能删除最后一个 passkey' : '删除'"
+                  :aria-label="`删除 passkey「${c.name || 'passkey'}」`" @click="remove(c)">
                   <icon-delete />
                 </button>
               </div>
@@ -79,28 +113,21 @@
           </div>
 
           <!-- TOTP 动态口令（RFC 6238）：与 passkey 并列的第二种真二因子 -->
-          <div class="bd-sec">
-            <div class="bd-sec__t">
+          <div class="bd-psec">
+            <div class="bd-psec__t">
               <icon-mobile />TOTP 动态口令
-              <a-tag v-if="totp.confirmed" color="green" size="small" bordered>已启用</a-tag>
-              <div style="flex:1" />
-              <button v-if="!totp.confirmed && !setup" class="bd-addbtn" @click="startTotp">
+              <span v-if="totpLoaded && !totpErr && totp.confirmed" class="bd-tg bd-tg--green">已启用</span>
+              <div class="bd-psec__spacer" />
+              <!-- ★读不到状态时置灰而不是照常亮着：/totp/enroll 对已确认账号是 ON CONFLICT 覆盖 + confirmed=0，
+                   一个已启用 TOTP 的用户在这里点一下「启用」，正在用的认证器当场作废，而页面此前全程零报错 -->
+              <button v-if="!totp.confirmed && !setup" class="bd-btn" :disabled="!totpLoaded || !!totpErr"
+                :title="totpErr ? 'TOTP 状态未读取，重试成功前不可注册' : undefined" @click="startTotp">
                 <icon-plus />{{ totp.enrolled ? '重新注册' : '启用 TOTP' }}
               </button>
             </div>
 
-            <!-- 空态 / 半截注册 -->
-            <div v-if="!totp.confirmed && !setup" class="bd-empty">
-              <icon-mobile class="bd-empty__ic" />
-              <div class="bd-empty__t">{{ totp.enrolled ? '上次注册未完成确认' : '还没有启用 TOTP' }}</div>
-              <div class="bd-empty__s">
-                RFC 6238 标准动态验证码，Google / 微软 Authenticator、1Password 等通用；
-                不依赖域名，IP 部署也可用。启用后登录将强制要求 6 位动态验证码。
-              </div>
-            </div>
-
-            <!-- 注册面板：扫码或手输密钥 → 验证码确认（密钥只显示这一次） -->
-            <div v-else-if="setup" class="bd-tsetup">
+            <!-- 注册面板排第一：密钥只回显这一次，enroll 之后那次 loadTotp 若失败也不能把面板顶掉 -->
+            <div v-if="setup" class="bd-card bd-tsetup">
               <div class="bd-tsetup__qr"><img v-if="qrData" :src="qrData" alt="TOTP 注册二维码" /></div>
               <div class="bd-tsetup__m">
                 <div class="bd-tsetup__step"><b>1.</b> 用认证器 App 扫码，或手动输入密钥：</div>
@@ -108,19 +135,34 @@
                 <div class="bd-tsetup__step"><b>2.</b> 输入 App 显示的 6 位验证码完成确认（确认前不生效）：</div>
                 <div class="bd-tsetup__row">
                   <input v-model="confirmCode" class="bd-tinput bd-mono" maxlength="6" inputmode="numeric"
-                    placeholder="000000" @keyup.enter="confirmTotp" />
-                  <button class="bd-addbtn" :disabled="confirming" @click="confirmTotp">
+                    placeholder="000000" aria-label="6 位动态验证码" @keyup.enter="confirmTotp" />
+                  <button class="bd-btn" :disabled="confirming" @click="confirmTotp">
                     {{ confirming ? '校验中…' : '确认启用' }}
                   </button>
-                  <button class="bd-cancelbtn" @click="cancelSetup">取消</button>
+                  <button class="bd-btn bd-btn--ghost" @click="cancelSetup">取消</button>
                 </div>
                 <div class="bd-tsetup__note">密钥只显示这一次；未完成确认可重新注册（旧密钥即作废）。</div>
               </div>
             </div>
 
+            <div v-else-if="!totpLoaded" class="bd-card"><SkeletonBlock kind="card" :rows="2" /></div>
+
+            <div v-else-if="totpErr" class="bd-card">
+              <EmptyState size="md" tone="danger" title="TOTP 状态未读取"
+                :desc="`${totpErr}——这里显示的不是「未启用」`" />
+            </div>
+
+            <!-- 空态 / 半截注册 -->
+            <div v-else-if="!totp.confirmed" class="bd-card">
+              <EmptyState size="md" :title="totp.enrolled ? '上次注册未完成确认' : '还没有启用 TOTP'"
+                desc="RFC 6238 标准动态验证码，Google / 微软 Authenticator、1Password 等通用；不依赖域名，IP 部署也可用。启用后登录将强制要求 6 位动态验证码。">
+                <template #icon><icon-mobile /></template>
+              </EmptyState>
+            </div>
+
             <!-- 已启用：解绑需出示当前验证码（拿到会话 ≠ 拿到认证器） -->
             <div v-else class="bd-clist">
-              <div class="bd-ccard">
+              <div class="bd-card bd-ccard">
                 <span class="bd-ccard__ic"><icon-mobile /></span>
                 <div class="bd-ccard__m">
                   <div class="bd-ccard__name">TOTP 动态口令</div>
@@ -129,13 +171,13 @@
                   </div>
                 </div>
                 <template v-if="!disarming">
-                  <button class="bd-del" title="解绑" @click="disarming = true"><icon-delete /></button>
+                  <button class="bd-del" title="解绑" aria-label="解绑 TOTP" @click="disarming = true"><icon-delete /></button>
                 </template>
                 <template v-else>
                   <input v-model="disableCode" class="bd-tinput bd-mono" maxlength="6" inputmode="numeric"
-                    placeholder="当前验证码" @keyup.enter="disableTotp" />
-                  <button class="bd-addbtn" @click="disableTotp">确认解绑</button>
-                  <button class="bd-cancelbtn" @click="disarming = false; disableCode = ''">取消</button>
+                    placeholder="当前验证码" aria-label="当前验证码" @keyup.enter="disableTotp" />
+                  <button class="bd-btn" @click="disableTotp">确认解绑</button>
+                  <button class="bd-btn bd-btn--ghost" @click="disarming = false; disableCode = ''">取消</button>
                 </template>
               </div>
             </div>
@@ -147,13 +189,15 @@
 </template>
 
 <script setup lang="ts">
-import { ref, computed, onMounted } from 'vue';
+import { ref, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import QRCode from 'qrcode';
 import { api, type WebauthnCredentialsResp, type WebauthnCredential, type TotpStatus, type TotpEnrollResp, failReason, failStatus } from '@/lib/api';
 import { createCredential, webauthnErrMsg, webauthnSupported } from '@/lib/webauthn';
 import PortalBar from '@/components/PortalBar.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const router = useRouter();
 const loading = ref(false);
@@ -161,8 +205,15 @@ const registering = ref(false);
 const enabled = ref(false);
 const displayName = ref('');
 const creds = ref<WebauthnCredential[]>([]);
-
-const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
+/** 首屏是否已完成第一次 load()：只决定 passkey 段的骨架何时让位（成功 / 失败都算完成），不改任何数据流。 */
+const loaded = ref(false);
+/**
+ * /webauthn/credentials 最近一次读取失败的后端原话；空 = 上次读取成功。
+ * ★失败时 creds / enabled 会被清成 [] / false，但模板每一处都先看这个字段——那两个零值在失败态
+ *   不是「没有注册 / 服务端未启用」，是「不知道」。此前 catch 里直接塌成零值且不留痕，控制面 5xx 与
+ *   用户确实没开二次认证在这页上完全同形（复现：截图 repro-portal-security/portal-security-fail503）。
+ */
+const credsErr = ref('');
 
 function transportLabel(raw: string): string {
   try {
@@ -182,12 +233,15 @@ async function load() {
     const resp = await api<WebauthnCredentialsResp>('/webauthn/credentials');
     creds.value = resp.credentials ?? [];
     enabled.value = !!resp.enabled;
-  } catch {
-    // 降级：无后端时页面完整可点，不白屏
+    credsErr.value = '';
+  } catch (e) {
+    // 读不到就说读不到（转述后端原话），不把上一次的好值留在页面上，也不断言「没有注册」。
     creds.value = [];
     enabled.value = false;
+    credsErr.value = failReason(e);
   } finally {
     loading.value = false;
+    loaded.value = true;
   }
 }
 
@@ -236,13 +290,28 @@ const confirmCode = ref('');
 const confirming = ref(false);
 const disarming = ref(false);
 const disableCode = ref('');
+/** /totp 第一次回来（成功或失败）之前 TOTP 段画骨架——与 loaded 分开：两个接口独立，一个慢不该让另一个陪等。 */
+const totpLoaded = ref(false);
+/** /totp 最近一次读取失败的后端原话；空 = 上次读取成功。语义同 credsErr：失败态的 {enrolled:false,confirmed:false} 是「不知道」。 */
+const totpErr = ref('');
 
 async function loadTotp() {
   try {
     totp.value = await api<TotpStatus>('/totp');
-  } catch {
+    totpErr.value = '';
+  } catch (e) {
+    // ★不能塌成「未启用」：模板据此亮出「启用 TOTP」，而 enroll 对已确认账号是覆盖式的（旧密钥立刻作废）。
     totp.value = { enrolled: false, confirmed: false };
+    totpErr.value = failReason(e);
+  } finally {
+    totpLoaded.value = true;
   }
+}
+
+/** 重试两个读取（都是幂等 GET）；成功后 credsErr / totpErr 清空，两个注册入口随之恢复。 */
+function retry() {
+  load();
+  loadTotp();
 }
 
 async function startTotp() {
@@ -329,117 +398,55 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.bd-portal { min-height: 100vh; background: var(--bd-fill-1); display: flex; flex-direction: column; }
-.bd-pacct { display: flex; align-items: center; gap: 9px; }
-.bd-pacct__av {
-  width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 13px; font-weight: 600;
-  background: linear-gradient(135deg, var(--bd-purple), var(--bd-primary));
-  display: flex; align-items: center; justify-content: center;
-}
-.bd-pacct__name { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
-.bd-pquit {
-  display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
-  border: 1px solid var(--bd-border); background: #fff; border-radius: 7px; cursor: pointer;
-  font-size: 13px; color: var(--bd-t2); transition: all .15s;
-}
-.bd-pquit:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
-
-.bd-pmain { flex: 1; padding: 40px 24px 64px; }
-.bd-pwrap { max-width: 900px; margin: 0 auto; }
-.bd-phead { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; margin-bottom: 24px; flex-wrap: wrap; }
-.bd-phead__hi { margin: 0; font-size: 26px; font-weight: 700; color: var(--bd-t1); letter-spacing: .3px; }
-.bd-phead__sub { margin: 8px 0 0; font-size: 14px; color: var(--bd-t3); }
-.bd-phead__sub b { color: var(--bd-primary); font-weight: 700; font-size: 15px; }
-.bd-phead__sub .bd-dot { margin: 0 8px; color: var(--bd-t4); }
-.bd-sub2 { font-size: 13px; }
-
-/* 未配置提示 */
-.bd-warnbox {
-  display: flex; gap: 12px; padding: 16px 18px; margin-bottom: 24px;
-  background: var(--bd-tag-gold-bg); border-radius: var(--bd-radius);
-  font-size: 13px; line-height: 1.7; color: var(--bd-t2);
-}
-.bd-warnbox__ic { color: var(--bd-warning); font-size: 20px; flex: none; margin-top: 2px; }
-.bd-warnbox b { color: var(--bd-t1); }
-.bd-warnbox p { margin: 6px 0 0; }
-.bd-warnbox code {
-  background: rgba(0, 0, 0, .05); padding: 1px 5px; border-radius: 4px;
-  font-family: ui-monospace, monospace; font-size: 12px;
-}
-
-.bd-sec { margin-bottom: 30px; }
-.bd-sec__t { display: flex; align-items: center; gap: 8px; font-size: 15px; font-weight: 600; color: var(--bd-t1); margin-bottom: 14px; }
-.bd-addbtn {
-  display: inline-flex; align-items: center; gap: 6px; height: 34px; padding: 0 14px;
-  border: none; border-radius: 8px; background: var(--bd-primary); color: #fff;
-  font-size: 13px; font-weight: 500; cursor: pointer; transition: background .15s;
-  box-shadow: 0 2px 6px rgba(22, 93, 255, .25);
-}
-.bd-addbtn:hover:not(:disabled) { background: var(--bd-primary-h); }
-.bd-addbtn:disabled { background: var(--bd-fill-3); color: var(--bd-t4); cursor: not-allowed; box-shadow: none; }
+/* 本页独有：凭据卡 / TOTP 注册面板 / 验证码输入。门户壳在 PortalBar.vue；按钮 / 标签 / 提示条 / 空态 / 骨架是全局或共享件。 */
+.bd-pspin { display: block; }
+.bd-sub2 { font-size: var(--bd-fs-md); }
+.bd-warnbox__p { margin: 6px 0 0; }
 
 /* 凭据卡片 */
-.bd-clist { display: flex; flex-direction: column; gap: 12px; }
-.bd-ccard {
-  display: flex; align-items: center; gap: 14px;
-  background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
-  padding: 16px 18px;
-}
+.bd-clist { display: flex; flex-direction: column; gap: var(--bd-sp-3); }
+.bd-ccard { display: flex; align-items: center; gap: var(--bd-sp-4); padding: var(--bd-sp-4) var(--bd-sp-5); flex-wrap: wrap; }
 .bd-ccard__ic {
-  width: 42px; height: 42px; border-radius: 11px; flex: none;
+  width: 42px; height: 42px; border-radius: var(--bd-radius); flex: none;
   background: var(--bd-tag-blue-bg); color: var(--bd-primary);
   display: flex; align-items: center; justify-content: center; font-size: 21px;
 }
 .bd-ccard__m { flex: 1; min-width: 0; }
-.bd-ccard__name { font-size: 14.5px; font-weight: 600; color: var(--bd-t1); }
-.bd-ccard__meta { font-size: 12px; color: var(--bd-t3); margin-top: 4px; }
-.bd-ccard__tag {
-  font-size: 11.5px; font-weight: 500; color: var(--bd-purple);
-  background: var(--bd-tag-purple-bg); padding: 4px 10px; border-radius: 6px; white-space: nowrap;
-}
+.bd-ccard__name { font-size: var(--bd-fs-base); font-weight: 600; color: var(--bd-t1); }
+.bd-ccard__meta { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: var(--bd-sp-1); }
+
 /* TOTP 注册面板 */
-.bd-tsetup {
-  display: flex; gap: 22px; align-items: flex-start;
-  background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
-  padding: 20px 22px;
-}
+.bd-tsetup { display: flex; gap: var(--bd-sp-6); align-items: flex-start; padding: var(--bd-sp-5); flex-wrap: wrap; }
 .bd-tsetup__qr {
-  width: 168px; height: 168px; flex: none; border: 1px solid var(--bd-border); border-radius: 10px;
-  display: flex; align-items: center; justify-content: center; overflow: hidden; background: #fff;
+  width: 168px; height: 168px; flex: none; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
+  display: flex; align-items: center; justify-content: center; overflow: hidden; background: var(--bd-bg-1);
 }
 .bd-tsetup__qr img { width: 100%; height: 100%; display: block; }
-.bd-tsetup__m { flex: 1; min-width: 0; }
-.bd-tsetup__step { font-size: 13px; color: var(--bd-t2); margin-bottom: 8px; line-height: 1.6; }
+.bd-tsetup__m { flex: 1; min-width: 240px; }
+.bd-tsetup__step { font-size: var(--bd-fs-md); color: var(--bd-t2); margin-bottom: var(--bd-sp-2); line-height: var(--bd-lh); }
 .bd-tsetup__step b { color: var(--bd-primary); }
 .bd-tsetup__sec {
   display: block; background: var(--bd-fill-1); border: 1px dashed var(--bd-border);
-  border-radius: 8px; padding: 8px 12px; margin-bottom: 14px;
-  font-size: 13px; letter-spacing: 1px; word-break: break-all; color: var(--bd-t1);
+  border-radius: var(--bd-radius-s); padding: var(--bd-sp-2) var(--bd-sp-3); margin-bottom: var(--bd-sp-4);
+  font-size: var(--bd-fs-md); letter-spacing: 1px; word-break: break-all; color: var(--bd-t1);
 }
-.bd-tsetup__row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
-.bd-tsetup__note { font-size: 12px; color: var(--bd-t3); margin-top: 10px; }
+.bd-tsetup__row { display: flex; gap: var(--bd-sp-2); align-items: center; flex-wrap: wrap; }
+.bd-tsetup__note { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 10px; }
+/* 6 位验证码输入：等宽、字距拉开 */
 .bd-tinput {
-  width: 130px; height: 34px; padding: 0 12px; border: 1px solid var(--bd-border);
-  border-radius: 8px; font-size: 15px; letter-spacing: 3px; outline: none; color: var(--bd-t1);
+  width: 130px; height: var(--bd-ctl-h-l); padding: 0 var(--bd-sp-3); border: 1px solid var(--bd-border);
+  border-radius: var(--bd-radius-s); font-size: 15px; letter-spacing: 3px; outline: none; color: var(--bd-t1); background: var(--bd-bg-1);
+  transition: border-color var(--bd-dur-fast) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease);
 }
-.bd-tinput:focus { border-color: var(--bd-primary); }
-.bd-cancelbtn {
-  height: 34px; padding: 0 14px; border: 1px solid var(--bd-border); background: #fff;
-  border-radius: 8px; font-size: 13px; color: var(--bd-t2); cursor: pointer; transition: all .15s;
-}
-.bd-cancelbtn:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
+.bd-tinput:focus { border-color: var(--bd-primary); box-shadow: var(--bd-focus-ring); }
 
+/* 图标按钮：删除 / 解绑 */
 .bd-del {
-  width: 32px; height: 32px; flex: none; border: 1px solid var(--bd-border); background: #fff;
-  border-radius: 7px; color: var(--bd-t3); cursor: pointer; transition: all .15s;
+  width: var(--bd-ctl-h); height: var(--bd-ctl-h); flex: none; border: 1px solid var(--bd-border); background: var(--bd-bg-1);
+  border-radius: var(--bd-radius-s); color: var(--bd-t3); cursor: pointer;
+  transition: border-color var(--bd-dur-fast) var(--bd-ease), color var(--bd-dur-fast) var(--bd-ease);
   display: flex; align-items: center; justify-content: center;
 }
 .bd-del:hover:not(:disabled) { border-color: var(--bd-danger); color: var(--bd-danger); }
 .bd-del:disabled { color: var(--bd-t4); cursor: not-allowed; opacity: .5; }
-
-.bd-empty { text-align: center; padding: 56px 20px; background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius); }
-.bd-empty__ic { font-size: 48px; color: var(--bd-t4); }
-.bd-empty__t { margin-top: 14px; font-size: 15px; font-weight: 600; color: var(--bd-t2); }
-.bd-empty__s { margin-top: 6px; font-size: 13px; color: var(--bd-t3); }
-.bd-mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 </style>

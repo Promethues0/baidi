@@ -20,7 +20,12 @@
       <h1 class="scr-title"><span>零信任安全态势感知中心</span></h1>
       <div class="scr-top__r">
         <div class="scr-clock"><b>{{ clock }}</b><i>{{ today }}</i></div>
-        <span class="scr-live" :class="{ off: !live }" :title="degradedNote"><span class="scr-live__dot" />{{ live ? '实时' : '降级' }}</span>
+        <!-- 连接态三态：live == null（首屏三路都还没回来）→ **不画徽标**。此前初值是 false，
+             于是大屏一挂载就打出橙色「降级」——挂在墙上的屏，那一瞬会被当成"出事了"，
+             而那时三个请求还在飞。判不出来就什么都不说，方向与 PageHeader 一致。
+             data-tone 给 CDP 探针断言用（核不到 class 里的 off）。 -->
+        <span v-if="live != null" class="scr-live" :class="{ off: !live }" :data-tone="live ? 'live' : 'degraded'"
+          :title="degradedNote"><span class="scr-live__dot" />{{ live ? '实时' : '降级' }}</span>
         <button class="scr-act" title="全屏" @click="toggleFs"><icon-fullscreen /></button>
         <button class="scr-act" title="返回控制台" @click="back"><icon-export /></button>
       </div>
@@ -200,7 +205,7 @@
 <script setup lang="ts">
 import { ref, computed, onMounted, onBeforeUnmount, watch } from 'vue';
 import { useRouter } from 'vue-router';
-import { api, type Overview, type OnlineResp, type OnlineSession, type AuditBundle, type AuditEntry } from '@/lib/api';
+import { api, type Overview, type OnlineResp, type OnlineSession, type AuditBundle, type AuditEntry, failReason } from '@/lib/api';
 import { FIRST_PATH } from '@/nav';
 
 const router = useRouter();
@@ -242,9 +247,17 @@ const MOCK_AUDIT: AuditEntry[] = [
 const ov = ref<Overview>(MOCK_OV);
 const sessions = ref<OnlineSession[]>(MOCK_SESS);
 const audit = ref<AuditEntry[]>(MOCK_AUDIT);
-const live = ref(false);
+/**
+ * 连接态**三态**：undefined = 三路都还没回来（判不出来）/ true 三路全成 / false 缺至少一路。
+ *
+ * ★初值必须是 undefined 而不是 false：false 的含义是「探过了，有路没通」。大屏是挂在墙上
+ *   的，首屏那一瞬打出的橙色「降级」会被读成一次真实故障。`load()` 的两条落定路径
+ *   （全挂 / 部分或全通）逐条赋值——**漏一条会让徽标永远不画**。
+ */
+const live = ref<boolean | undefined>(undefined);
 /** 降级原因：**点名缺了哪一路**。只写「降级」的话，看屏的人无从判断空面板是
- *  "真的没事" 还是 "这一路没读到"，而这两件事在大屏上的处置完全相反。 */
+ *  "真的没事" 还是 "这一路没读到"，而这两件事在大屏上的处置完全相反。
+ *  它天生是三态友好的：初值 '' → 首屏不画那条横幅，不需要跟着改。 */
 const degradedNote = ref('');
 /** 聚合窗口的人话（后端 Overview.windowHours；缺席按默认 24 小时说）。 */
 const windowLabel = computed(() => {
@@ -387,17 +400,37 @@ const regionMax = computed(() => Math.max(...topRegions.value.map((r) => r.count
  * 比整屏假更难识别；三路全挂才保留整屏演示态（那时没有真数据可混淆）。`live` 要求三路
  * 全成，缺哪一路在徽标上点名。/audit 归 PermAudit，安全/系统管理员打开这页拿到的是 403。
  */
+/** 三路的显示名，下标与 load() 里的 errs 一一对应（顺序即取数顺序，别单独调整其中一个）。 */
+const ROUTES = ['态势总览', '在线会话', '安全事件（需审计权限）'];
+
 async function load() {
+  /**
+   * 逐路的**后端原话**。
+   *
+   * ★按**下标**写而不是 push：三个请求是并发的，谁先失败谁先 push，
+   *   数组顺序与 ROUTES 对不上时，横幅会把「在线会话」的失败原因挂到「态势总览」名下。
+   * ★改造前这三处是 `.catch(() => null)`：后端那句话被整句丢掉，全挂时横幅写死
+   *   「控制面不可达」——而 503 维护中、502、403 无权都会得到同一句**编造的归因**。
+   *   （check-dead-ui 规则 3a 只认 `} catch {` 与 `catch (e) {` 两种形状，
+   *    箭头函数形态它扫不到，所以这一族在别处还会再长出来——已写进 leftForLead。）
+   */
+  const errs: string[] = [];
   const [o, on, au] = await Promise.all([
-    api<Overview>('/overview').catch(() => null),
-    api<OnlineResp>('/online').catch(() => null),
-    api<AuditBundle>('/audit').catch(() => null)
+    api<Overview>('/overview').catch((e) => { errs[0] = failReason(e); return null; }),
+    api<OnlineResp>('/online').catch((e) => { errs[1] = failReason(e); return null; }),
+    api<AuditBundle>('/audit').catch((e) => { errs[2] = failReason(e); return null; })
   ]);
   const anyReal = !!(o || on || au);
   if (!anyReal) {
     // 一路都没通：保持整屏演示常量（离线演示），徽标写「降级」。
+    // 三路原话通常是同一句（控制面整个停了），去重后只写一次；不同才逐路点名，
+    // 否则墙上那条横幅会变成一段没人读得完的话。
     live.value = false;
-    degradedNote.value = '控制面不可达，整屏为离线演示数据';
+    const uniq = [...new Set(errs.filter(Boolean))];
+    const detail = uniq.length === 1
+      ? uniq[0]
+      : ROUTES.map((n, i) => `${n}：${errs[i] || '未知错误'}`).join('；');
+    degradedNote.value = `三路读取全部失败（后端原话：${detail}）——整屏为离线演示数据，不是"没有事件"`;
     return;
   }
   if (o) ov.value = o;
@@ -405,7 +438,9 @@ async function load() {
   // 失败的那一路清空而不是留演示值——真假同屏比整屏假更难识别。
   sessions.value = on ? (on.sessions?.filter((s) => s.status === 'online') ?? []) : [];
   audit.value = au ? (au.logs ?? []) : [];
-  const missing = [!o && '态势总览', !on && '在线会话', !au && '安全事件（需审计权限）'].filter(Boolean);
+  // 缺哪一路 ⟺ 那一路的 errs 有值（只有 catch 会让它变 null），原话跟着路名一起报：
+  // 「安全事件没读到」与「安全事件没读到，因为当前角色缺 audit 权」的下一步动作完全不同。
+  const missing = ROUTES.map((n, i) => (errs[i] ? `${n}（${errs[i]}）` : '')).filter(Boolean);
   live.value = missing.length === 0;
   degradedNote.value = missing.length ? `未读取：${missing.join('、')}——相关面板为空，不是"没有事件"` : '';
 }
@@ -430,7 +465,9 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 </script>
 
 <style scoped>
-/* 暗色 NOC 主题（局部，不影响控制台暖色系） */
+/* 暗色 NOC 主题（局部）。颜色刻意用本页 --c-* 变量而不接 --bd-*：设计 token 是浅色控制台的调色板，
+   直接套进深色墙屏会把语义色（success/danger）压到与霓虹青撞色。这里只让字号 / 圆角 / 间距 / 动效四组
+   尺度 token 与控制台同源，配色保持大屏自己的深色体系。 */
 .scr {
   --c-bg0: #050a1c; --c-bg1: #0a1838; --c-cyan: #2fe6ff; --c-blue: #4080ff;
   --c-line: rgba(96, 150, 255, .16); --c-panel: rgba(20, 44, 96, .34);
@@ -474,7 +511,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 }
 .scr-top__l { display: flex; align-items: center; gap: 11px; width: 320px; }
 .scr-mark {
-  width: 34px; height: 34px; border-radius: 8px; flex: none; display: flex; align-items: center; justify-content: center;
+  width: 34px; height: 34px; border-radius: var(--bd-radius-s); flex: none; display: flex; align-items: center; justify-content: center;
   background: rgba(47, 230, 255, .12); border: 1px solid rgba(47, 230, 255, .35);
   box-shadow: 0 0 16px rgba(47, 230, 255, .25);
 }
@@ -496,11 +533,14 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .scr-clock { text-align: right; line-height: 1.15; }
 .scr-clock b { font-size: 20px; font-weight: 700; letter-spacing: 1px; }
 .scr-clock i { display: block; font-style: normal; font-size: 11px; color: var(--c-t3); }
+/* 带上后端原话之后这条横幅会换行：改 flex-start 对齐并给图标 flex:none，
+   否则长文案会把那枚感叹号挤扁成一条线（大屏上尤其明显）。 */
 .scr-degrade {
-  margin: 0 22px 10px; padding: 9px 16px; border-radius: 8px;
+  margin: 0 22px 10px; padding: 9px 16px; border-radius: var(--bd-radius-s);
   background: rgba(255, 169, 64, .12); border: 1px solid rgba(255, 169, 64, .35);
-  color: #ffc069; font-size: 13px; display: flex; align-items: center; gap: 9px;
+  color: #ffc069; font-size: 13px; display: flex; align-items: flex-start; gap: 9px; line-height: var(--bd-lh);
 }
+.scr-degrade > svg { flex: none; margin-top: 2px; }
 .scr-live {
   display: inline-flex; align-items: center; gap: 6px; font-size: 12px; color: #36e29b; font-weight: 600;
   padding: 4px 10px; border-radius: 20px; border: 1px solid rgba(54, 226, 155, .4); background: rgba(54, 226, 155, .08);
@@ -509,18 +549,20 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .scr-live__dot { width: 7px; height: 7px; border-radius: 50%; background: currentColor; box-shadow: 0 0 0 0 currentColor; animation: pulse 1.6s infinite; }
 @keyframes pulse { 0% { box-shadow: 0 0 0 0 rgba(54, 226, 155, .5); } 70% { box-shadow: 0 0 0 7px rgba(54, 226, 155, 0); } 100% { box-shadow: 0 0 0 0 rgba(54, 226, 155, 0); } }
 .scr-act {
-  width: 34px; height: 34px; border-radius: 8px; border: 1px solid var(--c-line); background: var(--c-panel);
-  color: var(--c-t2); cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center; transition: .15s;
+  width: 34px; height: 34px; border-radius: var(--bd-radius-s); border: 1px solid var(--c-line); background: var(--c-panel);
+  color: var(--c-t2); cursor: pointer; font-size: 16px; display: flex; align-items: center; justify-content: center;
+  transition: color var(--bd-dur-fast) var(--bd-ease), border-color var(--bd-dur-fast) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease);
 }
 .scr-act:hover { color: var(--c-cyan); border-color: rgba(47, 230, 255, .5); box-shadow: 0 0 12px rgba(47, 230, 255, .3); }
+.scr-act:focus-visible { outline: 2px solid var(--c-cyan); outline-offset: 2px; }
 
 /* 三列栅格 */
-.scr-grid { flex: 1; display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: 16px; padding: 16px 20px 20px; min-height: 0; }
-.scr-col { display: flex; flex-direction: column; gap: 16px; min-height: 0; }
+.scr-grid { flex: 1; display: grid; grid-template-columns: 1fr 1.5fr 1fr; gap: var(--bd-sp-4); padding: var(--bd-sp-4) var(--bd-sp-5) var(--bd-sp-5); min-height: 0; }
+.scr-col { display: flex; flex-direction: column; gap: var(--bd-sp-4); min-height: 0; }
 
 /* 面板 */
 .panel {
-  background: var(--c-panel); border: 1px solid var(--c-line); border-radius: 12px; padding: 14px 16px;
+  background: var(--c-panel); border: 1px solid var(--c-line); border-radius: var(--bd-radius-l); padding: 14px 16px;
   display: flex; flex-direction: column; min-height: 0; position: relative; overflow: hidden;
   box-shadow: inset 0 1px 0 rgba(255, 255, 255, .04), 0 8px 30px rgba(0, 0, 0, .25);
   backdrop-filter: blur(2px);
@@ -548,7 +590,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .kpis { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
 .kpi {
   background: linear-gradient(160deg, rgba(47, 230, 255, .08), rgba(64, 128, 255, .03)); border: 1px solid var(--c-line);
-  border-radius: 10px; padding: 12px 14px; transition: .2s;
+  border-radius: var(--bd-radius); padding: 12px 14px; transition: border-color var(--bd-dur-base) var(--bd-ease), box-shadow var(--bd-dur-base) var(--bd-ease);
 }
 .kpi:hover { border-color: rgba(47, 230, 255, .4); box-shadow: 0 0 18px rgba(47, 230, 255, .12); }
 .kpi__v { font-size: 30px; font-weight: 800; line-height: 1.1; color: #fff; text-shadow: 0 0 16px rgba(47, 230, 255, .4); }
@@ -567,7 +609,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .donut__c b { display: block; font-size: 24px; font-weight: 800; color: #fff; }
 .donut__c i { font-style: normal; font-size: 11px; color: var(--c-t3); }
 .donut__legend { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 7px; }
-.donut__legend li { display: flex; align-items: center; gap: 7px; font-size: 12.5px; }
+.donut__legend li { display: flex; align-items: center; gap: 7px; font-size: var(--bd-fs-sm); }
 .dot { width: 8px; height: 8px; border-radius: 2px; flex: none; }
 .lg-n { color: var(--c-t2); width: 56px; }
 .lg-v { color: var(--c-t1); font-weight: 600; margin-left: auto; }
@@ -576,10 +618,10 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 /* 条形 */
 .bars { display: flex; flex-direction: column; gap: 12px; justify-content: center; flex: 1; }
 .bar { display: flex; align-items: center; gap: 10px; }
-.bar__l { width: 64px; font-size: 12.5px; color: var(--c-t2); flex: none; }
+.bar__l { width: 64px; font-size: var(--bd-fs-sm); color: var(--c-t2); flex: none; }
 .bar__track { flex: 1; height: 8px; background: rgba(96, 150, 255, .12); border-radius: 5px; overflow: hidden; }
 .bar__fill { display: block; height: 100%; border-radius: 5px; background: linear-gradient(90deg, var(--c-blue), var(--c-cyan)); transition: width .6s; box-shadow: 0 0 10px rgba(47, 230, 255, .5); }
-.bar__v { width: 42px; text-align: right; font-size: 12.5px; font-weight: 600; }
+.bar__v { width: 42px; text-align: right; font-size: var(--bd-fs-sm); font-weight: 600; }
 
 /* 雷达 */
 .panel--radar { flex: 1.4; }
@@ -631,7 +673,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .ticker__roll { display: flex; flex-direction: column; gap: 9px; animation: roll 26s linear infinite; }
 .ticker:hover .ticker__roll { animation-play-state: paused; }
 @keyframes roll { from { transform: translateY(0); } to { transform: translateY(-50%); } }
-.ev { display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px; border-radius: 8px; background: rgba(96, 150, 255, .05); border-left: 2px solid var(--c-t3); }
+.ev { display: flex; gap: 9px; align-items: flex-start; padding: 8px 10px; border-radius: var(--bd-radius-s); background: rgba(96, 150, 255, .05); border-left: 2px solid var(--c-t3); }
 .ev--deny { border-left-color: #ff4d4f; }
 .ev--mfa { border-left-color: #ffa940; }
 .ev--allow, .ev--ok { border-left-color: #36e29b; }
@@ -644,7 +686,7 @@ onBeforeUnmount(() => { clearInterval(clockTimer); clearInterval(dataTimer); });
 .ev--deny .ev__vd, .ev--fail .ev__vd { color: #ff6b6b; }
 .ev--mfa .ev__vd { color: #ffc069; }
 .ev--allow .ev__vd, .ev--ok .ev__vd { color: #36e29b; }
-.ev__sub { font-size: 11.5px; color: var(--c-t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev__sub { font-size: var(--bd-fs-xs); color: var(--c-t3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* 接入网关分布 */
 .panel--regions { flex: none; }

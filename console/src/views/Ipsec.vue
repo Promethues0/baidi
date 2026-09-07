@@ -1,22 +1,34 @@
 <template>
   <div class="bd-page">
-    <div class="bd-page__head">
-      <div>
-        <div class="bd-page__title">IPSec VPN 组网</div>
-        <div class="bd-page__sub">站点到站点隧道 · 白帝自研 IKEv2/ESP（用户态） · 运行态由网关实测回报</div>
-      </div>
-      <div class="bd-head__right">
-        <a-tag :color="live ? 'green' : 'orange'" bordered>{{ live ? '已连 baidi-control' : '降级演示' }}</a-tag>
-        <button class="bd-btn bd-btn--ghost" @click="load"><icon-refresh />刷新</button>
-        <button class="bd-btn" :disabled="!live" :title="live ? '' : '降级演示模式下不可写入'" @click="openCreate"><icon-plus />新建站点</button>
+    <PageHeader title="IPSec VPN 组网" subtitle="站点到站点隧道 · 白帝自研 IKEv2/ESP（用户态） · 运行态由网关实测回报" :live="live" off-text="降级演示">
+      <button class="bd-btn bd-btn--ghost" @click="load"><icon-refresh />刷新</button>
+      <!-- 停用理由分两种：live===false 是「确实在降级演示」，live===undefined 是「还没读到」——
+           两者都不许写入，但把「还在读」说成「降级演示」是在替一件没判定的事下结论。
+           ★文案收口在 writeHint：这句话此前在页头写一遍、四处写操作守卫各写一遍（且那四处
+           写死成「未连接后端」），改一处漏五处是必然的。 -->
+      <button class="bd-btn" :disabled="!live" :title="writeHint"
+        @click="openCreate"><icon-plus />新建站点</button>
+    </PageHeader>
+
+    <!-- ★读取失败时，后端那句原话必须在页面上有地方看。改造前 load() 是 bare catch，
+         唯一的线索是页头右上那枚橙色「降级演示」标签——看得出"出事了"，看不到"是什么事"，
+         而这一页读不到的成因至少三种：控制面不通 / 502 / 403（组网归系统管理员一权）。
+         这一屏的演示站点与真实站点结构完全一致（连 SPI、流量、剩余寿命都齐），
+         误当成现场就会以为五条隧道已经建好。 -->
+    <div v-if="live === false" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">
+        站点清单未读取（后端原话：<b>{{ loadErr }}</b>），下面的拓扑、五个聚合数与站点清单全是
+        <b>内置演示数据</b>，<b>不代表现场情况</b>——SPI / 流量 / 剩余寿命都是编的，写入入口已按此置灰。
+        页面每 {{ HEARTBEAT_SEC }}s 自动重试一次，后端恢复后会自己回到实时态。
       </div>
     </div>
 
     <!-- 诚实边界：把「哪些是实测、哪些本轮不支持」写在产品里，而不是只写在文档里。
          文档没人翻，界面天天看——边界只有摆在这里才拦得住误用。 -->
-    <div class="bd-note">
-      <icon-info-circle-fill class="bd-note__ic" />
-      <div>
+    <div class="bd-notice">
+      <icon-info-circle-fill />
+      <div class="bd-notice__body">
         状态 / SPI / 流量 / 剩余寿命<b>全部来自网关经 mTLS 心跳回报的实测值</b>（15s 一跳，控制面不再自行改写运行态）。
         <b>「期望」列是管理意图，「实际状态」列才是隧道真实情况</b>——两列不一致的行就是要排查的行。
         本轮认证方式<b>只支持 PSK</b>（证书认证未实现）；国密套件走白帝私有码点（IANA 私有段 1024+），
@@ -25,39 +37,29 @@
     </div>
 
     <!-- Tab 切换 -->
-    <div class="bd-tabs">
-      <span class="bd-tab" :class="{ on: tab === 'topo' }" @click="tab = 'topo'">拓扑总览</span>
-      <span class="bd-tab" :class="{ on: tab === 'list' }" @click="tab = 'list'">站点清单 <em>{{ sites.length }}</em></span>
+    <div class="bd-tabs" role="tablist">
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'topo'" @click="tab = 'topo'">拓扑总览</button>
+      <button type="button" class="bd-tab" role="tab" :aria-selected="tab === 'list'" @click="tab = 'list'">站点清单 <em>{{ sites.length }}</em></button>
     </div>
 
     <!-- ============ 拓扑总览（P8 SVG）============ -->
     <div v-show="tab === 'topo'">
       <!-- 聚合统计：刻意不做「国密站点数 / 后量子站点数」——那两个数来自配置字段，
            回答的是「配了什么」而不是「协商成了什么」，摆在监控位置上会被当成运行事实读。 -->
-      <div class="bd-stats">
-        <div class="bd-card bd-stat">
-          <div class="bd-stat__n">{{ sites.length }}</div>
-          <div class="bd-stat__c">站点总数</div>
-        </div>
-        <div class="bd-card bd-stat">
-          <div class="bd-stat__n">{{ enabledCount }}</div>
-          <div class="bd-stat__c">期望启用（管理意图）</div>
-        </div>
-        <div class="bd-card bd-stat">
-          <div class="bd-stat__n" style="color: #00B42A">{{ upCount }}</div>
-          <div class="bd-stat__c">隧道已建立（实测）</div>
-        </div>
-        <div class="bd-card bd-stat">
-          <div class="bd-stat__n" style="color: #F53F3F">{{ failedCount }}</div>
-          <div class="bd-stat__c">协商失败</div>
-        </div>
-        <div class="bd-card bd-stat">
-          <div class="bd-stat__n" style="color: #FF7D00">{{ silentCount }}</div>
-          <div class="bd-stat__c">已启用但无回报</div>
-        </div>
+      <!-- 首屏骨架：第一次 load() 回来之前不画演示站点——那一瞬显示的是假数 -->
+      <div v-if="!loaded" class="bd-stats">
+        <div v-for="i in 5" :key="i" class="bd-card"><SkeletonBlock kind="stat" /></div>
+      </div>
+      <div v-else class="bd-stats">
+        <StatCard label="站点总数" :value="sites.length" />
+        <StatCard label="期望启用（管理意图）" :value="enabledCount" />
+        <StatCard label="隧道已建立（实测）" :value="upCount" tone="success" />
+        <StatCard label="协商失败" :value="failedCount" tone="danger" />
+        <StatCard label="已启用但无回报" :value="silentCount" tone="warning" />
       </div>
 
-      <div class="bd-card bd-topo">
+      <div v-if="!loaded" class="bd-card"><SkeletonBlock kind="card" :rows="5" /></div>
+      <div v-else class="bd-card bd-topo">
         <svg viewBox="0 0 960 460" width="100%" preserveAspectRatio="xMidYMid meet" font-family="-apple-system, 'PingFang SC', 'Segoe UI', sans-serif">
           <!-- 中心到各站点连线 -->
           <g v-for="(r, i) in decorated" :key="'edge-' + r.s.id">
@@ -90,7 +92,7 @@
             <rect :x="hubCx - 92" :y="hubCy - 34" width="184" height="68" rx="12" fill="#F2F7FF" stroke="#BEDAFF" stroke-width="1.5" />
             <circle :cx="hubCx - 66" :cy="hubCy - 8" r="9" fill="#165DFF" />
             <text :x="hubCx - 50" :y="hubCy - 3" font-size="14" font-weight="700" fill="#1D2129">本端网关</text>
-            <text :x="hubCx" :y="hubCy + 20" font-size="11.5" fill="#86909C" text-anchor="middle">白帝自研 IKEv2/ESP（用户态）</text>
+            <text :x="hubCx" :y="hubCy + 20" font-size="12" fill="#86909C" text-anchor="middle">白帝自研 IKEv2/ESP（用户态）</text>
           </g>
 
           <!-- 图例：五态各一色。down 用灰不用红——「没启用」是管理意图不是故障，
@@ -111,12 +113,14 @@
       <div class="bd-toolbar">
         <span class="bd-toolbar__c">站点到站点隧道 · {{ shownRows.length }} 个</span>
         <span v-if="polling && live" class="bd-polling"><icon-loading spin />有站点在途，每 {{ POLL_SEC }}s 自动刷新</span>
-        <div style="flex: 1" />
-        <div class="bd-searchbox" style="width: 240px">
+        <div class="bd-toolbar__spacer" />
+        <div class="bd-searchbox bd-ipsec__search">
           <icon-search />
           <input v-model="kw" class="bd-searchbox__in" placeholder="按站点 / 网段 / 对端搜索" />
         </div>
       </div>
+      <SkeletonBlock v-if="!loaded" kind="table" :rows="5" :cols="8" />
+      <div v-else class="bd-tablewrap">
       <table class="bd-table">
         <thead>
           <tr>
@@ -128,7 +132,7 @@
           <tr v-for="r in shownRows" :key="r.s.id">
             <!-- 站点 -->
             <td>
-              <b style="color: var(--bd-t1); font-weight: 500">{{ r.s.name }}</b>
+              <b class="bd-cell-strong">{{ r.s.name }}</b>
               <div class="bd-mono bd-sub3">{{ r.s.peer }}</div>
               <div class="bd-sub3">
                 承载网关
@@ -144,18 +148,18 @@
 
             <!-- 网段 -->
             <td>
-              <span class="bd-mono" style="font-size: 11.5px">{{ r.s.localSubnet || '—' }} ⇄ {{ r.s.remoteSubnet || '—' }}</span>
+              <span class="bd-mono bd-ipsec__net">{{ r.s.localSubnet || '—' }} ⇄ {{ r.s.remoteSubnet || '—' }}</span>
             </td>
 
             <!-- 期望态：管理员想让它开不开 -->
             <td>
-              <span class="bd-pill" :class="r.s.enabled ? 'on' : 'off'">{{ r.s.enabled ? '已启用' : '已停用' }}</span>
+              <span class="bd-tg" :class="r.s.enabled ? 'bd-tg--blue' : 'bd-tg--grey'">{{ r.s.enabled ? '已启用' : '已停用' }}</span>
               <div class="bd-sub2">
-                <span class="bd-tg" :style="tagStyle(authColor(r.s.auth))" :title="authHint(r.s.auth)">{{ authText(r.s.auth) }}</span>
+                <span class="bd-tg" :class="authTag(r.s.auth)" :title="authHint(r.s.auth)">{{ authText(r.s.auth) }}</span>
                 <span
                   v-if="r.s.auth === 'psk'"
                   class="bd-tg"
-                  :style="tagStyle(r.s.hasPsk ? '#00B42A' : '#F53F3F')"
+                  :class="r.s.hasPsk ? 'bd-tg--green' : 'bd-tg--red'"
                   :title="r.s.hasPsk ? '指纹供两端核对是否为同一把密钥；控制面永不回显原文' : '空 PSK 会让网关在装载期拒绝启动该站点'"
                 >{{ r.s.hasPsk ? (r.s.pskFingerprint ? '指纹 ' + r.s.pskFingerprint : 'PSK 已配置') : '未配置 PSK' }}</span>
               </div>
@@ -176,7 +180,7 @@
               <!-- 失败原因必须留在一级视图：IPSec 的协商失败率远高于 TLS，
                    把原因收进抽屉等于把这个功能做成不可运维。 -->
               <div v-else-if="r.vs === 'failed'" class="bd-fail">
-                <span class="bd-tg" :style="tagStyle('#F53F3F')">{{ r.s.sa?.lastErrorCode || 'IKE 协商失败' }}</span>
+                <span class="bd-tg bd-tg--red">{{ r.s.sa?.lastErrorCode || 'IKE 协商失败' }}</span>
                 <div class="bd-fail__msg" :title="r.s.sa?.lastError || ''">{{ r.s.sa?.lastError || '网关未给出原因（建议查 baidi-ipsec 日志）' }}</div>
                 <div class="bd-sub3">{{ fmtTs(r.s.sa?.lastErrorAt || 0) }}</div>
               </div>
@@ -190,9 +194,9 @@
                 <div :class="'v-' + r.cmp.v">实际 {{ r.s.sa?.negotiatedProposal || '—' }} {{ CMP_ICON[r.cmp.v] }}</div>
               </div>
               <div class="bd-sub2">
-                <span v-if="r.s.suite === 'gm'" class="bd-tg" :style="tagStyle('#F53F3F')" title="IANA 私有使用段码点（1024+），仅白帝↔白帝互通，非 GM/T 0022 合规">国密 · 私有码点</span>
-                <span v-if="r.s.pfs" class="bd-tg" :style="tagStyle('#00B42A')">PFS</span>
-                <span v-if="r.s.pqHybrid" class="bd-tg" :style="tagStyle('#86909C')" title="pqHybrid 字段保留但本版本未实现 ML-KEM 混合，网关会在装载期拒绝">PQ 未实现</span>
+                <span v-if="r.s.suite === 'gm'" class="bd-tg bd-tg--red" title="IANA 私有使用段码点（1024+），仅白帝↔白帝互通，非 GM/T 0022 合规">国密 · 私有码点</span>
+                <span v-if="r.s.pfs" class="bd-tg bd-tg--green">PFS</span>
+                <span v-if="r.s.pqHybrid" class="bd-tg bd-tg--grey" title="pqHybrid 字段保留但本版本未实现 ML-KEM 混合，网关会在装载期拒绝">PQ 未实现</span>
               </div>
               <div v-if="r.cmp.v === 'mismatch'" class="bd-err">实际套件缺少：{{ r.cmp.miss.join(' / ') }} —— 谈成的不是配的那套</div>
               <div v-if="r.unsupported.length" class="bd-err">本实现不支持：{{ r.unsupported.join('、') }} · 网关装载期会直接拒绝</div>
@@ -223,29 +227,35 @@
 
             <!-- 操作 -->
             <td class="r">
-              <div class="bd-ops">
-                <span class="bd-link" :class="{ 'bd-link--grey': r.vs === 'pending' }" @click="toggle(r)">
+              <div class="bd-acts bd-ops">
+                <button type="button" class="bd-link" :class="{ 'bd-link--grey': r.vs === 'pending' }" @click="toggle(r)">
                   {{ r.s.enabled ? '停用' : '启用' }}
-                </span>
-                <span v-if="r.s.auth === 'psk'" class="bd-link" @click="openPsk(r.s)">PSK</span>
-                <span class="bd-link" @click="detailId = r.s.id">详情</span>
-                <span class="bd-link" @click="openEdit(r.s)">编辑</span>
+                </button>
+                <button v-if="r.s.auth === 'psk'" type="button" class="bd-link" @click="openPsk(r.s)">PSK</button>
+                <button type="button" class="bd-link" @click="detailId = r.s.id">详情</button>
+                <button type="button" class="bd-link" @click="openEdit(r.s)">编辑</button>
                 <a-popconfirm content="确定删除该站点隧道？" @ok="del(r.s)">
-                  <span class="bd-link bd-link--danger">删除</span>
+                  <button type="button" class="bd-link bd-link--danger">删除</button>
                 </a-popconfirm>
               </div>
             </td>
           </tr>
-          <tr v-if="!shownRows.length"><td colspan="8" class="bd-empty">{{ kw ? '无匹配站点' : '暂无站点，点右上「新建站点」创建' }}</td></tr>
+          <tr v-if="!shownRows.length" class="bd-table__emptyrow">
+            <td colspan="8">
+              <EmptyState v-if="kw" size="md" title="无匹配站点" />
+              <EmptyState v-else size="md" title="暂无站点" desc="点右上「新建站点」创建" />
+            </td>
+          </tr>
         </tbody>
       </table>
+      </div>
     </div>
 
     <!-- ============ 运行态详情抽屉 ============ -->
     <a-drawer v-model:visible="detailOpen" :width="520" :footer="false" unmount-on-close>
       <template #title>{{ detailRow?.s.name || '站点详情' }} · 运行态</template>
       <template v-if="detailRow">
-        <div class="bd-dsec">协商证据</div>
+        <div class="bd-form-sec">协商证据</div>
         <!-- SPI 是「真的协商过」最硬的证据：单端伪造不出与对端交叉相等的一对 SPI。
              这几行是空的，就说明这条隧道从来没谈成过，与界面上任何绿色无关。 -->
         <div class="bd-kv"><span>IKE SPI(i)</span><b class="bd-mono">{{ detailRow.s.sa?.ikeSpiI || '—' }}</b></div>
@@ -254,13 +264,13 @@
         <div class="bd-kv"><span>ESP SPI 出向</span><b class="bd-mono">{{ spiHex(detailRow.s.sa?.childSpiOut) }}</b></div>
         <div class="bd-dhint">本端入向 SPI 必然等于对端出向 SPI；两端都拿到这一对且交叉相等，才是隧道真的谈成了。</div>
 
-        <div class="bd-dsec">套件对比</div>
+        <div class="bd-form-sec">套件对比</div>
         <div class="bd-kv"><span>相一配置</span><b class="bd-mono">{{ phText(detailRow.s.phase1) }}</b></div>
         <div class="bd-kv"><span>相一实际</span><b class="bd-mono" :class="'v-' + detailRow.cmp.v">{{ detailRow.s.sa?.negotiatedProposal || '—' }} {{ CMP_ICON[detailRow.cmp.v] }}</b></div>
         <div class="bd-kv"><span>相二配置</span><b class="bd-mono">{{ phText(detailRow.s.phase2) }}</b></div>
         <div class="bd-dhint">相二（Child SA）的实际套件本轮不回报，这里只有配置值——没有的东西不假装有。</div>
 
-        <div class="bd-dsec">计数与时间</div>
+        <div class="bd-form-sec">计数与时间</div>
         <div class="bd-kv"><span>入向</span><b class="bd-mono">{{ formatBytes(detailRow.s.sa?.rxBytes || 0) }} / {{ detailRow.s.sa?.packetsIn || 0 }} 包</b></div>
         <div class="bd-kv"><span>出向</span><b class="bd-mono">{{ formatBytes(detailRow.s.sa?.txBytes || 0) }} / {{ detailRow.s.sa?.packetsOut || 0 }} 包</b></div>
         <div class="bd-kv"><span>建立于</span><b class="bd-mono">{{ fmtTs(detailRow.s.sa?.establishedAt || 0) }}</b></div>
@@ -269,13 +279,13 @@
         <div class="bd-kv"><span>最近回报</span><b class="bd-mono">{{ fmtTs(detailRow.s.sa?.reportedAt || 0) }}</b></div>
 
         <template v-if="detailRow.s.sa?.lastError">
-          <div class="bd-dsec">最近失败</div>
+          <div class="bd-form-sec">最近失败</div>
           <div class="bd-kv"><span>码点</span><b class="bd-mono">{{ detailRow.s.sa?.lastErrorCode || '—' }}</b></div>
           <div class="bd-kv"><span>原因</span><b>{{ detailRow.s.sa?.lastError }}</b></div>
           <div class="bd-kv"><span>时间</span><b class="bd-mono">{{ fmtTs(detailRow.s.sa?.lastErrorAt || 0) }}</b></div>
         </template>
 
-        <div class="bd-dsec">密钥材料</div>
+        <div class="bd-form-sec">密钥材料</div>
         <div class="bd-kv"><span>PSK</span><b>{{ detailRow.s.hasPsk ? `已配置 · 指纹 ${detailRow.s.pskFingerprint || '—'} · v${detailRow.s.pskVersion ?? 1}` : '未配置' }}</b></div>
         <div class="bd-dhint">控制面只保存密文并只回指纹，任何接口都不回显原文；下发只走 mTLS 通道。</div>
       </template>
@@ -283,12 +293,15 @@
 
     <!-- ============ PSK 设置 ============ -->
     <a-modal v-model:visible="pskOpen" :title="`设置 PSK · ${pskSite?.name || ''}`" :width="520" :footer="false" unmount-on-close>
-      <div class="bd-uform">
-        <div v-if="pskSite?.hasPsk" class="bd-pskcur">
-          已配置 · 指纹 <span class="bd-mono">{{ pskSite?.pskFingerprint || '—' }}</span> · 版本 v{{ pskSite?.pskVersion ?? 1 }}
-          <div class="bd-sub3">指纹用于核对两端是不是同一把密钥。原文不回显——回显没有任何操作价值，只有泄露面；配错了重设即可。</div>
+      <div>
+        <div v-if="pskSite?.hasPsk" class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <div class="bd-notice__body">
+            已配置 · 指纹 <span class="bd-mono">{{ pskSite?.pskFingerprint || '—' }}</span> · 版本 v{{ pskSite?.pskVersion ?? 1 }}
+            <div class="bd-sub3">指纹用于核对两端是不是同一把密钥。原文不回显——回显没有任何操作价值，只有泄露面；配错了重设即可。</div>
+          </div>
         </div>
-        <div class="bd-uform__f">
+        <div class="bd-fld">
           <label>新的预共享密钥<i class="req">*</i></label>
           <a-input-password v-model="pskValue" placeholder="至少 20 字符，建议直接用右侧随机生成" allow-clear />
           <div class="bd-pskacts">
@@ -298,11 +311,13 @@
         </div>
         <!-- IKEv2 的 PSK 认证在弱口令下可被离线字典攻击：AUTH 载荷就是 PSK 的 PRF 输出，
              抓一次握手就能在本地慢慢猜。所以这里只推随机串，不接受「好记的口令」。 -->
-        <div class="bd-uform__note">
-          提交后原文<b>立刻从界面消失且无法再读取</b>，请在关闭前同步配置到对端设备。
-          两端 PSK 不一致的症状是 <span class="bd-mono">AUTHENTICATION_FAILED</span>，会显示在「实际状态」列。
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <span>提交后原文<b>立刻从界面消失且无法再读取</b>，请在关闭前同步配置到对端设备。
+          两端 PSK 不一致的症状是 <span class="bd-mono">AUTHENTICATION_FAILED</span>，会显示在「实际状态」列。</span>
         </div>
-        <div class="bd-uform__foot">
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="pskOpen = false">取消</button>
           <button class="bd-btn" :disabled="pskSaving" @click="savePsk">写入并下发</button>
         </div>
@@ -311,35 +326,43 @@
 
     <!-- ============ 新建 / 编辑 站点 ============ -->
     <a-modal v-model:visible="formOpen" :title="editing ? '编辑站点隧道' : '新建站点隧道'" :width="560" :footer="false" unmount-on-close>
-      <div class="bd-uform">
+      <div>
         <!-- 装载期会被拒绝的参数在这里提前说清楚。留成「可选但不工作」的下场是：
              管理员保存成功、启用成功、隧道永远起不来，而界面上看不出为什么。 -->
-        <div v-if="formUnsupported.length" class="bd-formwarn">
+        <div v-if="formUnsupported.length" class="bd-notice bd-notice--warn">
           <icon-exclamation-circle-fill />
-          <div>当前配置含本实现<b>不支持</b>的参数：{{ formUnsupported.join('、') }}。保存可以，但网关在装载期会直接拒绝并把站点置为「协商失败」。</div>
+          <div class="bd-notice__body">当前配置含本实现<b>不支持</b>的参数：{{ formUnsupported.join('、') }}。保存可以，但网关在装载期会直接拒绝并把站点置为「协商失败」。</div>
         </div>
 
-        <div class="bd-uform__group">基本</div>
-        <div class="bd-uform__row">
-          <div class="bd-uform__f"><label>站点名称<i class="req">*</i></label>
+        <!-- ★对象库读不到与「库里一个网段对象都没有」在界面上同形：两种情况下那两个
+             选择器都是置灰 + 一句「从对象库选择（可选）」。而 /objects 归系统管理员一权，
+             安全管理员在这一页会稳定拿 403。原话在这里当面说出来，并点明网段仍可手填。 -->
+        <div v-if="objErr" class="bd-notice bd-notice--warn">
+          <icon-exclamation-circle-fill />
+          <div class="bd-notice__body">对象库未读取（后端原话：<b>{{ objErr }}</b>），下面两处「从对象库选择」已置灰——这不是"库里没有网段对象"，网段可以直接手填。</div>
+        </div>
+
+        <div class="bd-form-sec">基本</div>
+        <div class="bd-fld-grid">
+          <div class="bd-fld"><label>站点名称<i class="req">*</i></label>
             <a-input v-model="form.name" placeholder="如 上海分支" />
           </div>
-          <div class="bd-uform__f"><label>对端网关地址<i class="req">*</i></label>
+          <div class="bd-fld"><label>对端网关地址<i class="req">*</i></label>
             <a-input v-model="form.peer" placeholder="如 203.0.113.20" />
           </div>
         </div>
-        <div class="bd-uform__row">
-          <div class="bd-uform__f"><label>承载网关 ID<i class="req">*</i></label>
+        <div class="bd-fld-grid">
+          <div class="bd-fld"><label>承载网关 ID<i class="req">*</i></label>
             <a-input v-model="form.gatewayId" placeholder="如 ipsec-gw-1（须与组网网关 mTLS 证书 CN 逐字符一致）" />
-            <div class="bd-uform__refhint">留空则没有任何网关会拉到这条站点：界面上表现为永远「未回报」，且全程不会有任何报错。</div>
+            <div class="bd-fld__d">留空则没有任何网关会拉到这条站点：界面上表现为永远「未回报」，且全程不会有任何报错。</div>
           </div>
-          <div class="bd-uform__f"><label>协议版本</label>
+          <div class="bd-fld"><label>协议版本</label>
             <a-input model-value="IKEv2" disabled />
-            <div class="bd-uform__refhint">固定 IKEv2，提交时自动带上（不实现 IKEv1）。</div>
+            <div class="bd-fld__d">固定 IKEv2，提交时自动带上（不实现 IKEv1）。</div>
           </div>
         </div>
-        <div class="bd-uform__row">
-          <div class="bd-uform__f"><label>本端网段</label>
+        <div class="bd-fld-grid">
+          <div class="bd-fld"><label>本端网段</label>
             <a-select
               :model-value="form.localRef"
               class="bd-uform__objpick"
@@ -351,9 +374,9 @@
               <a-option v-for="o in subnetObjs" :key="o.id" :value="o.id">{{ objLabel(o) }}</a-option>
             </a-select>
             <a-input v-model="form.localSubnet" placeholder="如 10.10.0.0/16" @input="onLocalSubnetInput" />
-            <div v-if="form.localRef" class="bd-uform__refhint">引用地址对象：{{ refName(form.localRef) }}</div>
+            <div v-if="form.localRef" class="bd-fld__d">引用地址对象：{{ refName(form.localRef) }}</div>
           </div>
-          <div class="bd-uform__f"><label>对端网段</label>
+          <div class="bd-fld"><label>对端网段</label>
             <a-select
               :model-value="form.remoteRef"
               class="bd-uform__objpick"
@@ -365,69 +388,71 @@
               <a-option v-for="o in subnetObjs" :key="o.id" :value="o.id">{{ objLabel(o) }}</a-option>
             </a-select>
             <a-input v-model="form.remoteSubnet" placeholder="如 10.20.0.0/16" @input="onRemoteSubnetInput" />
-            <div v-if="form.remoteRef" class="bd-uform__refhint">引用地址对象：{{ refName(form.remoteRef) }}</div>
+            <div v-if="form.remoteRef" class="bd-fld__d">引用地址对象：{{ refName(form.remoteRef) }}</div>
           </div>
         </div>
 
-        <div class="bd-uform__group">认证 · 套件</div>
-        <div class="bd-uform__row">
-          <div class="bd-uform__f"><label>认证方式</label>
+        <div class="bd-form-sec">认证 · 套件</div>
+        <div class="bd-fld-grid">
+          <div class="bd-fld"><label>认证方式</label>
             <a-select v-model="form.auth">
               <a-option value="psk">预共享密钥（PSK）</a-option>
               <a-option value="cert" disabled>证书 · 本轮未实现</a-option>
               <a-option value="sm2cert" disabled>SM2 证书 · 本轮未实现</a-option>
             </a-select>
-            <div class="bd-uform__refhint">证书认证需要 RFC 7427 数字签名 AUTH 与 CERT/CERTREQ 载荷，本轮不做，故置灰而不是留成可选。</div>
+            <div class="bd-fld__d">证书认证需要 RFC 7427 数字签名 AUTH 与 CERT/CERTREQ 载荷，本轮不做，故置灰而不是留成可选。</div>
           </div>
-          <div class="bd-uform__f"><label>密码套件</label>
+          <div class="bd-fld"><label>密码套件</label>
             <a-radio-group v-model="form.suite" type="button" @change="onSuiteChange">
               <a-radio value="standard">标准</a-radio>
               <a-radio value="gm">国密</a-radio>
             </a-radio-group>
-            <div v-if="form.suite === 'gm'" class="bd-uform__refhint bd-warn">
+            <div v-if="form.suite === 'gm'" class="bd-fld__d bd-warn">
               国密 = SM4-GCM/HMAC-SM3/sm2p256v1，走 IANA 私有使用段码点（1024+）：仅白帝↔白帝互通，与第三方设备一律不通，且与 GM/T 0022 无关。
             </div>
           </div>
         </div>
-        <div class="bd-uform__row">
-          <div class="bd-uform__f bd-uform__sw"><label>PFS 完美前向保密</label><a-switch v-model="form.pfs" /></div>
-          <div class="bd-uform__f bd-uform__sw">
+        <div class="bd-fld-grid">
+          <div class="bd-fld bd-fld--row"><label>PFS 完美前向保密</label><a-switch v-model="form.pfs" /></div>
+          <div class="bd-fld bd-fld--row">
             <label>后量子 ML-KEM 混合<span class="bd-sub3">字段保留，本版本未实现</span></label>
             <a-switch v-model="form.pqHybrid" disabled />
           </div>
         </div>
 
-        <div class="bd-uform__group">相一参数（IKE SA）</div>
-        <div class="bd-uform__row3">
-          <div class="bd-uform__f"><label>加密</label>
+        <div class="bd-form-sec">相一参数（IKE SA）</div>
+        <div class="bd-fld-grid bd-fld-grid--3">
+          <div class="bd-fld"><label>加密</label>
             <a-select v-model="form.phase1.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!algUsable(e)">{{ algLabel(e) }}</a-option></a-select>
           </div>
-          <div class="bd-uform__f"><label>哈希</label>
+          <div class="bd-fld"><label>哈希</label>
             <a-select v-model="form.phase1.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!algUsable(h)">{{ algLabel(h) }}</a-option></a-select>
           </div>
-          <div class="bd-uform__f"><label>DH 群</label>
+          <div class="bd-fld"><label>DH 群</label>
             <a-select v-model="form.phase1.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!algUsable(d)">{{ algLabel(d) }}</a-option></a-select>
           </div>
         </div>
 
-        <div class="bd-uform__group">相二参数（IPSec SA）</div>
-        <div class="bd-uform__row3">
-          <div class="bd-uform__f"><label>加密</label>
+        <div class="bd-form-sec">相二参数（IPSec SA）</div>
+        <div class="bd-fld-grid bd-fld-grid--3">
+          <div class="bd-fld"><label>加密</label>
             <a-select v-model="form.phase2.enc"><a-option v-for="e in ENC_OPTS" :key="e.v" :value="e.v" :disabled="!algUsable(e)">{{ algLabel(e) }}</a-option></a-select>
           </div>
-          <div class="bd-uform__f"><label>哈希</label>
+          <div class="bd-fld"><label>哈希</label>
             <a-select v-model="form.phase2.hash"><a-option v-for="h in HASH_OPTS" :key="h.v" :value="h.v" :disabled="!algUsable(h)">{{ algLabel(h) }}</a-option></a-select>
           </div>
-          <div class="bd-uform__f"><label>DH 群</label>
+          <div class="bd-fld"><label>DH 群</label>
             <a-select v-model="form.phase2.dh"><a-option v-for="d in DH_OPTS" :key="d.v" :value="d.v" :disabled="!algUsable(d)">{{ algLabel(d) }}</a-option></a-select>
           </div>
         </div>
 
-        <div class="bd-uform__note">
-          保存只写配置与管理意图，<b>不会立刻建隧道</b>：网关下一跳（≤{{ HEARTBEAT_SEC }}s）拉到配置后才开始 IKE 协商，结果在「实际状态」列。
+        <div class="bd-notice bd-notice--plain">
+          <icon-info-circle />
+          <span>保存只写配置与管理意图，<b>不会立刻建隧道</b>：网关下一跳（≤{{ HEARTBEAT_SEC }}s）拉到配置后才开始 IKE 协商，结果在「实际状态」列。</span>
         </div>
 
-        <div class="bd-uform__foot">
+        <div class="bd-drawer__foot">
+          <div class="bd-drawer__foot-spacer" />
           <button class="bd-btn bd-btn--ghost" @click="formOpen = false">取消</button>
           <button class="bd-btn" :disabled="saving" @click="save">{{ editing ? '保存' : '创建' }}并落库</button>
         </div>
@@ -443,10 +468,39 @@ import {
   api,
   type IpsecSite, type IpsecSA, type IpsecState, type IpsecPhase, type IpsecResp, type IpsecPskResp,
   type AddrObject, type ObjectBundle, failReason, failStatus } from '@/lib/api';
+import PageHeader from '@/components/PageHeader.vue';
+import StatCard from '@/components/StatCard.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const tab = ref<'topo' | 'list'>('topo');
-const live = ref(false);
+/* 连接态三态：undefined = 首轮读取还没回来，页头不画连接标签。
+ * ★不能写 ref(false)：那会让红色「数据未读取」在第一次请求回来之前就画出来——
+ *   它宣告的是一件**还没发生**的事，慢网 / 大表下能持续好几秒，与「真的读失败了」完全同形。
+ * 落定点：load() 的 try 尾（true）与 catch（false）。★本页与其余无回落页不同：catch 里真的换上了 demoSites()，
+ *   所以离线文案仍是「降级演示」（橙）而不是「数据未读取」（红）——文案与真实处境一一对应。两条路径都必须落定，漏一条标签就永远不画（比误报更难发现）。 */
+const live = ref<boolean | undefined>(undefined);
+/** 读取失败时后端那句原话（failReason 收口，前端不编造归因）。页头下那条 warn 提示条
+ *  与四处写操作守卫共用它——这一页此前是全站唯一一页在 503 下整页读不到后端原话的。 */
+const loadErr = ref('');
+/** 对象库（/objects）读失败时的后端原话。它与站点清单是两个独立端点、两套权限，
+ *  一个通一个不通是常态，所以不并进 loadErr。 */
+const objErr = ref('');
+/** 写入入口的禁用说明。三态各说各的：判不出来时说「正在读取」，
+ *  ★不许把「还在读」说成「降级演示」——首轮请求还没回来，那件事还没发生。 */
+const writeHint = computed(() =>
+  live.value === true ? '' : live.value === false ? '降级演示模式下不可写入' : '正在读取站点清单，稍候可写入');
+/** 写操作被拒时说的那句话。★原文案四处都写死「当前为降级演示，未连接后端，无法写入」，
+ *  而 live!==true 有三种成因：还没读完 / 后端不通 / **403 无权**（组网这一页归系统管理员一权）。
+ *  把 403 说成"没连上后端"，管理员会去查网络、去重登，而后端那句「角色「安全管理员」无权
+ *  执行该操作（需要权限：system）」才是唯一能指导下一步动作的。loadErr 是 failReason(e)
+ *  存下的后端原话，有就带上。 */
+function writeDeniedMsg() {
+  return `${writeHint.value}${loadErr.value ? `：${loadErr.value}` : ''}`;
+}
 const saving = ref(false);
+/** 首屏是否已完成一次加载（成功或降级都算）——只决定骨架屏何时让位，不改任何数据流。 */
+const loaded = ref(false);
 
 /* ── 节拍常量 ──
  * 网关经 mTLS 心跳回报运行态，15s 一跳。这个数字决定了两件事：
@@ -637,7 +691,6 @@ function formatBytes(n: number): string {
 }
 function spiHex(n?: number) { return n ? '0x' + n.toString(16).padStart(8, '0') : '—'; }
 function phText(p: IpsecPhase) { return `${p.enc} / ${p.hash} / ${p.dh}`; }
-function tagStyle(color: string) { return { color, background: color + '14' }; }
 
 /* ── 认证方式 ──
  * 本轮只有 PSK 是通的。cert/sm2cert 存量数据仍可能是这两个值，所以文案要明说
@@ -645,7 +698,8 @@ function tagStyle(color: string) { return { color, background: color + '14' }; }
 function authText(auth: string) {
   return auth === 'psk' ? '预共享密钥' : auth === 'cert' ? '证书 · 未实现' : 'SM2 证书 · 未实现';
 }
-function authColor(auth: string) { return auth === 'psk' ? '#86909C' : '#FF7D00'; }
+/** 认证方式标签色：PSK 中性灰，未实现的两种走警示橙——只走 .bd-tg 变体。 */
+function authTag(auth: string) { return auth === 'psk' ? 'bd-tg--grey' : 'bd-tg--gold'; }
 function authHint(auth: string) {
   return auth === 'psk' ? 'IKEv2 PSK 认证（RFC 7296 AUTH 方法 2）' : '本轮未实现证书认证，网关会在装载期拒绝这条站点并置为协商失败';
 }
@@ -722,8 +776,10 @@ function decorate(s: IpsecSite): Row {
   const waiting = since > 0 && rep <= since;              // 下发后还没等到新回报
   const timedOut = waiting && nowSec.value - since > PENDING_MAX_SEC;
   const vs: ViewState = waiting && !timedOut ? 'pending' : !s.sa ? 'unreported' : s.sa.state;
-  // 降级演示没有网关心跳，新鲜度判定没有意义（横幅已标明是演示数据）
-  const stale = live.value && !!s.sa && rep > 0 && nowSec.value - rep > STALE_SEC;
+  // 降级演示没有网关心跳，新鲜度判定没有意义（横幅已标明是演示数据）。
+  // ★ `live.value === true` 而不是 `live.value`：三态化之后首轮未定时它是 undefined，
+  //   直接与运算会把 stale 的类型带成 boolean|undefined，也会把「还没读到」当成「不判新鲜度」。
+  const stale = live.value === true && !!s.sa && rep > 0 && nowSec.value - rep > STALE_SEC;
   return { s, vs, stale, timedOut, cmp: comparePhase1(s), unsupported: unsupportedOf(s) };
 }
 const decorated = computed<Row[]>(() => sites.value.map(decorate));
@@ -845,7 +901,7 @@ function onLocalSubnetInput() { form.localRef = undefined; }
 function onRemoteSubnetInput() { form.remoteRef = undefined; }
 
 async function save() {
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  if (live.value !== true) { Message.warning(writeDeniedMsg()); return; }
   if (!form.name || !form.peer) { Message.warning('站点名称与对端网关地址必填'); return; }
   saving.value = true;
   // 运行态字段一律不提交：sa 是网关权威，前端往回写就等于又给「控制面自说自话改状态」开了口子
@@ -874,7 +930,7 @@ async function save() {
 }
 
 async function del(s: IpsecSite) {
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  if (live.value !== true) { Message.warning(writeDeniedMsg()); return; }
   try {
     await api(`/ipsec/${s.id}`, { method: 'DELETE' });
     clearBusy(s.id);
@@ -888,7 +944,7 @@ async function del(s: IpsecSite) {
  * ★点完不许宣布「已建立 IPSec 隧道」：控制面没有能力知道隧道建没建起来。 */
 async function toggle(r: Row) {
   const s = r.s;
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  if (live.value !== true) { Message.warning(writeDeniedMsg()); return; }
   if (r.vs === 'pending') { Message.info('上一次下发还在途中，等网关回报后再操作'); return; }
   const next = !s.enabled;
   if (next && s.auth === 'psk' && !s.hasPsk) {
@@ -937,7 +993,7 @@ function genPsk() {
 async function savePsk() {
   const s = pskSite.value;
   if (!s) return;
-  if (!live.value) { Message.warning('当前为降级演示，未连接后端，无法写入'); return; }
+  if (live.value !== true) { Message.warning(writeDeniedMsg()); return; }
   const v = pskValue.value.trim();
   if (v.length < 20) { Message.warning('PSK 至少 20 字符（建议直接用随机生成），过短的口令可被离线字典攻击'); return; }
   pskSaving.value = true;
@@ -953,7 +1009,7 @@ async function savePsk() {
   } catch (e) {
     if (failStatus(e) === 404) Message.error('控制面没有 PSK 端点：该版本 baidi-control 尚未支持 IPSec 密钥下发');
     else if (failStatus(e) === 403) Message.error(failReason(e));
-    else Message.error('写入失败，请检查后端连接');
+    else Message.error(failReason(e));
   } finally { pskSaving.value = false; }
 }
 
@@ -985,16 +1041,21 @@ async function load() {
     const r = await api<IpsecResp>('/ipsec');
     sites.value = r.sites ?? [];
     live.value = true;
+    loadErr.value = '';
     // 已经等到「比点击更新」的回报的站点，脱离在途窗口
     for (const s of sites.value) {
       const since = busy.value[s.id];
       if (since && (s.sa?.reportedAt ?? 0) > since) clearBusy(s.id);
     }
-  } catch {
+  } catch (e) {
+    // ★原写法是 bare catch：后端那句原话（「控制面维护中」/ 403 无权 / 502 网关不通）被
+    //   整句丢掉，页面上只剩页头一枚橙色「降级演示」标签。loadErr 存下原话，页头下那条
+    //   .bd-notice--warn 与四处写操作守卫共用它。
     sites.value = demoSites();
     live.value = false;
+    loadErr.value = failReason(e);
     busy.value = {};
-  }
+  } finally { loaded.value = true; }
 }
 
 async function loadObjects() {
@@ -1002,7 +1063,12 @@ async function loadObjects() {
     const b = await api<ObjectBundle>('/objects');
     // 仅保留可作网段的地址对象（cidr/ip/range），排除 domain
     subnetObjs.value = (b.addrs || []).filter((o) => o.kind === 'cidr' || o.kind === 'ip' || o.kind === 'range');
-  } catch { subnetObjs.value = []; }
+    objErr.value = '';
+  } catch (e) {
+    // 置灰选择器本身没错，错在不说为什么——表单里那条 warn 提示条负责把原话说出来。
+    subnetObjs.value = [];
+    objErr.value = failReason(e);
+  }
 }
 
 function onTick() {
@@ -1025,96 +1091,68 @@ onUnmounted(() => { if (ticker) window.clearInterval(ticker); });
 </script>
 
 <style scoped>
-/* 诚实边界提示条 */
-.bd-note { display: flex; gap: 10px; align-items: flex-start; background: var(--bd-primary-1); border: 1px solid #BEDAFF; border-radius: var(--bd-radius); padding: 11px 14px; margin-bottom: 16px; font-size: 12.5px; line-height: 1.7; color: var(--bd-t2); }
-.bd-note__ic { color: var(--bd-primary); font-size: 15px; flex: none; margin-top: 3px; }
-.bd-note b { color: var(--bd-t1); font-weight: 600; }
+/* 本页独有：页签、聚合卡排布、拓扑卡、站点表里的多层行内注记、抽屉键值行。
+   页头 / KPI 卡 / 提示条 / 表单节奏 / 抽屉底栏 / 空态 / 标签都在共享件与 app.css 里。 */
 
-/* tabs */
-.bd-tabs { display: flex; gap: 4px; margin-bottom: 16px; }
-.bd-tab { font-size: 13px; color: var(--bd-t2); padding: 7px 14px; border-radius: 7px; cursor: pointer; }
-.bd-tab em { font-style: normal; color: var(--bd-t3); margin-left: 4px; }
-.bd-tab:hover { background: var(--bd-fill-2); }
-.bd-tab.on { color: var(--bd-primary); font-weight: 600; background: var(--bd-primary-1); }
-
-/* 聚合统计 */
-.bd-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 14px; margin-bottom: 16px; }
-.bd-stat { padding: 16px 18px; }
-.bd-stat__n { font-size: 28px; font-weight: 700; color: var(--bd-t1); line-height: 1.1; }
-.bd-stat__c { margin-top: 6px; font-size: 12.5px; color: var(--bd-t3); }
+/* 聚合统计：1440 一行五张，1280 收成三列 */
+.bd-stats { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--bd-sp-4); margin-bottom: var(--bd-sp-4); }
 
 /* 拓扑卡 */
-.bd-topo { padding: 16px 18px; }
+.bd-topo { padding: var(--bd-sp-4) 18px; }
 .bd-topo svg { display: block; }
 
-/* 搜索框输入 */
-.bd-searchbox__in { border: none; outline: none; background: transparent; flex: 1; min-width: 0; font-size: 13px; color: var(--bd-t1); }
-.bd-searchbox__in::placeholder { color: var(--bd-t3); }
-.bd-polling { display: inline-flex; align-items: center; gap: 5px; font-size: 12px; color: var(--bd-primary); }
-
-/* 降级演示下禁用写入按钮 */
-.bd-btn:disabled { opacity: .5; cursor: not-allowed; }
+.bd-ipsec__search { width: 240px; }
+.bd-tablewrap { overflow-x: auto; }
+.bd-polling { display: inline-flex; align-items: center; gap: 5px; font-size: var(--bd-fs-sm); color: var(--bd-primary); }
+.bd-cell-strong { color: var(--bd-t1); font-weight: 500; }
+.bd-ipsec__net { font-size: var(--bd-fs-xs); }
 
 /* 行内辅助文字 */
-.bd-sub2 { margin-top: 5px; display: flex; flex-wrap: wrap; gap: 4px; }
-.bd-sub3 { font-size: 11px; color: var(--bd-t3); line-height: 1.6; margin-top: 2px; }
-.bd-sub3.warn, .bd-warn { color: var(--bd-warning, #FF7D00); font-size: 11px; line-height: 1.6; margin-top: 2px; }
-.bd-err { color: var(--bd-danger, #F53F3F); font-size: 11px; line-height: 1.6; margin-top: 2px; }
+.bd-sub2 { margin-top: 5px; display: flex; flex-wrap: wrap; gap: var(--bd-sp-1); }
+.bd-sub3 { font-size: var(--bd-fs-xs); color: var(--bd-t3); line-height: var(--bd-lh); margin-top: 2px; }
+.bd-sub3.warn, .bd-warn { color: var(--bd-warning); font-size: var(--bd-fs-xs); line-height: var(--bd-lh); margin-top: 2px; }
+.bd-err { color: var(--bd-danger); font-size: var(--bd-fs-xs); line-height: var(--bd-lh); margin-top: 2px; }
 .bd-dim { color: var(--bd-t3); }
 .bd-dash { color: var(--bd-t3); }
-.bd-flow { font-size: 11.5px; line-height: 1.7; }
+.bd-flow { font-size: var(--bd-fs-xs); line-height: var(--bd-lh-loose); }
 
 /* 操作列：链接多，窄列里靠 margin 排会散成一竖条，用 flex 收成两行 */
-.bd-ops { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px 12px; min-width: 108px; }
-
-/* 期望态 pill */
-.bd-pill { display: inline-block; font-size: 11.5px; padding: 2px 9px; border-radius: 10px; font-weight: 500; }
-.bd-pill.on { color: #165DFF; background: #E8F3FF; }
-.bd-pill.off { color: #86909C; background: var(--bd-fill-2); }
+.bd-ops { display: flex; flex-wrap: wrap; justify-content: flex-end; gap: 4px var(--bd-sp-3); min-width: 108px; white-space: normal; }
 
 /* 失败原因（一级视图） */
-.bd-fail { margin-top: 4px; }
-.bd-fail__msg { font-size: 11.5px; color: var(--bd-danger, #F53F3F); line-height: 1.6; margin-top: 3px; max-width: 260px; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.bd-fail { margin-top: var(--bd-sp-1); }
+.bd-fail__msg { font-size: var(--bd-fs-xs); color: var(--bd-danger); line-height: var(--bd-lh); margin-top: 3px; max-width: 260px; display: -webkit-box; -webkit-line-clamp: 2; line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
 
 /* 套件对比 */
-.bd-cmp { font-size: 11px; line-height: 1.7; color: var(--bd-t3); }
-.bd-cmp .v-match { color: #00B42A; }
-.bd-cmp .v-mismatch { color: var(--bd-danger, #F53F3F); font-weight: 600; }
+.bd-cmp { font-size: var(--bd-fs-xs); line-height: var(--bd-lh-loose); color: var(--bd-t3); }
+.bd-cmp .v-match { color: var(--bd-success); }
+.bd-cmp .v-mismatch { color: var(--bd-danger); font-weight: 600; }
 .bd-cmp .v-unknown { color: var(--bd-t3); }
 .bd-cmp .v-pending { color: var(--bd-t3); }
-.v-match { color: #00B42A; }
-.v-mismatch { color: var(--bd-danger, #F53F3F); font-weight: 600; }
+.v-match { color: var(--bd-success); }
+.v-mismatch { color: var(--bd-danger); font-weight: 600; }
 
 /* SA 剩余寿命 */
-.bd-life { font-family: ui-monospace, monospace; font-size: 13px; font-weight: 600; color: var(--bd-t1); margin-bottom: 4px; }
-.bd-life.soon { color: var(--bd-warning, #FF7D00); }
+.bd-life { font-family: var(--bd-font-mono); font-size: var(--bd-fs-md); font-weight: 600; color: var(--bd-t1); margin-bottom: var(--bd-sp-1); }
+.bd-life.soon { color: var(--bd-warning); }
 
-/* 抽屉 */
-.bd-dsec { font-size: 12.5px; font-weight: 600; color: var(--bd-t1); margin: 18px 0 8px; padding-bottom: 6px; border-bottom: 1px solid var(--bd-fill-2); }
-.bd-dsec:first-child { margin-top: 0; }
-.bd-kv { display: flex; justify-content: space-between; gap: 12px; font-size: 12.5px; padding: 5px 0; }
+/* 抽屉键值行 */
+.bd-kv { display: flex; justify-content: space-between; gap: var(--bd-sp-3); font-size: var(--bd-fs-sm); padding: 5px 0; }
 .bd-kv span { color: var(--bd-t3); flex: none; }
 .bd-kv b { color: var(--bd-t1); font-weight: 500; text-align: right; word-break: break-all; }
-.bd-dhint { font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; margin-top: 6px; }
+.bd-dhint { font-size: var(--bd-fs-xs); color: var(--bd-t3); line-height: var(--bd-lh-loose); margin-top: 6px; }
 
 /* PSK */
-.bd-pskcur { background: var(--bd-fill-1); border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px; color: var(--bd-t2); }
-.bd-pskacts { display: flex; align-items: center; gap: 10px; margin-top: 8px; }
+.bd-pskacts { display: flex; align-items: center; gap: 10px; margin-top: var(--bd-sp-2); }
 
-/* 表单 */
-.bd-formwarn { display: flex; gap: 8px; align-items: flex-start; background: #FFF7E8; border: 1px solid #FFCF8B; border-radius: 6px; padding: 10px 12px; margin-bottom: 14px; font-size: 12.5px; color: #7A4B00; line-height: 1.7; }
-.bd-uform__group { font-size: 13px; font-weight: 600; color: var(--bd-t1); margin: 16px 0 10px; padding-bottom: 6px; border-bottom: 1px solid var(--bd-fill-2); }
-.bd-uform__group:first-child { margin-top: 0; }
-.bd-uform__row { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
-.bd-uform__row3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; }
-.bd-uform__f { margin-bottom: 12px; }
-.bd-uform__f label { display: block; font-size: 12.5px; color: var(--bd-t2); margin-bottom: 6px; }
-.bd-uform__f .req { color: var(--bd-danger); margin-left: 2px; font-style: normal; }
-.bd-uform__sw { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
-.bd-uform__sw label { margin-bottom: 0; }
-.bd-uform__sw label .bd-sub3 { display: block; margin-top: 2px; } /* 说明另起一行，别和标题挤成一句 */
-.bd-uform__note { font-size: 12px; color: var(--bd-t3); margin: -2px 0 6px; line-height: 1.7; }
+/* 表单：三列参数行、对象库选择器与手填框上下排 */
+.bd-fld-grid--3 { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+.bd-fld--row > label { margin-bottom: 0; }
+.bd-fld--row > label .bd-sub3 { display: block; margin-top: 2px; } /* 说明另起一行，别和标题挤成一句 */
 .bd-uform__objpick { margin-bottom: 6px; }
-.bd-uform__refhint { font-size: 11.5px; color: var(--bd-t3); margin-top: 4px; line-height: 1.6; }
-.bd-empty { text-align: center; color: var(--bd-t3); padding: 28px 0; }
+
+@media (max-width: 1320px) {
+  .bd-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .bd-ipsec__search { width: 200px; }
+}
 </style>

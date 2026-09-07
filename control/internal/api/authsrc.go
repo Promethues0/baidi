@@ -3,12 +3,14 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"net/http"
 	"strings"
 	"time"
 
 	"baidi.dev/control/internal/authsrc"
+	"baidi.dev/control/internal/authsrc/radiussrc"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/secret"
 	"baidi.dev/control/internal/store"
@@ -64,8 +66,9 @@ func (s *Server) handleAuthSources(w http.ResponseWriter, r *http.Request) {
 	}
 	// 顺带告诉前端哪些类型是真的实现了——控制台据此把未实现的选项置灰，
 	// 而不是让它们看起来可选。
+	// ★清单只有 authsrc.SupportedKinds 一份：这里、保存拒绝文案、Kind.Supported 三处同源。
 	supported := []string{}
-	for _, k := range []authsrc.Kind{authsrc.KindLocal, authsrc.KindLDAP, authsrc.KindAD, authsrc.KindOIDC} {
+	for _, k := range authsrc.SupportedKinds() {
 		supported = append(supported, string(k))
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"sources": recs, "supportedKinds": supported})
@@ -97,8 +100,21 @@ func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
 		// ★装载期明确拒绝，而不是存下来再在登录时静默失败。
 		// 「界面上能选、后端静默不生效」是本项目反复吃亏的形态。
 		httpx.Error(w, http.StatusBadRequest,
-			"认证源类型 "+b.Kind+" 本版本未实现（当前支持：local / ldap / ad / oidc）")
+			"认证源类型 "+b.Kind+" 本版本未实现（当前支持："+authsrc.SupportedKindsZh()+"）")
 		return
+	}
+	// radiusWarn RADIUS 源打开了安全逃生舱时的当面告警（见 validateRadiusConfig）。
+	var radiusWarn string
+	if kind == authsrc.KindRADIUS {
+		// RADIUS 专属入口校验。★与 IPSec peer 拒收 FQDN 同一条纪律：拒绝要说得出原因，
+		// 且能在这里挡住的就不留到「第一个用户登录不上」那一刻。
+		normalized, rwarn, rerr := validateRadiusConfig(b.Config)
+		if rerr != nil {
+			httpx.Error(w, http.StatusBadRequest, rerr.Error())
+			return
+		}
+		b.Config = normalized
+		radiusWarn = rwarn
 	}
 	if kind == authsrc.KindLocal && b.ID != "local" {
 		httpx.Error(w, http.StatusBadRequest, "本地目录是内置认证源，不能再新建一条")
@@ -147,10 +163,14 @@ func (s *Server) handleSaveAuthSource(w http.ResponseWriter, r *http.Request) {
 	}
 	// ★保存即校验：配置写错了要当场知道，而不是等到有人登录不上才发现。
 	// 构造失败不拒绝保存（管理员可能正分几步填），但把原因带回去。
-	var warn string
+	// 逃生舱告警排在最前：它是管理员**刚刚亲手放弃**的一层保护，不该跟在
+	// 「还没填共享密钥」后面被读成同一类提示。
+	warn := radiusWarn
 	if kind != authsrc.KindLocal {
 		if _, berr := s.buildProvider(r.Context(), rec); berr != nil {
-			warn = "配置已保存，但当前还不可用：" + berr.Error()
+			// ★拼接而不是覆盖：逃生舱告警与"当前不可用"是两件独立的事，
+			// 覆盖会让「打开了逃生舱 + 还没填共享密钥」那一次保存把前者整句吃掉。
+			warn = strings.TrimSpace(warn + " 配置已保存，但当前还不可用：" + berr.Error())
 		}
 	}
 	// FR-AUTH-10：接入一个用户目录后，系统要为它自动生成默认认证策略。
@@ -288,13 +308,28 @@ func (s *Server) handleProbeAuthSource(w http.ResponseWriter, r *http.Request) {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "detail": err.Error()})
 		return
 	}
+	start := time.Now()
+	// ★能说清"用什么方法探到的"的源优先走 DetailedProber：RADIUS 的自检有两条路
+	// （Status-Server / 回退到一次探测用 Access-Request），后者会在对面日志里留一条失败登录，
+	// 控制台必须把是哪一种说给管理员，一句「连接正常」盖不住这个差别。
+	if dp, okd := prov.(authsrc.DetailedProber); okd {
+		rep, err := dp.ProbeDetail(ctx)
+		if err != nil {
+			s.audit(r, "admin", "测试认证源「"+rec.Name+"」连通性失败", "fail")
+			httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "detail": err.Error(), "method": rep.Method})
+			return
+		}
+		httpx.JSON(w, http.StatusOK, map[string]any{
+			"ok": true, "detail": rep.Detail, "method": rep.Method, "elapsedMs": time.Since(start).Milliseconds(),
+		})
+		return
+	}
 	type prober interface{ Probe(context.Context) error }
 	p, okp := prov.(prober)
 	if !okp {
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "detail": "该类型不支持连通性自检"})
 		return
 	}
-	start := time.Now()
 	if err := p.Probe(ctx); err != nil {
 		s.audit(r, "admin", "测试认证源「"+rec.Name+"」连通性失败", "fail")
 		httpx.JSON(w, http.StatusOK, map[string]any{"ok": false, "detail": err.Error()})
@@ -303,6 +338,135 @@ func (s *Server) handleProbeAuthSource(w http.ResponseWriter, r *http.Request) {
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"ok": true, "detail": "连接正常", "elapsedMs": time.Since(start).Milliseconds(),
 	})
+}
+
+// radiusAllowMissingRespMAKey RADIUS 源配置里那个安全逃生舱的落库键名。
+//
+// ★名字刻意不叫 requireResponseAuthenticator：**Response Authenticator 正是 Blast-RADIUS
+// 攻破的那层 MD5**，用它命名开关会被读成"要不要校验响应认证符"，与开关真正管的东西
+// （应答里的 Message-Authenticator，HMAC-MD5 那层）差了一层。
+// 同样刻意是**允许式**而不是要求式：JSON 里缺席 = false = 要求带 MA，安全那一侧就是零值——
+// 用 requireXxx 的话存量库里没这个键的行在升级那一刻集体变成"不要求"，两边都不报错。
+const radiusAllowMissingRespMAKey = "allowMissingResponseMessageAuthenticator"
+
+// radiusWaiverWarning 打开逃生舱时回给管理员的当面告警（保存回执）。
+const radiusWaiverWarning = "已打开「允许应答不带 Message-Authenticator」：该源会接受不携带 " +
+	"Message-Authenticator 的 RADIUS 应答，等于放弃 Blast-RADIUS（CVE-2024-3596）缓解里唯一还站得住的那层 HMAC，" +
+	"应答完整性只剩已被攻破的 MD5 Response Authenticator。只在确认该服务器确实不回这个属性时保持开启；" +
+	"能在服务端开启应答侧 Message-Authenticator 的话，请关掉这个开关。"
+
+// validateRadiusConfig RADIUS 源保存时的入口校验，返回归一后的 config JSON 与一句可选告警。
+//
+// 每一条都是「能在这里挡住就别留到登录那一刻」：
+//   - host 必填、port 0（取 1812）或 1~65535；
+//   - protocol / groupAttr 限枚举——填错的话 radiussrc.New 会拒，但那是「保存成功、
+//     warning 里一句话」，而这里是 400，管理员不会把它当成"存好了"；
+//   - **allowedDomains 必须为空**：RADIUS 应答里没有邮箱，准入闸的域白名单对它恒
+//     fail-closed（AdmitFilter.Allow 的「认证源未返回邮箱」分支）——配上去的后果是该源
+//     所有用户都进不来、而白名单看着完全正确。这正是本项目最怕的"配了却不生效"的反面：
+//     "配了就全拒"，同样无报错。
+//   - **allowedGroups 非空时 groupAttr 必填**：同一条理由。组属性留空 = radiussrc 不映射组
+//     = Identity.Groups 恒空 = 组白名单对每个人都判「不属于任何允许的组」——保存 200、
+//     零报错、谁都进不来。要么选一个组属性，要么清空允许的组。
+//   - **retries 缺席归一成显式 1 落库**：DTO 用 *int 区分「缺席」与「显式 0」，落库那份
+//     不该再留一个要靠读方约定去解释的空缺。
+//   - **allowMissingResponseMessageAuthenticator 限布尔、归一成显式落库**，为真时回一句
+//     告警（放弃了哪一层保护）。它是安全逃生舱，"填了个字符串 true 于是被当成 false"这种
+//     静默归零在这里的方向是收紧的，但管理员会以为自己配上了，故一律 400 说清楚。
+//
+// ★归一用 **map 原样保留其余键**，绝不"解成 DTO 再重新 Marshal"：DTO 里没声明的配置键
+// 会被那次保存整个抹掉——「改了 A 设置，B 设置莫名其妙没了」，两边都不报错。
+// 同仓 mergeAdmitCfg 的注释早写死了这条纪律，这里此前恰好因为字段对齐才没出事，
+// 是一颗已知会响的雷（DTO 与库里那份 config 的字段集，只要有一次没同步就炸）。
+// 所以下面**只回写本函数真正修改过的键**。
+//
+// 共享密钥不在这里校验：它走独立的 secret 端点，保存那一刻可能还没来得及填；
+// buildProvider 的 warning（「未配置共享密钥」）与登录时的「认证源不可用」都会点名它。
+func validateRadiusConfig(raw json.RawMessage) (json.RawMessage, string, error) {
+	if len(raw) == 0 {
+		return nil, "", fmt.Errorf("RADIUS 源必须提供 config（host 必填）")
+	}
+	// ① 原文进 map：本函数没碰过的键（含将来新增的、以及别的入口写进去的）原样带过去。
+	m := map[string]any{}
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return nil, "", fmt.Errorf("RADIUS 配置不是合法 JSON 对象：%v", err)
+	}
+	if m == nil { // config 是字面量 null：当空对象处理，下面 host 必填那条会拦住它
+		m = map[string]any{}
+	}
+	// ② DTO 只用来读本函数关心的那几个键（顺带把类型错的值挡在这里）。
+	var c radiusConfigDTO
+	if err := json.Unmarshal(raw, &c); err != nil {
+		return nil, "", fmt.Errorf("RADIUS 配置字段类型不对：%v", err)
+	}
+	c.Host = strings.TrimSpace(c.Host)
+	if c.Host == "" {
+		return nil, "", fmt.Errorf("RADIUS 源的 host 必填（服务器主机名或 IP）")
+	}
+	if c.Port == 0 {
+		c.Port = 1812
+	}
+	if c.Port < 1 || c.Port > 65535 {
+		return nil, "", fmt.Errorf("RADIUS 端口 %d 超出 1~65535（认证口惯用 1812；1813 是计费口，不是认证口）", c.Port)
+	}
+	c.Protocol = strings.ToLower(strings.TrimSpace(c.Protocol))
+	switch c.Protocol {
+	case "":
+		c.Protocol = string(radiussrc.ProtocolPAP)
+	case string(radiussrc.ProtocolPAP), string(radiussrc.ProtocolCHAP):
+	default:
+		return nil, "", fmt.Errorf("RADIUS protocol 取值须为 pap 或 chap，得到：%s（EAP / MS-CHAPv2 本版本不做）", c.Protocol)
+	}
+	c.GroupAttr = strings.ToLower(strings.TrimSpace(c.GroupAttr))
+	switch radiussrc.GroupAttr(c.GroupAttr) {
+	case radiussrc.GroupAttrNone, radiussrc.GroupAttrClass, radiussrc.GroupAttrFilterID, radiussrc.GroupAttrReplyMessage:
+	default:
+		return nil, "", fmt.Errorf("RADIUS groupAttr 取值须为 class / filter-id / reply-message 或留空，得到：%s", c.GroupAttr)
+	}
+	if c.TimeoutMs < 0 || c.TimeoutMs > 30000 {
+		return nil, "", fmt.Errorf("RADIUS timeoutMs 须在 0（取默认 3000）~30000 之间，得到：%d", c.TimeoutMs)
+	}
+	if c.Retries == nil {
+		// 缺席 → 显式 1 落库（radiussrc 的默认值），落库那份不留空缺；显式 0 原样保留（只发一次）。
+		one := 1
+		c.Retries = &one
+	}
+	if *c.Retries < 0 || *c.Retries > 5 {
+		return nil, "", fmt.Errorf("RADIUS retries 须在 0~5 之间，得到：%d", *c.Retries)
+	}
+	// 逃生舱：只认真正的布尔。缺席 = false = 要求应答带 Message-Authenticator。
+	allowMissingMA := false
+	if v, ok := m[radiusAllowMissingRespMAKey]; ok && v != nil {
+		b, isBool := v.(bool)
+		if !isBool {
+			return nil, "", fmt.Errorf("RADIUS %s 须为布尔值 true / false，得到：%v", radiusAllowMissingRespMAKey, v)
+		}
+		allowMissingMA = b
+	}
+	if len(store.NormalizeAdmitList(c.AllowedDomains)) > 0 {
+		return nil, "", fmt.Errorf("RADIUS 源不能配置「允许的邮箱域」：RADIUS 应答里没有邮箱，域白名单会让该源所有用户都被准入闸拒绝（fail-closed）。请清空后保存；按组限制请用「允许的组」+ 组属性映射")
+	}
+	if len(store.NormalizeAdmitList(c.AllowedGroups)) > 0 && c.GroupAttr == "" {
+		// ★与上一条同一条理由：组属性留空 = 不映射组 = 每个人的组都是空 = 组白名单对谁都不过。
+		// 放行等于保存一条谁都进不来的源，且保存 200、零报错。
+		return nil, "", fmt.Errorf("RADIUS 源配置了「允许的组」但「组属性」为空：组属性留空时不从应答映射组，组白名单会让该源所有用户都被准入闸拒绝（fail-closed）。请在「组属性」里选 class / filter-id / reply-message 之一（须与服务端策略写入的属性一致），或清空「允许的组」")
+	}
+	// ③ 只回写本函数改过的键。其余（nasIdentifier / timeoutMs / 准入白名单 / 未来新增的键）原样留在 m 里。
+	m["host"] = c.Host
+	m["port"] = c.Port
+	m["protocol"] = c.Protocol
+	m["groupAttr"] = c.GroupAttr
+	m["retries"] = *c.Retries
+	m[radiusAllowMissingRespMAKey] = allowMissingMA
+	out, err := json.Marshal(m)
+	if err != nil {
+		return nil, "", fmt.Errorf("RADIUS 配置序列化失败：%v", err)
+	}
+	warn := ""
+	if allowMissingMA {
+		warn = radiusWaiverWarning
+	}
+	return out, warn, nil
 }
 
 // ensureDirectoryDefaultPolicy 为某个用户目录补一条默认认证策略（若它一条都没有）。
@@ -315,10 +479,12 @@ func (s *Server) handleProbeAuthSource(w http.ResponseWriter, r *http.Request) {
 // 而 authpolicy.Match 第一刀就按目录筛——库里一条该目录的策略都没有 → Evaluate
 // 返回零值 Decision → 二次认证要求为零，且 secondFactor 在零值分支两个 case 都不进，
 // **审计里连「本次未要求二次认证」都没有**。三处都无异常：
-//   ① 认证源保存回 200、连通性测试通过；
-//   ② 认证策略页只按「已有策略」分组渲染，接了 LDAP 之后页面上根本不多出这一栏，
-//      管理员看到的与接入前一模一样；
-//   ③ 用户侧是一次完全正常的成功登录。
+//
+//	① 认证源保存回 200、连通性测试通过；
+//	② 认证策略页只按「已有策略」分组渲染，接了 LDAP 之后页面上根本不多出这一栏，
+//	   管理员看到的与接入前一模一样；
+//	③ 用户侧是一次完全正常的成功登录。
+//
 // 管理员在「本地目录 · 默认策略」里配好的规则对这批外部账号一条都不生效——
 // 而外部目录的人恰恰是这些规则最想覆盖的对象。
 //

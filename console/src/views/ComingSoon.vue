@@ -41,5 +41,5 @@ const title = computed(() => (leafTitle.value ? leafTitle.value : '页面不存�
 
 <style scoped>
 .bd-coming { display: flex; align-items: center; justify-content: center; min-height: 60vh; }
-code { font-family: var(--bd-mono, ui-monospace, SFMono-Regular, Menlo, monospace); font-size: 12.5px; }
+code { font-family: var(--bd-font-mono); font-size: var(--bd-fs-sm); }
 </style>

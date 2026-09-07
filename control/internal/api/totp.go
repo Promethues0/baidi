@@ -239,9 +239,14 @@ func (s *Server) handleTotpLogin(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, "请求格式不正确")
 		return
 	}
-	account, ok := s.verifyMfaTicket(b.Ticket)
+	account, dir, ok := s.verifyMfaTicket(b.Ticket)
 	if !ok {
 		httpx.Error(w, http.StatusUnauthorized, "认证票据无效或已过期，请重新登录")
+		return
+	}
+	// ★纵深：本回合第一因子不是本地口令、而这个账号是管理员 → 到此为止。
+	// 排在验码之前——一个不该在这条路上换令牌的人，不必让他先证明自己持有认证器。
+	if s.denyExternalMfaAdmin(w, r, account, dir) {
 		return
 	}
 	// 防爆破锁：验证码猜测失败也计数，锁定可能在两回合之间触发，此处再拦一次。

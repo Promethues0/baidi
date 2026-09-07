@@ -14,6 +14,7 @@ import (
 	"baidi.dev/control/internal/authsrc"
 	"baidi.dev/control/internal/authsrc/ldapsrc"
 	"baidi.dev/control/internal/authsrc/oidcsrc"
+	"baidi.dev/control/internal/authsrc/radiussrc"
 	"baidi.dev/control/internal/secret"
 	"baidi.dev/control/internal/store"
 )
@@ -107,6 +108,54 @@ type oidcConfigDTO struct {
 	admitConfigDTO
 }
 
+// radiusConfigDTO RADIUS 源落库 config JSON 的形状。共享密钥**不在这里**——
+// 它走 auth_source_secrets（AAD 绑源 id、只写不读），与 LDAP bind 口令同一条路。
+type radiusConfigDTO struct {
+	Host string `json:"host"`
+	Port int    `json:"port"` // 0 = 1812
+	// NASIdentifier 报文里的 NAS-Identifier；服务端常按它挑策略/找客户端条目。
+	NASIdentifier string `json:"nasIdentifier"`
+	// Protocol pap | chap（默认 pap）。CHAP 要求服务端持有明文口令，接 AD 的 FreeRADIUS 通常只放行 PAP。
+	Protocol string `json:"protocol"`
+	// GroupAttr class | filter-id | reply-message | 空（不映射组）。
+	GroupAttr string `json:"groupAttr"`
+	// TimeoutMs 单次等待应答；Retries 重发次数。总预算仍受外部认证 8s 预算（BAIDI_EXTAUTH_TIMEOUT）钳制。
+	TimeoutMs int `json:"timeoutMs"`
+	// Retries 用指针是为了把「配置里缺席」与「管理员显式选了 0」分开：控制台让人选
+	// 「重发 0 次」并按「总预算 = 单次等待 × (重发+1)」算，此前 int 零值被当成"取默认 1"，
+	// 显示 0、执行 1，预算翻倍且页面上看不出来。nil = 取 radiussrc 默认（1）；&0 = 只发一次。
+	// validateRadiusConfig 保存时把 nil 归一成显式 1 落库，存量行 UI 一直都带这个键、不需回填。
+	Retries *int `json:"retries,omitempty"`
+	admitConfigDTO
+	// ★安全逃生舱 allowMissingResponseMessageAuthenticator **刻意不在这个 DTO 里**，
+	// 取值走 radiusWaiverFromConfig（按常量读 map）。两条理由都在那个函数的注释里。
+}
+
+// radiusWaiverFromConfig 从落库 config 里取那个安全逃生舱
+// （allowMissingResponseMessageAuthenticator，见 authsrc.go 的 radiusAllowMissingRespMAKey）。
+//
+// ★为什么不做成 radiusConfigDTO 的一个字段——两条理由，各对应一种"零报错的不生效"：
+//
+//	① 键名的唯一真相源是 radiusAllowMissingRespMAKey 那个常量，而结构体 tag 只能写字面量。
+//	   两处各写一份，改名时就会分家成「入口按新名字校验、构造按旧名字读」——症状与本次修的
+//	   缺陷逐字相同：管理员在页面上打开它、保存回执当面说「已打开」，而 Provider 那边恒 false。
+//	② DTO 上多一个 bool 字段会让 validateRadiusConfig 的第 ② 步（把整份 config 解进 DTO）
+//	   对 `"yes"` 这类非布尔值先炸在 json 解码器手里，authsrc.go 里那句点名键名的中文 400
+//	   （「须为布尔值 true / false，得到：yes」）就永远走不到——安全开关填错时给出的解释
+//	   会退化成一行英文 unmarshal 报错。
+//
+// 只认真正的布尔：缺席 / null / 类型不对一律 false = 要求应答带 Message-Authenticator。
+// 安全那一侧就是零值（与入口校验同向；类型不对的那份在保存那一刻就被 400 挡住了，
+// 走到这里只可能是别的入口写进去的脏数据，此时回落方向必须是收紧）。
+func radiusWaiverFromConfig(cfg string) bool {
+	var m map[string]any
+	if err := json.Unmarshal([]byte(cfg), &m); err != nil {
+		return false
+	}
+	b, _ := m[radiusAllowMissingRespMAKey].(bool)
+	return b
+}
+
 // buildProvider 由一条落库配置构造出可用的认证源实现。
 //
 // ★凭据在这里、且只在这里被解密。整个控制面里能读到 bind 口令/client_secret 明文的
@@ -173,6 +222,27 @@ func (s *Server) buildProvider(ctx context.Context, rec store.AuthSourceRec) (an
 			Issuer: c.Issuer, ClientID: c.ClientID, ClientSecret: credential,
 			RedirectURI: c.RedirectURI, Scopes: c.Scopes,
 			UseUserInfo: c.UseUserInfo,
+		})
+	case authsrc.KindRADIUS:
+		var c radiusConfigDTO
+		if err := json.Unmarshal([]byte(rec.Config), &c); err != nil {
+			return nil, fmt.Errorf("RADIUS 配置不是合法 JSON：%w", err)
+		}
+		// ★SourceID 必须是 rec.ID：Subject = radius:<源 id>:<用户名>，源 id 就是把两条
+		// RADIUS 源里的同名用户隔成两个身份的那道墙。传别的值等于拆墙。
+		return radiussrc.New(radiussrc.Config{
+			SourceID: rec.ID, Host: c.Host, Port: c.Port, Secret: credential,
+			NASIdentifier: c.NASIdentifier,
+			Protocol:      radiussrc.Protocol(c.Protocol),
+			GroupAttr:     radiussrc.GroupAttr(c.GroupAttr),
+			Timeout:       time.Duration(c.TimeoutMs) * time.Millisecond,
+			Retries:       radiusRetries(c.Retries),
+			// ★这一行此前是缺的：入口校验、归一落库、保存告警、登录拒绝文案、探测结论
+			// 五处都在，唯独没有人把它传给 Provider——于是那个字段恒 false（恒「要求 MA」），
+			// 管理员打开开关、回执说「已打开」，而它一点作用都没有。
+			// 它是**放宽**方向的开关，没有执行方时的后果不是不安全而是"配了不生效"，
+			// 但同样属于本仓反复消灭的那一族（配置面与执行方分家，两边都不报错）。
+			AllowMissingResponseMessageAuthenticator: radiusWaiverFromConfig(rec.Config),
 		})
 	}
 	return nil, fmt.Errorf("认证源类型 %q 无法构造", rec.Kind)
@@ -249,6 +319,13 @@ func (s *Server) authenticateExternal(r *http.Request, username, password, direc
 			// 继续问别的源等于把同一份明文口令再投递给一台不该看到它的服务器
 			// （与 wave8 行动 12 要修的凭据外溢同一条道理）。
 			return extAuthResult{SrcName: rec.Name, SrcKind: rec.Kind, Elapsed: spent}, ferr
+		case asAdminExtDenied(ferr) != nil:
+			// ★管理员闸拒绝：与准入闸同款，**不再问下一个源**——口令已经对了、这个人的
+			// 归属也已确定，继续问别的源就是把同一份明文口令再投递给一台不该看到它的
+			// 服务器。少了这一条，它会掉进下面的 default 被当成"运维故障"，
+			// 用户看到的是「认证服务暂时不可用」而不是那句「管理员只接受本地口令」——
+			// 一句把人支去查网络的假归因，正是本项目反复消灭的形态。
+			return extAuthResult{SrcName: rec.Name, SrcKind: rec.Kind, Elapsed: spent}, ferr
 		case errors.Is(ferr, authsrc.ErrInvalidCredentials):
 			// 这个源不认识他/口令不对：继续问下一个源。不记 unavailable。
 			continue
@@ -268,6 +345,58 @@ func (s *Server) authenticateExternal(r *http.Request, username, password, direc
 			fmt.Errorf("%w：%s", authsrc.ErrSourceUnavailable, strings.Join(unavailable, "、"))
 	}
 	return extAuthResult{Elapsed: spent}, nil
+}
+
+// radiusRetries 把 DTO 里的 *int 翻成 radiussrc.Config.Retries：
+// nil（配置里缺席）→ -1 让 radiussrc 取自己的默认值 1；显式值（含 0）原样——管理员在
+// 控制台选「重发 0 次」要的就是只发一次，此前 `n <= 0 → -1` 把它悄悄改成了 1。
+// 负数不可能从 validateRadiusConfig 过来（那里 400），防御性地也当"取默认"。
+func radiusRetries(n *int) int {
+	if n == nil || *n < 0 {
+		return -1
+	}
+	return *n
+}
+
+// radiusSyncableGroups 把 RADIUS 应答里的组值筛成**可以同步成员的那部分**：
+// 只保留白帝里**已存在**的、属于本源的外部用户组（kind=external，名字大小写不敏感），
+// 其余一律丢掉——BindExternalUser 对传进去的每个组名都会 INSERT OR IGNORE 一行永久的
+// user_groups，而 RADIUS 的 Class 常被服务器用作逐会话标识（Cisco ISE 的 CACS:<session>…），
+// 原样传等于每次登录都往 user_groups 表里加一行、直到写爆。
+//
+// ★这只影响**成员同步**：准入闸（allowedGroups 比对）仍看 radiussrc 交出来的全部组值
+// （已在那边限到 32 个 / 128 字节），调用方要在过闸**之后**才用本函数的结果去绑定。
+// 「已存在」的组只可能来自升级前的自动建组行（本改动后 RADIUS 不再建）——LDAP/OIDC 的
+// memberOf / groups 同步是 DN 维度的另一条路，不在这里动它。
+//
+// ★外部组的 id 形态（`gext-<源 id>-<hash>`）是 store.extGroupID 的私有约定，这里刻意
+// **不复刻它**，改按 (kind=external, 描述里带本源 id, 名字) 三元匹配——描述文本
+// 「外部目录组（来源 <源 id>）」是 refreshExternalProfile 建行时写死的，两处若分家，
+// 症状是"存量组停止同步"，TestRadiusClassNeverCreatesGroups 钉着它。
+// 读组失败时 fail-closed：一个组都不同步（少同步一个成员远好过多建一行）。
+func (s *Server) radiusSyncableGroups(ctx context.Context, sourceID string, groups []string) []string {
+	if len(groups) == 0 {
+		return nil
+	}
+	all, err := s.store.UserGroups(ctx)
+	if err != nil {
+		slog.Warn("读取用户组失败，本次 RADIUS 登录不同步任何组成员", "源", sourceID, "err", err.Error())
+		return nil
+	}
+	marker := "（来源 " + sourceID + "）"
+	existing := map[string]bool{}
+	for _, g := range all {
+		if g.Kind == store.GroupKindExternal && strings.Contains(g.Description, marker) {
+			existing[strings.ToLower(strings.TrimSpace(g.Name))] = true
+		}
+	}
+	out := make([]string, 0, len(groups))
+	for _, g := range groups {
+		if existing[strings.ToLower(strings.TrimSpace(g))] {
+			out = append(out, g)
+		}
+	}
+	return out
 }
 
 func ldapTLSMode(s string) ldapsrc.TLSMode {
@@ -301,6 +430,25 @@ func asAdmitDenied(err error) *admitDenied {
 
 // errBindFailed 认证过了但绑定/建号失败（本机故障，换个源也救不了）。
 var errBindFailed = errors.New("外部身份绑定失败")
+
+// adminExtDenied 管理员账号经外部认证源认证通过、但按纪律不得换取任何凭证。
+//
+// 与 admitDenied 同族、刻意分开：两者都是「口令是对的、人不准进」，但下一步动作
+// 完全不同——准入拒绝要么等审批要么去找管理员开白名单，而这条的出路只有一个：
+// 改用本地口令登录。合成一种错误的话，handlePortalLogin 只能给出一句折中的话。
+// 审计与文案已在 denyAdminExternal 里落好，调用方不再重复记账、不计爆破锁定。
+type adminExtDenied struct{ reason string }
+
+func (e *adminExtDenied) Error() string { return e.reason }
+
+// asAdminExtDenied 从错误链里取管理员闸拒绝（不是则回 nil）。
+func asAdminExtDenied(err error) *adminExtDenied {
+	var d *adminExtDenied
+	if errors.As(err, &d) {
+		return d
+	}
+	return nil
+}
 
 // passwordAuthOf 取该源的口令认证实现；nil,nil = 这个源不参与口令登录（如 OIDC）。
 func (s *Server) passwordAuthOf(ctx context.Context, rec store.AuthSourceRec) (authsrc.PasswordAuthenticator, error) {
@@ -347,7 +495,7 @@ func (s *Server) finishExternalAuth(r *http.Request, rec store.AuthSourceRec, as
 	}
 	// ★准入闸必须在 BindExternalUser **之前**（wave8 行动 10）。
 	// 放在建号之后就晚了：账号已经存在、已经落进组织树、已经被组织授权覆盖到了。
-	_, bound, berr := as.UserBySubject(ctx, rec.ID, id.Subject)
+	cur, bound, berr := as.UserBySubject(ctx, rec.ID, id.Subject)
 	if berr != nil {
 		return store.Credential{}, false, elapsed, fmt.Errorf("%w：%v", errBindFailed, berr)
 	}
@@ -359,9 +507,33 @@ func (s *Server) finishExternalAuth(r *http.Request, rec store.AuthSourceRec, as
 		}
 		return store.Credential{}, false, elapsed, &admitDenied{verdict: v}
 	}
+	// ★管理员账号绝不交给外部目录改写——这道闸必须在 BindExternalUser **之前**。
+	//
+	//   调用方那道闸（externalSessionCredential）拒的是**会话**，而它排在绑定之后：
+	//   会话确实拒掉了，可 BindExternalUser → refreshExternalProfile 已经按外部应答把这个
+	//   白帝管理员的显示名与邮箱写成了目录说的那份，并**增删**了他的外部组归属。
+	//   于是控制 AD/IdP 的人虽然登不进来，却能把某个管理员移出一个「一律二次认证」的
+	//   用户组——等于替他的**本地**登录降了一档认证策略要求（authpolicy 的适用范围
+	//   正是按用户组/组织算的）；改邮箱那半则能把找回/通知引到别处。
+	//   「认证被拒了」不等于"这次外部登录什么都没改动"，这正是那条 minor 的实质。
+	//
+	//   判据与另一处逐字同源：users.role='admin'（窄 SELECT 里就有 role，此前被丢成 _），
+	//   文案与审计同经 denyAdminExternal 产出，两处同真同假。
+	//   只在 bound 时判：未绑定就还没有这个外部身份对应的白帝账号，建号一律 role=user。
+	if bound && cur.Role == "admin" {
+		return store.Credential{}, false, elapsed,
+			&adminExtDenied{reason: s.denyAdminExternal(r, cur.Account, "外部认证源「"+rec.Name+"」")}
+	}
+	// ★RADIUS 的组值不自动建组：过了准入闸（那里看的是全部组值）之后，只把**已存在**的
+	// 本源外部组交给绑定去同步成员。传全部的话 BindExternalUser 会把每个 Class 值
+	// INSERT OR IGNORE 成一行永久的 user_groups（见 radiusSyncableGroups）。
+	syncGroups := id.Groups
+	if authsrc.Kind(rec.Kind) == authsrc.KindRADIUS {
+		syncGroups = s.radiusSyncableGroups(ctx, rec.ID, id.Groups)
+	}
 	cred, berr := as.BindExternalUser(ctx, rec.ID, store.ExternalIdentity{
 		Subject: id.Subject, Username: id.Username,
-		DisplayName: id.DisplayName, Email: id.Email, Groups: id.Groups,
+		DisplayName: id.DisplayName, Email: id.Email, Groups: syncGroups,
 	})
 	if berr != nil {
 		slog.Error("外部身份绑定失败", "源", rec.Name, "subject", id.Subject, "err", berr.Error())

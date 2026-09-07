@@ -14,7 +14,7 @@
 
       <!-- 强制改密：初始口令须换掉才发正常会话 -->
       <template v-if="step === 'changepw'">
-        <div class="bd-login__pk">
+        <div class="bd-notice bd-notice--plain bd-login__pk">
           <icon-lock />
           <span>账号 {{ username }} 正在使用初始口令，须修改后才能进入管理台</span>
         </div>
@@ -26,7 +26,7 @@
         <a-input-password v-model="newPw2" size="large" placeholder="再次输入新口令" class="bd-login__inp" @keyup.enter="submitChangePw">
           <template #prefix><icon-lock /></template>
         </a-input-password>
-        <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
+        <div v-if="err" class="bd-notice bd-notice--danger bd-login__err"><icon-exclamation-circle-fill /><span>{{ err }}</span></div>
         <a-button type="primary" size="large" long :loading="loading" class="bd-login__btn" @click="submitChangePw">修改并登录</a-button>
       </template>
 
@@ -38,17 +38,17 @@
           <template #prefix><icon-lock /></template>
         </a-input-password>
 
-        <div v-if="err" class="bd-login__err"><icon-exclamation-circle-fill /> {{ err }}</div>
+        <div v-if="err" class="bd-notice bd-notice--danger bd-login__err"><icon-exclamation-circle-fill /><span>{{ err }}</span></div>
 
         <!-- passkey 二次认证（口令已通过，等待认证器） -->
-        <div v-if="step === 'webauthn'" class="bd-login__pk">
-          <icon-fingerprint />
+        <div v-if="step === 'webauthn'" class="bd-notice bd-notice--plain bd-login__pk">
+          <icon-idcard />
           <span>{{ pkMsg || '请用 Touch ID / Windows Hello / 安全密钥完成二次认证' }}</span>
         </div>
 
         <!-- TOTP 动态验证码（口令已通过，已启用 TOTP 的账号强制） -->
         <template v-if="step === 'totp'">
-          <div class="bd-login__pk">
+          <div class="bd-notice bd-notice--plain bd-login__pk">
             <icon-mobile />
             <span>{{ pkMsg || '请输入认证器 App 中的 6 位动态验证码' }}</span>
           </div>
@@ -265,33 +265,30 @@ async function submitChangePw() {
 </script>
 
 <style scoped>
+/* 登录卡：圆角 / 阴影 / 字号全部走 token；提示条复用全局 .bd-notice，这里只调它在窄卡里的间距。 */
 .bd-login {
   min-height: 100vh; display: flex; align-items: center; justify-content: center;
-  background: radial-gradient(1200px 600px at 50% -10%, #E8F3FF 0%, var(--bd-fill-1) 55%);
+  background: radial-gradient(1200px 600px at 50% -10%, var(--bd-primary-1) 0%, var(--bd-fill-1) 55%);
 }
 .bd-login__card {
-  width: 380px; background: #fff; border: 1px solid var(--bd-border); border-radius: 14px;
-  padding: 36px 32px 28px; box-shadow: 0 12px 40px rgba(22, 93, 255, .08);
+  width: 380px; background: var(--bd-bg-1); border: 1px solid var(--bd-border); border-radius: var(--bd-radius-l);
+  padding: var(--bd-sp-7) var(--bd-sp-7) var(--bd-sp-6); box-shadow: var(--bd-shadow-3);
 }
-.bd-login__brand { text-align: center; margin-bottom: 26px; }
+.bd-login__brand { text-align: center; margin-bottom: var(--bd-sp-6); }
 .bd-login__mark {
-  width: 46px; height: 46px; border-radius: 12px; display: inline-flex; align-items: center; justify-content: center;
-  background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d)); box-shadow: 0 4px 12px rgba(22, 93, 255, .35);
+  width: 46px; height: 46px; border-radius: var(--bd-radius); display: inline-flex; align-items: center; justify-content: center;
+  background: linear-gradient(135deg, var(--bd-primary), var(--bd-primary-d)); box-shadow: var(--bd-shadow-primary-h);
 }
-.bd-login__title { font-size: 18px; font-weight: 700; margin-top: 14px; color: var(--bd-t1); }
-.bd-login__sub { font-size: 12px; color: var(--bd-t3); margin-top: 5px; }
-.bd-login__inp { margin-bottom: 14px; }
-.bd-login__err { display: flex; align-items: center; gap: 6px; font-size: 12.5px; color: var(--bd-danger); margin: -4px 0 12px; }
-.bd-login__pk {
-  display: flex; align-items: center; gap: 9px; font-size: 12.5px; line-height: 1.6;
-  color: var(--bd-t2); background: var(--bd-fill-1); border: 1px solid var(--bd-border);
-  border-radius: var(--bd-radius-s); padding: 11px 13px; margin: 2px 0 14px;
-}
-.bd-login__pk :deep(.arco-icon) { font-size: 18px; color: var(--bd-primary); flex: none; }
-.bd-login__btn { margin-top: 4px; height: 42px; font-size: 15px; letter-spacing: 4px; }
-.bd-login__hint { text-align: center; font-size: 12px; color: var(--bd-t3); margin-top: 16px; }
+.bd-login__title { font-size: 18px; font-weight: 700; margin-top: var(--bd-sp-4); color: var(--bd-t1); line-height: var(--bd-lh-tight); }
+.bd-login__sub { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 5px; }
+.bd-login__inp { margin-bottom: var(--bd-sp-4); }
+.bd-login__err { margin: -4px 0 var(--bd-sp-3); }
+.bd-login__pk { margin: 2px 0 var(--bd-sp-4); }
+.bd-login__pk > svg { font-size: 18px; }
+.bd-login__btn { margin-top: var(--bd-sp-1); height: 42px; font-size: 15px; letter-spacing: 4px; }
+.bd-login__hint { text-align: center; font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: var(--bd-sp-4); }
 .bd-login__hint code, .bd-login__foot a { color: var(--bd-primary); }
-.bd-login__hint code { background: var(--bd-primary-1); padding: 1px 6px; border-radius: 4px; font-family: ui-monospace, monospace; }
-.bd-login__foot { text-align: center; font-size: 12px; color: var(--bd-t3); margin-top: 10px; }
+.bd-login__hint code { background: var(--bd-primary-1); padding: 1px 6px; border-radius: var(--bd-radius-xs); font-family: var(--bd-font-mono); }
+.bd-login__foot { text-align: center; font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 10px; }
 .bd-login__foot a { cursor: pointer; }
 </style>

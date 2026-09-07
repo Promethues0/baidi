@@ -1,7 +1,7 @@
 <template>
   <div class="bd-portal">
-    <!-- 顶部细 bar -->
-    <PortalBar title="白帝 · 应用门户">
+    <!-- 顶部细 bar：账号徽章由 PortalBar 画，「退出」放它右边 -->
+    <PortalBar title="白帝 · 应用门户" :user="displayName">
       <button class="bd-pquit" @click="router.push('/portal/requests')">
         <icon-history /><span>我的申请</span>
       </button>
@@ -11,11 +11,9 @@
       <button class="bd-pquit" @click="router.push('/portal/downloads')">
         <icon-download /><span>下载客户端</span>
       </button>
-      <div class="bd-pacct">
-        <span class="bd-pacct__av">{{ avatarText }}</span>
-        <span class="bd-pacct__name">{{ displayName }}</span>
-      </div>
-      <button class="bd-pquit" @click="logout"><icon-export /><span>退出</span></button>
+      <template #after>
+        <button class="bd-pquit" @click="logout"><icon-export /><span>退出</span></button>
+      </template>
     </PortalBar>
 
     <!-- 主体 -->
@@ -25,26 +23,57 @@
         <div class="bd-phead">
           <div class="bd-phead__l">
             <h1 class="bd-phead__hi">你好，{{ displayName }}</h1>
+            <!-- ★两个计数是三态的：列表还没回来 / 读取失败时它们是「不可判定」，画成 0 就是在断言
+                 「你一个应用都没有权限」——而那正是读取失败时用户最不该被告知的事。不可判定时
+                 加全局 .bd-unknown（灰、细），不让「—」穿着主色粗体长得像一个数。 -->
             <p class="bd-phead__sub">
-              可访问 <b>{{ accessibleCount }}</b> 个应用
+              可访问 <b :class="{ 'bd-unknown': !countsKnown }">{{ accessibleText }}</b> 个应用
               <span class="bd-dot">·</span>
-              <i>{{ pendingCount }}</i> 个待申请
+              <i :class="{ 'bd-unknown': !countsKnown }">{{ pendingText }}</i> 个待申请
             </p>
           </div>
-          <a-input
-            v-model="keyword"
-            class="bd-psearch"
-            placeholder="搜索应用名称或地址…"
-            allow-clear
-          >
-            <template #prefix><icon-search /></template>
-          </a-input>
+          <!-- ★从 a-input allow-clear 换成裸 <input> 时丢了一键清空——这里补回一个真 <button>：
+               有关键词才出现（空框上一个"清空"是装饰）、可 Tab、有 aria-label（图标按钮没有可读文本），
+               点它清词并把焦点还给输入框（键盘用户清完通常要接着输）。 -->
+          <div class="bd-searchbox bd-psearch">
+            <icon-search />
+            <input ref="searchInput" v-model="keyword" class="bd-searchbox__in" placeholder="搜索应用名称或地址…" />
+            <button
+              v-if="keyword"
+              type="button"
+              class="bd-psearch__clear"
+              aria-label="清空搜索"
+              title="清空搜索"
+              @click="clearKeyword"
+            ><icon-close /></button>
+          </div>
+        </div>
+
+        <!-- 首屏骨架：第一次 load() 回来之前不画空态（「暂无可用应用」在这一刻是一句没有依据的断言） -->
+        <div v-if="!loaded" class="bd-grid">
+          <div v-for="i in 6" :key="i" class="bd-card"><SkeletonBlock kind="card" :rows="3" /></div>
         </div>
 
         <!-- 应用磁贴网格 -->
-        <a-spin :loading="loading" style="display:block">
-          <div v-if="filtered.length" class="bd-grid">
-            <div v-for="app in filtered" :key="app.id" class="bd-tile">
+        <a-spin v-else :loading="loading" class="bd-pspin">
+          <!-- ★读取失败必须排在一切空态之前，且是常驻的：此前失败只弹一条 3 秒就消失的 toast，
+               屏幕上留下的常驻状态却是「暂无可用应用 / 请联系管理员为你授权应用访问」——控制面
+               5xx 时终端用户会照着去找管理员要授权，而不是等控制面恢复。这里转述后端原话
+               （failReason），并给一个真能重新拉列表的「重试」。 -->
+          <div v-if="loadErr" class="bd-card">
+            <EmptyState
+              size="lg"
+              tone="danger"
+              title="应用列表未读取"
+              :desc="`${loadErr}——这里显示的不是「没有可用应用」，你的授权情况尚未读到；请稍后重试`"
+            >
+              <template #action>
+                <button class="bd-btn bd-btn--ghost" :disabled="loading" @click="load"><icon-refresh />重试</button>
+              </template>
+            </EmptyState>
+          </div>
+          <div v-else-if="filtered.length" class="bd-grid">
+            <div v-for="app in filtered" :key="app.id" class="bd-card bd-card--hover bd-tile">
               <div class="bd-tile__top">
                 <span class="bd-tile__icon" :class="'m-' + app.mode">
                   <component :is="modeMeta[app.mode].icon" />
@@ -55,16 +84,16 @@
                      普通资源没授权同样进不去，已授权的高敏资源则能直接访问。 -->
                 <span
                   v-if="app.degraded"
-                  class="bd-tile__gold bd-tile__gold--deg"
+                  class="bd-tg bd-tg--red bd-tile__flag"
                 ><icon-exclamation-circle-fill />终端降级 · 暂停访问</span>
                 <span
                   v-else-if="app.unavailable"
-                  class="bd-tile__gold bd-tile__gold--deg"
+                  class="bd-tg bd-tg--red bd-tile__flag"
                   :title="app.unavailableReason"
                 ><icon-exclamation-circle-fill />配置缺口 · 不可用</span>
                 <span
                   v-else-if="!app.accessible"
-                  class="bd-tile__gold"
+                  class="bd-tg bd-tg--gold bd-tile__flag"
                 >
                   <icon-lock />{{ app.sensitivity === 'high' ? '高敏 · 需申请' : '未授权 · 可申请' }}
                 </span>
@@ -72,61 +101,90 @@
               <div class="bd-tile__name">{{ app.name }}</div>
               <div class="bd-tile__addr bd-mono">{{ app.addr }}</div>
               <div class="bd-tile__meta">
-                <span class="bd-mtag" :class="'mt-' + app.mode">{{ modeMeta[app.mode].label }}</span>
+                <span class="bd-tg" :class="'bd-tg--' + modeMeta[app.mode].tag">{{ modeMeta[app.mode].label }}</span>
               </div>
-              <!-- ★这一串 v-if/v-else-if 必须连续，中间不许插任何元素：v-else-if 只认紧邻的
-                   上一个兄弟节点，链一断就会让已授权的应用同时画出「访问」和「申请权限」
-                   两个按钮。补充说明性的提示一律挂在整条链之后。 -->
-              <button
-                v-if="app.accessible"
-                class="bd-tile__btn"
-                :disabled="opening === app.id || webBlocked(app)"
-                :title="webBlocked(app) ? webBlockNote(app) : ''"
-                @click="openApp(app)"
-              ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
-              <!-- 续期（PRD FR-AUTH-03/04）。★只在服务端说可以续时出现：renewable 的判据与
-                   store.CreateAccessRequest 的放行条件同源（剩余 ≤ RenewWindowMinutes），
-                   早于窗口点它必然 409。 -->
-              <button
-                v-if="app.accessible && app.renewable"
-                class="bd-tile__btn bd-tile__btn--ghost"
-                @click="requestAccess(app, true)"
-              ><icon-history />续期</button>
+              <!-- ★这一串 v-if/v-else-if 必须是**一条**链，中间不许插任何元素、也不许另起
+                   一个 v-if：v-else-if 只认紧邻的上一个兄弟节点。此前「续期」写成了独立的
+                   `v-if="accessible && renewable"`，等于在「访问」后面开了第二条链——它的
+                   v-else 对「已授权但不可续期」照样命中，于是 OA / Git / 直连书签这几张
+                   已授权磁贴同时画出「访问」和「申请权限」（后者点下去会被后端以「无需申请」
+                   顶回来）。现在「访问 + 续期」收进同一个 <template v-if> 分支里。
+                   补充说明性的提示一律挂在整条链之后。
+
+                   ★四个分支互斥有后端保证（control/internal/api/subjects.go appAccessState）：
+                   Accessible = accessibleFor(…, degraded)，而 accessibleFor 在
+                   `degraded && HighSensitivity()` 时直接回 false；Degraded 恰好也等于
+                   `degraded && HighSensitivity()`——所以 degraded ⇒ !accessible。
+                   Unavailable 只在两条提前 return 的分支里置 true，那两处 Accessible 是零值
+                   false——所以 unavailable ⇒ !accessible。因此「accessible 排最前」不会
+                   压掉任何降权 / 不可用磁贴。 -->
+              <template v-if="app.accessible">
+                <button
+                  class="bd-btn bd-tile__btn"
+                  :disabled="opening === app.id || webBlocked(app)"
+                  :title="webBlocked(app) ? webBlockNote(app) : ''"
+                  @click="openApp(app)"
+                ><icon-link />{{ opening === app.id ? '正在打开…' : openLabel(app) }}</button>
+                <!-- 续期（PRD FR-AUTH-03/04）。★只在服务端说可以续时出现：renewable 的判据与
+                     store.CreateAccessRequest 的放行条件同源（剩余 ≤ RenewWindowMinutes），
+                     早于窗口点它必然 409。 -->
+                <button
+                  v-if="app.renewable"
+                  class="bd-btn bd-btn--ghost bd-tile__btn"
+                  @click="requestAccess(app, true)"
+                ><icon-history />续期</button>
+              </template>
+              <!-- ★禁用按钮的解释不能只放 title：disabled 的 <button> 键盘聚焦不到、触屏没有 hover，
+                   两类用户都读不到那句话。解释另画成下面那行可见的 .bd-tile__warn（与 webBlocked 同款），
+                   title 保留给鼠标用户，并用 aria-describedby 把两者接起来。文案只有一份（DEGRADED_NOTE）。 -->
               <button
                 v-else-if="app.degraded"
-                class="bd-tile__btn bd-tile__btn--ghost"
+                class="bd-btn bd-btn--ghost bd-tile__btn"
                 disabled
-                title="终端环境不合规，已暂停高敏资源访问。修复后重新上报即自动恢复（申请审批在此状态下无效）"
+                :title="DEGRADED_NOTE"
+                :aria-describedby="noteId(app)"
               ><icon-exclamation-circle-fill />请先修复终端</button>
               <!-- 结构性不可用：按钮必须点不动。给它一个「申请权限」会把人送进死路——
                    后端 JIT 闸会以「该应用不支持自助申请」400 拒掉，而用户无从知道为什么。
                    原因由服务端下发（两种成因文案不同，管理员要去改的栏也不同）。 -->
               <button
                 v-else-if="app.unavailable"
-                class="bd-tile__btn bd-tile__btn--ghost"
+                class="bd-btn bd-btn--ghost bd-tile__btn"
                 disabled
-                :title="app.unavailableReason"
+                :title="unavailableNote(app)"
+                :aria-describedby="noteId(app)"
               ><icon-exclamation-circle-fill />请联系管理员</button>
               <button
                 v-else
-                class="bd-tile__btn bd-tile__btn--ghost"
+                class="bd-btn bd-btn--ghost bd-tile__btn"
                 @click="requestAccess(app)"
               ><icon-safe />申请权限</button>
               <div v-if="app.accessible && app.grantExpiresAt" class="bd-tile__exp" :class="{ soon: app.renewable }">
                 <icon-clock-circle />临时授权剩余 {{ remainText(app.grantExpiresAt) }}
               </div>
-              <!-- 七层入口不可用时当面说清原因：磁贴还在、按钮点不动，而不是点下去什么也没发生 -->
+              <!-- 按钮点不动的原因当面写出来（三种处境互斥，一条链）：
+                   七层入口不可用 → 磁贴还在、按钮点不动，而不是点下去什么也没发生；
+                   终端降级 → 该做的是修终端，不是去申请（申请在此状态下无效）；
+                   配置缺口 → 拿着后端那句原因去找管理员（两种成因要改的栏不同）。
+                   后两条是 disabled 按钮 title 里那句的可见版，id 供按钮 aria-describedby 引用。 -->
               <div v-if="app.accessible && webBlocked(app)" class="bd-tile__warn">
                 <icon-exclamation-circle-fill />{{ webBlockNote(app) }}
+              </div>
+              <div v-else-if="app.degraded" :id="noteId(app)" class="bd-tile__warn bd-tile__warn--danger">
+                <icon-exclamation-circle-fill />{{ DEGRADED_NOTE }}
+              </div>
+              <div v-else-if="app.unavailable" :id="noteId(app)" class="bd-tile__warn bd-tile__warn--danger">
+                <icon-exclamation-circle-fill />{{ unavailableNote(app) }}
               </div>
             </div>
           </div>
 
-          <!-- 空态 -->
-          <div v-else-if="!loading" class="bd-empty">
-            <icon-apps class="bd-empty__icon" />
-            <div class="bd-empty__t">{{ keyword ? '没有匹配的应用' : '暂无可用应用' }}</div>
-            <div class="bd-empty__s">{{ keyword ? '换个关键词试试' : '请联系管理员为你授权应用访问' }}</div>
+          <!-- 空态：搜索无命中 / 确实没有可用应用，两者下一步动作不同 -->
+          <div v-else-if="!loading" class="bd-card">
+            <EmptyState v-if="keyword" size="lg" title="没有匹配的应用" desc="换个关键词试试" />
+            <EmptyState v-else size="lg" title="暂无可用应用" desc="请联系管理员为你授权应用访问">
+              <template #icon><icon-apps /></template>
+            </EmptyState>
           </div>
         </a-spin>
       </div>
@@ -135,21 +193,23 @@
     <!-- JIT 访问申请 -->
     <a-modal v-model:visible="reqOpen" :title="`${reqRenew ? '续期' : '申请访问'}「${reqApp?.name ?? ''}」`" :width="480"
       :ok-loading="submitting" @ok="submitRequest" ok-text="提交申请" cancel-text="取消">
-      <div class="bd-reqtip">
-        <icon-safe class="bd-reqtip__ic" />
+      <div class="bd-notice">
+        <icon-safe />
         <!-- 文案按 sensitivity 分档，不许一律写「高敏」：走到这个抽屉只说明当前没有该资源的
              访问权，它可能只是一条你不在授权名单里的普通资源。 -->
-        <div>
+        <span>
           你当前<b>未获授权</b>访问<b>{{ reqApp?.sensitivity === 'high' ? '该高敏资源' : '该资源' }}</b>，
           需管理员审批。批准后你将获得<b>限时访问授予</b>，到期自动回收。
+        </span>
+      </div>
+      <div class="bd-fld">
+        <label>期望时长（分钟）</label>
+        <div class="bd-req__ttl">
+          <a-input-number v-model="reqTtl" :min="15" :max="480" :step="15" />
+          <span class="bd-fld__d">15–480 分钟</span>
         </div>
       </div>
-      <div class="bd-reqfield">
-        <label>期望时长（分钟）</label>
-        <a-input-number v-model="reqTtl" :min="15" :max="480" :step="15" style="width: 160px" />
-        <span class="bd-reqfield__hint">15–480 分钟</span>
-      </div>
-      <div class="bd-reqfield">
+      <div class="bd-fld">
         <label>申请理由</label>
         <a-textarea v-model="reqReason" placeholder="例如：季度财务对账，需临时访问财务核算系统"
           :max-length="200" allow-clear :auto-size="{ minRows: 3, maxRows: 5 }" />
@@ -164,12 +224,39 @@ import { useRouter } from 'vue-router';
 import { Message } from '@arco-design/web-vue';
 import { api, clearToken, type PortalAppsResp, type PortalTile, type WebProxyStatus, type WebTicketResp, failReason, failStatus } from '@/lib/api';
 import PortalBar from '@/components/PortalBar.vue';
+import EmptyState from '@/components/EmptyState.vue';
+import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
 const router = useRouter();
 
 const loading = ref(false);
+/** 首屏是否已完成第一次 load()：只决定骨架屏何时让位（成功 / 失败都算完成），不改任何数据流。 */
+const loaded = ref(false);
+/** 最近一次 load() 失败的后端原话（failReason）；空串 = 上一次读取成功。
+ *  ★它是常驻状态，不是 toast：失败时磁贴区画 tone=danger 的空态并转述这句话，
+ *  头部两个计数退成「—」。成功那次必须清空（Apps.vue 同款）。 */
+const loadErr = ref('');
 const keyword = ref('');
+const searchInput = ref<HTMLInputElement | null>(null);
+/** 一键清空搜索词，并把焦点还给输入框（清空按钮随词消失，焦点若留在它上面会掉到 body）。 */
+function clearKeyword() {
+  keyword.value = '';
+  searchInput.value?.focus();
+}
 const apps = ref<PortalTile[]>([]);
+
+/** 终端降级磁贴的解释——按钮 title 与可见说明行共用这一句，别写成两份会漂移的文案。
+ *  语义与后端一致：degraded = 风险引擎判 degrade，只摘掉高敏资源、不断连（CLAUDE.md「风险四档」），
+ *  下一次 posture 上报判回 allow 即恢复，期间的 JIT 审批被 DenyUsers 否决压过。 */
+const DEGRADED_NOTE = '终端环境不合规，已暂停高敏资源访问。修复后重新上报即自动恢复（申请审批在此状态下无效）';
+/** 结构性不可用的解释：优先用服务端下发的那句原因（用户要拿它去找管理员）。
+ *  ★字段缺席（旧后端 / 字段没带）时不许替后端编一个原因——如实说"原因未下发"，
+ *  让人去找管理员核对，而不是照着一句猜的话去改错的栏。 */
+function unavailableNote(app: PortalTile) {
+  return app.unavailableReason || '该应用当前不可用，服务端未下发具体原因；请联系管理员核对它的资源关联与后端地址';
+}
+/** 说明行的 DOM id（供禁用按钮 aria-describedby 引用）。app.id 在一页里唯一。 */
+function noteId(app: PortalTile) { return `bd-tile-note-${app.id}`; }
 const displayName = ref('');
 /** 七层 Web 代理入口状态（后端下发）。ready=false 时 Web 磁贴的「访问」按钮置灰并说明原因，
  *  而不是让人点下去才拿到一个一闪而过的错误提示。 */
@@ -184,19 +271,23 @@ const reqReason = ref('');
 const reqTtl = ref(60);
 const submitting = ref(false);
 
-const modeMeta: Record<PortalTile['mode'], { label: string; icon: string }> = {
-  tunnel: { label: '隧道代理', icon: 'icon-swap' },
-  web:    { label: 'Web 应用', icon: 'icon-common' },
+/* tag 是 .bd-tg 的颜色变体名（隧道紫 / Web 蓝 / 直连书签绿），与磁贴图标底色同一族。 */
+const modeMeta: Record<PortalTile['mode'], { label: string; icon: string; tag: 'purple' | 'blue' | 'green' }> = {
+  tunnel: { label: '隧道代理', icon: 'icon-swap', tag: 'purple' },
+  web:    { label: 'Web 应用', icon: 'icon-common', tag: 'blue' },
   // ★「直连书签」的名字在向导 / 门户 / 移动端三处必须一致：这类应用不经网关、不进隧道
   // 路由、不做鉴权，剖面与门户直接给 accessible: true，任何叫得像"受控"的名字都是误导。
-  global: { label: '直连书签', icon: 'icon-public' }
+  global: { label: '直连书签', icon: 'icon-public', tag: 'green' }
 };
-
-const avatarText = computed(() => (displayName.value || '·').slice(0, 1).toUpperCase());
 const accessibleCount = computed(() => apps.value.filter(a => a.accessible).length);
 // ★「待申请」只数真的能去申请的：被降权的必然被否（降权否决压过 JIT 授予），未关联受控
 // 资源的会被后端以「不支持自助申请」拒掉——算进来就是替点不动的磁贴承诺「还有 N 件事可做」。
 const pendingCount = computed(() => apps.value.filter(a => !a.accessible && !a.degraded && !a.unavailable).length);
+/** 头部计数的三态渲染：首屏未回 / 读取失败 → 「—」（不可判定），否则才是真实计数。
+ *  apps 在这两种情形下都是 []，直接渲染 accessibleCount 会画出一个言之凿凿的 0。 */
+const countsKnown = computed(() => loaded.value && !loadErr.value);
+const accessibleText = computed(() => (countsKnown.value ? String(accessibleCount.value) : '—'));
+const pendingText = computed(() => (countsKnown.value ? String(pendingCount.value) : '—'));
 
 const filtered = computed(() => {
   const k = keyword.value.trim().toLowerCase();
@@ -328,10 +419,15 @@ async function load() {
     apps.value = resp.apps ?? [];
     // 旧后端不下发 webProxy：按"可用"处理，点开时若真不可用会拿到后端的 503 原文。
     if (resp.webProxy) webProxy.value = resp.webProxy;
+    // 成功必须清掉上一次的失败原话：「重试」会再次走到这里，留着的话磁贴区仍是 danger 空态。
+    loadErr.value = '';
   } catch (e) {
+    // 常驻态 + toast 同源同句：toast 负责当下引起注意，loadErr 负责 3 秒后屏幕上留下的仍是真话。
+    loadErr.value = failReason(e);
     Message.error(`应用列表加载失败：${failReason(e)}`);
   } finally {
     loading.value = false;
+    loaded.value = true;
   }
 }
 
@@ -357,102 +453,46 @@ onMounted(() => {
 </script>
 
 <style scoped>
-.bd-portal { min-height: 100vh; background: var(--bd-fill-1); display: flex; flex-direction: column; }
-
-.bd-pacct { display: flex; align-items: center; gap: 9px; }
-.bd-pacct__av {
-  width: 30px; height: 30px; border-radius: 50%; flex: none; color: #fff; font-size: 13px; font-weight: 600;
-  background: linear-gradient(135deg, var(--bd-purple), var(--bd-primary));
-  display: flex; align-items: center; justify-content: center;
-}
-.bd-pacct__name { font-size: 13px; font-weight: 600; color: var(--bd-t1); }
-.bd-pquit {
-  display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 12px;
-  border: 1px solid var(--bd-border); background: #fff; border-radius: 7px; cursor: pointer;
-  font-size: 13px; color: var(--bd-t2); transition: all .15s;
-}
-.bd-pquit:hover { border-color: var(--bd-primary); color: var(--bd-primary); }
-
-/* 主体 */
-.bd-pmain { flex: 1; padding: 40px 24px 64px; }
-.bd-pwrap { max-width: 1080px; margin: 0 auto; }
-
-/* 欢迎语 + 搜索 */
-.bd-phead {
-  display: flex; align-items: flex-end; justify-content: space-between; gap: 20px;
-  margin-bottom: 28px; flex-wrap: wrap;
-}
-.bd-phead__hi { margin: 0; font-size: 26px; font-weight: 700; color: var(--bd-t1); letter-spacing: .3px; }
-.bd-phead__sub { margin: 8px 0 0; font-size: 14px; color: var(--bd-t3); }
-.bd-phead__sub b { color: var(--bd-primary); font-weight: 700; font-size: 15px; }
-.bd-phead__sub i { color: var(--bd-warning); font-style: normal; font-weight: 700; font-size: 15px; }
-.bd-phead__sub .bd-dot { margin: 0 8px; color: var(--bd-t4); }
+/* 本页独有：磁贴网格与磁贴内部。门户壳（.bd-portal / .bd-pmain / .bd-pwrap / .bd-phead / .bd-pquit）在 PortalBar.vue。 */
 .bd-psearch { width: 300px; max-width: 100%; }
+/* 搜索框里的清空按钮：与搜索图标同色同号，hover 提亮；焦点环走全局 :focus-visible。
+   尺寸取 --bd-sp-5（20）：比 32 高的框留出上下各 6px，不把框撑高。 */
+.bd-psearch__clear {
+  flex: none; display: inline-flex; align-items: center; justify-content: center;
+  width: var(--bd-sp-5); height: var(--bd-sp-5); padding: 0; border: 0; border-radius: var(--bd-radius-xs);
+  background: transparent; color: var(--bd-t3); cursor: pointer; font: inherit;
+  transition: color var(--bd-dur-fast) var(--bd-ease), background var(--bd-dur-fast) var(--bd-ease);
+}
+.bd-psearch__clear:hover { color: var(--bd-t2); background: var(--bd-fill-2); }
+.bd-pspin { display: block; }
 
 /* 磁贴网格 */
-.bd-grid {
-  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 18px;
-}
-.bd-tile {
-  background: #fff; border: 1px solid var(--bd-border); border-radius: var(--bd-radius);
-  padding: 20px; display: flex; flex-direction: column; transition: box-shadow .15s, border-color .15s, transform .15s;
-}
-.bd-tile:hover {
-  border-color: var(--bd-primary-b); box-shadow: 0 8px 24px rgba(22, 93, 255, .1); transform: translateY(-2px);
-}
-.bd-tile__top { display: flex; align-items: flex-start; justify-content: space-between; gap: 8px; margin-bottom: 14px; }
+.bd-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: var(--bd-sp-4); }
+.bd-tile { padding: var(--bd-sp-5); display: flex; flex-direction: column; }
+.bd-tile__top { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--bd-sp-2); margin-bottom: var(--bd-sp-4); }
 .bd-tile__icon {
-  width: 46px; height: 46px; border-radius: 12px; flex: none;
+  width: 46px; height: 46px; border-radius: var(--bd-radius); flex: none;
   display: flex; align-items: center; justify-content: center; font-size: 22px;
 }
 .bd-tile__icon.m-tunnel { background: var(--bd-tag-purple-bg); color: var(--bd-purple); }
 .bd-tile__icon.m-web    { background: var(--bd-tag-blue-bg);   color: var(--bd-primary); }
 .bd-tile__icon.m-global { background: var(--bd-tag-green-bg);  color: var(--bd-success); }
-.bd-tile__gold {
-  display: inline-flex; align-items: center; gap: 4px; font-size: 11px; font-weight: 600;
-  color: var(--bd-warning); background: var(--bd-tag-gold-bg); padding: 3px 8px; border-radius: 6px; white-space: nowrap;
-}
-/* 终端降级：红而非金——它与"高敏需申请"是两回事，申请审批在这个状态下无效 */
-.bd-tile__gold--deg { color: var(--bd-danger); background: var(--bd-tag-red-bg, rgba(245, 63, 63, .08)); }
-.bd-tile__name { font-size: 16px; font-weight: 600; color: var(--bd-t1); line-height: 1.3; }
-.bd-tile__addr { font-size: 12px; color: var(--bd-t3); margin-top: 6px; word-break: break-all; }
-.bd-tile__meta { margin-top: 12px; }
-.bd-mtag {
-  display: inline-block; font-size: 11.5px; font-weight: 500; padding: 2px 9px; border-radius: 5px;
-}
-.bd-mtag.mt-tunnel { background: var(--bd-tag-purple-bg); color: var(--bd-purple); }
-.bd-mtag.mt-web    { background: var(--bd-tag-blue-bg);   color: var(--bd-primary); }
-.bd-mtag.mt-global { background: var(--bd-tag-green-bg);  color: var(--bd-success); }
-.bd-tile__btn {
-  margin-top: 18px; height: 38px; width: 100%; border: none; border-radius: 8px;
-  background: var(--bd-primary); color: #fff; font-size: 13px; font-weight: 500;
-  display: inline-flex; align-items: center; justify-content: center; gap: 7px; cursor: pointer;
-  box-shadow: 0 2px 6px rgba(22, 93, 255, .25); transition: background .15s;
-}
-.bd-tile__btn:hover { background: var(--bd-primary-h); }
-.bd-tile__btn:disabled { background: var(--bd-fill-2); color: var(--bd-t4); box-shadow: none; cursor: not-allowed; }
-.bd-tile__warn {
-  display: flex; gap: 6px; margin-top: 8px; font-size: 11.5px; line-height: 1.55; color: var(--bd-warning);
-}
-.bd-tile__btn--ghost {
-  background: #fff; color: var(--bd-t2); border: 1px solid var(--bd-border); box-shadow: none;
-}
-.bd-tile__btn--ghost:hover { border-color: var(--bd-warning); color: var(--bd-warning); background: #fff; }
-
-/* 空态 */
-.bd-empty { text-align: center; padding: 80px 20px; }
-.bd-empty__icon { font-size: 56px; color: var(--bd-t4); }
-.bd-empty__t { margin-top: 16px; font-size: 16px; font-weight: 600; color: var(--bd-t2); }
-.bd-empty__s { margin-top: 6px; font-size: 13px; color: var(--bd-t3); }
+/* 右上角状态徽标：复用 .bd-tg 的色族，只加图标间距 */
+.bd-tile__flag { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; padding: 3px 8px; }
+.bd-tile__name { font-size: var(--bd-fs-lg); font-weight: 600; color: var(--bd-t1); line-height: var(--bd-lh-tight); }
+.bd-tile__addr { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 6px; word-break: break-all; }
+.bd-tile__meta { margin-top: var(--bd-sp-3); }
+/* 磁贴主按钮：全局 .bd-btn 的整宽变体 */
+.bd-tile__btn { margin-top: var(--bd-sp-4); width: 100%; }
+.bd-tile__btn + .bd-tile__btn { margin-top: var(--bd-sp-2); }
+.bd-tile__warn { display: flex; gap: 6px; margin-top: var(--bd-sp-2); font-size: var(--bd-fs-xs); line-height: var(--bd-lh); color: var(--bd-warning-t); }
+/* 降级 / 配置缺口那两行跟随磁贴右上角红色徽标的语义色（同族 danger-t），与七层入口的 warning 分得开 */
+.bd-tile__warn--danger { color: var(--bd-danger-t); }
+.bd-tile__exp { display: flex; align-items: center; gap: 4px; margin-top: 7px; font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-tile__exp.soon { color: var(--bd-warning); }
 
 /* 申请弹窗 */
-.bd-reqtip { display: flex; gap: 10px; font-size: 13px; line-height: 1.7; color: var(--bd-t2); margin-bottom: 16px; }
-.bd-reqtip__ic { color: var(--bd-primary); font-size: 18px; flex: none; margin-top: 2px; }
-.bd-reqtip b { color: var(--bd-t1); font-weight: 600; }
-.bd-reqfield { margin-bottom: 14px; }
-.bd-reqfield label { display: block; font-size: 13px; font-weight: 500; color: var(--bd-t1); margin-bottom: 8px; }
-.bd-reqfield__hint { font-size: 12px; color: var(--bd-t3); margin-left: 10px; }
-.bd-tile__exp { display: flex; align-items: center; gap: 4px; margin-top: 7px;
-  font-size: 11.5px; color: var(--bd-t3); }
-.bd-tile__exp.soon { color: var(--bd-warning); }
+.bd-req__ttl { display: flex; align-items: center; gap: 10px; }
+.bd-req__ttl :deep(.arco-input-number) { width: 160px; }
+.bd-req__ttl .bd-fld__d { margin-top: 0; }
 </style>

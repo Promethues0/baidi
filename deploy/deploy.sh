@@ -50,7 +50,26 @@ fi
 # 等于把一条逃生舱写在了门外。
 : "${BD_FORCE:=}" "${BD_MIN_CPU:=}" "${BD_MIN_MEM_MB:=}" "${BD_MIN_DISK_MB:=}" "${BD_DNS_PROBE_HOST:=}"
 
+# 客户端源码版本 → 服务端溯源比对的「当前值」（control 的 clientSourceRev() 读 BAIDI_CLIENT_SRC_REV）。
+# ★这一项**每次部署都要转发并覆盖**，不能像其它项那样幂等追加一次：它每次部署都会变，
+#   追加一次的话服务端永远拿着第一次的值去比，之后所有新包都被判成「已过期」——而零报错。
+#   clientSourceRev() 的注释写着「部署机通常没有 .git，由构建流水线注入」，但此前**没有任何脚本兑现它**：
+#   演示站上每个安装包都显示「无法判断新旧」，manifest 里逐包的 sourceCommit 白记了。
+# 口径必须与 clients/build-artifacts.sh 完全一致（子树 commit + 有未提交改动即加 -dirty），
+# 两边算出不同值 = 溯源比对永远对不上。允许 BAIDI_CLIENT_SRC_REV 显式注入（CI 浅克隆拿不到子树历史时）。
+if [ -z "${BAIDI_CLIENT_SRC_REV:-}" ]; then
+  BAIDI_CLIENT_SRC_REV="$(git -C "$HERE/.." log -1 --format=%h -- clients/ 2>/dev/null || echo "")"
+  if [ -n "$BAIDI_CLIENT_SRC_REV" ] && [ -n "$(git -C "$HERE/.." status --porcelain -- clients/ 2>/dev/null)" ]; then
+    BAIDI_CLIENT_SRC_REV="${BAIDI_CLIENT_SRC_REV}-dirty"
+  fi
+fi
+if [ -n "$BAIDI_CLIENT_SRC_REV" ]; then
+  echo "==> 客户端源码版本（下载中心溯源比对基准）：$BAIDI_CLIENT_SRC_REV"
+else
+  echo "⚠ 取不到 clients/ 的 git 版本：服务端将对所有安装包报「无法判断新旧」"
+fi
+
 echo "==> 远程安装（sudo；独立端口 ${BD_HTTPS_PORT}）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' BAIDI_CLIENT_SRC_REV='${BAIDI_CLIENT_SRC_REV:-}' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

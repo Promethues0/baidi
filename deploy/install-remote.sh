@@ -328,6 +328,24 @@ else
   echo "    不使用「上传升级包」功能时这是正常的；需要时见 deploy/config.env.example"
 fi
 
+# 客户端源码版本 → control 的 clientSourceRev() 用它与 manifest 里各包的 sourceCommit 比对新旧。
+# ★这一项**每次部署都覆盖**（与本文件其它 baidi.env 项的「幂等追加一次」相反）：值随每次部署变化，
+#   只追加一次会让服务端永远拿首次部署的版本去比——之后所有新包都被判成过期，而没有任何报错。
+# ★取不到时**删掉该行**而不是写空值：让 control 回落到自己的判定（部署机无 .git → 不可判定）。
+#   留一个陈旧值比「不可判定」更坏：它会把一个看不出新旧的包说成「已过期」或「一致」。
+if [ -n "${BAIDI_CLIENT_SRC_REV:-}" ]; then
+  if grep -q '^BAIDI_CLIENT_SRC_REV=' "$BD_PREFIX/etc/baidi.env" 2>/dev/null; then
+    sed -i "s|^BAIDI_CLIENT_SRC_REV=.*|BAIDI_CLIENT_SRC_REV=$BAIDI_CLIENT_SRC_REV|" "$BD_PREFIX/etc/baidi.env"
+  else
+    echo "BAIDI_CLIENT_SRC_REV=$BAIDI_CLIENT_SRC_REV" >> "$BD_PREFIX/etc/baidi.env"
+  fi
+  chmod 0600 "$BD_PREFIX/etc/baidi.env"
+  echo "==> 客户端源码版本已登记 → BAIDI_CLIENT_SRC_REV=$BAIDI_CLIENT_SRC_REV（下载中心据此判断安装包是否过期）"
+else
+  sed -i '/^BAIDI_CLIENT_SRC_REV=/d' "$BD_PREFIX/etc/baidi.env" 2>/dev/null || true
+  echo "⚠ 未取到客户端源码版本：下载中心将对所有安装包报「无法判断新旧」（应由 deploy.sh 在构建机上注入）"
+fi
+
 # 自签 TLS（仅首次；生产请换正式证书）。SAN 区分 IP/域名；私钥严格 0600（umask 兜底）。
 if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
   san="DNS:baidi"

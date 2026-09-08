@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# GNU sed -i 的垫片：BSD sed 的 -i 必须带备份后缀，GNU 不带。只翻译这一处差异。
+args=(); for a in "$@"; do
+  if [ "$a" = "-i" ]; then args+=("-i" ""); else args+=("$a"); fi
+done
+exec /usr/bin/sed "${args[@]}"

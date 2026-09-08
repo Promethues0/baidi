@@ -1,0 +1,16 @@
+[Unit]
+Description=baidi: check twice daily whether the IP certificate needs renewal
+
+[Timer]
+# 每日两次。证书只有 6 天 15 小时有效期、脚本在剩余 <96h 时才真去续，
+# 所以从「该续了」到「必须切自签」之间大约有 6 次机会，够扛住一次网络抖动或 LE 侧限流。
+# ★一天一次是不够的：那样从首次尝试到剩余不足 24h 只剩 3 次机会，而 HTTP-01 依赖
+#   公网能打到本机 80 端口——安全组、上游链路任一处抖一下就吃掉一次。
+OnCalendar=*-*-* 03,15:17:00
+# 随机延迟半小时：避免同一批机器在同一秒一起打 LE（对方是有速率限制的）。
+RandomizedDelaySec=1800
+# 机器关机/挂起错过了窗口，开机后补跑一次——云主机重启后正好落在窗口外是常态。
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -235,7 +235,12 @@ export function overall(states: DiagState[]): { level: 'fail' | 'warn' | 'pass' 
  *   （锁 15 分钟，期间每试一次还在续锁）。让"后端说了什么"成为入参并排在最前面，
  *   下一个调用方就没法再绕过它了。
  */
-export function explainControlFailure(control: string, probe?: TcpProbe, serverSaid = ''): string {
+export function explainControlFailure(
+  control: string,
+  probe?: TcpProbe,
+  serverSaid = '',
+  platform: DesktopPlatform = ''
+): string {
   const said = serverSaid.trim();
   if (said) return said;
   const u = control.trim();
@@ -252,9 +257,78 @@ export function explainControlFailure(control: string, probe?: TcpProbe, serverS
   if (https) {
     return `${u} 的 TCP 端口连得通（${probe.ms}ms），但 HTTPS 请求失败——` +
       '**地址是对的，问题在证书**：按 install-remote.sh 部署出来的控制面用的是**自签证书**，' +
-      '系统不信任它，浏览器内核会直接掐断请求。解法二选一：' +
-      '① 把该站点证书导入本机受信任的根证书颁发机构；② 给控制面换一张受信任的证书。';
+      '而登录走的是 WebView 的 fetch，它只认**系统信任库**、应用层塞不进任何信任材料，' +
+      '于是浏览器内核直接掐断请求。解法二选一：' +
+      '① 把该站点证书导入**系统**信任库；② 给控制面换一张受信任的证书。\n' +
+      importCertHint(platform, u);
   }
   return `${u} 的 TCP 端口连得通（${probe.ms}ms），但 HTTP 请求失败——` +
     '端口是通的，说明那头有东西在听，但它可能不是 baidi-control（端口写错？被别的服务占了？）。';
+}
+
+/* ── 四、导证书进系统信任库：可操作的下一步 ────────────────────────── */
+
+/** 桌面宿主平台。`''` = 判不出来——那时三平台的命令都给，**不猜一条**。 */
+export type DesktopPlatform = 'macos' | 'windows' | 'linux' | '';
+
+/**
+ * 从 UserAgent 判宿主平台。纯函数，好让三条分支在任何一台机器上都被断言
+ * （只在 Windows 上才走到的那条，在 mac 开发机上一次都验不到）。
+ */
+export function hostPlatform(ua: string): DesktopPlatform {
+  const s = ua.toLowerCase();
+  // 顺序有讲究：Windows 的 UA 里不含 mac/linux，而 macOS 的含 "mac os x"；
+  // Linux 桌面的 WebKitGTK 里既有 "linux" 也有 "x11"。先判独占词再判泛词。
+  if (s.includes('windows') || s.includes('win64') || s.includes('win32')) return 'windows';
+  if (s.includes('mac os') || s.includes('macintosh')) return 'macos';
+  if (s.includes('linux') || s.includes('x11')) return 'linux';
+  return '';
+}
+
+/** 拆控制中心地址，回 (host, port)。端口缺省按协议补（https 443 / http 80）。 */
+function splitControl(u: string): { host: string; port: number } {
+  const m = u.match(/^(https?):\/\/([^/:]+)(?::(\d+))?/i);
+  if (!m) return { host: '<控制中心主机>', port: 443 };
+  return { host: m[2], port: m[3] ? Number(m[3]) : (m[1].toLowerCase() === 'https' ? 443 : 80) };
+}
+
+/**
+ * 「把控制面证书导入**系统**信任库」这一步的具体命令。
+ *
+ * ★为什么必须给到命令级：改造前这里只说「把该站点证书导入本机受信任的根证书颁发机构」——
+ * 方向是对的，但用户下一步会去翻系统设置，而三个平台的入口、需不需要管理员、
+ * 导进「登录钥匙串」还是「系统钥匙串」全不一样，导错了症状与没导一模一样
+ * （仍是一句 `Failed to fetch`）。2026-08-18 首次真机验证卡在这一步整整一轮。
+ *
+ * ★最后那句限定语不许删：`~/.baidi/control-ca.pem` 那份本地信任锚**只覆盖数据面**
+ * （baidi-tun 取敲门令牌），替代不了这一步。不说清的话，放过锚的人会以为已经配好了，
+ * 然后对着同一个 `Failed to fetch` 反复重试——「配置齐全却零报错不生效」的原版。
+ *
+ * ★判不出平台时**三条都给**，不按开发机的平台猜一条：猜错的那条会被照着执行，
+ * 而失败形态与没执行完全相同。
+ */
+export function importCertHint(platform: DesktopPlatform, control: string): string {
+  const { host, port } = splitControl(control.trim());
+  const 取件 =
+    `  openssl s_client -connect ${host}:${port} -showcerts </dev/null 2>/dev/null | openssl x509 -out baidi-control.crt`;
+  const 段: Record<Exclude<DesktopPlatform, ''>, string> = {
+    macos:
+      `【macOS】先取证书，再导入系统钥匙串（需管理员口令；导进「登录」钥匙串不生效）：\n${取件}\n` +
+      '  sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain baidi-control.crt',
+    windows:
+      '【Windows】以**管理员**身份开 PowerShell，取证书后导入「本地计算机 · 受信任的根证书颁发机构」：\n' +
+      `  $t=[Net.Sockets.TcpClient]::new('${host}',${port}); $s=[Net.Security.SslStream]::new($t.GetStream(),$false,{$true});` +
+      ` $s.AuthenticateAsClient('${host}'); [IO.File]::WriteAllBytes("$env:TEMP\\baidi-control.crt",$s.RemoteCertificate.Export('Cert'))\n` +
+      '  Import-Certificate -FilePath "$env:TEMP\\baidi-control.crt" -CertStoreLocation Cert:\\LocalMachine\\Root',
+    linux:
+      `【Linux · Debian/Ubuntu】先取证书，再进系统 CA 目录（其他发行版用 update-ca-trust）：\n${取件}\n` +
+      '  sudo cp baidi-control.crt /usr/local/share/ca-certificates/baidi-control.crt && sudo update-ca-certificates'
+  };
+  const 正文 = platform ? 段[platform] : [段.macos, 段.windows, 段.linux].join('\n');
+  return (
+    `① 的具体做法：\n${正文}\n` +
+    '（导入后需重启客户端让 WebView 重新读取系统信任库。）\n' +
+    '注意：`~/.baidi/control-ca.pem` 那份本地信任锚**只对数据面生效**（baidi-tun 取敲门令牌那一跳），' +
+    '替代不了这一步——登录用的 WebView 只认系统信任库。'
+  );
 }

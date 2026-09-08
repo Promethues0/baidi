@@ -215,6 +215,17 @@
                 <span>SPA 敲门</span>
                 <b class="ok" :title="'隐身效果（未授权者能否看到端口）由网关侧内核态防火墙决定，请在管理台「网关」页看该网关的实测回执'">{{ tun.keepalive ? '保活中 · 放行窗口持续续期' : '已完成 · 已开放行窗口' }}</b>
               </div>
+              <!-- ★控制中心信任：这一行陈述的是**数据面那一跳**用了哪份信任材料。
+                   桌面端到控制面有两条 TLS 路径且来源不同——登录/拉剖面走 WebView 的
+                   fetch（只认系统信任库，应用层塞不进任何东西），数据面走 baidi-tun
+                   的 -control-ca。本地锚只管得了后者，所以「仅数据面」这四个字写进
+                   行内文本本身，而不是只挂在 title 里：鼠标不悬停就看不见的限定语
+                   等于没写，而这条限定语正是本功能最容易被误读的地方。
+                   判不出来时显示「—」，绝不塌成「用系统信任库」。 -->
+              <div class="ck-kv">
+                <span>控制中心信任</span>
+                <b :class="{ ok: controlCaLine?.tone === 'ok' }" :title="CONTROL_CA_SCOPE_NOTE">{{ controlCaLine ? controlCaLine.text : '—' }}</b>
+              </div>
               <div class="ck-kv"><span>虚拟网卡 / IP</span><b class="dk-mono">{{ tun.dev || 'utun' }} · {{ tun.vip }}</b></div>
               <div class="ck-kv"><span>引流网段</span><b class="dk-mono">{{ tun.route }} → 隧道</b></div>
               <div v-if="isTauri" class="ck-logwrap">
@@ -236,13 +247,24 @@ import { Message } from '@arco-design/web-vue';
 import { api, fetchProfile, checkClientUpdate, ApiError, failReason, failStatus, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
-import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, type TunView, type DataplaneNotice } from '@/lib/tunnel';
+import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, controlCaInfo, controlCaSay, CONTROL_CA_SCOPE_NOTE, type TunView, type DataplaneNotice, type ControlCaInfo } from '@/lib/tunnel';
 import { postureState, collectPosture, reportPosture } from '@/lib/posture';
-import { explainControlFailure, type TcpProbe } from '@/lib/diagnose';
+import { explainControlFailure, hostPlatform, type TcpProbe } from '@/lib/diagnose';
 import { invoke } from '@tauri-apps/api/core';
 
 const authedNow = computed(() => authed());
 const isTauri = tauriRuntime();
+
+/**
+ * 本机控制面信任锚的现状（Rust 侧 control_ca_info 的四态原样带过来）。
+ *
+ * `null` = **不可判定**（浏览器 dev / 老版本壳没有这条命令），界面显示「—」，
+ * 绝不塌成「没有锚」——我们压根没看过那个位置。
+ */
+const controlCa = ref<ControlCaInfo | null>(null);
+// ★把控制中心地址一起交给判定：`http://` 时锚根本不参与（这一跳没有 TLS），
+//   只按文件在不在就说「已生效」，会在最该报警的那种部署上给出最令人安心的一句话。
+const controlCaLine = computed(() => controlCaSay(controlCa.value, config.control));
 
 /* 登录 */
 const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
@@ -319,7 +341,10 @@ async function explainControl(e?: unknown): Promise<string> {
       }
     } catch { /* 探不到就不猜，交给下面的通用文案 */ }
   }
-  return explainControlFailure(u, probe, said);
+  // ★平台按 UA 判后传进去：三个平台导证书的入口、要不要管理员、导进哪个存储全不一样，
+  //   而导错了的症状与没导一模一样（仍是一句 Failed to fetch）。判不出来时
+  //   importCertHint 会三条都给，不猜。
+  return explainControlFailure(u, probe, said, hostPlatform(navigator.userAgent));
 }
 
 /** TOTP 第二回合：口令已验票据 + 动态验证码换会话令牌（同码只能成功一次）。 */
@@ -665,6 +690,12 @@ watch(() => postureVerdict.value?.verdict, (now, before) => {
 
 /* 重开 app 时若隧道仍在跑，恢复已接入态 */
 onMounted(async () => {
+  // 信任锚现状：只读一次（它是本机磁盘上的一个文件，不会在会话中途变），读不到就保持
+  // null = 不可判定。**必须排在 authed 判断之前**：未登录时 mount 一次、登录成功后本视图
+  // 并不重新 mount，放在下面的话「首次输密码登录 → 接入」这条最常见的路径上，
+  // 那一行会永远显示「—」，而重开 app 的人反倒看得到——一个只在部分路径上生效的显示项，
+  // 正是本项目要消灭的那类静默偏差。
+  if (isTauri) void controlCaInfo().then((v) => { controlCa.value = v; });
   if (!authedNow.value) return;
   // 令牌存在 localStorage：重开 app 是直接落在已登录态的，登录那条路径根本不跑。
   // 少了这一句，只有"当次输过密码"的人才看得到新版提示，而常驻用户几乎从不重新登录。

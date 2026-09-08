@@ -147,8 +147,50 @@ if ls "$DIR/"*.inc.conf >/dev/null 2>&1; then
   bad "nginx 片段不得以 .conf 结尾（会被 include 进 http{} 而炸掉整台机器的 nginx）"
 fi
 
+# ── ⑥ 80 端口块：ACME 挑战通路 + 跳转必须在 location 内 ────────────────────
+#
+# ★守的是什么：nginx 的 `return` 属于 rewrite 模块，**在 rewrite 阶段执行、早于 location
+#   选择**。写成 server 级的 `return 301 https://…;` 时，本 server 收到的每一个请求
+#   （含 /.well-known/acme-challenge/xxx）都在挑 location 之前就被 301 走——下面那条
+#   挑战 location 一次都不会命中。而这件事在机器上**完全看不出来**：nginx -t 通过、
+#   站点正常、跳转也正常，只有签发那一步失败，且 lego 报的是「拿不到挑战文件 / 404」，
+#   看起来像 webroot 配错了。2026-09-08 演示站上就是先踩了这个形态，改成
+#   「挑战 location + return 301 挪进 location /」之后一次签发成功。
+#   本文件这三条就是不让后来的人把它改回去（"顺手简化成 server 级 return" 太自然了）。
+#
+# ★这个 80 块此前是 install-remote.sh 里的一段 heredoc，本自检**看不到**它。
+#   现在它写在模板里、由 install-remote.sh 按 @BD_HTTP80_BEGIN@/@BD_HTTP80_END@
+#   在非 443 端口时整段删掉——所以这对标记也要钉住：标记没了，共存机（9443）就会
+#   带上一个抢 80 端口的 server 块，与烛龙的共存契约当场破裂，而 nginx -t 照样通过。
+for m in '@BD_HTTP80_BEGIN@' '@BD_HTTP80_END@'; do
+  grep -q -- "$m" "$CONF" || bad "80 端口块缺少标记 ${m}（install-remote.sh 靠这对标记在非 443 端口上整段删掉它；缺了就会在共存机上抢 80）"
+done
+
+# ★这条**必须用 grep 而不是 block_has**：`^~` 里那个 `^` 出现在正则中段，
+#   awk 的动态正则里它是语法错误（BSD awk 直接报 syntax error，mawk/gawk 行为也不一致）。
+#   grep -E 里写成 `\^` 就是普通字符。判据分两半：`^~` 的形状用 grep 查，块内有没有
+#   root 用 block_has 查（后者的 loc 正则绕开那个 `^`）。
+strip | grep -Eq '^ *location +\^~ +/\.well-known/acme-challenge/' \
+  || bad "缺少 ACME HTTP-01 挑战通路（location ^~ /.well-known/acme-challenge/）——Let's Encrypt 证书将永远签不下来，而站点一切正常"
+block_has '^ *location .*acme-challenge' 'root ' \
+  || bad "ACME 挑战 location 块内没有 root（挑战文件的落点没了，lego 会报 404）"
+
+block_has '^ *location +/ ' 'return +301' \
+  || bad "80 端口块里的 return 301 不在 location 内（或整个跳转没了）"
+
+# 反向断言：剥注释后，任何 location 块**外**都不得出现 return 301。
+# 这一条才是真正拦住「改回 server 级 return」的那道——上面那条只保证「location 里有一条」，
+# 两条都写着的时候 server 级那条照样会先执行、照样吃掉挑战。
+if strip | awk '
+    $0 ~ /^ *location /   { inloc = 1; next }
+    inloc && /^ *}/       { inloc = 0; next }
+    !inloc && /return +301/ { hit = 1 }
+    END { exit !hit }'; then
+  bad "有 return 301 写在 location 块之外（server 级）：它在 rewrite 阶段执行、早于 location 选择，会把 ACME 挑战一起重定向掉——证书永远签不下来而处处正常"
+fi
+
 if [ "$fail" -ne 0 ]; then
   echo "✗ nginx 站点配置自检未通过（见上）"
   exit 1
 fi
-echo "✓ nginx 站点配置自检通过：限流区 3 条定义 + 6 个应用点、/healthz 精确匹配且真反代、片段命名合规"
+echo "✓ nginx 站点配置自检通过：限流区 3 条定义 + 6 个应用点、/healthz 精确匹配且真反代、ACME 挑战通路在位且 return 301 在 location 内、片段命名合规"

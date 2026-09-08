@@ -11,6 +11,20 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${BD_HTTPS_PORT:=9443}"          # 白帝独立端口，绝不碰烛龙的 80/443
 : "${PUBLIC_HOST:=_}"               # nginx server_name + 证书 SAN
 
+# ── Let's Encrypt IP 地址证书（WITH_ACME_IP_CERT=1 才做，默认 0）──
+#
+# ★为什么是 **IP 证书**而不是常规的域名证书：大陆云主机（如演示站 101.43.125.131）上，
+#   把一个未备案域名解析过来会被 DNSPod 侧拦截——ACME 的 HTTP-01 挑战拿到的是一张
+#   webblock 页面而不是挑战文件，证书永远签不下来（sslip.io / nip.io 同样被拦，2026-09-08 实测）。
+#   而 IP 证书在挑战时 Host 就是 IP，不触发备案拦截，实测能正式签发。
+# ★代价写在明处：IP 证书**只能**走 shortlived profile，有效期 6 天 15 小时，
+#   全靠 baidi-acme-renew.timer 续。定时器停掉或 80 端口被挡住，六天后证书就过期。
+#   所以本脚本装的续期脚本带「续不上且剩余不足 24h 就切回自签」的回退。
+: "${WITH_ACME_IP_CERT:=0}"
+: "${ACME_EMAIL:=}"                 # LE 账户邮箱（首次注册必填；仅用于到期提醒）
+: "${ACME_SERVER:=https://acme-v02.api.letsencrypt.org/directory}"
+ACME_PROFILE=shortlived             # 常量：IP 证书在 LE 上只有这一个 profile 可用
+
 echo "==> 目标：prefix=$BD_PREFIX user=$BD_USER control_port=$CONTROL_PORT https_port=$BD_HTTPS_PORT"
 
 # ── 部署前环境基线自检（FR-DEPLOY-01）────────────────────────────────────────
@@ -128,6 +142,7 @@ elif [ "$bd_avail_mb" -lt "$BD_MIN_DISK_MB" ]; then
   echo "  ✗ 可用磁盘：${bd_dfpath} 所在分区仅剩 ${bd_avail_mb} MiB，低于硬下限 ${BD_MIN_DISK_MB} MiB"
   echo "      一次部署的峰值实测约 334 MiB：交付包落盘 127（bin 45 + web 2 + 客户端包 80）"
   echo "      + /tmp/baidi-deploy 的暂存副本同样 127 + 客户端包原子切换期并存的第二份 80。"
+  echo "      （WITH_ACME_IP_CERT=1 时交付包还多一个 ~65 MiB 的 lego，峰值再加约 130 MiB。）"
   echo "      不够时的失败点在 cp -R 中途，留下的是半棵 web/ 目录树而不是一次干净的失败。"
   envck_bad=$((envck_bad + 1))
 elif [ "$bd_avail_mb" -lt "$BD_REC_DISK_MB" ]; then
@@ -362,6 +377,15 @@ if [ ! -f "$BD_PREFIX/etc/tls/server.crt" ]; then
   echo "==> 已生成自签 TLS 证书（SAN=${san}，私钥 0600）"
 fi
 
+# 站点证书的两组候选路径。**渲染 nginx 时一律先用自签**，ACME 那一段签成功之后
+# 再重新指过去——顺序是有意的：HTTP-01 挑战要由本机 nginx 的 80 端口应答，
+# 也就是说「站点先起来」是「拿到证书」的前置条件；反过来先把配置指向一个还不存在的
+# le.crt，nginx 会直接起不动，整站陪着一张没签下来的证书一起躺下。
+SELF_CRT="$BD_PREFIX/etc/tls/server.crt"; SELF_KEY="$BD_PREFIX/etc/tls/server.key"
+LE_CRT="$BD_PREFIX/etc/tls/le.crt";       LE_KEY="$BD_PREFIX/etc/tls/le.key"
+LE_CSR="$BD_PREFIX/etc/tls/le.csr"
+BD_TLS_CRT="$SELF_CRT"; BD_TLS_KEY="$SELF_KEY"
+
 chown -R "$BD_USER":"$BD_USER" "$BD_PREFIX"
 
 # 渲染 systemd 单元（先装单元，nginx 校验通过后再启动控制面，避免无入口空跑）
@@ -408,6 +432,9 @@ render() { sed -e "s#@BD_PREFIX@#$BD_PREFIX#g" -e "s#@BD_USER@#$BD_USER#g" \
                -e "s#@BD_HTTPS_PORT@#$BD_HTTPS_PORT#g" -e "s#@PUBLIC_HOST@#$PUBLIC_HOST#g" \
                -e "s#@MTLS_PORT@#$MTLS_PORT#g" -e "s#@GW_ID@#$GW_ID#g" \
                -e "s#@IPSEC_GW_ID@#$IPSEC_GW_ID#g" \
+               -e "s#@BD_TLS_CRT@#$BD_TLS_CRT#g" -e "s#@BD_TLS_KEY@#$BD_TLS_KEY#g" \
+               -e "s#@ACME_SERVER@#$ACME_SERVER#g" -e "s#@ACME_EMAIL@#$ACME_EMAIL#g" \
+               -e "s#@ACME_PROFILE@#$ACME_PROFILE#g" \
                -e "s#@IKE_PORT@#$IKE_PORT#g" -e "s#@NATT_PORT@#$NATT_PORT#g" "$1"; }
 render "$HERE/systemd/baidi-control.service" > /etc/systemd/system/baidi-control.service
 systemctl daemon-reload
@@ -440,20 +467,46 @@ restore_nginx() { # 有旧备份则还原可用配置，仅首装无备份才删
 # 而这份里全是 proxy_* 这类只能出现在 location 里的指令——落成 .conf 会让
 # **整台机器的 nginx** 起不来（包括与我们共存的烛龙站点）。
 render "$HERE/nginx/baidi-proxy-api.inc" > /etc/nginx/conf.d/baidi-proxy-api.inc
-render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
-# 独占标准端口(443)时补一个 80→443 跳转：具名 server（server_name=本机），非 default_server，
-# 与烛龙共存契约不冲突（名匹配，不抢兜底）；裸 IP / http:// 访问自动跳 https。非 443 端口(共存模式)不加。
-if [ "$BD_HTTPS_PORT" = "443" ]; then
-  cat >> /etc/nginx/conf.d/baidi.conf <<EOF
 
-# HTTP→HTTPS 跳转（具名，非 default_server）
-server {
-    listen 80;
-    server_name ${PUBLIC_HOST};
-    return 301 https://\$host\$request_uri;
+# ── 站点渲染收口成一个函数 ──
+#
+# 本次部署**渲染一次**：证书路径取自 BD_TLS_CRT/BD_TLS_KEY，默认自签；若配置里当前已在用
+# LE 证书且材料齐全，上面那段会把它改成 LE 后再渲染（见下）。首签之后从自签切到 LE
+# 不走 render，而是 acme-renew.sh 用 point_nginx_to 就地改那两行——两处的「当前是谁」
+# 判据逐字同款（nginx_current_crt / current_crt），否则会出现「续期脚本说已指向 LE、
+# 安装脚本说还是自签」这种谁也说服不了谁的状态。
+#
+# 80 端口那个 server 块现在**写在模板里**（@BD_HTTP80_BEGIN@/@BD_HTTP80_END@ 之间），
+# 非 443 端口时整段删掉。改造前它是本脚本里的一段 heredoc，于是：
+#   ① deploy/check-nginx.sh 的构建期自检**看不到它**（那个脚本查的是模板文件），
+#      而它正是 ACME 挑战通路所在——写错一个字就是「证书永远签不下来、而处处正常」；
+#   ② 模板与脚本各存一半 nginx 配置，改的人不知道要改哪边。
+write_nginx_site() {
+  render "$HERE/nginx/baidi.conf" > /etc/nginx/conf.d/baidi.conf
+  if [ "$BD_HTTPS_PORT" != "443" ]; then
+    # 共存机（默认 9443）：80 端口归烛龙的 default_server，白帝一个字都不写进去。
+    sed -i '/@BD_HTTP80_BEGIN@/,/@BD_HTTP80_END@/d' /etc/nginx/conf.d/baidi.conf
+  fi
 }
-EOF
+# 站点里当前真正写着的那张证书路径（判据只有这一个：配置文件里的字，不记额外状态）。
+# 与续期脚本 acme-renew.sh 的 current_crt() 逐字同款——两处必须同口径，否则会出现
+# 「续期脚本说已指向 LE、安装脚本说还是自签」这种谁也说服不了谁的状态。
+nginx_current_crt() { sed -nE 's#^[[:space:]]*ssl_certificate[[:space:]]+(.*);#\1#p' /etc/nginx/conf.d/baidi.conf | head -n1; }
+
+# ★重新部署**不得自带一次降级窗口**。
+#   改造前这里是无条件渲染（= 一律写自签），指望随后的 ACME 段再把它切回 LE。
+#   但切回那一步是 acme-renew.sh 做的，而它的「续期失败、可证书剩余仍充裕」分支
+#   只打一句「保持现状」——于是一台本来在用 LE 证书的机器，会因为一次
+#   （与证书完全无关的）重新部署退回自签，并**一直停在那里直到下次续期成功**。
+#   站点照常可用，所以没有任何人会发现。
+#   判据只用一个：配置文件里当前真写着谁（nginx_current_crt），不另记状态。
+#   自签依然是 ACME 段判失败时的回退目标，server.crt/key 从不删。
+if [ -f /etc/nginx/conf.d/baidi.conf ] && [ "$(nginx_current_crt)" = "$LE_CRT" ] \
+   && [ -s "$LE_CRT" ] && [ -s "$LE_KEY" ]; then
+  BD_TLS_CRT="$LE_CRT"; BD_TLS_KEY="$LE_KEY"
+  echo "==> 站点当前在用 Let's Encrypt 证书且材料齐全 → 本次渲染沿用它（不制造自签窗口）"
 fi
+write_nginx_site
 # 防御①：白帝绝不得声明 default_server（剥注释后再查，避免被说明性注释里的字样误伤）
 if sed 's/#.*//' /etc/nginx/conf.d/baidi.conf | grep -q 'default_server'; then
   restore_nginx; echo "✗ 拒绝：baidi nginx 站点含 default_server，已还原（绝不抢占烛龙 80/443）"; exit 1
@@ -476,6 +529,180 @@ if ! systemctl reload-or-restart nginx; then
   echo "✗ nginx 重载/启动失败，已还原 baidi 配置"; exit 1
 fi
 rm -f /etc/nginx/conf.d/baidi.conf.bak
+
+# ══════════════════════════════════════════════════════════════════════════════
+# Let's Encrypt IP 地址证书（WITH_ACME_IP_CERT=1 才做）
+#
+# 位置：**必须在 nginx 起来之后**——HTTP-01 挑战是由本机 nginx 的 80 端口应答的。
+#
+# 全流程 fail-safe：这一整段里任何一步失败都只做两件事——保持自签、当面说清原因。
+# 绝不能出现「签失败 → nginx 指向不存在的 le.crt → 整站起不来」：那是拿一个可用站点
+# 去赌一张锦上添花的证书。所以配置的切换只发生在**证书文件确实躺在盘上**之后，
+# 且切换后 nginx -t 不过就立刻退回自签（下面 apply 那段）。
+# ══════════════════════════════════════════════════════════════════════════════
+acme_state=disabled        # disabled | ok | failed
+acme_why=""                # failed 时的原因（原样进结尾摘要，不做二次归因）
+acme_fail() { acme_state=failed; acme_why="$1"; echo "  ✗ $1"; }
+
+if [ "${WITH_ACME_IP_CERT:-0}" = "1" ]; then
+  echo "==> Let's Encrypt IP 地址证书（WITH_ACME_IP_CERT=1）"
+  # ★中间态叫 pending，不叫 failed：下面那批闸失败时会 acme_fail() 写下**真实原因**，
+  #   而结尾摘要要把那句原话原样打给运维。先塞一个占位理由的话，「签到了但 nginx 没切过去」
+  #   这条路径（它不经过任何 acme_fail）就会带着占位文案进摘要——比不报还糟。
+  acme_state=pending; acme_why=""
+
+  # 纯 IPv4 判定：四段、每段 0-255。宽松写法（只查「有没有字母」）会让 1.2.3 这种
+  # 值一路走到 lego 那里，报的是 ACME 侧的 identifier 错误，与「填错了地址」看起来无关。
+  valid_ipv4() {
+    case "$1" in *[!0-9.]*|*..*|.*|*.) return 1 ;; esac
+    local o n=0 IFS=.
+    for o in $1; do
+      n=$((n+1))
+      [ -n "$o" ] || return 1
+      [ "${#o}" -le 3 ] || return 1
+      [ "$o" -le 255 ] 2>/dev/null || return 1
+    done
+    [ "$n" = 4 ]
+  }
+
+  if ! valid_ipv4 "$PUBLIC_HOST"; then
+    acme_fail "PUBLIC_HOST=${PUBLIC_HOST} 不是裸 IPv4：本开关签的是 **IP 地址证书**，只认 IP。
+     有域名的话不要用这个开关——域名走常规 HTTP-01/DNS-01 更好（有效期 90 天、不必两天一续）。
+     ★大陆云主机上给这台机指一个**未备案**域名会被 DNSPod 拦截，挑战拿到的是 webblock 页面，
+       证书永远签不下来，这正是本开关存在的理由。"
+  elif [ "$BD_HTTPS_PORT" != "443" ]; then
+    acme_fail "BD_HTTPS_PORT=${BD_HTTPS_PORT}（非 443）：HTTP-01 挑战必须由本机 80 端口应答，
+     而共存机的 80 归烛龙的 default_server，白帝的共存契约是绝不去争它。
+     IP 证书方案只支持独占标准端口的机器（BD_HTTPS_PORT=443 + WIPE=1 那种形态）。"
+  elif [ -z "$ACME_EMAIL" ]; then
+    acme_fail "ACME_EMAIL 为空：LE 账户注册必须给一个邮箱（它也是证书到期提醒的唯一去处）。
+     在 config.env 里填 ACME_EMAIL=you@example.com 后重新部署。"
+  elif [ ! -x "$HERE/bin/lego" ] && [ ! -x "$BD_PREFIX/bin/lego" ]; then
+    acme_fail "部署包里没有 bin/lego（ACME 客户端），这台机上也没有装过。
+     成因通常是构建机取不到 github.com/go-acme/lego 模块——deploy/build.sh 在那种情况下
+     **只跳过 lego、不让整个构建失败**（一个可选组件不该拖垮全部交付）。
+     修法：在能访问 proxy.golang.org 的机器上重跑 deploy/build.sh，或手工把交叉编译好的
+     lego（linux/amd64）放到 deploy/_out/bin/lego 再部署。
+     ★目标机自己下不动 GitHub（演示站实测 codeload.github.com 超时），所以不在这里现取。"
+  else
+    if [ -x "$HERE/bin/lego" ]; then
+      install -m 0755 "$HERE/bin/lego" "$BD_PREFIX/bin/lego"
+    else
+      # ★包里没带、但机器上有一份能用的：沿用它，别把这次部署变成一次**降级**。
+      #   报错退回自签的话，一台本来证书好好的机器会因为「构建机今天没联网」而
+      #   退回浏览器警告——那是拿现状去赔一个本可以不出的问题。当面说清即可。
+      echo "  ⚠ 部署包里没带 lego，沿用机器上已有的 ${BD_PREFIX}/bin/lego"
+      echo "    （版本可能比本次交付的旧；想更新它就在能联网的构建机上重跑 deploy/build.sh）"
+    fi
+    mkdir -p "$BD_PREFIX/etc/acme"; chmod 0700 "$BD_PREFIX/etc/acme"
+    # 挑战文件的落点。nginx 那条 location 恒定指向这里；目录不存在时 nginx 回 404，
+    # 而 lego 写文件会失败——两种失败长得不一样，先把目录建出来省一轮排查。
+    mkdir -p /var/www/html/.well-known/acme-challenge
+
+    # ── 私钥 + CSR ──
+    # ★CSR 必须自造，不能让 lego 代劳：LE 对 IP 证书的硬要求是 **IP 不能出现在 CN**，
+    #   只能在 SAN 里；CN 带 IP 时直接回 `badCSR :: CSR contains IP address in Common Name`。
+    #   `-subj "/"` = 空 subject，`-addext subjectAltName=IP:…` 把 IP 只放进 SAN。
+    # ★已有 CSR 就复用，但要核对它的 SAN 与本次 PUBLIC_HOST 一致——改了地址重装时
+    #   不核对的话会拿着旧 IP 的 CSR 去签，签出来的证书对新地址无效，而全程零报错。
+    esc_ip="$(printf '%s' "$PUBLIC_HOST" | sed 's/\./\\./g')"
+    csr_ready=0
+    if [ -s "$LE_KEY" ] && [ -s "$LE_CSR" ]; then
+      if openssl req -in "$LE_CSR" -noout -text 2>/dev/null | tr -d ' ' \
+           | grep -Eq "(^|,)IPAddress:${esc_ip}(,|$)"; then
+        csr_ready=1
+      else
+        echo "  · 现有 CSR 的 SAN 与 ${PUBLIC_HOST} 不符，重新生成"
+        # ★必须同时作废旧证书：下面重造 CSR 会覆盖 le.key，而首签的守卫是
+        #   `[ ! -s "$LE_CRT" ]`——旧证书还在就不会重签，留下一对**互不配对**的
+        #   key/cert（nginx 起不来，或起来了但握手一直失败）。地址都变了，
+        #   那张旧证书对新地址本来也无效。
+        rm -f "$LE_CRT"
+      fi
+    fi
+    if [ "$csr_ready" = 0 ]; then
+      if ( umask 077; openssl req -new -newkey rsa:2048 -nodes \
+             -keyout "$LE_KEY" -out "$LE_CSR" -subj "/" \
+             -addext "subjectAltName=IP:$PUBLIC_HOST" >/dev/null 2>&1 ); then
+        csr_ready=1
+        echo "  · 已生成 CSR（CN 空、SAN=IP:${PUBLIC_HOST}）"
+      else
+        acme_fail "生成 CSR 失败（本机 openssl 不支持 -addext？需要 OpenSSL 1.1.1+）"
+      fi
+    fi
+
+    # ── 续期脚本 + 定时器：**先装，后签** ──
+    # 顺序是有意的：签发这一步可能失败，而失败之后更需要那个定时器——它每天两次重试，
+    # 一次网络抖动不至于让这台机永远停在自签上。反过来「签成功才装定时器」会让
+    # 「首签失败」变成一个**再也不会自愈**的状态，且机器上没有任何东西记得要重试。
+    # ★判据用 csr_ready 而不是「文件在不在」：生成失败时盘上可能留着一个半截的
+    #   / SAN 不对的 CSR，照着它往下走会拿一张对本机无效的证书，且全程零报错。
+    if [ "$csr_ready" = 1 ]; then
+      render "$HERE/acme-renew.sh" > "$BD_PREFIX/bin/acme-renew.sh"
+      chmod 0755 "$BD_PREFIX/bin/acme-renew.sh"
+      render "$HERE/systemd/baidi-acme-renew.service" > /etc/systemd/system/baidi-acme-renew.service
+      cp -f "$HERE/systemd/baidi-acme-renew.timer" /etc/systemd/system/baidi-acme-renew.timer
+      systemctl daemon-reload
+      systemctl enable --now baidi-acme-renew.timer >/dev/null 2>&1 \
+        || echo "  ⚠ 定时器 enable 失败：证书 6 天后会过期且无人续，请查 systemctl status baidi-acme-renew.timer"
+      echo "  · 续期脚本与定时器已装（每日两次；续不上且剩余不足 24h 会自动切回自签）"
+
+      # ── 签发 ──
+      # 还没有证书 → 首签（run）；已有 → 交给续期脚本自己判断该不该续。
+      # ★复用续期脚本而不是在这里再写一遍判断：它是两次部署**之间**的唯一执行方，
+      #   部署期也走它 = 全系统只有一条「要不要续、续完指哪」的判定路径。
+      if [ ! -s "$LE_CRT" ]; then
+        echo "  · 首次签发（lego run --profile ${ACME_PROFILE}）"
+        # ★参数位置：--csr 是全局参数（lego 之后、子命令之前），--profile 是子命令参数。
+        #   放反了报 `flag provided but not defined`，与「签不下来」是两回事。
+        if "$BD_PREFIX/bin/lego" --server "$ACME_SERVER" --accept-tos --email "$ACME_EMAIL" \
+             --http --http.webroot /var/www/html \
+             --path "$BD_PREFIX/etc/acme" --csr "$LE_CSR" \
+             run --profile "$ACME_PROFILE"; then
+          if [ -s "$BD_PREFIX/etc/acme/certificates/${PUBLIC_HOST}.crt" ]; then
+            install -m 0644 "$BD_PREFIX/etc/acme/certificates/${PUBLIC_HOST}.crt" "$LE_CRT"
+          else
+            acme_fail "lego 退出码 0，但产物 ${BD_PREFIX}/etc/acme/certificates/${PUBLIC_HOST}.crt 不在"
+          fi
+        else
+          acme_fail "lego 签发失败（原文见上方输出）。最常见的三种成因：
+     ① 公网打不到本机 80 端口（云安全组没放行 80——HTTP-01 只走 80，放行 443 不算）；
+     ② 80 端口的 return 301 写在了 server 级：nginx 的 return 在 rewrite 阶段执行、
+        早于 location 选择，会把挑战请求一起重定向掉（本仓模板已写成 location 内，
+        deploy/check-nginx.sh 有构建期断言守着，改回去就红）；
+     ③ 触到 LE 速率限制（同一 IP 一周内失败/签发次数过多），等一段时间再试。"
+        fi
+      fi
+      if [ -s "$LE_CRT" ]; then
+        # 续期脚本自己判断该不该续，并负责把 nginx 指向当前可用的那张证书。
+        # 失败退出码不能让本脚本跟着死（set -e）：站点此刻是自签、完全可用。
+        "$BD_PREFIX/bin/acme-renew.sh" || true
+      fi
+    fi
+
+    # ── 结论以「nginx 配置里真正写着哪条路径」为准 ──
+    # 不看 le.crt 在不在、也不看 lego 的退出码：那两样都可能为真而站点仍在用自签
+    # （证书续着、没人用——正是这次要消灭的静默状态）。
+    if [ "$(nginx_current_crt)" = "$LE_CRT" ]; then
+      BD_TLS_CRT="$LE_CRT"; BD_TLS_KEY="$LE_KEY"
+      acme_state=ok; acme_why=""
+      echo "  ✓ 站点已使用 Let's Encrypt IP 证书（${LE_CRT}）"
+    elif [ "$acme_state" = pending ]; then
+      acme_fail "证书已签下来，但 nginx 站点仍指向 $(nginx_current_crt)（续期脚本切换失败？见上方输出）"
+    fi
+  fi
+  if [ "$acme_state" = failed ]; then
+    echo "  → 保持自签证书，站点照常可用（浏览器会有警告，客户端需导信任锚）"
+  fi
+elif [ -s "$LE_CRT" ]; then
+  # ★开关关掉、机器上却还留着上一轮的 LE 证书与定时器：必须当面说，否则会落进
+  #   一个谁都看不出来的状态——定时器还在续、nginx 已经被这次部署指回自签。
+  echo "⚠ WITH_ACME_IP_CERT=0，但机器上有 ${LE_CRT}：本次部署已把站点指回自签证书。"
+  echo "  ★但这不是终态：定时器若还开着，它会在下一次运行（≤12h）确认「证书还有效就该在用」"
+  echo "    并把 nginx 再切回 LE —— 只删证书不停定时器，等于每天让它去改一份你以为已经关掉的配置。"
+  echo "  彻底关闭（先停定时器、再删材料，顺序不能反）："
+  echo "    systemctl disable --now baidi-acme-renew.timer && rm -f ${LE_CRT} ${LE_KEY} ${LE_CSR}"
+fi
 
 # nginx 就绪后再启动控制面
 systemctl enable --now baidi-control
@@ -720,7 +947,49 @@ if [ "${PUBLIC_ORIGIN:-*}" = "*" ]; then
 else
   echo "  ✓ CORS 白名单：$PUBLIC_ORIGIN"
 fi
+# ── ACME IP 证书姿态：开了却没生效必须当面说 ──
+#
+# ★这一段的存在理由与本文件里那批告警同源：`WITH_ACME_IP_CERT=1` 却仍在用自签，
+#   在机器上与「压根没开」**完全同形**（站点正常、nginx -t 通过、部署退出码 0）。
+#   下面这条把它变成一句看得见的话，并且原因是签发那一步的原话，不做二次归因。
+case "$acme_state" in
+  ok)
+    le_left=""
+    if command -v openssl >/dev/null 2>&1; then
+      le_end="$(openssl x509 -in "$LE_CRT" -noout -enddate 2>/dev/null | cut -d= -f2 || true)"
+      # ★用 if 而不是 `[ ] && 赋值`：条件为假时整条语句返回 1，本文件 set -e 下会静默中止
+      #   （同本文件第 255 / 644 行的注释，那个坑这里是第四次）。
+      if [ -n "$le_end" ]; then
+        le_epoch="$(date -d "$le_end" +%s 2>/dev/null || echo 0)"
+        # 解析不出来（非 GNU date / 格式不认）就**不给数**，绝不拿 0 去减出一个
+        # 「剩余 -486000h」的假值——判不了与判出来是两件事。
+        if [ "$le_epoch" != 0 ]; then le_left="$(( (le_epoch - $(date +%s)) / 3600 ))h"; fi
+      fi
+    fi
+    echo "  ✓ 控制台 TLS：Let's Encrypt IP 地址证书（公共 CA 签发，各端开箱受信）${le_left:+，剩余 ${le_left}}"
+    echo "    ★有效期只有 6 天 15 小时（IP 证书只能走 shortlived profile），靠定时器续："
+    echo "      systemctl status baidi-acme-renew.timer   # 停了就是六天后过期"
+    echo "      systemctl status baidi-acme-renew         # 上一次续期的成败（失败会是 failed 状态）"
+    echo "      ${BD_PREFIX}/bin/acme-renew.sh            # 手工跑一次，输出即诊断"
+    echo "    ★续期依赖公网能打到本机 **80** 端口（HTTP-01）。安全组只放 443 的话，"
+    echo "      站点今天一切正常、六天后证书过期——这两件事之间没有任何中间告警。"
+    echo "    ★续不下来且剩余不足 24h 时，续期脚本会主动切回自签（过期比自签更糟）。"
+    echo "      切回之后客户端会重新回到「必须导信任锚」的状态，别把它读成站点被攻击。"
+    ;;
+  failed)
+    echo ""
+    echo "  ⚠ WITH_ACME_IP_CERT=1，但**没有拿到可用的 LE 证书**，站点仍在用自签："
+    echo "    ${acme_why}"
+    echo "    （站点本身可用；下面那段自签告警说的就是当前这张证书。）"
+    echo ""
+    ;;
+esac
 # ── 控制台 TLS 证书姿态：自签必须当面告警 ──
+#
+# ★证书路径取的是 $BD_TLS_CRT ——**nginx 站点里真正写着的那一张**，而不是写死的
+#   server.crt。ACME 生效时那两者不是同一个文件，照着 server.crt 判会把一台正在用
+#   公共 CA 证书的机器报成「自签」，并劝人去导一张根本没在用的信任锚。
+#   （同一条纪律：展示值必须来自真正在用的那份。）
 #
 # 与内核态隐身 / 首登改密 / CORS 同一条纪律：默认值就是绝大多数部署的真实姿态，
 # 不能让它沉默地留在机器上。
@@ -733,22 +1002,22 @@ fi
 #
 # 判据用 subject == issuer：这只认得出**自签**。外部 CA 签发的会走 else 分支，但那句话
 # 只敢说「不是自签」，不敢说「客户端一定信任」——私有 CA 签的证书同样要分发信任锚。
-if [ -f "$BD_PREFIX/etc/tls/server.crt" ] && command -v openssl >/dev/null 2>&1; then
+if [ -f "$BD_TLS_CRT" ] && command -v openssl >/dev/null 2>&1; then
   # ★每条命令替换都必须兜 `|| true`：本文件顶部是 `set -euo pipefail`，而这四条管道里
   #   openssl 与 grep 都会在「正常但没东西可读」时返回非零（无 SAN 扩展的证书、不认 -ext 的
   #   LibreSSL、证书不是 PEM…）。不兜的话赋值语句本身非零 → 脚本**当场静默退出 1**：
   #   此刻服务其实已经装完并起来了，而下面的摘要、演示账号、回滚命令一行都打不出来，
   #   deploy.sh 把一次成功的部署报成失败，operator 手上零线索。
   #   同一个坑本文件此前已在第 255 / 644 行各踩过一次并留了注释，这是第三次。
-  crt_subj="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -subject 2>/dev/null | sed 's/^subject=[[:space:]]*//' || true)"
-  crt_iss="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -issuer  2>/dev/null | sed 's/^issuer=[[:space:]]*//' || true)"
+  crt_subj="$(openssl x509 -in "$BD_TLS_CRT" -noout -subject 2>/dev/null | sed 's/^subject=[[:space:]]*//' || true)"
+  crt_iss="$(openssl x509 -in "$BD_TLS_CRT" -noout -issuer  2>/dev/null | sed 's/^issuer=[[:space:]]*//' || true)"
   # SAN 取值走两条路：`-ext` 是 OpenSSL 1.1+ 才有的选项，而不少机器（含 macOS 自带的
   # LibreSSL）没有它——只用 `-ext` 的话 crt_san 会静默为空，下面那道 SAN 检查就**永远
   # 不会触发**，而部署输出里看不出它没跑过。回退到 `-text` 解析同一段扩展。
-  crt_san="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -ext subjectAltName 2>/dev/null \
+  crt_san="$(openssl x509 -in "$BD_TLS_CRT" -noout -ext subjectAltName 2>/dev/null \
              | grep -v 'X509v3' | tr -d ' \n' || true)"
   if [ -z "$crt_san" ]; then
-    crt_san="$(openssl x509 -in "$BD_PREFIX/etc/tls/server.crt" -noout -text 2>/dev/null \
+    crt_san="$(openssl x509 -in "$BD_TLS_CRT" -noout -text 2>/dev/null \
                | grep -A1 'Subject Alternative Name' | tail -n1 | tr -d ' \n' || true)"
   fi
   if [ -n "$crt_subj" ] && [ "$crt_subj" = "$crt_iss" ]; then
@@ -825,4 +1094,9 @@ if [ -f "$BD_PREFIX/etc/tls/server.crt" ] && command -v openssl >/dev/null 2>&1;
 fi
 echo "  管理员演示账号 admin / baidi@123（生产请改后端登录逻辑或接 IdP）"
 echo "  回滚：systemctl disable --now baidi-control; rm /etc/nginx/conf.d/baidi.conf /etc/nginx/conf.d/baidi-proxy-api.inc /etc/systemd/system/baidi-control.service; nginx -t && systemctl reload nginx"
+if [ "$acme_state" = ok ]; then
+  # ★这一条必须跟着上一行一起给：只删站点配置、不停定时器的话，机器上会留下一个
+  #   每天两次去改一份**已经不存在**的 nginx 配置的任务（它会报错，但没人会去看）。
+  echo "        ACME 部分另需：systemctl disable --now baidi-acme-renew.timer; rm -f /etc/systemd/system/baidi-acme-renew.{service,timer} ${BD_PREFIX}/bin/acme-renew.sh"
+fi
 systemctl --no-pager status baidi-control | head -5 || true

@@ -34,7 +34,9 @@ etc/gwcerts/            网关身份材料（仅 WITH_GATEWAY=1）：gw.crt/key.
                           （两把公钥分口装：SPA 敲门口只装 knock.pub、L7 七层 Web 口只装 web.pub——
                            拿错票据在对面连签名都验不过，见 install-remote.sh 的 BAIDI_GW_JWT_PUBKEY / BAIDI_GW_WEB_JWT_PUBKEY）
 etc/baidi-gateway.env   网关专属 env（0640）——只有验证材料，没有任何签发能力
-etc/tls/server.{crt,key} TLS（首装自签，生产换正式证书）
+etc/tls/server.{crt,key} TLS（首装自签，生产换正式证书；**自签这一对从不删**——它是 ACME 续不上时的回退目标）
+etc/tls/le.{crt,key,csr}  Let's Encrypt IP 地址证书（仅 WITH_ACME_IP_CERT=1）；etc/acme/ 是 lego 的账户与状态目录
+                          （开关、四条硬约束与续期/回退语义见下方「HTTPS 证书」一节）
 downloads/              客户端安装包 + manifest.json（先跑 clients/build-artifacts.sh 汇集到 deploy/artifacts/downloads，build.sh 携带进 _out）
 ```
 
@@ -137,6 +139,115 @@ sudo BD_DNS_PROBE_HOST=idp.corp.example … bash install-remote.sh
 - **时钟准不准**：判据只是「有没有同步守护进程在跑」。真实偏差要等网关连上来之后，
   由 `/diag` 的时钟一致性检查回答。
 
+## HTTPS 证书
+
+**默认是自签**（`install-remote.sh` 首装时签一张 CN=baidi、SAN 含 `PUBLIC_HOST` 的证书，
+`[ ! -f ]` 守卫，重复部署不覆盖）。自签**不是「能凑合用」**：每一个第一次接入的客户端都会撞墙，
+且三端的报错长得完全不一样（桌面端登录在 TLS 握手阶段就断、移动端 WebView 拒绝加载、
+Go 数据面报 `x509: certificate signed by unknown authority` 而隧道进程本身起着）。
+有域名、且域名能正常解析到这台机器时，最省事的路仍然是**换一张常规的受信证书**
+（本脚本不代办，换完把 `etc/tls/server.{crt,key}` 替掉即可）。
+
+### 大陆云主机 + 没有备案域名：只剩 LE 的 IP 地址证书这一条路
+
+2026-09-08 在演示站 `101.43.125.131`（腾讯云大陆机）实测出来的结论，逐条都是踩出来的：
+
+- **未备案域名指向大陆机器会被 DNSPod 在 HTTP 层拦掉**——`sslip.io` / `nip.io` 这类
+  wildcard DNS 同样算。ACME 的 HTTP-01 挑战取回的是一张 webblock 页而不是挑战文件，
+  于是**域名路线根本签不下来**。错的不是 ACME 配置、也不是 nginx，别在那两处反复调。
+- **Let's Encrypt 的 IP 地址证书可行**：挑战时 Host 头就是 IP，不触发备案拦截。
+  实测拿到 `The server validated our request` 并正式签发。
+
+开启方式（`config.env`）：
+
+```bash
+WITH_ACME_IP_CERT=1
+ACME_EMAIL=you@example.com      # LE 账户邮箱，首次注册必填（仅用于到期提醒）
+# ACME_SERVER=…                 # 默认 LE 正式环境；调试期可指向 staging
+```
+
+四个前置条件，任一不满足**只警告不中止**——站点保持自签、照常可用，原因原样打进结尾摘要：
+
+| 前置 | 不满足时 |
+|---|---|
+| `PUBLIC_HOST` 是**裸 IPv4** | 拒。有域名就别用这个开关：域名走常规 HTTP-01/DNS-01 更好（90 天有效期，不必两天一续） |
+| `BD_HTTPS_PORT=443`（独占整机） | 拒。HTTP-01 挑战必须由本机 **80 端口**应答，而共存机的 80 归烛龙的 `default_server`，白帝的共存契约是绝不去争它 |
+| `ACME_EMAIL` 非空 | 拒。LE 账户注册必须给邮箱，它也是到期提醒的唯一去处 |
+| 部署包里有 `bin/lego` | 拒。取不到 `github.com/go-acme/lego` 模块时 `build.sh` **只跳过 lego、不让整个构建失败**（一个可选组件不该拖垮全部交付），此时自己交叉编译一个 linux/amd64 的放进 `deploy/_out/bin/lego` 再部署 |
+
+`PUBLIC_HOST` 同时是证书 SAN、nginx 的 `server_name`、以及续期脚本找 lego 产物用的文件名
+（lego 按 CSR 里的第一个标识命名产物），三处必须是同一个值。
+
+### 四条硬约束（每条都对应一个具体的失败）
+
+| 约束 | 违反时的现场 |
+|---|---|
+| IP 证书**只能**走 `shortlived` profile，有效期 **6 天 15 小时** | 用默认 profile 直接被 LE 拒签 |
+| CSR 里 IP **不能出现在 Common Name**，只能进 SAN | LE 回 `badCSR :: CSR contains IP address in Common Name`。故须 `openssl req -subj "/" -addext "subjectAltName=IP:<ip>"` 自造 CSR，再 `lego --csr` 拿去签 |
+| **certbot 2.9（Ubuntu 自带那版）不支持 `--preferred-profile`** | 选不到 `shortlived`，这条路走不通。改用 **lego**（单二进制、纯 Go、无依赖，`build.sh` 交叉编译后随部署包带上；版本钉死在 `LEGO_VERSION=v4.35.2`——ACME profile 是 2025 年才进 lego 的，v4.21 以前的版本根本没有 `--profile`）。★别打算在目标机上现装：演示站访问 `codeload.github.com` 超时，那次是在开发机上交叉编译好再上传的 |
+| lego 的 **`--csr` 是全局参数**（写在 `lego` 之后、`run`/`renew` 之前），**`--profile` 是 `run`/`renew` 子命令的参数** | 放错报 `flag provided but not defined` —— 与「证书签不下来」看起来是两回事，最容易把人带偏 |
+
+还有一条在 nginx 侧：**80 端口的 server 块不能写 server 级 `return 301`**。它在 rewrite 阶段执行、
+**早于 location 选择**，会把 ACME 挑战一起重定向掉。正确写法是把 return 挪进 `location /`，
+并另加一条 `location ^~ /.well-known/acme-challenge/ { root /var/www/html; }`
+（已落在 `deploy/nginx/baidi.conf` 里）。
+
+### 机上落点
+
+| 路径 | 是什么 |
+|---|---|
+| `$BD_PREFIX/bin/lego` | ACME 客户端（单二进制） |
+| `$BD_PREFIX/etc/tls/le.crt` · `le.key` · `le.csr` | LE 证书 / 私钥 / 自造的 CSR（CN 空、IP 在 SAN） |
+| `$BD_PREFIX/etc/tls/server.crt` · `server.key` | **自签那一对，原样保留、从不删** —— 它是回退目标 |
+| `$BD_PREFIX/etc/acme/` | lego 的账户与状态目录 |
+| `$BD_PREFIX/bin/acme-renew.sh` | 续期脚本（模板 `deploy/acme-renew.sh`，占位由 `install-remote.sh` 渲染） |
+| `baidi-acme-renew.timer` / `.service` | 每日两次拉起续期（`OnCalendar=*-*-* 03,15:17:00` + 随机延迟 30min + `Persistent=true`） |
+
+### 续期与回退（fail-safe 的语义与代价）
+
+`acme-renew.sh` 每次跑做三件事，判据只有一个——**nginx 配置文件里真正写着哪条 `ssl_certificate`
+路径**（不记任何额外状态；多一份状态就多一次两边不一致的机会，而不一致时的症状正是本功能要消灭的
+那一种：证书天天续着、nginx 却在用自签，处处正常）：
+
+1. 剩余 **> 96h** → 不续，但仍然确认一次 nginx 真的指着 LE 证书（少了这一句，一次重新部署把配置
+   指回自签之后就再没人发现）；
+2. 剩余 **≤ 96h** → 调 lego 续；成功就装文件 + 指向 LE + `nginx -t` 通过才 reload；
+3. 续不上 **且** 剩余 **< 24h** → **切回自签**（`fallback_to_self_signed`，真改配置真 reload）。
+   理由：**过期证书比自签更糟**——自签浏览器还给一个「继续访问」的出口，过期在多数客户端上同样拦、
+   而且更容易被读成「站点整个挂了」。最坏结果因此是退回到没启用 ACME 之前的状态，而不是 TLS 直接不可用。
+
+`nginx -t` 不过就把改动退回去，绝不留一个会让 nginx 起不来的配置（这台机可能与烛龙共存，
+半残配置会毒化对方的下一次 reload）。续期失败时 `.service` 单元**就该是 failed**——刻意不加
+`Restart`、不吞退出码，因为 `systemctl --failed` / `systemctl status baidi-acme-renew`
+是这件事在机器上**唯一**的可见面（控制台不呈现证书状态）。
+
+**代价必须写在明处**：
+
+- **6 天 15 小时的有效期意味着「机器长期关机、开回来必然已过期」**。`Persistent=true` 会在开机后补跑
+  一次，但那时多半已经过期、且已经切回自签 —— 站点能开，只是又回到浏览器警告 + 客户端要导信任锚。
+- 定时器被停掉、或 80 端口被安全组/上游挡住，同样是六天后过期。**这两件事在控制台上看不出来**，
+  只能上机看单元状态。
+- **它不替代客户端侧的信任材料**。受信只在这一台机器上成立：换任何一台自签部署，桌面端仍要把证书
+  导进本机信任库（`baidi-tun` 那半边可以用 `-control-ca`，登录那半边没有入口）、安卓仍要
+  `-PbaidiControlCa`。详见 docs/ARCHITECTURE.md 第七节「控制中心信任锚」的逐端表。
+
+**`install-remote.sh` 判「这次到底成没成」用的是同一条判据**（它的结论与 `acme-renew.sh` 的
+`current_crt()` 逐字同款）——不看 `le.crt` 在不在、也不看 lego 的退出码，因为那两样都可能为真
+而站点仍在用自签。装机顺序也是有意的：**先装续期脚本与定时器，后签发**——首签失败之后**更需要**
+那个每日两次的重试，反过来「签成功才装定时器」会让首签失败变成一个再也不会自愈、
+且机器上没有任何东西记得要重试的状态。
+
+把开关关掉、但机器上还留着上一轮的 LE 证书时，`install-remote.sh` 会当面告警（本次部署已把站点
+指回自签，而定时器还在续）。彻底关闭：
+
+```bash
+systemctl disable --now baidi-acme-renew.timer
+rm -f $BD_PREFIX/etc/tls/le.crt $BD_PREFIX/etc/tls/le.key $BD_PREFIX/etc/tls/le.csr
+```
+
+排查一句话：`curl -sS -o /dev/null -w '%{http_code}\n' https://<PUBLIC_HOST>/`（**不带 `-k`**）
+回 200 才算此刻受信。
+
 ## 运维
 
 ```bash
@@ -197,8 +308,11 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 - [ ] `etc/tls` 换正式证书（替换自签）——**自签不是"能凑合用"，是每个客户端第一次接入必然失败**：
       桌面端登录在 TLS 握手阶段就断（拿不到 HTTP 状态码，界面显示成"网络错误"）、移动端 WebView 拒绝加载、
       数据面报 `x509: certificate signed by unknown authority` 而隧道进程本身是起着的。
-      裸 IP 部署拿不到公共 CA 证书，只能走第二条路：把 `etc/tls/server.crt` 当信任锚分发给客户端，
-      代价是它带 `CA:TRUE`（导入系统信任库 = 信任它今后签发的任意证书）。指纹核对：
+      **裸 IP 部署也能拿到公共 CA 证书**（此前这里写的是「拿不到」，已被 2026-09-08 的实测推翻）：
+      Let's Encrypt 签 IP 地址证书，代价是只能走 `shortlived` profile、有效期 6 天 15 小时、
+      必须有定时器续着——开关与全部约束见上方「HTTPS 证书」一节。
+      走不了那条路（没有公网 80、或不接受 6 天有效期）时才退到第二条：把 `etc/tls/server.crt`
+      当信任锚分发给客户端，代价是它带 `CA:TRUE`（导入系统信任库 = 信任它今后签发的任意证书）。指纹核对：
       `openssl x509 -in <crt> -outform der | openssl dgst -sha256`。
       ★这个指纹与**隧道钉扎**无关：那是网关自签的另一张证书，指纹由网关上报、经接入剖面自动下发，不需人工填。
       `install-remote.sh` 每次部署都会当面把这段告警打出来（含 SAN 与本次 `PUBLIC_HOST` 是否一致）。

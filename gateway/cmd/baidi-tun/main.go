@@ -55,6 +55,14 @@ func main() {
 	pin := flag.String("pin", "", "网关隧道证书 SHA-256 指纹（hex，控制面剖面下发）：对通用 TLS **与国密 TLCP** 隧道都做证书钉扎；空=不认证网关身份")
 	defaultRes := flag.String("resource", "", "默认资源 id（resmap 未命中时用；空=网关回退默认后端）")
 	control := flag.String("control", "", "baidi-control 地址（必填）：换短时效一次性敲门令牌 + 定期保活续窗")
+	// ★「客户端 → 控制面 HTTPS」这一跳此前在桌面端**连入口都没有**：dataplane.Config.ControlTLS
+	// 恒 nil = 只认系统信任库，而参考部署给控制面签的是自签证书，于是敲门令牌永远取不到
+	// （报 x509: certificate signed by unknown authority）。修法是**分发信任锚，不是关校验**：
+	// 控制面自己的锚不能由控制面下发（循环论证），只能随安装包/部署脚本给到终端。
+	controlCA := flag.String("control-ca", "",
+		"控制中心 HTTPS 的信任锚 PEM 文件（部署期分发的自签证书）；"+
+			"空=用系统信任库（**不是**跳过校验）。装载后信任池是「系统池 ∪ 该锚」，"+
+			"部署方换成受信证书那天照常可用")
 	reknock := flag.Duration("reknock", 15*time.Second, "敲门保活间隔（须 < 网关 SPA TTL；-control 模式生效）")
 	// ── 隧道内 DNS（split-DNS）──
 	// 只按域分流、不全局接管：全局接管会让所有 DNS 都走隧道，隧道一断全网解析全挂。
@@ -101,6 +109,20 @@ func main() {
 			}
 			tlcpCfg.RootCAs = pool
 		}
+	}
+
+	// ── 控制中心信任锚 ──
+	// 放在创建 TUN 之前：锚填错要在动系统状态（建卡/改路由/改系统解析器）之前失败。
+	// **读不出证书一律致命**，绝不静默回落成系统信任库——回落就是「配了却不生效」，
+	// 而它与"根本没配"在现场完全同形（都只表现为门敲不开）。
+	ctlTLS, trustNote, trustWarn, err := loadControlTrust(*controlCA, *control)
+	if err != nil {
+		log.Fatalf("控制中心信任锚不可用: %v", err)
+	}
+	if trustWarn {
+		slog.Warn(trustNote)
+	} else {
+		slog.Info(trustNote)
 	}
 
 	// ── 网关落点清单 ──
@@ -268,6 +290,10 @@ func main() {
 		Reknock: *reknock, MTU: mtu,
 		DNSListen: dnsIP, DNSRecords: records,
 		Device: *device,
+		// ControlTLS 为 nil 即系统信任库（**不是**跳过校验）；非 nil 时是「系统池 ∪ -control-ca 的锚」。
+		// ★这一行就是本轨修的缺口：字段一直存在、移动端一直在传，桌面端此前从不传，
+		// 于是自签控制面下敲门令牌永远取不到，而"字段在那儿"看起来一切正常。
+		ControlTLS: ctlTLS,
 	}
 	if err := dataplane.Run(dev, cfg); err != nil {
 		// ★ log.Fatalf 不跑 defer——这里必须显式清理，否则「数据面异常退出」会顺带

@@ -17,6 +17,10 @@ source "$HERE/config.env"
 # 内核态隐身（默认关）。同样必须显式转发——漏转的症状是 config.env 里写了 WITH_STEALTH=1、
 # 部署"成功"，而机器上既没有规则集、网关也没带 -pf，且部署输出还照着"未启用"那段念。
 : "${WITH_STEALTH:=0}"
+# Let's Encrypt IP 地址证书（默认关）。同样必须显式转发——漏转的症状是 config.env 里
+# 写了 WITH_ACME_IP_CERT=1、部署"成功"，而机器上既没签证书也没装定时器，
+# 站点照旧自签，且部署输出里那段 ACME 姿态一个字都不会打印（因为远端根本没看见这个开关）。
+: "${WITH_ACME_IP_CERT:=0}"; : "${ACME_EMAIL:=}"; : "${ACME_SERVER:=}"
 # 首登强制改密：**默认 1**（wave8 行动 16）。同样必须显式转发，否则 config.env 里写了也悄悄不生效。
 #
 # ★为什么默认翻成 1：NFR-SEC-05 是 P0，验收词就是「默认安全开局：首登强制改密、
@@ -33,7 +37,10 @@ SSH=(ssh); RSYNC_E=(ssh)
 [ -n "$SSH_KEY" ] && { SSH=(ssh -i "$SSH_KEY"); RSYNC_E=(ssh -i "$SSH_KEY"); }
 
 echo "==> 本地构建"
-bash "$HERE/build.sh"
+# WITH_ACME_IP_CERT 必须显式传给 build.sh：config.env 里的值没 export，子 shell 看不见。
+# 它决定交付包里带不带 lego（约 65MB，只有开这个开关的部署才需要）——漏传的症状是
+# 「config.env 里写着 =1、部署也没报错，装机时却说包里没有 lego 并保持自签」。
+WITH_ACME_IP_CERT="$WITH_ACME_IP_CERT" bash "$HERE/build.sh"
 
 echo "==> 上传到 $SERVER_SSH:/tmp/baidi-deploy"
 "${SSH[@]}" "$SERVER_SSH" 'rm -rf /tmp/baidi-deploy && mkdir -p /tmp/baidi-deploy'
@@ -70,6 +77,6 @@ else
 fi
 
 echo "==> 远程安装（sudo；独立端口 ${BD_HTTPS_PORT}）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' BAIDI_CLIENT_SRC_REV='${BAIDI_CLIENT_SRC_REV:-}' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' WITH_ACME_IP_CERT='$WITH_ACME_IP_CERT' ACME_EMAIL='$ACME_EMAIL' ACME_SERVER='$ACME_SERVER' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' BAIDI_CLIENT_SRC_REV='${BAIDI_CLIENT_SRC_REV:-}' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

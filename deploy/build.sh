@@ -49,14 +49,61 @@ echo "==> 交叉编译控制面温备节点 baidi-standby（linux/amd64）"
 ( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-standby" ./cmd/baidi-standby )
 
+# ACME 客户端 lego（只有 WITH_ACME_IP_CERT=1 的部署才用得到，见 config.env.example）。
+#
+# ★为什么要由**构建机**编译进包，而不是让目标机自己去取：演示站（腾讯云大陆机）实测
+#   访问 codeload.github.com 超时，装机脚本里现取 = 那台机上这个功能永远开不起来。
+#   ubuntu 自带的 certbot 2.9 也用不了——它不支持 `--preferred-profile`，而 LE 的
+#   **IP 地址证书只能走 shortlived profile**。lego 是单二进制纯 Go，交叉编译最省事。
+#
+# ★取不到模块时**只跳过 lego，不让整个构建失败**：这是一个可选组件（默认关的开关），
+#   为它拖垮 console + 五个 Go 二进制的全部交付是明显的错误取舍。代价说在明处——
+#   install-remote.sh 在「开关打开却没有 lego」时会明确报错并保持自签，不会静默。
+#   （所以这里**不能**改成 `|| true` 就完事：那样连"没带上"这件事都没人说。）
+#
+# ★版本钉死：ACME profile 是 2025 年才进 lego 的（v4.21+），旧版本没有 `--profile`，
+#   而缺了它 IP 证书压根签不下来。跟着 latest 走 = 某天构建机换了缓存就换了行为。
+#
+# ★与 baidi-ipsec / baidi-standby 那两个「无条件编译进包」的取舍**相反**：那两个各 3~6MB，
+#   多带上的成本远小于「现场想开却发现产物里没有」；而 lego 剥完符号仍有 ~65MB
+#   （它把几十家 DNS 服务商的 SDK 全静态链进去了），是整个交付包的两倍多，每次部署
+#   都要 rsync 一遍。所以这一个跟着开关走：deploy.sh 把 config.env 里的
+#   WITH_ACME_IP_CERT 显式传进来，只有真要用的部署才带。
+#   单独跑 build.sh（CI / 手工）时默认不带——install-remote.sh 在「开关开着却没有 lego」
+#   时会明确报错并保持自签，不会静默。
+LEGO_VERSION=v4.35.2
+if [ "${WITH_ACME_IP_CERT:-0}" = "1" ]; then
+  echo "==> 交叉编译 ACME 客户端 lego ${LEGO_VERSION}（linux/amd64）"
+  lego_tmp="$(mktemp -d)"
+  if ( cd "$lego_tmp" \
+       && "$GO" mod init baidi-lego-build >/dev/null 2>&1 \
+       && "$GO" get "github.com/go-acme/lego/v4/cmd/lego@${LEGO_VERSION}" >/dev/null 2>&1 \
+       && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
+          "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/lego" github.com/go-acme/lego/v4/cmd/lego ); then
+    echo "    ✓ 已携带 lego（$(wc -c < "$OUT/bin/lego" | tr -d ' ') 字节）"
+  else
+    echo "    ⚠ 取不到 github.com/go-acme/lego@${LEGO_VERSION}（构建机不通外网？），本次交付包**不含 lego**"
+    echo "      → 装机时 install-remote.sh 会明确报错并保持自签证书，站点照常可用；"
+    echo "        修法：在能访问 proxy.golang.org 的机器上重跑本脚本。"
+    rm -f "$OUT/bin/lego"
+  fi
+  rm -rf "$lego_tmp"
+else
+  # 不打印成 ✗/⚠：这不是失败，是这次部署压根没要这个可选组件。
+  echo "==> 不携带 ACME 客户端 lego（WITH_ACME_IP_CERT!=1）"
+fi
+
 echo "==> 携带部署脚本/模板"
 # 隐身规则集脚本随包走（WITH_STEALTH=1 时 install-remote.sh 会装到 $BD_PREFIX/bin）。
 # ★用仓库里那一份而不是在部署脚本里重抄一遍规则：抄一遍就有第二个真相来源，
 #   而两份规则不一致时的症状是「网关页说 armed、实际保护的是别的端口」。
 mkdir -p "$OUT/firewall"
 cp "$ROOT/gateway/firewall/baidi-nft.sh" "$OUT/firewall/baidi-nft.sh"
+# acme-renew.sh 是**模板**（占位由 install-remote.sh 渲染后装到 $BD_PREFIX/bin）：
+# 与隐身规则集同一条理由——不在装机脚本里重抄一遍续期逻辑，那就有了第二个真相来源，
+# 而两份不一致时的症状是「证书续着、nginx 用的是另一张」，正是这功能要消灭的那种。
 cp -R "$HERE/systemd" "$HERE/nginx" "$HERE/install-remote.sh" "$HERE/wipe-remote.sh" \
-      "$HERE/promote-standby.sh" "$OUT/"
+      "$HERE/promote-standby.sh" "$HERE/acme-renew.sh" "$OUT/"
 
 if [ -d "$HERE/artifacts/downloads" ]; then
   echo "==> 携带客户端安装包（deploy/artifacts/downloads）"

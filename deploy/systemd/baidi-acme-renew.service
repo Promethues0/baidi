@@ -1,0 +1,17 @@
+[Unit]
+# 续期 Let's Encrypt IP 地址证书（6 天有效期；续不上且剩余不足 24h 会自动切回自签）。
+# 由 baidi-acme-renew.timer 拉起，不设 [Install]——它不该被 enable 成开机自启的一次性任务。
+Description=baidi: renew Let's Encrypt IP certificate
+# nginx 必须已经在跑：HTTP-01 挑战是由本机 nginx 的 80 端口应答的，
+# 脚本续期成功后还要 reload 它。nginx 不在时这一次续期必然失败（脚本会如实报错）。
+After=network-online.target nginx.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# 以 root 运行：要改 /etc/nginx/conf.d/baidi.conf 并 systemctl reload nginx，
+# 还要读 @BD_PREFIX@/etc/tls 下 0700 的私钥目录。
+ExecStart=@BD_PREFIX@/bin/acme-renew.sh
+# ★刻意不加 Restart / 不吞退出码：续期失败时本单元就该是 failed 状态，
+#   `systemctl --failed` 与 `systemctl status baidi-acme-renew` 是这件事在机器上
+#   唯一的可见面（控制台不呈现证书状态）。把失败吞成成功 = 6 天后站点证书过期而无人知情。

@@ -20,7 +20,7 @@ vi.mock('./store', () => ({
   device: { id: '' }
 }));
 
-import { classifyFail, nextDataplaneNotice, parseHealth, parseTunStatus, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
+import { classifyFail, controlCaSay, nextDataplaneNotice, parseHealth, parseTunStatus, CONTROL_CA_SCOPE_NOTE, type ControlCaInfo, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
 // 跨轨契约用例要摆一份三落点剖面：store 已被上面的 vi.mock 换成最小桩，这里拿到的就是那个对象。
 import { profile } from './store';
 import type { ProfileGateway } from './api';
@@ -423,5 +423,106 @@ describe('parseEndpoint · 跨轨契约（喂 Go 侧 logCurrent 的真实输出�
     // 切到 gw-b（无指纹）后必须翻成「未钉扎」——这正是本契约断掉时被掩盖掉的那件事
     const after = parseTunStatus(raw({ endpoint: ENDPOINT_GOLDEN, health: SLOG + 'knock=true tunnel=true err=""' }));
     expect(after.cipher).toContain('未钉扎');
+  });
+});
+
+/**
+ * 控制中心信任锚的**四态**在展示层不许塌。
+ *
+ * 桌面端到控制面有两条 TLS 路径：登录/拉剖面走 WebView 的 fetch（只认系统信任库，
+ * 应用层塞不进任何信任材料），数据面走 baidi-tun 的 `-control-ca`。本地锚只管得了
+ * 后者。这组用例守两件事：
+ *   ① `unknown`（判不出来）与 `absent`（确认没有）必须是两句不同的话——塌成一个 bool 的话，
+ *      一台我们压根没看过那个位置的机器，会被界面陈述成「已确认没有本地锚」；
+ *   ② `ready` 那句必须把「仅数据面」写进**行内文本**，不能只挂在 title 上——
+ *      鼠标不悬停就看不见的限定语等于没写，而这条正是本功能最容易被误读的地方。
+ */
+describe('controlCaSay · 信任锚四态', () => {
+  const 锚 = (state: ControlCaInfo['state'], reason = '') =>
+    ({ path: '/home/u/.baidi/control-ca.pem', state, reason }) as ControlCaInfo;
+
+  it('不可判定（老壳 / 浏览器 dev）回 null，由调用方渲染成「—」', () => {
+    expect(controlCaSay(null)).toBeNull();
+  });
+
+  it('ready：行内文本必须自带「仅数据面」限定语，并说出锚的路径', () => {
+    const v = controlCaSay(锚('ready'), 'https://c.example:8090')!;
+    expect(v.tone).toBe('ok');
+    expect(v.text).toContain('仅数据面');
+    expect(v.text).toContain('/home/u/.baidi/control-ca.pem');
+  });
+
+  /**
+   * ★控制中心是 http:// 时锚**根本不参与**——那一跳压根没有 TLS，敲门令牌明文过网。
+   * 只按"文件在不在"就说「已生效」，等于在最该报警的那种部署上给出最令人安心的一句话。
+   * 与 baidi-tun 启动回执（loadControlTrust 的第三种结局）同判据，两处必须同真同假。
+   */
+  it('ready 但控制中心是 http:// → 必须说锚未参与，且点名"明文"，不许说「已生效」', () => {
+    const v = controlCaSay(锚('ready'), 'http://127.0.0.1:8090')!;
+    expect(v.tone).toBe('warn');
+    expect(v.text).toContain('未参与');
+    expect(v.text).toContain('明文');
+    expect(v.text).not.toContain('已生效');
+  });
+
+  it('absent 与 unknown 是两句不同的话，且都不许说成「已生效」', () => {
+    const absent = controlCaSay(锚('absent'))!;
+    const unknown = controlCaSay(锚('unknown', '读不到环境变量 HOME'))!;
+    expect(absent.text).not.toBe(unknown.text);
+    expect(absent.text).toContain('系统信任库');
+    expect(unknown.text).toContain('判不出来');
+    expect(unknown.text).toContain('读不到环境变量 HOME'); // 原因要转述，不能吞
+    for (const v of [absent, unknown]) expect(v.text).not.toContain('已生效');
+  });
+
+  it('unsafe：转述后端原因 + 说清后果（接入会被拒），不是一句含糊的"有问题"', () => {
+    const v = controlCaSay(锚('unsafe', '它是一个符号链接'))!;
+    expect(v.tone).toBe('warn');
+    expect(v.text).toContain('它是一个符号链接');
+    expect(v.text).toContain('接入会被拒绝');
+  });
+
+  it('覆盖范围声明只有一份字节，且把「WebView 只认系统信任库」说穿', () => {
+    expect(CONTROL_CA_SCOPE_NOTE).toContain('只对数据面生效');
+    expect(CONTROL_CA_SCOPE_NOTE).toContain('系统信任库');
+  });
+});
+
+/**
+ * ★跨轨契约：Rust 侧四态字符串与 TS 这边的联合类型必须逐字对齐。
+ *
+ * 两边各写各的话，多出来的那一态会落进 `controlCaSay` 的 default 分支被渲染成
+ * 「系统信任库」——即「有人往你家目录塞了个别人可写的信任锚」被显示成「一切正常」。
+ * 这种偏差编译期无感、运行期也不报错，只能靠源码级断言守。
+ */
+describe('控制中心信任锚 · 跨轨契约', () => {
+  const rs = readFileSync(new URL('../../src-tauri/src/main.rs', import.meta.url), 'utf8');
+
+  it('main.rs 里出现的 state 字面量与 ControlCaState 逐字一致', () => {
+    // Rust 侧的映射写在 control_ca_info 里：("ready", …) / ("absent", …) / …
+    for (const s of ['ready', 'absent', 'unsafe', 'unknown']) {
+      expect(rs, `main.rs 里必须有 ${s} 这一态`).toContain(`("${s}",`);
+    }
+  });
+
+  /**
+   * ★桌面壳传的参数名，必须与 baidi-tun 真正声明的那个 flag 逐字一致。
+   *
+   * 对不上的症状极其难认：Go 的 flag 包遇到未定义参数会 exit(2)，而客户端这边只看到
+   * 提权器返回非零 → 一句「启动数据面失败」。它与「用户点了取消 / 提权被策略拒」
+   * 在界面上完全同形，而这条参数只在**放了锚的那些机器**上才会被传出去——
+   * 也就是说，故障只发生在自签部署的现场，开发机上永远复现不了。
+   *
+   * Rust 那边的字面量收敛在 CONTROL_CA_FLAG 一处（生产与用例都引用它），
+   * 所以这条断言不会被"测试代码里恰好也有这个字符串"糊弄过去。
+   */
+  it('传给 baidi-tun 的参数名与 gateway/cmd/baidi-tun 声明的 flag 逐字一致', () => {
+    const m = rs.match(/const CONTROL_CA_FLAG: &str = "(-[A-Za-z0-9-]+)";/);
+    expect(m, 'main.rs 里必须有 CONTROL_CA_FLAG 常量（参数名的唯一定义处）').toBeTruthy();
+    const 壳传的 = m![1];
+    const go = readFileSync(new URL('../../../../gateway/cmd/baidi-tun/main.go', import.meta.url), 'utf8');
+    const g = go.match(/flag\.String\("(control-ca)"/);
+    expect(g, 'baidi-tun 必须声明 control-ca 这个 flag（轨 B 的产出）').toBeTruthy();
+    expect(壳传的).toBe('-' + g![1]);
   });
 });

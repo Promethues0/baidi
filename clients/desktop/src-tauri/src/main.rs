@@ -246,6 +246,246 @@ struct TunOpts {
     device: String,
 }
 
+// ── 控制中心信任锚（本地约定路径，只覆盖数据面那一半）────────────────────────
+//
+// 桌面客户端到控制面有**两条** TLS 路径，信任材料来源不同，这件事必须说穿：
+//
+//   ① WebView 的 `fetch`（登录 / 拉剖面 / 上报 posture）—— 走**系统信任库**。
+//      WKWebView / WebView2 / WebKitGTK 都不接受应用层塞给它的信任锚，而本进程里
+//      也没有任何 HTTP 客户端能替它发请求（全仓无 reqwest，这不是疏漏）。所以自签
+//      部署下**这一半只能靠把控制面证书导进系统信任库**（macOS 钥匙串 / Windows
+//      证书存储 / Linux ca-certificates），客户端做不了任何事。
+//   ② baidi-tun 取敲门令牌 —— Go 侧，接受 `-control-ca <PEM 文件>`
+//      （链路 knock.NewFetcher → dataplane.Config.ControlTLS，与移动端
+//      `baidimobile.Config.ControlCaPEM` 同一条）。
+//
+// 下面这一段只覆盖 ②。**绝不能让人以为它把问题解决完了**——「配置齐全却零报错
+// 不生效」正是本项目最反对的形态。所以另外两处如实写明覆盖范围，且都有执行方：
+// 接入信息卡有一行「控制中心信任」（Connect.vue，文案来自 tunnel.ts 的
+// `controlCaSay` / `CONTROL_CA_SCOPE_NOTE`），登录撞证书墙时的归因文案
+// （lib/diagnose.ts 的 `explainControlFailure`）给的是**导系统信任库**的具体命令，
+// 而不是「去放个锚文件」。
+//
+// ★锚**不能由控制面下发**：控制面自己的信任锚由控制面发就是循环论证（同 JWT 公钥
+//   那条纪律）。所以只认本地约定路径，由部署方经带外渠道（U 盘 / 内网文件服务 /
+//   MDM）放进去，与安卓那边构建期经 `-PbaidiControlCa` 注入是同一个方向。
+//
+// ★刻意**不开环境变量入口**：桌面 app 从 Finder / 开始菜单双击启动时不继承 shell
+//   环境，加了 `BAIDI_CONTROL_CA` 就会出现「终端里 npm run tauri dev 时生效、双击
+//   图标启动时静默不生效」两种行为，而现场完全同形。宁可只有一条固定路径。
+//
+// ★文件不存在 = **不传这个参数** = 用系统信任库（**不是**跳过校验）。此时交给
+//   baidi-tun 的 argv 与改造前逐字一致，一个字节都不多——这也是「轨 B 的
+//   `-control-ca` 万一没落地」时的兜底：没人放锚的机器上，flag 解析压根碰不到它。
+
+/// 交给 baidi-tun 的那个参数名。**全仓这个字面量只写这一处**（生产与用例都引用它），
+/// 好让跨轨契约用例能真正守住：改了它就与 `gateway/cmd/baidi-tun/main.go` 的
+/// `flag.String("control-ca", …)` 对不上，而症状是 baidi-tun 在 flag 解析那步直接
+/// exit(2)，客户端只会说一句「启动数据面失败」——参数名对不上与提权被拒完全同形。
+const CONTROL_CA_FLAG: &str = "-control-ca";
+
+/// 信任锚的约定路径：`<家目录>/.baidi/control-ca.pem`。
+///
+/// 三平台同一个写法（Windows 上就是 `%USERPROFILE%\.baidi\control-ca.pem`）：排障
+/// 文档、支持人员的口头指令、界面提示只需要同一句话就能说清放哪儿。**纯函数**，
+/// 好让路径拼接在任何主机上都被断言。
+fn control_ca_path_in(home: &str) -> String {
+    PathBuf::from(home).join(".baidi").join("control-ca.pem").to_string_lossy().to_string()
+}
+
+/// 家目录。unix 读 `HOME`，Windows 读 `USERPROFILE`。
+///
+/// 读不出来时回 `None`——那是**判不出来**，不是「没有锚」，两者在 [`ControlCa`] 里
+/// 分成两态：前者界面显示「—」，后者显示「用系统信任库」。塌成一个的话，一台
+/// 环境异常的机器会被界面陈述成「已确认没有本地锚」，而我们根本没看过那个位置。
+fn home_dir() -> Option<String> {
+    let key = if Platform::host().is_windows() { "USERPROFILE" } else { "HOME" };
+    std::env::var(key).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// 锚文件与其父目录在磁盘上的事实（unix 概念；Windows 上一律 `None`，如实退化）。
+#[derive(Debug)]
+struct AnchorFacts {
+    is_symlink: bool,
+    is_file: bool,
+    uid: u32,
+    mode: u32,
+    /// 父目录的 (uid, mode)。`None` = 父目录事实读不到——**不可判定，按不安全处置**，
+    /// 因为「别人能不能把这个文件整个换掉」正取决于它。
+    dir: Option<(u32, u32)>,
+}
+
+/// 锚的四态。
+///
+/// **存在但不可信**必须与**不存在**分开：前者是攻击信号（有人往你家目录放了一个
+/// 你不拥有、或别人能改的信任锚），后者是绝大多数部署的正常形态；而**判不出来**
+/// 又必须与「不存在」分开（见 [`home_dir`]）。
+#[derive(Debug, PartialEq)]
+enum ControlCa {
+    /// 家目录判不出来，压根没去看过那个位置。不传参数，界面显示「—」。
+    Unknown(String),
+    /// 没有锚文件 → 不传参数，用系统信任库。
+    Absent,
+    /// 可用 → 传 `-control-ca <路径>`。
+    Ready,
+    /// 存在但不可信 → **拒绝接入**并说清原因（见 [`control_ca_arg`]）。
+    Unsafe(String),
+}
+
+/// 纯函数判定（无 cfg，任何主机上都被逐字断言）。
+///
+/// ★这里只判**属主与权限**，刻意不看文件内容：能不能解析出证书是数据面的判据，
+/// 由 `knock.ControlTLSFromPEM` 一处实现（`baidi-tun` 装载失败会当场报错退出，
+/// 不静默回落成系统信任库）。在这里再写一份 PEM 校验就是第二个真相来源——两边
+/// 松紧不一致时，现场是「客户端说锚没问题，数据面说锚读不出来」。装载失败的原文
+/// 会进数据面日志，`elevate::failure_message` 把日志路径一并交给用户。
+///
+/// 判据与 [`elevate::check_runtime_dir`] 同源，理由也同源：这份 PEM 的消费方是
+/// **root 进程**（baidi-tun 由提权器拉起），而它决定 root 去信任哪一个 CA。同机
+/// 另一个普通用户若能写这个文件（或能在父目录里把它整个换掉），就能让数据面信任
+/// 他签的证书 → 冒充控制面 → 换走敲门令牌与会话令牌，而两端日志全都正常。
+/// 所以属主与权限位必须当场复核，且**符号链接一律不接受**：lstat 与 root 那边
+/// open 之间隔着一次提权授权（用户输密码的那几秒），链接目标可以在中间被换掉。
+fn judge_control_ca(exists: bool, facts: Option<&AnchorFacts>) -> ControlCa {
+    if !exists {
+        return ControlCa::Absent;
+    }
+    let Some(f) = facts else {
+        // Windows：拿不到 unix 属主/权限位，如实放行。保护退化成 `%USERPROFILE%` 的
+        // 继承 ACL（本人 + SYSTEM + Administrators），与 write_private 那处同一条
+        // 退化说明——**Windows 上这道复核弱于 unix**，写在这里是为了别让人以为
+        // 三个平台一样严。
+        return ControlCa::Ready;
+    };
+    if f.is_symlink {
+        return ControlCa::Unsafe(
+            "它是一个符号链接。锚文件由 root 数据面读取，链接目标可以在校验之后、root 打开它之前被换掉，因此一律不接受".into(),
+        );
+    }
+    if !f.is_file {
+        return ControlCa::Unsafe("它不是普通文件".into());
+    }
+    // root 拥有的那份也认：管理员经 MDM/配置管理下发时通常是 root:0600。
+    if f.uid != current_uid_or_zero() && f.uid != 0 {
+        return ControlCa::Unsafe(format!("它属于另一个账号（uid={}），既不是你本人也不是 root", f.uid));
+    }
+    if f.mode & 0o022 != 0 {
+        return ControlCa::Unsafe(format!(
+            "它的权限是 {:04o}，同组或其他用户可写——别人能把这份信任锚替换成自己的",
+            f.mode
+        ));
+    }
+    match f.dir {
+        None => ControlCa::Unsafe(
+            "读不到它所在目录的属主与权限，无法确认别人不能把这个文件整个换掉".into(),
+        ),
+        Some((uid, _)) if uid != current_uid_or_zero() && uid != 0 => {
+            ControlCa::Unsafe(format!("它所在的目录属于另一个账号（uid={uid}）"))
+        }
+        Some((_, mode)) if mode & 0o022 != 0 => ControlCa::Unsafe(format!(
+            "它所在的目录权限是 {mode:04o}，别人能在里面把这个文件整个换掉"
+        )),
+        Some(_) => ControlCa::Ready,
+    }
+}
+
+/// 当前 euid；非 unix 上没有这个概念，回 0（那条路径下 facts 恒为 None，判据用不到）。
+#[cfg(unix)]
+fn current_uid_or_zero() -> u32 {
+    current_uid()
+}
+#[cfg(not(unix))]
+fn current_uid_or_zero() -> u32 {
+    0
+}
+
+/// 读锚文件的磁盘事实。unix 走 **lstat**（符号链接必须被看见），Windows 上
+/// `facts=None`（如实退化，见 [`judge_control_ca`]）。
+#[cfg(unix)]
+fn probe_control_ca(path: &str) -> (bool, Option<AnchorFacts>) {
+    use std::os::unix::fs::{MetadataExt, PermissionsExt};
+    let Ok(md) = fs::symlink_metadata(path) else { return (false, None) };
+    let dir = std::path::Path::new(path)
+        .parent()
+        .and_then(|p| fs::symlink_metadata(p).ok())
+        .map(|d| (d.uid(), d.permissions().mode() & 0o7777));
+    (
+        true,
+        Some(AnchorFacts {
+            is_symlink: md.file_type().is_symlink(),
+            is_file: md.is_file(),
+            uid: md.uid(),
+            mode: md.permissions().mode() & 0o7777,
+            dir,
+        }),
+    )
+}
+#[cfg(not(unix))]
+fn probe_control_ca(path: &str) -> (bool, Option<AnchorFacts>) {
+    (fs::symlink_metadata(path).is_ok(), None)
+}
+
+/// 本机信任锚的现状：(约定路径, 四态)。`tunnel_start` 与接入页共用这一处判据。
+///
+/// 路径为空串**只在**家目录判不出来时出现——那时四态必是 `Unknown`。
+fn control_ca_state() -> (String, ControlCa) {
+    let Some(home) = home_dir() else {
+        let key = if Platform::host().is_windows() { "USERPROFILE" } else { "HOME" };
+        return (String::new(), ControlCa::Unknown(format!("读不到环境变量 {key}，无从确定家目录")));
+    };
+    let path = control_ca_path_in(&home);
+    let (exists, facts) = probe_control_ca(&path);
+    let st = judge_control_ca(exists, facts.as_ref());
+    (path, st)
+}
+
+/// 由四态算出「往 argv 里加什么」与「拒不拒绝接入」。
+///
+/// ★抽成纯函数就是为了让**这一条**被用例钉死：`Unsafe` 必须返回 `Err`（拒绝接入），
+/// 不能悄悄不用它。用户特地把锚放在那儿，说明他的控制面就是自签的；静默退回系统
+/// 信任库的后果是 baidi-tun 报一句 `x509: certificate signed by unknown authority`，
+/// 排查方向（证书链）与真实原因（文件权限）完全无关——这正是「配置齐全却零报错
+/// 不生效」。把 `Unsafe` 分支改成 `Ok(None)` 的变异会被 `不可信的锚必须拒绝接入`
+/// 当场抓住。
+fn control_ca_arg(path: &str, ca: &ControlCa) -> Result<Option<[String; 2]>, String> {
+    match ca {
+        ControlCa::Ready => Ok(Some([CONTROL_CA_FLAG.to_string(), path.to_string()])),
+        // 不存在 / 判不出家目录：一个字节都不多传 = 用系统信任库（不是跳过校验）。
+        ControlCa::Absent | ControlCa::Unknown(_) => Ok(None),
+        ControlCa::Unsafe(why) => Err(format!(
+            "控制中心信任锚 {path} 不可信：{why}。请修好它（chmod 600 且属主是你本人），或直接删除它——删掉之后将改用系统信任库。"
+        )),
+    }
+}
+
+/// 接入页读的那份锚状态。四态原样交给前端，**不许在这里塌成 bool**。
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ControlCaInfo {
+    /// 约定路径。空串 = 家目录判不出来（此时 state 必为 `unknown`）。
+    path: String,
+    /// `ready` | `absent` | `unsafe` | `unknown`。
+    state: String,
+    /// `unsafe` / `unknown` 时的原因（人话），其余为空。
+    reason: String,
+}
+
+/// 查本机控制面信任锚的现状（接入信息卡那一行「控制中心信任」的数据源）。
+///
+/// 只读，不落盘、不提权。老版本壳没有这个命令，前端 invoke 会抛 → 那边按
+/// **不可判定**处理（显示「—」），绝不塌成「没有锚」。
+#[tauri::command]
+fn control_ca_info() -> ControlCaInfo {
+    let (path, st) = control_ca_state();
+    let (state, reason) = match st {
+        ControlCa::Ready => ("ready", String::new()),
+        ControlCa::Absent => ("absent", String::new()),
+        ControlCa::Unsafe(why) => ("unsafe", why),
+        ControlCa::Unknown(why) => ("unknown", why),
+    };
+    ControlCaInfo { path, state: state.into(), reason }
+}
+
 /// 定位随 app 打包的 baidi-tun。确定性顺序：同名 → 当前平台/架构三元组名 → 排序后首个 baidi-tun*。
 /// 候选清单分平台（Windows 那份带 `.exe`），构造与断言都在 elevate::sidecar_candidates。
 fn find_tun() -> Result<PathBuf, String> {
@@ -319,6 +559,15 @@ fn tunnel_start(opts: TunOpts) -> Result<(), String> {
     if !opts.device.trim().is_empty() {
         args.push("-device".into());
         args.push(opts.device.trim().into());
+    }
+    // 控制中心信任锚（`<家目录>/.baidi/control-ca.pem`）：**只覆盖 baidi-tun 这一半**。
+    // WebView 的 fetch（登录、拉剖面）仍只认系统信任库，客户端改不了——完整说明与
+    // 三处如实表述见本文件上方「控制中心信任锚」那一节。
+    // 文件不在就不传，此时 argv 与改造前逐字一致；存在但不可信则**当场拒绝接入**
+    // 而不是悄悄不用（判据与理由在 control_ca_arg 上）。
+    let (ca_path, ca) = control_ca_state();
+    if let Some(pair) = control_ca_arg(&ca_path, &ca)? {
+        args.extend(pair);
     }
     if opts.gm {
         args.push("-gm".into());
@@ -705,6 +954,7 @@ fn main() {
             tunnel_stop,
             force_quit,
             collect_posture,
+            control_ca_info,
             diag::collect_diag,
             open_app_url,
             probe_tcp,
@@ -907,6 +1157,150 @@ mod tests {
         assert_eq!(fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
         // 写不进去必须报错，绝不静默成功
         assert!(write_private(&format!("{base}/没有这个目录/x"), "y").is_err());
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    // ── 控制中心信任锚 ──
+    //
+    // 判定是纯函数（judge_control_ca / control_ca_arg / control_ca_path_in），所以这几条
+    // 用例在**任何**主机上都跑，包括那些只在 Linux 多用户机上才会出现的形态。
+    // 执行层（probe_control_ca 的 lstat）另有两条带 cfg(unix) 的真落盘用例。
+
+    fn 安全的锚事实() -> AnchorFacts {
+        AnchorFacts {
+            is_symlink: false,
+            is_file: true,
+            uid: current_uid_or_zero(),
+            mode: 0o600,
+            dir: Some((current_uid_or_zero(), 0o700)),
+        }
+    }
+
+    #[test]
+    fn 锚路径三平台同一句话() {
+        let p = control_ca_path_in("/Users/somebody");
+        assert!(p.ends_with("control-ca.pem"), "得 {p}");
+        assert!(p.contains(".baidi"), "得 {p}");
+    }
+
+    /// 不存在 ≠ 判不出来 ≠ 不可信。三态必须分得开——塌成一个 bool 的话，
+    /// 「有人往你家目录塞了个别人可写的信任锚」会与「你根本没配锚」在界面上同形。
+    #[test]
+    fn 没有锚文件时是_absent_而不是不可信() {
+        assert_eq!(judge_control_ca(false, None), ControlCa::Absent);
+        assert_eq!(judge_control_ca(false, Some(&安全的锚事实())), ControlCa::Absent);
+    }
+
+    #[test]
+    fn 属主与权限都对时可用() {
+        assert_eq!(judge_control_ca(true, Some(&安全的锚事实())), ControlCa::Ready);
+    }
+
+    /// Windows 拿不到 unix 属主/权限（facts=None），如实放行——保护退化成继承 ACL。
+    /// 这条用例存在的意义是把「那边弱一些」这件事写成可执行的断言，而不是只写注释。
+    #[test]
+    fn 拿不到属主权限时如实放行并在注释里说明退化() {
+        assert_eq!(judge_control_ca(true, None), ControlCa::Ready);
+    }
+
+    /// 五条不安全判据。这份 PEM 决定 **root 进程**信任哪个 CA：别人能写它 = 别人能
+    /// 冒充控制面换走敲门令牌，而两端日志全正常。
+    #[test]
+    fn 不安全的锚被逐条认出来() {
+        let 拒 = |改: fn(&mut AnchorFacts), 关键词: &str| {
+            let mut f = 安全的锚事实();
+            改(&mut f);
+            match judge_control_ca(true, Some(&f)) {
+                ControlCa::Unsafe(why) => assert!(why.contains(关键词), "原因里得说清「{关键词}」，实得 {why}"),
+                其他 => panic!("必须判不可信，实得 {其他:?}"),
+            }
+        };
+        拒(|f| f.is_symlink = true, "符号链接");
+        拒(|f| f.is_file = false, "普通文件");
+        拒(|f| f.uid = 4242, "另一个账号");
+        拒(|f| f.mode = 0o666, "可写");
+        拒(|f| f.dir = None, "读不到");
+        拒(|f| f.dir = Some((4242, 0o700)), "另一个账号");
+        拒(|f| f.dir = Some((current_uid_or_zero(), 0o777)), "换掉");
+    }
+
+    /// root 拥有的那份也认（MDM / 配置管理下发的常见形态是 root:0600）。
+    #[test]
+    fn root_拥有的锚可用() {
+        let mut f = 安全的锚事实();
+        f.uid = 0;
+        f.dir = Some((0, 0o755));
+        assert_eq!(judge_control_ca(true, Some(&f)), ControlCa::Ready);
+    }
+
+    /// ★这条守的是本轮最容易被"顺手简化"掉的一条纪律：不可信的锚必须**拒绝接入**，
+    /// 不能悄悄退回系统信任库。把 Unsafe 分支改成 `Ok(None)`（"反正不用它就安全了"）
+    /// 会让用户撞上一句 `x509: certificate signed by unknown authority`，
+    /// 排查方向（证书链）与真实原因（文件权限）完全无关。
+    #[test]
+    fn 不可信的锚必须拒绝接入() {
+        let e = control_ca_arg("/home/u/.baidi/control-ca.pem", &ControlCa::Unsafe("它是一个符号链接".into()))
+            .expect_err("不可信的锚必须让接入失败，不能静默退回系统信任库");
+        assert!(e.contains("/home/u/.baidi/control-ca.pem"), "报错里必须点名文件路径：{e}");
+        assert!(e.contains("符号链接"), "报错里必须转述具体原因：{e}");
+        assert!(e.contains("删除"), "报错里必须给出可操作的下一步：{e}");
+    }
+
+    /// 没有锚（以及判不出家目录）时 argv 一个字节都不多——「与改造前逐字一致」这句话
+    /// 得有执行方。顺带守住：`-control-ca` 只在 Ready 时出现。
+    #[test]
+    fn 没有锚时不多传任何参数() {
+        assert_eq!(control_ca_arg("/x", &ControlCa::Absent), Ok(None));
+        assert_eq!(control_ca_arg("", &ControlCa::Unknown("读不到 HOME".into())), Ok(None));
+        assert_eq!(
+            control_ca_arg("/home/u/.baidi/control-ca.pem", &ControlCa::Ready),
+            Ok(Some([CONTROL_CA_FLAG.to_string(), "/home/u/.baidi/control-ca.pem".to_string()]))
+        );
+    }
+
+    /// 执行层：lstat 而不是 stat——符号链接必须被看见（判定层已断言它会被拒）。
+    #[cfg(unix)]
+    #[test]
+    fn 探测走_lstat_能看见符号链接() {
+        let base = 临时用目录("ca");
+        let 真文件 = format!("{base}/real.pem");
+        fs::write(&真文件, "-----BEGIN CERTIFICATE-----\n").unwrap();
+        let 链接 = format!("{base}/link.pem");
+        std::os::unix::fs::symlink(&真文件, &链接).unwrap();
+        let (exists, facts) = probe_control_ca(&链接);
+        assert!(exists, "链接本身是存在的");
+        assert!(facts.expect("unix 上必须能读到事实").is_symlink, "stat 会跟随链接，必须用 lstat");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 执行层：真放一份 0600 的锚进去，整条 control_ca_state 之外的判定链应判 Ready；
+    /// 把它 chmod 成 0666 之后必须翻成 Unsafe。
+    #[cfg(unix)]
+    #[test]
+    fn 真文件的权限变化会被复核出来() {
+        use std::os::unix::fs::PermissionsExt;
+        let base = 临时用目录("ca2");
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let pem = format!("{base}/control-ca.pem");
+        write_private(&pem, "-----BEGIN CERTIFICATE-----\n").unwrap();
+        let (exists, facts) = probe_control_ca(&pem);
+        assert_eq!(judge_control_ca(exists, facts.as_ref()), ControlCa::Ready);
+
+        fs::set_permissions(&pem, fs::Permissions::from_mode(0o666)).unwrap();
+        let (exists, facts) = probe_control_ca(&pem);
+        assert!(matches!(judge_control_ca(exists, facts.as_ref()), ControlCa::Unsafe(_)), "组/其他可写必须被拒");
+        let _ = fs::remove_dir_all(&base);
+    }
+
+    /// 不存在的路径：probe 回 (false, None) → Absent，不能报成不可信（那会把绝大多数
+    /// 部署（根本没放锚）全部挡在门外）。
+    #[cfg(unix)]
+    #[test]
+    fn 路径不存在时判_absent() {
+        let base = 临时用目录("ca3");
+        let (exists, facts) = probe_control_ca(&format!("{base}/没有这个文件.pem"));
+        assert!(!exists);
+        assert_eq!(judge_control_ca(exists, facts.as_ref()), ControlCa::Absent);
         let _ = fs::remove_dir_all(&base);
     }
 

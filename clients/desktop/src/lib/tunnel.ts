@@ -35,6 +35,92 @@ async function invoke<T>(cmd: string, args?: Record<string, unknown>): Promise<T
   return tauriInvoke<T>(cmd, args as Record<string, unknown>);
 }
 
+/* ── 控制中心信任锚（本地约定路径，只覆盖数据面那一半）───────────────────── */
+
+/**
+ * 锚的四态（与 Rust 侧 `ControlCaInfo.state` 逐字一致，见 src-tauri/src/main.rs）。
+ *
+ * ★`unknown`（判不出来）与 `absent`（确认没有）必须分开：塌成一个 bool 的话，
+ * 一台环境异常、我们压根没看过那个位置的机器，会在界面上被陈述成「已确认没有本地锚」。
+ */
+export type ControlCaState = 'ready' | 'absent' | 'unsafe' | 'unknown';
+
+export interface ControlCaInfo {
+  /** 约定路径。空串 = 家目录判不出来（此时 state 必为 'unknown'）。 */
+  path: string;
+  state: ControlCaState;
+  /** 'unsafe' / 'unknown' 时的原因（人话），其余为空。 */
+  reason: string;
+}
+
+/**
+ * 这句话是**覆盖范围声明**，三处共用同一份字节（接入信息卡的 title、诊断归因文案、
+ * 排障文档），免得各写各的然后慢慢分家。
+ *
+ * ★为什么非说不可：桌面客户端到控制面有两条 TLS 路径，本地锚只管得了其中一条。
+ * 让人以为放个锚就万事大吉，正是本项目最反对的「配置齐全却零报错不生效」——
+ * 登录那半照样撞 `Failed to fetch`，而 WebView 连原因都不会告诉你。
+ */
+export const CONTROL_CA_SCOPE_NOTE =
+  '本地信任锚只对数据面生效（baidi-tun 取敲门令牌那一跳）。登录与拉取接入剖面走的是 WebView 的 fetch，' +
+  '它只认系统信任库、应用层塞不进任何信任材料——自签部署下这一半仍须把控制面证书导入系统' +
+  '（macOS 钥匙串 / Windows 证书存储 / Linux ca-certificates）。';
+
+/**
+ * 查本机控制面信任锚的现状。
+ *
+ * 非 Tauri 运行时（浏览器 dev）或**老版本壳**（没有 control_ca_info 这条命令）→ 回
+ * `null` = **不可判定**，界面显示「—」。这里的 catch 不编造任何归因：命令不存在时
+ * Tauri 抛的是一句英文内部错误，把它渲染成「没有本地锚」就是替一个从未看过的位置背书。
+ */
+export async function controlCaInfo(): Promise<ControlCaInfo | null> {
+  if (!tauriRuntime()) return null;
+  try {
+    return await invoke<ControlCaInfo>('control_ca_info');
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * 接入信息卡那一行「控制中心信任」的人话。
+ *
+ * 四态各一句，`null`（不可判定）也原样往外传——由调用方渲染成「—」。
+ * `tone` 只驱动颜色，不是判据。
+ *
+ * ★第二个参数是**控制中心地址**，不是可选的装饰：`-control` 是 `http://` 时锚**根本不参与**
+ * （这一跳压根没有 TLS，敲门令牌明文过网）。只按文件在不在就说「已生效」，会在最该报警的
+ * 那种部署上给出一句最令人安心的话——与 baidi-tun 启动回执（`loadControlTrust` 的第三种结局）
+ * 同判据、同方向，两处必须同真同假。
+ */
+export function controlCaSay(
+  info: ControlCaInfo | null,
+  control = ''
+): { text: string; tone: 'ok' | 'warn' | 'plain' } | null {
+  if (!info) return null;
+  const 明文 = /^http:/i.test(control.trim());
+  switch (info.state) {
+    case 'ready':
+      // 刻意把「仅数据面」写进这一行本身，而不是只挂在 title 里：鼠标不悬停就看不见的
+      // 限定语等于没写，而这条限定语正是本功能最容易被误读的地方。
+      return 明文
+        ? {
+            text: `本地信任锚未参与：控制中心地址是 http://，这一跳完全没有加密（敲门令牌明文过网） · ${info.path}`,
+            tone: 'warn'
+          }
+        : { text: `本地信任锚已生效（仅数据面） · ${info.path}`, tone: 'ok' };
+    case 'unsafe':
+      return { text: `本地信任锚不可用：${info.reason}（接入会被拒绝）`, tone: 'warn' };
+    case 'unknown':
+      return { text: `判不出来：${info.reason}`, tone: 'warn' };
+    case 'absent':
+    default:
+      // 绝大多数部署的正常形态，不涂色也不告警。路径照样说出来——用户要放锚时
+      // 需要知道放哪儿，而这是全客户端唯一说出这条路径的地方。
+      return { text: `系统信任库（未放置本地信任锚：${info.path}）`, tone: 'plain' };
+  }
+}
+
 /** Rust 侧 tunnel_status 回传的原始状态（serde 字段名一一对应 main.rs 的 TunStatus）。导出只为单测。 */
 export interface TunStatusRaw {
   running: boolean;

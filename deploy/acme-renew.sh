@@ -137,7 +137,15 @@ renew_days=$(( RENEW_BELOW_HOURS / 24 ))
 #   `flag provided but not defined`，与「证书签不下来」看起来是两回事。
 # ★`--csr` 指向我们自造的 CSR：CN 必须为空、IP 只能进 SAN，否则 LE 直接回
 #   `badCSR :: CSR contains IP address in Common Name`。CSR 由 install-remote.sh 生成。
-if "$LEGO" --server "$ACME_SERVER" --accept-tos --email "$ACME_EMAIL" \
+# 空邮箱不传 --email（同 install-remote.sh：传空串会被 LE 判 invalidContact）。
+acme_email_arg=()
+if [ -n "$ACME_EMAIL" ]; then acme_email_arg=(--email "$ACME_EMAIL"); fi
+# ★写成 if 而不是 `[ -n … ] && …`：后者在 set -e 下、邮箱为空时整条 && 链返回 1，
+#   会把脚本当场干掉——而症状是「ACME 段一声不响地什么都没发生」。
+# ★展开写成 "${arr[@]+"${arr[@]}"}" 而不是 "${arr[@]}"：后者在 set -u 下、
+#   数组为空时，**老 bash（macOS 3.2）会报 unbound variable** 并当场退出。
+#   Linux 上的 bash 5 不会，所以这个坑只在本地夹具里才暴露得出来。
+if "$LEGO" --server "$ACME_SERVER" --accept-tos "${acme_email_arg[@]+"${acme_email_arg[@]}"}" \
      --http --http.webroot /var/www/html \
      --path "$ACME_DIR" --csr "$CSR" \
      renew --profile "$ACME_PROFILE" --days "$renew_days" 2>&1 | tail -20; then

@@ -60,6 +60,9 @@ PY2
     ok)  cat > "$R/pkg/bin/lego" <<EOF
 #!/usr/bin/env bash
 echo "lego(fake) \$*"
+# 记下收到的 argv：有些断言要检查某个参数**没有**出现（例如空邮箱时不许传 --email，
+# 传空串会被 LE 判 invalidContact）。只看退出码是查不出这种事的。
+printf '%s\n' "\$@" > "$R/lego.argv"
 mkdir -p "$R/etc/acme/certificates"
 printf 'LE-CERT-NEW\n' > "$R/etc/acme/certificates/$2.crt"
 printf '158\n'          > "$R/etc/acme/certificates/$2.crt.hours"
@@ -134,10 +137,18 @@ setup 1 203.0.113.7 9443 ops@example.com ok ""; runit
 ck "状态 failed" "$(state)" failed
 ckc "点名 80 端口" "$OUT" 'HTTP-01 挑战必须由本机 80 端口应答'
 
-echo "I4 没填邮箱 —— 拒绝"
+echo "I4 没填邮箱 —— 放行，走无邮箱注册（LE 自 2025-06 起不再发到期提醒邮件，"
+echo "   「邮箱是提醒的唯一去处」这条旧理由已不成立；到期由本机定时器负责）"
 setup 1 203.0.113.7 443 "" ok ""; runit
-ck "状态 failed" "$(state)" failed
-ckc "点名 ACME_EMAIL" "$OUT" 'ACME_EMAIL 为空'
+ck "状态 ok（不因空邮箱被拒）" "$(state)" ok
+ck "仍切到了 LE"              "$(tlscrt)" "$R/etc/tls/le.crt"
+# ★关键：命令行里**不能**出现 --email（传空串 lego 会拿它当邮箱去注册，被 LE 判
+#   invalidContact）。夹具里的 lego 垫片会把收到的 argv 记进 $R/lego.argv。
+if [ -f "$R/lego.argv" ] && grep -q -- '--email' "$R/lego.argv"; then
+  ck "空邮箱时命令行里没有 --email" "有 --email" "没有 --email"
+else
+  ck "空邮箱时命令行里没有 --email" "没有 --email" "没有 --email"
+fi
 
 echo "I5 包里没带 lego —— 明确报错并说清怎么补，绝不静默"
 setup 1 203.0.113.7 443 ops@example.com none ""; runit

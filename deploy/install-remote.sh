@@ -21,7 +21,12 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 #   全靠 baidi-acme-renew.timer 续。定时器停掉或 80 端口被挡住，六天后证书就过期。
 #   所以本脚本装的续期脚本带「续不上且剩余不足 24h 就切回自签」的回退。
 : "${WITH_ACME_IP_CERT:=0}"
-: "${ACME_EMAIL:=}"                 # LE 账户邮箱（首次注册必填；仅用于到期提醒）
+: "${ACME_EMAIL:=}"                 # LE 账户邮箱，**可留空**。
+#   ★留空是被支持的姿态，不是将就：Let's Encrypt 自 2025-06 起**不再发送证书到期提醒邮件**，
+#     所以「邮箱是到期提醒的唯一去处」这条旧理由已经不成立；到期这件事由本机的
+#     baidi-acme-renew.timer 负责，而不是靠一封邮件。留空时 lego 走无邮箱注册，
+#     账户目录名是它的默认值 noemail@example.com（那是 lego 的占位，不是真地址）。
+#   ★填了也有用：LE 仍会用它发**吊销/安全**类通知。有合适的运维邮箱就填。
 : "${ACME_SERVER:=https://acme-v02.api.letsencrypt.org/directory}"
 ACME_PROFILE=shortlived             # 常量：IP 证书在 LE 上只有这一个 profile 可用
 
@@ -574,9 +579,6 @@ if [ "${WITH_ACME_IP_CERT:-0}" = "1" ]; then
     acme_fail "BD_HTTPS_PORT=${BD_HTTPS_PORT}（非 443）：HTTP-01 挑战必须由本机 80 端口应答，
      而共存机的 80 归烛龙的 default_server，白帝的共存契约是绝不去争它。
      IP 证书方案只支持独占标准端口的机器（BD_HTTPS_PORT=443 + WIPE=1 那种形态）。"
-  elif [ -z "$ACME_EMAIL" ]; then
-    acme_fail "ACME_EMAIL 为空：LE 账户注册必须给一个邮箱（它也是证书到期提醒的唯一去处）。
-     在 config.env 里填 ACME_EMAIL=you@example.com 后重新部署。"
   elif [ ! -x "$HERE/bin/lego" ] && [ ! -x "$BD_PREFIX/bin/lego" ]; then
     acme_fail "部署包里没有 bin/lego（ACME 客户端），这台机上也没有装过。
      成因通常是构建机取不到 github.com/go-acme/lego 模块——deploy/build.sh 在那种情况下
@@ -655,7 +657,16 @@ if [ "${WITH_ACME_IP_CERT:-0}" = "1" ]; then
         echo "  · 首次签发（lego run --profile ${ACME_PROFILE}）"
         # ★参数位置：--csr 是全局参数（lego 之后、子命令之前），--profile 是子命令参数。
         #   放反了报 `flag provided but not defined`，与「签不下来」是两回事。
-        if "$BD_PREFIX/bin/lego" --server "$ACME_SERVER" --accept-tos --email "$ACME_EMAIL" \
+        # 空邮箱时**不传** --email：传一个空串 lego 会拿它当邮箱去注册并被 LE 拒
+        # （invalidContact）。数组展开是为了让「不传」这件事在命令里真的不出现。
+        acme_email_arg=()
+if [ -n "$ACME_EMAIL" ]; then acme_email_arg=(--email "$ACME_EMAIL"); fi
+# ★写成 if 而不是 `[ -n … ] && …`：后者在 set -e 下、邮箱为空时整条 && 链返回 1，
+#   会把脚本当场干掉——而症状是「ACME 段一声不响地什么都没发生」。
+# ★展开写成 "${arr[@]+"${arr[@]}"}" 而不是 "${arr[@]}"：后者在 set -u 下、
+#   数组为空时，**老 bash（macOS 3.2）会报 unbound variable** 并当场退出。
+#   Linux 上的 bash 5 不会，所以这个坑只在本地夹具里才暴露得出来。
+        if "$BD_PREFIX/bin/lego" --server "$ACME_SERVER" --accept-tos "${acme_email_arg[@]+"${acme_email_arg[@]}"}" \
              --http --http.webroot /var/www/html \
              --path "$BD_PREFIX/etc/acme" --csr "$LE_CSR" \
              run --profile "$ACME_PROFILE"; then

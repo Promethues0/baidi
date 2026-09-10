@@ -490,7 +490,7 @@ export interface GatewayBundle {
 /** StealthReceipt 一台网关的隐身回执。status 六态见后端 api/stealth.go。 */
 export interface StealthReceipt {
   gatewayId: string;
-  /** unreported | off | orphan-ruleset | no-ruleset | no-drop-rule | port-mismatch | unknown | armed */
+  /** unreported | off | orphan-ruleset | no-ruleset | no-drop-rule | pass-unreachable | port-mismatch | unknown | armed */
   status: string;
   /** wanted = -pf 管理意图，与 status（实测态）分列：一格同时表达"想开"和"真的开着"，
    *  就分不出「本来没开」与「开了没生效」。 */

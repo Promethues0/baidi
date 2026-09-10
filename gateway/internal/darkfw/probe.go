@@ -48,6 +48,16 @@ type State struct {
 	// 而网关可以 `-proxy :18444` 启动——规则集装得好好的、保护的却是另一个端口，
 	// 隧道口照样全世界可见，两侧都不报错。与 wintun 的架构错配同族。
 	GuardedPort *int `json:"guardedPort,omitempty"`
+	// PassOrderOK 放行规则（来自 <baidi_allowed> 的 pass）是否**走得到**。
+	//
+	// ★指针三态：nil = 没测（nft 后端不测这一项——baidi-nft.sh 的次序由脚本结构保证；
+	// pf 读不出规则时也是 nil，那时 GuardedPort 已是 nil、控制面会判 no-drop-rule）；
+	// &false = 规则集与默认 DROP 都在，但放行规则缺失或被排在 `block … quick` 之后。
+	//
+	// 它存在的理由是 wave11 取证到的一个真实假绿：baidi-pf.conf 此前把 `block drop in quick`
+	// 排在 `pass in quick` 之前，而 pf 的 quick 是「命中即为最后匹配、后续规则不再求值」——
+	// 放行规则永远走不到，全员连不上；而本探针只抠得出 block 那一条，就把它判成了 armed。
+	PassOrderOK *bool `json:"passOrderOk,omitempty"`
 	// Detail 探测过程中的异常说明（命令报错等），供控制面原样呈现。
 	Detail string `json:"detail,omitempty"`
 }
@@ -102,6 +112,10 @@ func Probe(wanted bool) State {
 		st.Ruleset = &yes
 		if out, err := exec.Command("pfctl", "-a", pfAnchor, "-sr").CombinedOutput(); err == nil {
 			st.GuardedPort = parsePfDropPort(string(out))
+			if st.GuardedPort != nil {
+				// 只在抠得出 DROP 端口时才判次序：没有 DROP 那条时"放行在不在它前面"无从谈起。
+				st.PassOrderOK = parsePfPassBeforeBlock(string(out), *st.GuardedPort)
+			}
 		}
 	}
 	return st
@@ -145,4 +159,34 @@ func parsePfDropPort(out string) *int {
 		return &n
 	}
 	return nil
+}
+
+// pfPass 匹配 `pass in quick proto tcp from <baidi_allowed> to any port = 18443 …`（pfctl -sr 的输出形状）。
+var pfPass = regexp.MustCompile(`pass\s+in\s+quick\s+proto\s+tcp\s+from\s+<` + Table + `>.*?port\s*=\s*(\d+)`)
+
+// parsePfPassBeforeBlock 判断保护 port 的那条 `block … quick` 之前有没有放行 <baidi_allowed> 的 pass。
+//
+// ★判据是**同一份规则集内部的次序**：pf 的 quick 语义是「命中即为最后匹配、后续规则不再求值」
+// （pf.conf(5)），所以对同一个端口，排在 block quick 之后的 pass quick 永远走不到。
+// 返回：block 那条找不到 → nil（不可判定，交给 GuardedPort 那一支说话）；
+// pass 缺失或在 block 之后 → &false；pass 在 block 之前 → &true。
+func parsePfPassBeforeBlock(out string, port int) *bool {
+	passAt, blockAt := -1, -1
+	for i, line := range strings.Split(out, "\n") {
+		if blockAt < 0 {
+			if m := pfDrop.FindStringSubmatch(line); m != nil && m[1] == strconv.Itoa(port) {
+				blockAt = i
+			}
+		}
+		if passAt < 0 {
+			if m := pfPass.FindStringSubmatch(line); m != nil && m[1] == strconv.Itoa(port) {
+				passAt = i
+			}
+		}
+	}
+	if blockAt < 0 {
+		return nil
+	}
+	ok := passAt >= 0 && passAt < blockAt
+	return &ok
 }

@@ -207,6 +207,8 @@ type StealthState struct {
 	Root        bool   `json:"root"`
 	Ruleset     *bool  `json:"ruleset,omitempty"`
 	GuardedPort *int   `json:"guardedPort,omitempty"`
+	// PassOrderOK 放行规则是否走得到（darkfw.State 同名字段，三态；nil = 没测）。
+	PassOrderOK *bool  `json:"passOrderOk,omitempty"`
 	Detail      string `json:"detail,omitempty"`
 }
 

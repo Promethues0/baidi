@@ -56,6 +56,31 @@ func TestStealthReceiptStates(t *testing.T) {
 			wantStatus: StealthOrphanRuleset, wantScan: "teardown",
 		},
 		{
+			// ★wave11 取证到的真实假绿：baidi-pf.conf 把 block quick 排在 pass quick 之前，
+			// 放行规则永远走不到，全员连不上；此前探针只抠得出 block 那条，这里一路落到 armed。
+			// 锚点取「block … quick」：它是这一态独有的修复指引（与 orphan-ruleset 症状同形，
+			// 两态的 ScannerView 若被互换，靠「全员连不上」这种共用词分不出来）。
+			name: "规则集与 DROP 都在但放行规则走不到（pf 次序错误）", proxyAddr: "10.0.0.5:18443", reported: true,
+			state: gwStealthState{Wanted: true, Backend: "pf(macOS)", Root: true,
+				Ruleset: ptrBool(true), GuardedPort: ptrInt(18443), PassOrderOK: ptrBool(false)},
+			wantStatus: StealthPassUnreachable, wantScan: "block … quick",
+		},
+		{
+			// 反面：放行次序正确时，新分支不得误伤——照旧 armed。
+			name: "pf 放行次序正确（仍应 armed）", proxyAddr: "10.0.0.5:18443", reported: true,
+			state: gwStealthState{Wanted: true, Backend: "pf(macOS)", Root: true,
+				Ruleset: ptrBool(true), GuardedPort: ptrInt(18443), PassOrderOK: ptrBool(true)},
+			wantStatus: StealthArmed, wantArmed: true, wantScan: "",
+		},
+		{
+			// 反面：nft 后端不测放行次序（nil）。nil 是「没测」不是「走不到」，
+			// 拿它否定一台 nft 网关就是把不可判定塌成坏值——照旧 armed。
+			name: "nft 未测放行次序（nil，仍应 armed）", proxyAddr: "10.0.0.5:18443", reported: true,
+			state: gwStealthState{Wanted: true, Backend: "nftables(Linux)", Root: true,
+				Ruleset: ptrBool(true), GuardedPort: ptrInt(18443)},
+			wantStatus: StealthArmed, wantArmed: true, wantScan: "",
+		},
+		{
 			name: "开了 -pf 但规则集不在（最危险）", proxyAddr: "10.0.0.5:18443", reported: true,
 			state: gwStealthState{Wanted: true, Backend: "nftables(Linux)", Root: true,
 				Ruleset: ptrBool(false), Detail: "内核里没有 table inet baidi"},
@@ -157,6 +182,7 @@ func TestStealthWarningsCoverEveryNonArmedState(t *testing.T) {
 		StealthNoRuleset:     "对全世界可见",
 		StealthNoDropRule:    "没有默认 DROP 规则",
 		StealthOrphanRuleset: "全部合法用户都连不上",
+		StealthPassUnreachable: "放行规则走不到",
 		StealthPortMismatch:  "未被隐身保护",
 		StealthUnknown:       "不可判定",
 	}
@@ -413,5 +439,30 @@ func TestStealthWarningAgreesWithSummary(t *testing.T) {
 		if strings.Contains(w[0], "开启了 -pf") && !wanted {
 			t.Fatalf("wanted=false 却在告警里说「开启了 -pf」：%s", w[0])
 		}
+	}
+}
+
+// TestDiagStealthFailsOnPassUnreachable 放行规则走不到时 /diag 必须 fail（wave11，G33 的 pf 半边）。
+//
+// ★它同时是**报文层**的接线断言：走的是真实的 /api/v1/gateways/register，JSON 键 passOrderOk
+// 若与网关侧 cplane.StealthState 的标签对不上，控制面会静默拿到 nil（= 没测），
+// 这台 mac 网关就一路落进端口 switch 判成 armed——与改造前的假绿逐字同形，且两侧都不报错。
+//
+// ★变异实跑记录：把控制面标签改成 `passOrder`（拼写不同）→ 本用例变红。
+// 第一次用的变异是改成 `passOrderOK`（只差大小写），**逃逸了**——Go 的 encoding/json
+// 解码按字段名大小写不敏感匹配，那个变异根本没造出「两侧对不上」的状态，区分不了两种实现。
+// 所以这条守卫防的是**拼写漂移**；只差大小写的漂移在 Go↔Go 之间解码无害
+// （但若将来有非 Go 的消费方读这份报文，那一类漂移就不再无害，需要另外钉）。
+func TestDiagStealthFailsOnPassUnreachable(t *testing.T) {
+	h := newTestServer(t)
+	doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(), map[string]any{
+		"id": "gw-mac", "proxy": "10.0.0.5:18443",
+		"stealth": map[string]any{"wanted": true, "backend": "pf(macOS)", "root": true,
+			"ruleset": true, "guardedPort": 18443, "passOrderOk": false},
+	})
+	spa := diagCheck(t, getDiag(t, h), "spa")
+	if spa["status"] != "fail" {
+		t.Fatalf("放行规则走不到 = 全员连不上，/diag 必须 fail 而不是 pass，得到 %v（%v）",
+			spa["status"], spa["summary"])
 	}
 }

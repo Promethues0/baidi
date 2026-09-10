@@ -718,6 +718,7 @@ const STEALTH_ZH: Record<string, string> = {
   'no-ruleset': '已开启但规则集缺失',
   'no-drop-rule': '规则集缺默认丢弃规则',
   'orphan-ruleset': '规则集在但未启用（全员连不上）',
+  'pass-unreachable': '放行规则走不到（全员连不上）',
   'port-mismatch': '规则集保护了别的端口',
   unknown: '不可判定',
   unreported: '网关未上报'
@@ -726,7 +727,7 @@ function stealthLabel(st: string) { return STEALTH_ZH[st] ?? st; }
 
 /* 只有 armed 是绿的。不可判定与未上报走**灰**而不是暖色——
  * 它们不是"轻微问题"，是"我们不知道"（与在线用户页的 unknown 同一条纪律）。 */
-const STEALTH_BAD = ['no-ruleset', 'no-drop-rule', 'orphan-ruleset', 'port-mismatch'];
+const STEALTH_BAD = ['no-ruleset', 'no-drop-rule', 'orphan-ruleset', 'port-mismatch', 'pass-unreachable'];
 function stealthTagClass(st: string) {
   if (st === 'armed') return 'bd-tg--green';
   /* 与后端 checkStealth 的 fail 分桶**同一份名单**：两处分头维护就会出现

@@ -35,6 +35,8 @@ type gwStealthState struct {
 	Root        bool   `json:"root"`
 	Ruleset     *bool  `json:"ruleset"`     // nil = 探不到（非 root / 命令异常），不是「不在」
 	GuardedPort *int   `json:"guardedPort"` // nil = 解析不出来，不是 0
+	// PassOrderOK 放行规则是否走得到。nil = 网关没测这一项（nft 后端 / 旧网关），**不是**"走得到"。
+	PassOrderOK *bool  `json:"passOrderOk"`
 	Detail      string `json:"detail"`
 }
 
@@ -78,6 +80,15 @@ const (
 	// StealthPortMismatch 规则集在，但那条默认 DROP 保护的端口不是本网关的隧道口
 	// （setup 脚本 PROXY_PORT 默认 18443，网关却可以 -proxy 换端口）。隧道口照样全世界可见。
 	StealthPortMismatch = "port-mismatch"
+	// StealthPassUnreachable 规则集在、默认 DROP 也在，但**放行规则走不到**（缺失，或被排在
+	// `block … quick` 之后）。
+	//
+	// ★wave11 取证到的真实假绿：baidi-pf.conf 此前把 block quick 排在 pass quick 之前，
+	// 而 pf 的 quick 是「命中即为最后匹配、后续规则不再求值」——所有到隧道口的 TCP 都先被丢弃，
+	// 放行规则永远走不到。症状与 orphan-ruleset 同形（敲门成功、控制台在线、客户端拨号超时），
+	// 而此前探针只抠得出 block 那一条，于是这台被判成 armed。
+	// **它不能借用 no-drop-rule**：那一态的文案是「没有任何东西在丢包」，与这里的真相方向相反。
+	StealthPassUnreachable = "pass-unreachable"
 	// StealthArmed 规则集实测在位且保护的正是本网关的隧道口：内核态 DROP 生效。
 	StealthArmed = "armed"
 )
@@ -201,6 +212,20 @@ func stealthReceiptOf(id, proxyAddr string, info gwStealthInfo, reported bool) S
 			"要么 sudo gateway/firewall/baidi-nft.sh teardown 卸掉规则集"
 		return r
 	}
+	// ── 分支四：规则集与默认 DROP 都在，但放行规则走不到 ──
+	// ★必须排在端口 switch 之前：那一支在「GuardedPort 与隧道口一致」时会一路落到 armed，
+	// 而这正是此前的假绿路径。nil（没测）不参与判定——不可判定不等于走得到，
+	// 但也不能拿它否定一台 nft 网关（那边的次序由脚本结构保证，探针刻意不测）。
+	if st.PassOrderOK != nil && !*st.PassOrderOK {
+		r.Status = StealthPassUnreachable
+		r.Summary = "规则集与默认 DROP 都在，但放行规则走不到——全部合法用户都连不上"
+		r.ScannerView = "端口对扫描器确实是「filtered」，但合法用户同样进不来：" +
+			"放行 <baidi_allowed> 的那条规则缺失，或被排在 `block … quick` 之后" +
+			"（pf 的 quick 命中即终止求值，后面的 pass 永远走不到）。" +
+			"症状是敲门成功、放行表写进去了、控制台显示在线，客户端却一律拨号超时。" +
+			"用 sudo pfctl -a baidi-gw -sr 看一眼次序，然后用随仓的 gateway/firewall/setup-pf.sh 重装规则"
+		return r
+	}
 	switch {
 	case st.GuardedPort == nil:
 		// ★规则集在、却找不到那条默认 DROP：没有任何东西在丢包（见 StealthNoDropRule）。
@@ -274,6 +299,10 @@ func stealthWarnings(rs []StealthReceipt) []string {
 			out = append(out, fmt.Sprintf(
 				"网关「%s」的规则集在位，但里面没有默认 DROP 规则：没有任何东西在丢包，"+
 					"隧道口 %s 此刻对全世界可见。", r.GatewayID, orElse(r.ProxyAddr, "（未上报）")))
+		case StealthPassUnreachable:
+			out = append(out, fmt.Sprintf(
+				"网关「%s」的放行规则走不到（缺失，或排在默认丢弃之后）：全部合法用户都连不上"+
+					"（敲门会成功、控制台显示在线，客户端一律拨号超时）。", r.GatewayID))
 		case StealthOrphanRuleset:
 			out = append(out, fmt.Sprintf(
 				"网关「%s」的内核规则集装着、但它没带 -pf 启动：放行集合永远为空，"+
@@ -341,7 +370,7 @@ func (s *Server) checkStealth() DiagCheck {
 		switch r.Status {
 		case StealthArmed:
 			st, armed = "pass", armed+1
-		case StealthNoRuleset, StealthPortMismatch, StealthOrphanRuleset, StealthNoDropRule:
+		case StealthNoRuleset, StealthPortMismatch, StealthOrphanRuleset, StealthNoDropRule, StealthPassUnreachable:
 			st, bad = "fail", bad+1
 		case StealthUnknown, StealthUnreported:
 			undecided++

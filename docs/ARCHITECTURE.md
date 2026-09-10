@@ -1681,7 +1681,7 @@ PRD FR-UPG-07/14。改造前**服务端版本号没有单一真相来源**，三
 - **网关实测、心跳上报、控制面折算成七态回执**。控制面确实无法从外部扫描端口，但网关自己完全知道规则集装没装——不上报等于把可判定的事硬做成不可判定。
 - **判据不是 `darkfw.Available()`**。它只查 `nft`/`pfctl` 二进制在不在 PATH 上，而几乎所有 Linux 都装了 nft，于是它几乎恒为 true——拿它当「隐身已启用」跟写死一个 `true` 没区别。`darkfw.Probe()` 探的是 `nft list table inet baidi` / `pfctl -a baidi-gw -t baidi_allowed -T show` 能不能成，以及**那条默认 DROP 保护的是哪个端口**。
 - **端口比对是一道真判定**：setup 脚本的 `PROXY_PORT` 默认 18443，而网关可以 `-proxy :18444` 启动——规则集装得好好的、保护的却是另一个端口，隧道口照样全世界可见，两侧都不报错（与 wintun 的架构错配同族）。
-- **八态各自可区分**：`unreported`（旧网关，不知道）/ `off`（确定没开且确定无规则集）/ `no-ruleset`（开了但规则集不在）/ `no-drop-rule`（规则集在但没有默认 DROP）/ `orphan-ruleset`（规则集在但没带 -pf → 全员连不上）/ `port-mismatch` / `unknown`（探不到）/ `armed`。**「探不到」优先于一切确定结论**——参考部署（非 root）下几乎总是落在 unknown，那是实话。**只有 armed 计入「生效」**——不可判定与未上报都不算。
+- **九态各自可区分**：`unreported`（旧网关，不知道）/ `off`（确定没开且确定无规则集）/ `no-ruleset`（开了但规则集不在）/ `no-drop-rule`（规则集在但没有默认 DROP）/ `orphan-ruleset`（规则集在但没带 -pf → 全员连不上）/ `port-mismatch` / `unknown`（探不到）/ `armed`。**「探不到」优先于一切确定结论**——参考部署（非 root）下几乎总是落在 unknown，那是实话。**只有 armed 计入「生效」**——不可判定与未上报都不算。 / `pass-unreachable`（wave11：规则集与默认 DROP 都在，但放行规则缺失或被排在 `block … quick` 之后——pf 的 quick 命中即终止求值，全员连不上；此前 baidi-pf.conf 正是这个次序，而探针只抠得出 block 那条，判成了 armed。探针字段 `PassOrderOK` 三态，nft 后端刻意不测：次序由脚本结构保证。**未在 mac 上以 root 实装验证**）
 - **每一态都给出「攻击者视角」**：把配置状态翻译成安全后果（open / filtered / 全员连不上），而后者才是 NFR-SEC-01 验收的东西。
 - **页面那四条断言改为跟随真实态**：`allArmed` 为假时改写成「未敲门的 TCP 连接会先完成三次握手 / 端口表现为 open / 业务仍接入不了，但网关本身并未隐身」，页脚从「攻击面 = 0」改成「端口可见 · 业务不可达 —— 先认证后连接成立，隐身尚未成立」。**零台在线时 `allArmed` 恒假**：空集恒真会让一台网关都没有的部署把最强的那段断言画出来。
 - **`install-remote.sh` 当面交代**：装完打印「内核态隐身未启用」+ 现状 + 不默认启用的原因 + 启用命令。不装可以，但不能让人以为装了。

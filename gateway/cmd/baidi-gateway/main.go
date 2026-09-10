@@ -573,7 +573,7 @@ func main() {
 			st := darkfw.Probe(*pf)
 			return cplane.StealthState{
 				Wanted: st.Wanted, Backend: st.Backend, Root: st.Root,
-				Ruleset: st.Ruleset, GuardedPort: st.GuardedPort, Detail: st.Detail,
+				Ruleset: st.Ruleset, GuardedPort: st.GuardedPort, PassOrderOK: st.PassOrderOK, Detail: st.Detail,
 			}
 		})
 		cp.SetNAT(func() cplane.NATState {

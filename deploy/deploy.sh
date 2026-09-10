@@ -14,6 +14,12 @@ source "$HERE/config.env"
 # config.env 里的值不会自动过去——漏转的症状是「config.env 里写了 WITH_IPSEC=1，
 # 部署成功，机器上却根本没有 baidi-ipsec」，且全程无报错。
 : "${WITH_IPSEC:=0}"; : "${IPSEC_GW_ID:=}"; : "${IKE_PORT:=}"; : "${NATT_PORT:=}"
+# 网关的 mTLS 端口与本机网关 id（= mTLS 客户端证书 CN）。**这两项此前一直没转发**，
+# 而 config.env.example 里明明白白列着、还写了「多网关时每台一个」——于是每台机器都拿
+# install-remote.sh 的默认 CN=gw-1，控制面把它们当同一台网关：心跳互相覆盖、剖面里只有一个
+# 落点，症状是「配了两台网关，控制台上只有一台」。缺省留空、由 install-remote.sh 一处决定
+# 默认值（8092 / gw-1）：两边各写一份默认值就是两个真相来源，不一致时机器上完全同形。
+: "${MTLS_PORT:=}"; : "${GW_ID:=}"
 # 内核态隐身（默认关）。同样必须显式转发——漏转的症状是 config.env 里写了 WITH_STEALTH=1、
 # 部署"成功"，而机器上既没有规则集、网关也没带 -pf，且部署输出还照着"未启用"那段念。
 : "${WITH_STEALTH:=0}"
@@ -31,6 +37,20 @@ source "$HERE/config.env"
 # 演示便利由演示机在 config.env 里**显式**置 0 承担（那是一次有意识的选择，
 # 而不是一个谁也没看见的默认值）。
 : "${BAIDI_SEED_MUST_CHANGE:=1}"
+
+# 主机侧定期自动备份（NFR-AVL-04 / FR-OPS-04）。同样必须显式转发——**改造前这四项根本不在
+# 这个白名单里**，于是 wave9 做好的 StartAutoBackupLoop 在每一台按脚本装出来的机器上都是关的，
+# 而 /diag 那条 warn 的补救提示指的正是 config.env.example（那里当时也一个字都没有）。
+#
+# ★四项**全部缺省为空**，与 install-remote.sh 逐字一致：口令刻意不给默认值（写进模板或
+#   二进制的默认口令等于没有加密），目录/间隔/份数留空各有默认，而"默认是什么"只由
+#   install-remote.sh 一处决定——本脚本只负责原样把值带过去，不在这里再判一次。
+#
+# ★口令经这条 ssh 命令行转发，会短暂出现在目标机的 `ps` 输出里，sudo 也可能把整条命令记进
+#   auth.log。介意的部署把本项留空、登上目标机手工往 $BD_PREFIX/etc/baidi.env 追加那一行即可：
+#   install-remote.sh 对**空值一个字节都不动**，重新部署不会把它抹掉。
+: "${BAIDI_BACKUP_DIR:=}"; : "${BAIDI_BACKUP_PASSPHRASE:=}"
+: "${BAIDI_BACKUP_INTERVAL:=}"; : "${BAIDI_BACKUP_KEEP:=}"
 
 # 若指定私钥则用之（如 ubuntu 用户需 -i ~/.ssh/xxx）
 SSH=(ssh); RSYNC_E=(ssh)
@@ -55,7 +75,10 @@ fi
 # 第一个能拦住部署的闸，而这条 ssh 是白名单式显式转发。不转发的话，中止文案里那句
 # 「BD_FORCE=1 可跳过」在标准部署路径上根本够不着——运维只能改走手工 ssh 拼环境变量，
 # 等于把一条逃生舱写在了门外。
+# ★两个 BD_REC_*（推荐值，只影响警告门槛）此前漏在名单外，而 README 的阈值表把它们与
+#   BD_MIN_* 并排列在同一行——调了推荐值却只有硬下限生效，是同一族的静默不一致。
 : "${BD_FORCE:=}" "${BD_MIN_CPU:=}" "${BD_MIN_MEM_MB:=}" "${BD_MIN_DISK_MB:=}" "${BD_DNS_PROBE_HOST:=}"
+: "${BD_REC_MEM_MB:=}" "${BD_REC_DISK_MB:=}"
 
 # 客户端源码版本 → 服务端溯源比对的「当前值」（control 的 clientSourceRev() 读 BAIDI_CLIENT_SRC_REV）。
 # ★这一项**每次部署都要转发并覆盖**，不能像其它项那样幂等追加一次：它每次部署都会变，
@@ -77,6 +100,6 @@ else
 fi
 
 echo "==> 远程安装（sudo；独立端口 ${BD_HTTPS_PORT}）"
-"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' WITH_ACME_IP_CERT='$WITH_ACME_IP_CERT' ACME_EMAIL='$ACME_EMAIL' ACME_SERVER='$ACME_SERVER' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' BAIDI_CLIENT_SRC_REV='${BAIDI_CLIENT_SRC_REV:-}' bash /tmp/baidi-deploy/install-remote.sh"
+"${SSH[@]}" "$SERVER_SSH" "sudo BD_PREFIX='$BD_PREFIX' BD_USER='$BD_USER' CONTROL_PORT='$CONTROL_PORT' PUBLIC_ORIGIN='$PUBLIC_ORIGIN' BD_HTTPS_PORT='$BD_HTTPS_PORT' PUBLIC_HOST='${PUBLIC_HOST:-_}' WITH_GATEWAY='$WITH_GATEWAY' MTLS_PORT='$MTLS_PORT' GW_ID='$GW_ID' WITH_IPSEC='$WITH_IPSEC' WITH_STEALTH='$WITH_STEALTH' WITH_ACME_IP_CERT='$WITH_ACME_IP_CERT' ACME_EMAIL='$ACME_EMAIL' ACME_SERVER='$ACME_SERVER' IPSEC_GW_ID='$IPSEC_GW_ID' IKE_PORT='$IKE_PORT' NATT_PORT='$NATT_PORT' BAIDI_SEED_MUST_CHANGE='$BAIDI_SEED_MUST_CHANGE' BAIDI_UPGRADE_PUBKEY='${BAIDI_UPGRADE_PUBKEY:-}' BAIDI_BACKUP_DIR='$BAIDI_BACKUP_DIR' BAIDI_BACKUP_PASSPHRASE='$BAIDI_BACKUP_PASSPHRASE' BAIDI_BACKUP_INTERVAL='$BAIDI_BACKUP_INTERVAL' BAIDI_BACKUP_KEEP='$BAIDI_BACKUP_KEEP' BD_FORCE='$BD_FORCE' BD_MIN_CPU='$BD_MIN_CPU' BD_MIN_MEM_MB='$BD_MIN_MEM_MB' BD_MIN_DISK_MB='$BD_MIN_DISK_MB' BD_REC_MEM_MB='$BD_REC_MEM_MB' BD_REC_DISK_MB='$BD_REC_DISK_MB' BD_DNS_PROBE_HOST='$BD_DNS_PROBE_HOST' BAIDI_CLIENT_SRC_REV='${BAIDI_CLIENT_SRC_REV:-}' bash /tmp/baidi-deploy/install-remote.sh"
 
 echo "✓ 部署完成 → https://${PUBLIC_HOST:-<server>}:${BD_HTTPS_PORT}/"

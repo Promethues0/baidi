@@ -225,7 +225,14 @@ const knockView = computed<{ cls: string; text: string }>(() => {
   if (!s || s.healthObserved !== true || typeof s.healthKnock !== 'boolean') {
     return { cls: 'na', text: '不可判定（本端未报告数据面健康状态）' };
   }
-  if (s.healthKnock) return { cls: 'ok', text: '已完成 · 已开放行窗口' };
+  // ★只陈述**本机把包发出去了**（wave11 行动 11-②）。healthKnock 的真实语义是
+  //   「SPA 敲门包真的写出去了」，不是「网关开了放行窗口」——SPA **刻意不回包**
+  //   （回包等于向扫描者确认端口存在，隐身就没了），客户端在协议上永远无从确认对面收没收、
+  //   收了判没判过。写「已开放行窗口」是替网关下一个本机拿不到证据的结论：
+  //   时钟不准（网关按 ±30s 判信封时间戳）、网关没在听 SPA 口、令牌被网关拒——
+  //   三种「敲了但没开」下这一格照样是绿色的。判据没错，说法错了，一样会让人停止排查。
+  //   与桌面端 tunnel.ts 的 knockSay 逐字同一条纪律。
+  if (s.healthKnock) return { cls: '', text: '敲门包已发出（网关不回包，是否已放行以能否访问业务为准）' };
   const why = (s.healthKnockErr || s.healthErr || '').trim();
   return { cls: 'bad', text: why ? '未完成 · ' + why : '未完成（原生侧未报告原因）' };
 });

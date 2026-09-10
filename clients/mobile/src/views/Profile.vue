@@ -134,7 +134,9 @@ async function diag() {
       (s.healthObserved !== true || typeof v !== 'boolean')
         ? { v: '不可判定（本端未报告数据面健康状态）', state: 'na' }
         : v ? { v: okText, state: 'ok' } : { v: badText, state: 'bad' };
-    results.push({ k: 'SPA 敲门', ...three(s.healthKnock, '成功 · 放行窗口已开', '失败') });
+    // ★措辞与接入页的 knockView 同一条纪律（wave11 行动 11-②）：healthKnock 只说明
+    //   敲门包真的发出去了，SPA 不回包，网关那侧开没开窗本机拿不到任何证据。
+    results.push({ k: 'SPA 敲门', ...three(s.healthKnock, '敲门包已发出（网关不回包，开窗与否本机判不了）', '未发出') });
     // tunnel 是**粘性位**：用户打开第一个应用之前它恒 false，那是健康的空闲态而不是故障，
     // 所以文案不能写「隧道不通」（桌面端在这上面踩过，见 ARCHITECTURE 第七节边界①）。
     results.push({ k: '业务隧道', ...three(s.healthTunnel, '已拨通过业务连接', '尚无业务连接拨通（未必是故障：首次访问应用前恒为此值）') });

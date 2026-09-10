@@ -20,7 +20,7 @@ vi.mock('./store', () => ({
   device: { id: '' }
 }));
 
-import { classifyFail, controlCaSay, nextDataplaneNotice, parseHealth, parseTunStatus, CONTROL_CA_SCOPE_NOTE, type ControlCaInfo, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
+import { classifyFail, controlCaSay, knockSay, tunnelSay, nextDataplaneNotice, parseHealth, parseTunStatus, CONTROL_CA_SCOPE_NOTE, KNOCK_FAIL_PREFIXES, type ControlCaInfo, type DataplaneNotice, type TunStatusRaw, type TunView } from './tunnel';
 // 跨轨契约用例要摆一份三落点剖面：store 已被上面的 vi.mock 换成最小桩，这里拿到的就是那个对象。
 import { profile } from './store';
 import type { ProfileGateway } from './api';
@@ -524,5 +524,65 @@ describe('控制中心信任锚 · 跨轨契约', () => {
     const g = go.match(/flag\.String\("(control-ca)"/);
     expect(g, 'baidi-tun 必须声明 control-ca 这个 flag（轨 B 的产出）').toBeTruthy();
     expect(壳传的).toBe('-' + g![1]);
+  });
+});
+
+
+/* ── wave11 行动 11-②：「敲门已发出」与「隧道真的通了」在界面上必须是两件事 ── */
+
+describe('接入信息卡两行状态', () => {
+  it('★「加密隧道」不再写死「已建立」：tunnel 位没翻过时如实说尚未建立', () => {
+    // 这是一次**完全正常**的接入在用户点开第一个应用之前的稳定形态。
+    // 此前这一格恒是绿色「已建立 · 通用 TLS 1.3」——替一次从未发生的握手背书。
+    const line = tunnelSay(view({ tunnelUsed: false, cipher: '通用 TLS 1.3' }));
+    expect(line.tone).not.toBe('ok');
+    expect(line.text).toMatch(/尚未建立/);
+    expect(line.text).toContain('通用 TLS 1.3');
+  });
+
+  it('隧道真拨通过 → 才说已建立', () => {
+    expect(tunnelSay(view({ tunnelUsed: true, cipher: '通用 TLS 1.3' }))).toEqual({
+      text: '已建立 · 通用 TLS 1.3', tone: 'ok'
+    });
+  });
+
+  it('★老壳/老数据面不报健康行 = 不可判定，绝不塌成「已建立」', () => {
+    const line = tunnelSay(view({ tunnelUsed: null, cipher: '通用 TLS 1.3' }));
+    expect(line.text).toMatch(/判不了/);
+    expect(line.text).not.toMatch(/已建立/);
+  });
+
+  it('★「SPA 敲门」只陈述本机把包发出去了，不替网关断言开没开窗', () => {
+    const line = knockSay(view({ keepalive: true }));
+    expect(line.text).toMatch(/已发出/);
+    // 「放行窗口」这四个字是网关侧的事实，本机拿不到证据——SPA 刻意不回包。
+    expect(line.text).not.toMatch(/已开放行窗口|窗口持续续期/);
+    expect(line.text).toMatch(/不回包|以能否访问业务为准/);
+  });
+
+  it('一次都没发出去过 → 如实说尚未发出（不是绿色「已完成」）', () => {
+    const line = knockSay(view({ keepalive: false }));
+    expect(line.tone).toBe('warn');
+    expect(line.text).toMatch(/尚未发出/);
+  });
+});
+
+describe('跨轨契约：敲门类失败前缀', () => {
+  // ★守卫的存在理由：Go 侧新增一种敲门类失败（wave11 加了「SPA 敲门包发送失败」）而这里
+  // 没跟上时，两边都不会报错——那条失败只会被 classifyFail 判成 tunnel 类，
+  // 于是它会在提示条里**永远粘着**（tunnel 类要等隧道真拨通才清），而它其实每 15s 就自愈一次。
+  const dp = readFileSync(new URL('../../../../gateway/internal/dataplane/dataplane.go', import.meta.url), 'utf8');
+
+  it('Go 侧每一处 markKnockFail 的前缀都被 classifyFail 认成 knock 类', () => {
+    const prefixes = [...dp.matchAll(/markKnockFail\("([^"：:]+)[：:]/g)].map(m => m[1]);
+    expect(prefixes.length, 'dataplane.go 里应能抠出 markKnockFail 的固定前缀').toBeGreaterThan(0);
+    for (const p of new Set(prefixes)) {
+      expect(KNOCK_FAIL_PREFIXES as readonly string[], `Go 侧新增了敲门类失败前缀「${p}」，TS 侧没跟上`).toContain(p);
+      expect(classifyFail(p + '：某某原因'), `「${p}」应判为 knock 类`).toBe('knock');
+    }
+  });
+
+  it('wave11 新增的「敲门包发送失败」确实是 knock 类', () => {
+    expect(classifyFail('SPA 敲门包发送失败：write udp: connection refused')).toBe('knock');
   });
 });

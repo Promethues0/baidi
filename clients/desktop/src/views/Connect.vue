@@ -217,16 +217,25 @@
                 <span>网关落点</span>
                 <b :class="{ ok: !switchedEndpoint }">第 {{ tun.endpointIndex }} / 共 {{ tun.endpointTotal }} 个{{ tun.endpointTotal > 1 ? '（失败自动切下一个）' : '（单落点，无容灾余量）' }}</b>
               </div>
-              <div class="ck-kv"><span>加密隧道</span><b class="ok">已建立 · {{ tun.cipher }}</b></div>
-              <!-- ★这一行陈述的是**本机的敲门状态**，不替网关断言隐身效果。
-                   「业务对外不可见」取决于网关有没有启用内核态隐身（-pf），而客户端
-                   根本不知道——剖面里没有隐身回执字段。参考部署默认**不开** -pf，
-                   此时未敲门的 TCP 会完成三次握手再被 accept-then-close 断开，
-                   nmap 判 open。控制台侧那批「攻击面 = 0」已在 wave8 行动 7 改成跟随
-                   网关实测回执渲染，客户端这处当时漏了，同一条纪律只覆盖了一半。 -->
+              <!-- ★「隧道真的通了」是独立的一件事，不能跟着「已接入」一起写死。
+                   此前这一格恒是绿色「已建立」，而 tunnel 位可能一次都没翻过——
+                   三态由 tunnelSay 判（真拨通过 / 还没有业务流量 / 老数据面不报＝判不了）。 -->
+              <div class="ck-kv">
+                <span>加密隧道</span>
+                <b :class="{ ok: tunnelLine.tone === 'ok', warn: tunnelLine.tone === 'warn' }">{{ tunnelLine.text }}</b>
+              </div>
+              <!-- ★这一行陈述的是**本机把包发出去了**，不替网关断言开没开窗，也不断言隐身效果。
+                   · 开没开窗：SPA **刻意不回包**（回包等于向扫描者确认端口存在），
+                     客户端在协议上永远无从确认。此前这里写「已开放行窗口 / 放行窗口持续续期」
+                     是替网关下了一个本机拿不到证据的结论——时钟不准、网关没在听 SPA 口、
+                     令牌被网关拒，三种「敲了但没开」在这张卡上一律绿色。
+                   · 隐身效果：取决于网关有没有启用内核态隐身（-pf），剖面里没有这个回执字段。
+                     参考部署默认**不开** -pf，此时未敲门的 TCP 会完成三次握手再被
+                     accept-then-close 断开，nmap 判 open。控制台侧那批「攻击面 = 0」已在
+                     wave8 行动 7 改成跟随网关实测回执渲染，客户端这处当时漏了。 -->
               <div class="ck-kv">
                 <span>SPA 敲门</span>
-                <b class="ok" :title="'隐身效果（未授权者能否看到端口）由网关侧内核态防火墙决定，请在管理台「网关」页看该网关的实测回执'">{{ tun.keepalive ? '保活中 · 放行窗口持续续期' : '已完成 · 已开放行窗口' }}</b>
+                <b :class="{ warn: knockLine.tone === 'warn' }" :title="'网关收到敲门包后不回任何应答（回包会暴露端口存在），故本机只能陈述「包已发出」；隐身效果由网关侧内核态防火墙决定，请在管理台「网关」页看该网关的实测回执'">{{ knockLine.text }}</b>
               </div>
               <!-- ★控制中心信任：这一行陈述的是**数据面那一跳**用了哪份信任材料。
                    桌面端到控制面有两条 TLS 路径且来源不同——登录/拉剖面走 WebView 的
@@ -261,7 +270,7 @@ import { api, fetchProfile, checkClientUpdate, ApiError, failReason, failStatus,
 import { PW_RULE_HINT, checkNewPassword } from '@/lib/pwchange';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
-import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, controlCaInfo, controlCaSay, CONTROL_CA_SCOPE_NOTE, type TunView, type DataplaneNotice, type ControlCaInfo } from '@/lib/tunnel';
+import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, controlCaInfo, controlCaSay, knockSay, tunnelSay, CONTROL_CA_SCOPE_NOTE, type TunView, type DataplaneNotice, type ControlCaInfo } from '@/lib/tunnel';
 import { postureState, collectPosture, reportPosture } from '@/lib/posture';
 import { explainControlFailure, hostPlatform, type TcpProbe } from '@/lib/diagnose';
 import { invoke } from '@tauri-apps/api/core';
@@ -573,6 +582,10 @@ const dpHint = computed(() =>
     ? '此后敲门保活仍正常，但数据面报告隧道类失败此刻仍未解除（健康行 terr= 仍非空）——真拨通一次隧道后本条会自动收起。'
     : '此后敲门保活仍正常；隧道是否已恢复本机判不了——再访问一次应用可复测，确认无误后可关掉此条。'
 );
+// 接入信息卡两行状态（判据与文案都在 tunnel.ts 的纯函数里，那里有完整的来龙去脉与用例）。
+// ★「敲门包已发出」与「隧道真的通了」是两件事，此前被合成一行绿色断言。
+const knockLine = computed(() => knockSay(tun.value));
+const tunnelLine = computed(() => tunnelSay(tun.value));
 // 接入信息角标：ready 但隧道还没拨通过 = 健康的空闲态，不是异常——tunnel 位只在第一条业务流拨通时才置位。
 const liveText = computed(() => {
   if (!tun.value.ready) return '● 隧道异常';
@@ -925,6 +938,7 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-kv span { color: var(--bd-t3); flex: none; }
 .ck-kv b { font-weight: 500; color: var(--bd-t1); text-align: right; }
 .ck-kv b.ok { color: var(--bd-success); }
+.ck-kv b.warn { color: var(--bd-warning); }
 .ck-conn__off { padding: 18px 16px; font-size: 12.5px; color: var(--bd-t3); }
 .ck-logwrap { padding: 4px 16px 10px; }
 .ck-log__h { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-t3); cursor: pointer; padding: 6px 0; }

@@ -643,14 +643,25 @@ function unquoteGo(v: string): string {
 }
 
 /**
- * 数据面失败的类别。判据是 Go 侧 `dataplane.knockOne` 给 markFail 的两个固定前缀
- * （`取敲门令牌失败：` / `SPA 拨号失败：`，见 gateway/internal/dataplane/dataplane.go）；
- * 其余一律算 tunnel 类（`dialTunnel` 的原文：拨号超时 / 握手失败 / 指纹不匹配…）。
+ * 敲门类失败的固定前缀，逐字取自 Go 侧 `dataplane.knockOne` 里每一处 `markKnockFail(...)`
+ * （见 gateway/internal/dataplane/dataplane.go）。
+ *
+ * ★这是**跨轨契约**，两边分家不会报错、只会让一条失败被分错类（见 classifyFail 的后果说明）。
+ * `tunnel.test.ts` 有一条守卫直接读那个 .go 文件、把里面所有 `markKnockFail("前缀…")`
+ * 抠出来逐个过 classifyFail——Go 侧新增一种敲门类失败而这里没跟上，那条用例当场变红。
+ * wave11 行动 11-② 新增的 `SPA 敲门包发送失败：` 就是这么补进来的（此前只有前两个）。
+ */
+export const KNOCK_FAIL_PREFIXES = ['取敲门令牌失败', 'SPA 拨号失败', 'SPA 敲门包发送失败'] as const;
+
+/**
+ * 数据面失败的类别。判据是 Go 侧 `dataplane.knockOne` 给 markKnockFail 的固定前缀
+ * （见 KNOCK_FAIL_PREFIXES）；其余一律算 tunnel 类（`dialTunnel` 的原文：拨号超时 /
+ * 握手失败 / 指纹不匹配…）。
  * 认不出的前缀**落向 tunnel 类**：那一侧是粘住不清，认错的代价是多显示一会儿，而不是把一条中间人告警擦掉。
  */
 export type FailClass = 'knock' | 'tunnel';
 export function classifyFail(err: string): FailClass {
-  return /^(取敲门令牌失败|SPA 拨号失败)[：:]/.test(err) ? 'knock' : 'tunnel';
+  return KNOCK_FAIL_PREFIXES.some(p => err.startsWith(p + '：') || err.startsWith(p + ':')) ? 'knock' : 'tunnel';
 }
 
 /** 接入页「数据面报告」提示条的状态（纯数据，由 nextDataplaneNotice 推进）。 */
@@ -698,4 +709,50 @@ export function nextDataplaneNotice(prev: DataplaneNotice | null, v: TunView, no
 function stripTs(l: string): string {
   // 去掉 slog 的 time=... level=... 前缀，留人话
   return l.replace(/^time=\S+\s+level=\S+\s+msg=/, '').replace(/^"|"$/g, '');
+}
+
+
+/**
+ * 接入信息卡两行状态的取值（wave11 行动 11-②）。
+ *
+ * ★缺陷形态：这两行此前都是**写死的断言**——
+ *   · 「加密隧道」恒显示绿色「已建立 · <密码学>」，而 `tunnel` 位可能一次都没翻过；
+ *   · 「SPA 敲门」恒显示「已开放行窗口 / 放行窗口持续续期」，而客户端**在协议上无从得知**
+ *     网关有没有开窗——SPA 刻意不回包（回包等于向扫描者确认端口存在，隐身就没了），
+ *     本机唯一知道的事实是「那个 UDP 包写出去了」。
+ * 于是「敲门包发出去了」与「隧道真的通了」在界面上被合成同一件事，并且都被说成已完成。
+ * 时钟不准 / 网关没在听 SPA 口 / 令牌被网关拒 —— 三种「敲了但没开」在这张卡上一律绿色。
+ *
+ * 修法不是让网关回包（那会拆掉隐身），而是**把话说准**：本机说得出的只陈述到本机为止，
+ * 说不出的当面写「本机判不了」，并指向唯一能验证它的东西——真访问一次业务。
+ */
+export interface StatusLine {
+  text: string;
+  tone: 'ok' | 'warn' | 'plain';
+}
+
+/** 「SPA 敲门」行：只陈述**本机发出**这件事，绝不替网关断言开没开窗。 */
+export function knockSay(v: TunView): StatusLine {
+  if (!v.keepalive) {
+    // 一次都没发出去过。原因（取令牌失败 / 拨号失败 / 发送失败）由提示条单独呈现。
+    return { text: '尚未发出敲门包', tone: 'warn' };
+  }
+  return {
+    text: '敲门包已发出 · 每 15s 续期（网关不回包，是否已放行以能否访问业务为准）',
+    tone: 'plain'
+  };
+}
+
+/** 「加密隧道」行：判据是 `tunnel` 位（真拨通过一次业务流），三态。 */
+export function tunnelSay(v: TunView): StatusLine {
+  if (v.tunnelUsed === null) {
+    // 老壳 / 老数据面不报健康行 = 不可判定。绝不塌成「已建立」——那正是要消灭的形态。
+    return { text: `本机判不了（数据面未上报隧道状态） · ${v.cipher}`, tone: 'warn' };
+  }
+  if (!v.tunnelUsed) {
+    // 健康的空闲态：Run 启动期只敲门、不预拨，用户打开第一个应用之前它恒为 false。
+    // 说成「异常」会让人去查一个不存在的故障，说成「已建立」则是替一次没发生的握手背书。
+    return { text: `尚未建立（还没有业务流量，访问应用时按需建立） · ${v.cipher}`, tone: 'plain' };
+  }
+  return { text: `已建立 · ${v.cipher}`, tone: 'ok' };
 }

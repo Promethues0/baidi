@@ -271,6 +271,45 @@ func (c *Cache) Stats() (entries int, rejected uint64) {
 // 调用方据此把归因说对，并且**不要**把这个源 IP 计进攻击源统计。
 var ErrCacheFull = errors.New("敲门去重表已满（正被洪泛，本次敲门被拒）")
 
+// ErrClockSkew 敲门包的时间戳落在允许偏移之外。**归因与「重放」相反**，故必须分得开。
+//
+// ★为什么单列（wave11 行动 11-①）：此前超窗与 nonce 缺失/重复共用一句
+// 「敲门信封无效（疑似重放）」，一路上报成同一个 secevent 类别 `knock-envelope`
+// （中文名逐字写着「敲门信封无效/重放」）。而超窗最常见、也几乎唯一常见的成因是
+// **终端时钟不准**：客户端保活每 15s 敲一次、且每轮敲全部落点，一台时钟偏了 31 秒的
+// 正常员工机一天能稳定产出几千次超窗拒绝，于是它必然把安全概览的「攻击源 TOP」
+// 顶到第一名——管理员照着面板去封的是自己的员工，而真正该做的是给那台机器校时。
+//
+// 真正的重放信号有两个，都不落在这里：同一 nonce 再次出现（被动重放，整包重发）与
+// 同一 jti 再次出现（主动重放，见 spa.checkKnock 之后的 jti 去重）。
+var ErrClockSkew = errors.New("敲门包时间戳超出允许偏移")
+
+// ClockSkewError 携带实测偏移量的超窗错误。
+//
+// Offset = 网关当前时间 − 包内时间戳（秒）：
+//   - 正数 = 包内时间戳偏**早**。成因有两种：终端时钟慢，或一个延迟到达/被重放的旧包。
+//   - 负数 = 包内时间戳偏**晚**（在未来）。这一档**只可能**是终端时钟快——
+//     重放者手里的是捕获到的旧包，造不出未来时间戳。
+//
+// 把偏移量带出来是为了让审计与日志能写出「快/慢多少秒」这个可直接行动的事实；
+// 只说一句「时间戳无效」的话，管理员既分不清方向，也不知道差多少才算超。
+type ClockSkewError struct {
+	Offset int64 // 秒，见上
+	Allow  int64 // 允许偏移（秒）
+}
+
+func (e *ClockSkewError) Error() string {
+	if e.Offset < 0 {
+		return fmt.Sprintf("敲门包时间戳比网关当前时间晚 %d 秒（超出允许的 ±%d 秒）；"+
+			"未来时间戳造不出来自重放，必是终端时钟快了", -e.Offset, e.Allow)
+	}
+	return fmt.Sprintf("敲门包时间戳比网关当前时间早 %d 秒（超出允许的 ±%d 秒）；"+
+		"多半是终端时钟慢了，也可能是延迟到达的旧包", e.Offset, e.Allow)
+}
+
+// Is 让 errors.Is(err, ErrClockSkew) 成立——调用方按哨兵分类，不必知道结构体。
+func (e *ClockSkewError) Is(target error) bool { return target == ErrClockSkew }
+
 // Open 解析敲门包并做被动重放防护。返回待校验的 JWT 与是否启用了重放保护。
 // JSON 信封：校 ts 新鲜度 + nonce 去重；非 JSON：当旧式裸 JWT（protected=false）。
 func Open(data []byte, skew time.Duration, c *Cache) (token string, protected bool, err error) {
@@ -279,8 +318,11 @@ func Open(data []byte, skew time.Duration, c *Cache) (token string, protected bo
 		return string(data), false, nil // 兼容旧式裸 JWT
 	}
 	now := time.Now().Unix()
-	if d := now - p.Ts; d > int64(skew/time.Second) || d < -int64(skew/time.Second) {
-		return "", false, errors.New("敲门包时间戳超出允许偏移（疑似重放）")
+	allow := int64(skew / time.Second)
+	// ★超窗单列成 ErrClockSkew（不再与 nonce 缺失/重复共用一句「疑似重放」）：
+	// 归因方向相反，见 ErrClockSkew 上方。
+	if d := now - p.Ts; d > allow || d < -allow {
+		return "", false, &ClockSkewError{Offset: d, Allow: allow}
 	}
 	if p.N == "" {
 		return "", false, errors.New("敲门 nonce 缺失（重放被拒）")

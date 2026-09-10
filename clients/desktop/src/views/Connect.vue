@@ -297,6 +297,12 @@ const form = reactive({ username: 'li.fang', password: '', mfaCode: '', director
 /** 可选认证域（只在配了 ≥2 个外部认证源时非空）。取不到不阻断登录——单源部署本来就该是空的。 */
 const domains = ref<AuthDomainOption[]>([]);
 async function loadDomains(): Promise<void> { domains.value = await fetchAuthDomains(); }
+/* 只要登录表单要露面就拉一次域清单。
+   ★绑 authedNow 而不是只在 onMounted 里拉：令牌存在 localStorage，重开 app 是直接落在
+   已登录态的，本视图并不会在「点退出登录」之后重新 mount——只在 mount 时拉的话，
+   那条路径上 domains 恒为空数组，下拉整个不出现，人又回到"后端让我选、而我无处可选"的原状。
+   ★immediate 覆盖首次进入未登录态的情形（此时 onMounted 里那次已经多余，故不再写）。 */
+watch(authedNow, (v) => { if (!v) void loadDomains(); }, { immediate: true });
 const needMfa = ref(false);
 const needTotp = ref(false);
 const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOTP 第二回合凭它绑定账号
@@ -822,12 +828,9 @@ onMounted(async () => {
   // 那一行会永远显示「—」，而重开 app 的人反倒看得到——一个只在部分路径上生效的显示项，
   // 正是本项目要消灭的那类静默偏差。
   if (isTauri) void controlCaInfo().then((v) => { controlCa.value = v; });
-  if (!authedNow.value) {
-    // 认证域清单只在登录页用得上，登录之后不必再拉。不 await：拿不到就是空数组，
-    // 登录表单照常可用（单目录部署本来就该是空的）。
-    void loadDomains();
-    return;
-  }
+  // 认证域清单不在这里拉：它绑在 authedNow 上（见上方 watch），否则「已登录态启动 →
+  // 点退出登录」这条路径上永远拉不到。
+  if (!authedNow.value) return;
   // 令牌存在 localStorage：重开 app 是直接落在已登录态的，登录那条路径根本不跑。
   // 少了这一句，只有"当次输过密码"的人才看得到新版提示，而常驻用户几乎从不重新登录。
   void checkUpdate();

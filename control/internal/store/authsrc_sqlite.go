@@ -9,6 +9,8 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+
+	"baidi.dev/control/internal/auth"
 )
 
 const authSrcCols = `id,name,kind,enabled,priority,config,created_at,updated_at`
@@ -22,6 +24,9 @@ func (s *SQLiteStore) scanAuthSource(row interface{ Scan(...any) error }) (AuthS
 }
 
 // AuthSources 返回全部认证源，按 priority 升序（本地目录恒排最前）。
+//
+// ★这个顺序是**展示顺序**，不是询问顺序：登录只问 `api.routeDirectory` 挑中的那一个源。
+// 它的可见效果是列表卡片、身份源选项卡与登录页认证域下拉的排列，见 AuthSourceRec.Priority。
 func (s *SQLiteStore) AuthSources(ctx context.Context) ([]AuthSourceRec, error) {
 	rows, err := s.db.QueryContext(ctx,
 		`SELECT `+authSrcCols+` FROM auth_sources ORDER BY (kind='local') DESC, priority, id`)
@@ -324,6 +329,62 @@ ON CONFLICT(source_id,subject) DO UPDATE SET user_id=excluded.user_id, username=
 		return Credential{}, err
 	}
 	return Credential{ID: id, Name: name, Account: account, Role: "user", Status: "active", PassHash: ""}, nil
+}
+
+// SetExternalPwStrength 落一次「外部口令认证成功」判出的强度标记（FR-AUTH-21，wave11 行动 8-③）。
+//
+// # 为什么外部账号需要单独一条写口
+//
+// `users.pw_strength` 原本只有两个写值方——自助改密与建号/重置（`SetUserPassword`），
+// 而外部目录账号**这两条都走不到**：`BindExternalUser` 写 `pass_hash=''`，`pw_strength`
+// 留在补列回填的 `unknown` 上且此后永不更新。于是认证策略的「弱密码」增强规则
+// （判据 `pw_strength='weak'`）**对全部外部目录账号恒不命中**——一个把 AD 口令设成
+// `abc123` 的人不会被要求二次认证，而管理员在策略页上看到那条规则是「已启用」的。
+// PRD FR-AUTH-21 原文要求这条规则判的正是第三方认证服务器用户的登录口令。
+//
+// # 能判出来的只有口令认证源
+//
+// LDAP/AD/RADIUS 是**口令**认证源：明文由客户端提交给白帝，白帝拿它去 bind / 发
+// Access-Request，所以「认证成功那一刻」是明文唯一可得的时刻（与 auth/strength.go
+// 头部那段推理同构：库里只有 bcrypt 哈希时判不了）。OIDC 这类重定向式登录白帝
+// **从头到尾看不到口令**，那种账号只能停在 `unknown`——不可判定不填好值，也不填坏值。
+//
+// # 只落强度标记，绝不落外部口令的任何形式
+//
+// 本函数只写 `pw_strength` 这一列。**不写 pass_hash**（哪怕是哈希）：外部账号
+// `pass_hash` 恒空是一道闸（见 BindExternalUser 的注释），填上它等于让认证源被停用
+// 之后那个账号退回成"某个本地口令也能登录"，而且会让 `guardLocalCredentialForAdmin`
+// 判「是不是外部账号」的判据（`PassHash == ""`）整个失效。
+//
+// # 三条 WHERE 条件各挡一种错法
+//
+//  1. `EXISTS(auth_source_bindings)`——只允许改**有外部绑定**的行。这条不是可有可无的
+//     防御：登录链路上的账号名来自外部目录的 username（撞名时才加源后缀），万一
+//     调用点传错，一个纯本地账号的强度标记会被外部口令的判定结果覆盖。
+//  2. 账号匹配用 `lower(trim())`——与 `Credential` 的取数口逐字同款，否则大小写不同的
+//     一次登录会静默更新 0 行（`RowsAffected` 没人看，等于回到"永不命中"）。
+//  3. **只收紧不放宽**：本次判 `weak` 无条件写；判 `strong` 时，若该行**同时还有本地
+//     口令哈希**且已标 `weak`，则不覆盖。理由是「走完补救路径」的账号
+//     （管理员为外部绑定账号重置过本地口令）**同时持有两把口令**，任何一把弱都该命中
+//     弱密码规则；用外部那把强口令去把标记刷成 strong，等于让一把仍然可用的弱本地
+//     口令从策略视野里消失——fail-open 方向，且页面上看不出来。
+//     纯外部账号（`pass_hash=''`，唯一口令就是外部那把）不受这条约束，双向如实更新，
+//     否则用户在目录侧把弱口令改强之后，白帝这边会永远停在 weak 且无人能清。
+func (s *SQLiteStore) SetExternalPwStrength(ctx context.Context, account, strength string) error {
+	if strength != auth.PwWeak && strength != auth.PwStrong {
+		// 只接受判得出来的两态。`unknown` 由补列回填负责，不该从这条路径写进来——
+		// 让它进来就等于允许"认证成功了却把标记擦回未知"，那是一次静默的降级。
+		return fmt.Errorf("外部口令强度标记取值非法：%q", strength)
+	}
+	key := strings.ToLower(strings.TrimSpace(account))
+	tighten := strength == auth.PwWeak
+	_, err := s.db.ExecContext(ctx, `
+UPDATE users SET pw_strength=?
+ WHERE lower(trim(account))=?
+   AND EXISTS (SELECT 1 FROM auth_source_bindings b WHERE b.user_id = users.id)
+   AND (? OR COALESCE(pass_hash,'')='' OR COALESCE(pw_strength,'')<>?)`,
+		strength, key, tighten, auth.PwWeak)
+	return err
 }
 
 // extGroupID 外部组的确定性 id：gext-<源 id 清洗>-<sha256(组名小写) 前 10 位>。

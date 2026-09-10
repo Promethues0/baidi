@@ -28,7 +28,13 @@
           --><template v-if="sources.length"> · 外部目录已绑定 <b>{{ totalBoundExternal }}</b> 个账号</template>
           <!-- "已绑定账号"= auth_source_bindings 的真实条数（外部用户登录过一次即建绑定），
                不是目录纳管用户数——后者要全量遍历 LDAP，白帝没有那个能力。 -->
-          <span class="bd-srchint">登录按「本地目录 → 外部源（按优先级）」依次询问</span>
+<!--
+            ★这句话曾经是「登录按『本地目录 → 外部源（按优先级）』依次询问」，而"依次询问"
+            在 wave8 认证域路由落地时就被删掉了（api.routeDirectory 返回值长度恒 ≤1）。
+            留着它的后果不只是文案陈旧：管理员会据此以为"把某个源的优先级调小 = 让它先被问到"，
+            于是去调一个对登录判定毫无影响的旋钮，而真正决定问谁的是用户在登录页选的认证域。
+            -->
+          <span class="bd-srchint">登录先查本地目录；未命中则只问<b>用户选定的那一个认证域</b>——一次登录只把口令交给一台服务器</span>
         </div>
         <button class="bd-btn" @click="openSrcCreate"><icon-plus />接入认证源</button>
       </div>
@@ -591,9 +597,22 @@
 
         <div class="bd-srcform__row bd-srcform__row--inline">
           <a-switch v-model="srcForm.enabled" /><span>启用（参与登录）</span>
-          <span class="bd-srcform__pri">优先级
+          <!--
+            ★正名，不是删（wave11 行动 8-④）。这个旋钮曾叫「优先级」，语义是"多个源时先问谁"；
+            wave8 认证域路由落地后**那个行为整个不存在了**（routeDirectory 返回值长度恒 ≤1，
+            一次登录只问用户选定的那一个域）。但它没有变成纯装饰——后端 ORDER BY 仍在读它，
+            可见效果是本页卡片、用户目录页的身份源选项卡、以及**登录页认证域下拉**的排列顺序，
+            多目录部署里"把最多人用的域排在第一个"是有意义的。
+            所以改名叫「排列顺序」并当面说清它管什么、不管什么——留着"优先级"三个字，
+            管理员会去调一个对登录判定毫无影响的数字来解决"某个域没被问到"的问题。
+          -->
+          <span class="bd-srcform__pri">排列顺序
             <a-input-number v-model="srcForm.priority" :min="0" :max="99" size="small" class="bd-num--pri" />
           </span>
+        </div>
+        <div class="bd-srcform__hint">
+          排列顺序只决定本页卡片、用户目录选项卡与<b>登录页认证域下拉</b>的先后（小者靠前，本地目录恒排最前）。
+          它<b>不决定登录时先问哪个源</b>——一次登录只问用户选定的那一个认证域。
         </div>
 
         <!-- ── LDAP / AD ── -->
@@ -777,13 +796,14 @@
         </template>
 
         <!-- 外部身份准入。★这一段是真判定不是提示：自动建号的账号落进「外部目录」单元，
-             其父是根组织——把资源授权给根组织就把这批人全覆盖了。 -->
+             其父是根组织——把资源授权给根组织就把这批人全覆盖了。
+             ★新建认证源默认预选「需管理员批准」（见 ADMIT_NEW），编辑存量源则如实回显它当前的行为。 -->
         <template v-if="srcForm.kind !== 'local'">
           <div class="bd-srcform__sec">外部身份准入</div>
           <div class="bd-srcform__row"><label>未导入用户</label>
             <a-select v-model="admit.admitPolicy">
               <a-option value="auto">认证通过即自动建号</a-option>
-              <a-option value="approval">需管理员批准后才建号（推荐）</a-option>
+              <a-option value="approval">需管理员批准后才建号（推荐 · 新建默认）</a-option>
             </a-select>
           </div>
           <div v-if="admit.admitPolicy !== 'approval'" class="bd-srcform__warn">
@@ -1007,6 +1027,23 @@ const RAD_DEFAULT: RadiusForm = {
 };
 const rad = reactive<RadiusForm>({ ...RAD_DEFAULT });
 
+/* ── 外部身份准入的两个"默认"，刻意不是同一个（wave11 行动 8-②）──
+ *
+ * ADMIT_NEW  新建认证源时预选的值：**需管理员批准**（PRD FR-USER-13 的默认就是不允许）。
+ * ADMIT_EXISTING 编辑一条**存量**源、而它的 config 里根本没有 admitPolicy 这一项时的回显值：
+ *   auto——与后端 store.NormalizeAdmitPolicy 的归一结果逐字一致，页面显示的必须是它真实的行为。
+ *
+ * ★两者不能合并成一个常量。auto 那个缺省是 wave8 给**存量行**留的向后兼容（改成 approval
+ *   会把已经在用的目录用户当场挡在门外），而新建这一刻没有任何存量语义要兼容——默认就该是拒绝。
+ *   改造前两处共用 'auto'，于是页面自己把 approval 标成「（推荐）」却预选了不推荐的那一项：
+ *   接一个新 AD 域、一路下一步保存，该目录里**任何**能通过认证的条目（服务账号、承包商、
+ *   刚建的号）首登即获得白帝账号与门户会话，无审批。
+ * ★别顺手把 openSrcEdit 的回显也改成 approval：那会让一条实际在自动建号的存量源
+ *   在页面上显示成「需批准」，而保存之前它的行为一点没变。
+ */
+const ADMIT_NEW = 'approval' as const;
+const ADMIT_EXISTING = 'auto' as const;
+
 /** 一条 RADIUS 源当前是不是放弃了应答侧 Message-Authenticator 校验。
  *  ★判据与真正的执行方 api.radiusWaiverFromConfig **逐字同构**：只认真正的布尔，
  *  缺席 / null / 类型不对 / 整份 config 解不开一律 false（= 要求带该属性，收紧那一侧）。
@@ -1020,8 +1057,8 @@ function radiusWaiver(s: AuthSourceRec): boolean {
     return false;
   }
 }
-/* 准入设置（各类源共用）。默认 auto：存量配置没有这一项，缺省成 approval 会把人挡在门外。 */
-const admit = reactive<AdmitConfig>({ admitPolicy: 'auto' });
+/* 准入设置（各类源共用）。 */
+const admit = reactive<AdmitConfig>({ admitPolicy: ADMIT_EXISTING });
 const statusDisabledValues = ref<string[]>([]);
 
 /* 常见目录的状态属性预设。★这不是"帮你填个默认值"，是把各家的方言写在界面上——
@@ -1065,14 +1102,22 @@ function resetSrcForm() {
   assignFresh(ldap, { host: '', port: 0, tlsMode: 'ldaps', caCert: '', insecureSkipVerify: false, bindDn: '', baseDn: '', userFilter: '', usernameAttr: '' });
   assignFresh(oidc, { issuer: '', clientId: '', redirectUri: '', scopes: undefined, useUserInfo: false });
   assignFresh(rad, { ...RAD_DEFAULT });
-  assignFresh(admit, { admitPolicy: 'auto' });
+  // ★这里用 ADMIT_EXISTING（auto）而不是新建默认：resetSrcForm 是**两条路共用**的清场，
+  //   openSrcEdit 紧接着会用库里的值覆盖它，覆盖不到（config 里没有这一项）的那种情况
+  //   正是"存量行"，此时页面必须显示它真实的行为。新建那条路由 openSrcCreate 显式改写。
+  assignFresh(admit, { admitPolicy: ADMIT_EXISTING });
   statusDisabledValues.value = [];
   admitDomains.value = [];
   admitGroups.value = [];
   srcSecret.value = '';
 }
 
-function openSrcCreate() { resetSrcForm(); srcDrawer.value = true; }
+function openSrcCreate() {
+  resetSrcForm();
+  // 新建认证源默认「需管理员批准」，理由见 ADMIT_NEW / ADMIT_EXISTING 的注释。
+  admit.admitPolicy = ADMIT_NEW;
+  srcDrawer.value = true;
+}
 
 function openSrcEdit(r: AuthSourceRec) {
   resetSrcForm();
@@ -1087,8 +1132,9 @@ function openSrcEdit(r: AuthSourceRec) {
     if (r.kind === 'oidc') Object.assign(oidc, cfg);
     else if (r.kind === 'radius') Object.assign(rad, { ...RAD_DEFAULT, ...cfg });
     else Object.assign(ldap, cfg);
-    // ★准入设置缺省 'auto' 而不是留空：留空会让下拉显示未选中，与后端归一后的实际值不符。
-    admit.admitPolicy = cfg.admitPolicy === 'approval' ? 'approval' : 'auto';
+    // ★存量源缺这一项时回显 ADMIT_EXISTING（auto）而不是留空、也不是新建默认：
+    //   留空会让下拉显示未选中；显示成「需批准」则是替一条正在自动建号的源说了假话。
+    admit.admitPolicy = cfg.admitPolicy === 'approval' ? 'approval' : ADMIT_EXISTING;
     statusDisabledValues.value = Array.isArray(cfg.statusDisabledValues) ? cfg.statusDisabledValues : [];
     admitDomains.value = Array.isArray(cfg.allowedDomains) ? cfg.allowedDomains : [];
     admitGroups.value = Array.isArray(cfg.allowedGroups) ? cfg.allowedGroups : [];
@@ -1208,7 +1254,10 @@ async function saveSource() {
     const config = {
       ...base,
       ...(srcForm.kind === 'local' ? {} : {
-        admitPolicy: admit.admitPolicy ?? 'auto',
+        // ★兜底值仍是 ADMIT_EXISTING（auto）：这里是"表单里那一项莫名丢了"的分支，
+        //   它只可能发生在编辑存量源的路径上（新建那条由 openSrcCreate 显式置成 approval）。
+        //   把兜底改成 approval 等于一次编辑就悄悄改掉了这条源的准入语义。
+        admitPolicy: admit.admitPolicy ?? ADMIT_EXISTING,
         // RADIUS 拿不到邮箱：域白名单对它恒 fail-closed，后端保存即拒；表单里已禁用，这里不再带上。
         allowedDomains: srcForm.kind === 'radius' ? [] : admitDomains.value,
         allowedGroups: admitGroups.value

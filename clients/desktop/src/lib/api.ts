@@ -144,7 +144,36 @@ export interface PortalLoginResp {
   mustChangePassword?: boolean;
   /** 本回合第一因子来自外部认证源：后端不再校验旧口令（他不可能知道管理员设的**本地**旧口令）。 */
   skipOldPassword?: boolean;
+  /**
+   * 需要指定认证域（配了 ≥2 个外部认证源）。此时 `domains` 带回候选。
+   *
+   * ★不是"多一个可选项"——不选的话服务端**拒绝登录**：挨个去问等于把明文口令投递给
+   * 排在前面的每一台目录服务器（wave8 行动 12 的核心不变式「一次登录只把口令交给一台
+   * 服务器」）。桌面端此前既没有这两个字段、也没有那个控件，后端那句「请在下方选择所属
+   * 认证域」只能原样显示成一条错误，而**下方没有任何东西可选**——任何接了两个及以上
+   * 外部源的部署，桌面端外部目录账号 100% 登不进去。本地账号仍能登（登录先查本地哈希），
+   * 所以管理员自己试不出来。
+   */
+  needDirectory?: boolean;
+  domains?: AuthDomainOption[];
   reason?: string; token?: string; displayName?: string;
+}
+/** 登录页的认证域下拉项（GET /api/v1/auth/domains，免认证；只在 ≥2 个外部源时非空）。 */
+export interface AuthDomainOption { id: string; name: string; kind: string }
+
+/**
+ * 取可选认证域。**免认证**（登录页要在登录之前拿到它），单源部署恒回空数组。
+ *
+ * ★读失败不阻断登录：单目录部署本来就该是空的，把"拿不到列表"渲染成一条错误
+ * 只会让每个用户在登录页上先看见一句与他无关的红字。
+ */
+export async function fetchAuthDomains(): Promise<AuthDomainOption[]> {
+  try {
+    const r = await api<{ domains?: AuthDomainOption[] }>('/auth/domains');
+    return r.domains ?? [];
+  } catch {
+    return [];
+  }
 }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;

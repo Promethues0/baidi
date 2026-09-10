@@ -15,6 +15,7 @@ import (
 
 	"baidi.dev/control/internal/api"
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/pki"
@@ -295,7 +296,15 @@ func main() {
 
 	// 启动
 	go func() {
-		slog.Info("baidi-control starting", "addr", cfg.Addr, "env", cfg.Env, "version", api.Version)
+		bi := buildinfo.Current()
+		// ★启动日志里两个字段都打，且未注入时如实写"未注入"：
+		// 排查现场的第一句话就是"这台跑的是哪一版"，而把源码常量打出来会让人
+		// 对着一个与部署包毫无关系的数字排查。
+		slog.Info("baidi-control starting", "addr", cfg.Addr, "env", cfg.Env,
+			"version", bi.SemanticText(), "build", bi.BuildText())
+		if !bi.Injected() {
+			slog.Warn("⚠ 本进程未注入语义版本，升级包校验将一律拒绝", "处置", buildinfo.Note)
+		}
 		if err := httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			slog.Error("listen failed", "err", err)
 			os.Exit(1)

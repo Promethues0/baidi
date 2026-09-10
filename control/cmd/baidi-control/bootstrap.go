@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log/slog"
@@ -9,6 +10,7 @@ import (
 	"path/filepath"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
@@ -29,7 +31,31 @@ func runBootstrap() bool {
 		"离线签发 mTLS 客户端证书（值即证书 CN）：接入网关填网关 id（如 gw-1）；"+
 			"站点组网填 ipsec- 前缀；控制面温备节点填 standby- 前缀（主机按前缀分权）。写入 -out 后退出")
 	out := flag.String("out", "", "证书输出目录（与 -issue-gateway-cert 搭配）")
+	// -version 打印本二进制的版本身份后退出（**一行 JSON**）。
+	//
+	// ★为什么是 JSON 而不是人话：它有两个机器消费方——
+	//   ① 主机上的运维/部署脚本（"这台装的到底是哪个包"，改造前主机上没有任何版本戳）；
+	//   ② **备机的 baidi-standby**：它要回答"我这台机器上那份 baidi-control 是哪一版"，
+	//      而那正是切换那天真正会被启动的进程。人话格式一改，那条链就静默断了。
+	// 输出里不含任何配置或凭据，任何用户都能跑。
+	showVersion := flag.Bool("version", false, "打印版本身份（一行 JSON：semantic/commit/builtAt）后退出")
 	flag.Parse()
+
+	if *showVersion {
+		bi := buildinfo.Current()
+		b, err := json.Marshal(map[string]string{
+			"component": "baidi-control",
+			// 三个字段原样输出（**未注入即空串**）：在这里替换成"未注入"三个字，
+			// 读它的 baidi-standby 就会把那三个字当成一个版本号往上报。
+			"semantic": bi.Semantic, "commit": bi.Commit, "builtAt": bi.BuiltAt,
+		})
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "序列化版本身份失败："+err.Error())
+			os.Exit(1)
+		}
+		fmt.Println(string(b))
+		return true
+	}
 
 	if *gwID == "" {
 		return false

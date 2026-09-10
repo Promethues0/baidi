@@ -19,20 +19,50 @@ echo "==> 用 go：$("$GO" version) @ $GO"
 echo "==> 清理输出目录 $OUT"
 rm -rf "$OUT"; mkdir -p "$OUT/web" "$OUT/bin"
 
+# ── 版本身份：两个字段，都在这里注入 ────────────────────────────────────────
+#
+# BD_SEMVER —— **语义版本**（x.y.z）。单一真相来源是仓库根的 VERSION 文件，
+#   发布动作 = 改那个文件。升级判定（能不能升 / 是不是降级 / 组件一致性 / minSource）
+#   只认它，因为只有它能排序。
+# BD_BUILD  —— **构建标识**（git 短哈希 · 构建时间）。出事那天拿它去对代码：
+#   同一个 0.3.0 可以被构建一百次，其中九十九次含着不同的代码。
+#
+# ★为什么必须分成两个：改造前只有一个 `-X main.version=$BD_VERSION`，注进去的是
+#   `git rev-parse --short HEAD`。哈希 ParseVersion 必失败，于是**每一台按脚本装出来的
+#   网关**都被判成「版本将与控制面不一致，须同步升级」——控制台那一栏恒黄，
+#   组件一致性校验退化成一句永远为真的告警。
+# ★控制面此前根本注不进去：它是 `const Version = "0.3.0"`，而 `-ldflags -X` **对常量
+#   静默无效**（不报错、退出码 0，二进制里还是旧值）。于是「当前版本」与发布动作脱钩。
+#   两侧现在都注入 buildinfo/main 里的**变量**，未注入时如实报"未注入"而不是回落常量。
+# ★取不到时留空（不是 "dev"、不是 "0.0.0"）：任何非空缺省都是一句"我知道我是哪一版"
+#   的谎，而下游对空串有专门的三态处置。
+BD_SEMVER="${BAIDI_SEMVER:-$(tr -d ' \t\r\n' < "$ROOT/VERSION" 2>/dev/null || echo "")}"
+BD_COMMIT="${BAIDI_BUILD_COMMIT:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo "")}"
+BD_BUILT_AT="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+if [ -z "$BD_SEMVER" ]; then
+  echo "    ⚠ 读不到 $ROOT/VERSION：本次产物的语义版本将是「未注入」，升级包校验会一律拒绝（fail-closed）"
+fi
+echo "==> 版本身份：语义版本 ${BD_SEMVER:-未注入} · 构建 ${BD_COMMIT:-未注入} · ${BD_BUILT_AT}"
+
+# ★注入值里**绝不能有空格**：`-ldflags` 的内容是按空格分词的，
+#   `-X main.build=abc123 · 2026-09-10T…` 会被链接器当成多个参数而**直接报 usage 退出**
+#   （实测过，构建整个失败）。所以 commit 与 builtAt 各注一个变量，拼接放在 Go 里做。
+CTL_PKG="baidi.dev/control/internal/buildinfo"
+CTL_LDFLAGS="-s -w -X ${CTL_PKG}.semantic=${BD_SEMVER} -X ${CTL_PKG}.commit=${BD_COMMIT} -X ${CTL_PKG}.builtAt=${BD_BUILT_AT}"
+# 网关是另一个 Go module（baidi.dev/gateway），注的是它 main 包里的三个变量。
+GW_LDFLAGS="-s -w -X main.version=${BD_SEMVER} -X main.commit=${BD_COMMIT} -X main.builtAt=${BD_BUILT_AT}"
+
 echo "==> 构建 console（Vite）"
 ( cd "$ROOT/console" && (npm ci || npm install) && npm run build )
 cp -R "$ROOT/console/dist/." "$OUT/web/"
 
 echo "==> 交叉编译 baidi-control（linux/amd64，纯 Go 无 cgo）"
 ( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-control" ./cmd/baidi-control )
+    "$GO" build -trimpath -ldflags="$CTL_LDFLAGS" -o "$OUT/bin/baidi-control" ./cmd/baidi-control )
 
-# 网关版本号（编译期注入 main.version，随 mTLS 心跳上报控制面）：
-# 优先 BAIDI_VERSION，缺省取 git 短哈希；两者都取不到时保留源码缺省 "dev"。
-BD_VERSION="${BAIDI_VERSION:-$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo dev)}"
-echo "==> 交叉编译数据面 baidi-gateway（版本 ${BD_VERSION}）+ baidi-gmca（linux/amd64）"
+echo "==> 交叉编译数据面 baidi-gateway + baidi-gmca（linux/amd64）"
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    "$GO" build -trimpath -ldflags="-s -w -X main.version=$BD_VERSION" -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
+    "$GO" build -trimpath -ldflags="$GW_LDFLAGS" -o "$OUT/bin/baidi-gateway" ./cmd/baidi-gateway )
 ( cd "$ROOT/gateway" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
     "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-gmca" ./cmd/baidi-gmca )
 
@@ -45,9 +75,12 @@ echo "==> 交叉编译站点组网网关 baidi-ipsec（linux/amd64）"
 # 控制面温备节点（PRD 15.5）。同 baidi-ipsec：无条件编译、装不装由部署时决定。
 # ★它同时是**提升流程的执行方**——promote-standby.sh 靠它校验备份完整性与解包。
 # 产物里没有它的话，系统页上那条切换命令就是一句谎话（脚本第一步就会退出）。
+# ★它与 baidi-control 必须注入**同一组**版本身份（同一次构建、同一个 CTL_LDFLAGS）：
+# 备机每轮同步会回报「我这台机器上 baidi-control 是哪一版」，主机据此判断切换后
+# 会不会跨版本恢复。两个二进制的版本在这里就分了家的话，那条判定从源头起就是假的。
 echo "==> 交叉编译控制面温备节点 baidi-standby（linux/amd64）"
 ( cd "$ROOT/control" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-    "$GO" build -trimpath -ldflags='-s -w' -o "$OUT/bin/baidi-standby" ./cmd/baidi-standby )
+    "$GO" build -trimpath -ldflags="$CTL_LDFLAGS" -o "$OUT/bin/baidi-standby" ./cmd/baidi-standby )
 
 # ACME 客户端 lego（只有 WITH_ACME_IP_CERT=1 的部署才用得到，见 config.env.example）。
 #
@@ -92,6 +125,52 @@ else
   # 不打印成 ✗/⚠：这不是失败，是这次部署压根没要这个可选组件。
   echo "==> 不携带 ACME 客户端 lego（WITH_ACME_IP_CERT!=1）"
 fi
+
+# ── 版本身份注入的构建期自检 ────────────────────────────────────────────────
+#
+# ★为什么必须自检：`-ldflags -X` 打错包路径、或把目标从 var 改成 const，
+#   **链接器都不报错、退出码也是 0**——注了个寂寞而构建全绿。这正是改造前
+#   `const Version` 那半年里发生的事：脚本里没写注入，页面上永远显示 0.3.0，
+#   谁也看不出"当前版本"其实与部署包无关。
+#   所以判据只能是**跑一遍产出的二进制、看它自己报什么**，而不是看命令行拼对没拼对。
+#
+# 交叉编译的目标是 linux/amd64，构建机多半是 mac/arm——所以这里另编一份**本机架构**的
+# 二进制来跑 -version。它验的是「-X 的包路径与变量名对不对」，与目标架构无关。
+if [ -n "$BD_SEMVER" ]; then
+  echo "==> 自检：版本身份真的注进去了"
+  vprobe="$(mktemp -d)"
+  ( cd "$ROOT/control" && CGO_ENABLED=0 "$GO" build -ldflags="$CTL_LDFLAGS" -o "$vprobe/ctl" ./cmd/baidi-control )
+  ( cd "$ROOT/gateway" && CGO_ENABLED=0 "$GO" build -ldflags="$GW_LDFLAGS" -o "$vprobe/gw" ./cmd/baidi-gateway )
+  ctl_out="$("$vprobe/ctl" -version)"
+  gw_out="$("$vprobe/gw" -version)"
+  rm -rf "$vprobe"
+  case "$ctl_out" in
+    *"\"semantic\":\"$BD_SEMVER\""*) echo "    ✓ baidi-control: $ctl_out" ;;
+    *) echo "✗ baidi-control 的语义版本没注进去（期望 $BD_SEMVER，实际 $ctl_out）"; echo "  多半是 -X 的包路径写错了，或那个变量被改成了 const（对 const 注入静默无效）"; exit 1 ;;
+  esac
+  case "$gw_out" in
+    *"$BD_SEMVER"*) echo "    ✓ baidi-gateway: $gw_out" ;;
+    *) echo "✗ baidi-gateway 的语义版本没注进去（期望 $BD_SEMVER，实际 $gw_out）"; exit 1 ;;
+  esac
+  # 构建标识与语义版本是两个独立的注入点，各验各的——只验一个的话，
+  # 另一个哪天被写错也不会有人发现，而它正是出事那天用来对代码的那一个。
+  case "$gw_out" in
+    *"$BD_COMMIT"*) ;;
+    *) echo "✗ baidi-gateway 的构建标识没注进去（期望含 $BD_COMMIT，实际 $gw_out）"; exit 1 ;;
+  esac
+fi
+
+# 主机上的版本戳：`cat /opt/baidi/VERSION` 就能回答"这台装的是哪个包"。
+#
+# ★改造前主机上**没有任何版本戳**——版本只活在心跳报文与控制台页面里，
+#   而排查现场第一件事恰恰是 ssh 上去看这台机器装的是什么；控制面挂了、
+#   或正在切换温备的时候，页面本身就是不可用的。
+{
+  echo "semantic=${BD_SEMVER}"
+  echo "commit=${BD_COMMIT}"
+  echo "builtAt=${BD_BUILT_AT}"
+} > "$OUT/VERSION"
+echo "==> 已写版本戳 $OUT/VERSION（install-remote.sh 会装到 \$BD_PREFIX/VERSION）"
 
 echo "==> 携带部署脚本/模板"
 # 隐身规则集脚本随包走（WITH_STEALTH=1 时 install-remote.sh 会装到 $BD_PREFIX/bin）。

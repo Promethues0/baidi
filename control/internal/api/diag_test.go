@@ -37,6 +37,45 @@ func getDiag(t *testing.T, h http.Handler) map[string]any {
 	return out
 }
 
+// TestDiagVersionNotInjectedIsWarnNotPass 版本身份未注入时判 **warn**，且不许显示成任何数字
+// （wave11 行动 18-①）。
+//
+// 单测二进制不带 -ldflags，所以这里跑到的就是"未注入"那一支——这正是
+// `go run` / 手工 go build 起来的进程的真实形态。
+//
+// ★为什么是 warn 不是 skip：skip 的语义是"这个能力没部署"，而版本身份不是可选功能。
+// 一台生产机上跑着一份不知道自己是哪一版的二进制，是每套部署都该关心的事——
+// 升级判定、组件一致性、温备切换三件事的结论都建立在它上面。
+// ★为什么不能是 pass：那等于替一个来路不明的二进制背书。
+func TestDiagVersionNotInjectedIsWarnNotPass(t *testing.T) {
+	h := newTestServer(t)
+	out := getDiag(t, h)
+
+	c := diagCheck(t, out, "version")
+	if c["status"] != "warn" {
+		t.Fatalf("未注入版本应判 warn（不是 pass 也不是 skip），得到 %v", c["status"])
+	}
+	summary, _ := c["summary"].(string)
+	if !strings.Contains(summary, "未注入") {
+		t.Errorf("结论要说清是「未注入」：%q", summary)
+	}
+	// 处置必须能照做：只说"未注入"而不说怎么才能有，管理员唯一的选择是绕过它。
+	hint, _ := c["hint"].(string)
+	if !strings.Contains(hint, "build.sh") {
+		t.Errorf("处置建议要指向 deploy/build.sh：%q", hint)
+	}
+	// 顶部那个 version 字段是**语义版本原文**：未注入即空串，展示层自己去渲染「未注入」。
+	// 在这里塞中文串的话，任何读它的机器消费方都会把那三个字当成版本号解析。
+	if v, ok := out["version"].(string); !ok || v != "" {
+		t.Errorf("未注入时 version 必须是空串（机读三态），得到 %#v", out["version"])
+	}
+	// 而 metric / items 是给人看的，那里才写「未注入」。
+	metric, _ := c["metric"].(string)
+	if !strings.Contains(metric, "未注入") {
+		t.Errorf("展示用的 metric 要如实写「未注入」：%q", metric)
+	}
+}
+
 // 无网关注册时：stealth 必须 warn「隐身状态未知」，绝不能凭种子拓扑报 pass。
 func TestDiagStealthWarnWithoutGateways(t *testing.T) {
 	h := newTestServer(t)

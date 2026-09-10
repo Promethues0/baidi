@@ -103,10 +103,12 @@ graph TB
     subgraph CT["baidi-control（唯一信任根）"]
         K1["Ed25519 会话密钥<br/>BAIDI_JWT_KEY"]
         K2["Ed25519 敲门密钥<br/>BAIDI_JWT_KNOCK_KEY"]
+        K3["Ed25519 隧道票据密钥<br/>BAIDI_JWT_TUNNEL_KEY"]
         CA1["内部 CA (P-256)<br/>BAIDI_PKI_DIR"]
     end
     subgraph GW["baidi-gateway（被保护方）"]
-        P2["knock 公钥 .pub<br/>（只有这一把）"]
+        P2["knock 公钥 .pub<br/>（SPA 敲门口）"]
+        P3["tunnel 公钥 .pub<br/>（L4 隧道口）"]
         MC["mTLS 客户端证书"]
         SC["隧道自签证书"]
     end
@@ -120,6 +122,7 @@ graph TB
 
     K1 -->|签| TK
     K2 -->|签敲门令牌| P2
+    K3 -->|签隧道身份票据| P3
     CA1 -->|签| MC
     SC -->|指纹经 control 转发| PIN
     SM -->|只管 TLCP 隧道| SC
@@ -132,8 +135,9 @@ graph TB
 
 | 不变量 | 实现位置 | 为什么 |
 |---|---|---|
-| **网关只装 knock 公钥** | [main.go `-jwt-pubkey`](../gateway/cmd/baidi-gateway/main.go) | 会话令牌用另一把密钥签，其 kid 在网关侧查不到 → **从密码学上就敲不开门**。`spa.checkKnock` 的 `use` 语义闸退化为纵深，而非唯一防线 |
-| **敲门与 Web 票据各一把密钥** | [keys.go](../control/internal/auth/keys.go)、[splitkeys_test.go](../control/internal/auth/splitkeys_test.go) | 数据面有两条入场路径（UDP 敲门 / L7 票据），各只装一把公钥：拿错路径的票据在对面**连签名都验不过**，`use` 语义闸退化为纵深而非唯一防线 |
+| **网关的 SPA 口只装 knock 公钥** | [main.go `-jwt-pubkey`](../gateway/cmd/baidi-gateway/main.go) | 会话令牌用另一把密钥签，其 kid 在网关侧查不到 → **从密码学上就敲不开门**。`spa.checkKnock` 的 `use` 语义闸退化为纵深，而非唯一防线 |
+| **敲门 / 隧道 / Web 票据各一把密钥** | [keys.go](../control/internal/auth/keys.go)、[splitkeys_test.go](../control/internal/auth/splitkeys_test.go) | 数据面有三条入场路径（UDP 敲门 / L4 隧道前导票据 / L7 票据），各只装一把公钥：拿错路径的票据在对面**连签名都验不过**，`use` 语义闸退化为纵深而非唯一防线。隧道票据尤其不能与敲门合用一把——敲门令牌是每 15s 向全部落点广播的 UDP 明文包，截获门槛低得多 |
+| **L4 隧道连接自带身份** | [proxy/tunnelid.go](../gateway/internal/proxy/tunnelid.go)、[sharedip_test.go](../gateway/internal/proxy/sharedip_test.go) | 隧道此前**没有第二个身份来源**：TLS/TLCP 都不设 `ClientAuth`、前导只有 `CONNECT <资源id>`，于是 `proxy.handle` 只能按源 IP 反查放行表——门槛塌成"共享源 IP"。现在身份来自前导上的 `use=tunnel` 票据，放行表退回纯端口闸（`Allowed(ip)` 只回 ok），另加一道 `AllowedFor(ip, 账号)` 复核 |
 | **数据面没有 Sign 函数** | [gateway/internal/auth](../gateway/internal/auth/) | 阶段 4 主动删除。要加签发就是给被保护方发钥匙——不加 |
 | **公钥走部署期文件分发，不做 JWKS 端点** | 部署脚本 | 在线端点若自身即信任根，会构成循环论证 |
 | **配了 `-control` 就必须配 mTLS 证书** | [main.go](../gateway/cmd/baidi-gateway/main.go) | 机器身份只有一条路，没有回退 |
@@ -162,11 +166,13 @@ graph TB
 |---|---|---|---|
 | 1 | **敲门令牌签发闸** | [api.go `handleKnockToken`](../control/internal/api/api.go) | 强制下线名单 / 账号禁用锁定 / 终端合规（posture）三项任一不过就不发令牌 |
 | 2 | **SPA 单包授权** | [spa.go `checkKnock`](../gateway/internal/spa/spa.go) | 令牌签名、`use=knock`、jti 去重、TTL 上界、nonce 防重放；未通过 → 网关对该 IP 保持隐身 |
-| 3 | **放行窗口** | [spa.go `Allowlist`](../gateway/internal/spa/spa.go) | 源 IP 不在 30s 放行窗口内 → 隧道端口直接断连 |
+| 3 | **放行窗口 + 连接身份** | [spa.go `Allowlist`](../gateway/internal/spa/spa.go)、[proxy/tunnelid.go](../gateway/internal/proxy/tunnelid.go) | ①**端口闸**：该源 IP 上没有任何 30s 放行窗口 → 隧道端口直接断连；②**身份**：前导上的 `use=tunnel` 票据验不过 / 没带 → 断连；③**窗口复核**：票据自证的那个账号自己没从这个源地址敲开过窗 → 断连 |
 | 4 | **隧道证书钉扎** | [dataplane.go](../gateway/internal/dataplane/dataplane.go) | 对端不是那台网关 → 握手失败（防中间人） |
 | 5 | **资源鉴权** | [registry.go `Authorize`](../gateway/internal/resource/registry.go) | 资源 id 的 AllowRoles/AllowUsers 不命中 → 断连 |
 
 关键：**接入剖面不是授权凭据**。它只是"路由提示"，告诉客户端哪些地址该进隧道。即使剖面被完整泄露，攻击者也拿不到任何访问权 —— 第 5 道门在网关侧独立重新鉴权（自检第 ⑧ 步专门验证这一点）。
+
+> **第 3 道门为什么是三小步（wave11 行动 3）**：它原来只有第 ① 步，而 `Allowlist` 以源 IP 为唯一键、`Allow()` 整条覆盖 `user`，`proxy.handle` 又拿它反查身份。于是门槛不是"持有白帝账号"而是"**共享源 IP**"：企业 NAT / CGNAT / 公共 Wi-Fi / 同公网 IP 的云主机上，只要有人处在放行窗内，同出口任意主机直连隧道口即继承其全部 `AllowUsers`、JIT 授予与风险降权结论，而审计里记的是那个无辜者的账号；`RevokeUser(A)` 在末次敲门者是 B 时还整条匹配不上（**强制下线漏撤窗**）。上面第五节那句"即使剖面被完整泄露，攻击者也拿不到任何访问权"在那个形态下并不成立——不需要剖面，只要与某个在线用户共用出口。现在放行表的键是 `(源 IP, 账号)`，身份只来自票据，②③ 缺一不可：只有 ② 的话，被撤窗的账号仍能凭手里没过期的票借别人的窗口新建连接；只有 ③ 的话就退回了原缺陷。
 
 ### 浏览器走的是另一条入场路径（同样五道，但第 2~4 道换了）
 
@@ -360,6 +366,7 @@ sequenceDiagram
 | **隧道证书钉扎（防中间人）** | 自检 ⑤⑥；[pin_test.go](../gateway/internal/dataplane/pin_test.go) |
 | **多资源路由到不同后端** | 自检 ⑦：两个资源落到两个可区分的后端 |
 | **资源级鉴权（越权拒绝）** | 自检 ⑧ |
+| **L4 隧道连接自带身份（同出口两人各是各的）** | [proxy/tunnelid.go](../gateway/internal/proxy/tunnelid.go)、[proxy/sharedip_test.go](../gateway/internal/proxy/sharedip_test.go)（同一源 IP 上两个账号交替敲门：各自只拿到自己的授权、审计各记各的、撤 A 不影响 B 且 A 真的进不来）、[spa/sharedip_test.go](../gateway/internal/spa/sharedip_test.go)、[api/tunnelticket_test.go](../control/internal/api/tunnelticket_test.go)、[dataplane/tunnelticket_test.go](../gateway/internal/dataplane/tunnelticket_test.go)（前导真的带上票据） |
 | utun 真流量接管 + gVisor netstack | [dataplane.go](../gateway/internal/dataplane/dataplane.go)（需 root，自检不覆盖建卡） |
 | **网关多活 + 客户端故障转移（有序落点清单 · 逐网关指纹 · 切换可见）** | 自检 ②（单数 `gateway` 与清单首项一致）；[clientprofile.go `profileGateways`](../control/internal/api/clientprofile.go)、[api/failover_test.go](../control/internal/api/failover_test.go)、[dataplane/failover.go](../gateway/internal/dataplane/failover.go)、[dataplane/failover_test.go](../gateway/internal/dataplane/failover_test.go)（两张不同自签证书跑真 TLS 握手：首选死掉切备用、指纹取错必须被拒） |
 | 网关 mTLS 机器身份 + 即刻吊销 | [mtls.go](../control/internal/api/mtls.go)、[gwidentity_test.go](../control/internal/api/gwidentity_test.go) |
@@ -1476,6 +1483,32 @@ Android 10 起禁止 `untrusted_app` 绑 netlink 路由套接字，**AOSP 既定
 
 - **没有趋势图**。账号防线的历史趋势理论上可从 `audit_log` 算（它带 `ts`），但本轮只做了「窗口 + 口径标注」，没做时间序列。终端防线连数据源都没有（`posture_reports` 只存最新一份），那一条如实标注为当前状态。
 - **`/diag` 的访问威胁压力固定用默认 24h**：那项看的是「此刻的压力」，不该随管理员在概览页上选的窗口变化。
+
+### ✅ L4 隧道连接自带身份（wave11 行动 3：从「按源 IP 反查」到「票据自证 + 窗口复核」）
+
+改造前隧道上**没有第二个身份来源**：TLS/TLCP 两条监听都不设 `ClientAuth`，前导只有 `CONNECT <资源id>`，敲门令牌只走 UDP 口。`proxy.handle` 每条 TCP 流现查 `al.Allowed(ip)` 取身份，而 `spa.Allowlist` 以**源 IP 为唯一键**、`Allow()` 整条覆盖 `user`。于是：
+
+- 门槛不是"持有白帝账号"而是"**共享源 IP**"。企业 NAT / CGNAT / 咖啡厅 / 酒店 / 同公网 IP 的云主机上，只要有人处在 30s 放行窗内，同出口任意主机直连隧道口即继承其全部 `AllowUsers`、JIT 授予与风险降权结论，**审计里记的是那个无辜者的账号**；
+- 两个账号还会随各自 15s 保活来回刷写身份，`Sessions()`/`ActiveCount()`/`Touch` 全部把同出口两人混成一条（`ActiveCount` 数的是源 IP 数，却被上报成「已授权客户端数」）；
+- 连带旁路强制下线：`RevokeUser(A)` 按 `entry.user` 匹配，末次敲门者是 B 时**整条不匹配 → 漏撤窗**；一旦匹配上又会把 B 的窗口一起删掉（**误伤**）。两种错法方向相反、同时存在、都不报错。
+
+**能声称**：
+
+- **形态照抄 B/S 那条已验证的链，不发明新机制**：控制面在 `handleKnockToken` **跑完五道闸之后、同一次调用**附发 `use=tunnel` 短时效票据（第四把密钥 `BAIDI_JWT_TUNNEL_KEY`）→ 客户端挂在前导上 `CONNECT <资源id> <票据>` → 网关 `-jwt-tunnel-pubkey` 只装 tunnel 那把公钥验签取身份。`gateway/internal/auth` **仍然没有 Sign**。
+- **`use` 语义闸从三向扩到四向**：敲门口拒 tunnel/web、L4 拒 knock/web、L7 拒 knock/tunnel、控制面入站三者全拒（`auth.Middleware` 的默认拒绝分支）。四条路径各装一把密钥，拿错票在对面**连签名都验不过**。
+- **放行表的键改成 `(源 IP, 账号)`**，`Allowed(ip)` 收窄成只回 `ok`（纯端口闸）。`RevokeUser`/`Reap`/`Sessions`/`ActiveCount`/`Touch`/`-pf` 回收全部按新键改对：撤谁就只撤谁，`ActiveCount` 从此名副其实。
+- **票据之外还有一道 `AllowedFor(ip, 账号)` 复核**：票据证明"控制面刚放行过这个人"，复核证明"这个人自己从这个源地址敲开过窗"。少了它，被强制下线撤窗的账号仍能凭手里没过期的票，借同出口任何人的窗口继续新建连接。
+- **绝不接受客户端自报账号名**（哪怕再校验「该账号在本 IP 有窗口」）。身份只从签名验得过的票据里来。
+- **逃生舱 `BAIDI_GW_TUNNEL_ID_STRICT=0` 但默认严格**，且严格模式下没配公钥直接**拒绝启动**（不会静默退回旧信任模型）。逃生舱开着时：启动一条 WARN + 一条开机回执入审计；**每一次回落都留痕**（`tunnel-idfallback`，verdict=allow、不进攻击源统计——归因是我方配置不是攻击者，同 `proxy-capacity`）；**同源多账号仍然拒**（`proxy-idambig`，不可判定 ≠ 随手挑一个）。
+
+**不能声称 / 边界**：
+
+- **票据不做一次性**（不校验 jti、不做去重缓存），这是刻意的：一次性意味着每条业务 TCP 流都要打一次控制面，而隧道是逐流建连的；叠加严格敲门那条 fail-closed 纪律（控制面不可达超过 30s 窗口自然关闭），控制面一抖动就不是"下一轮重试"而是**当场断流**。理由写在 `proxy.checkTunnelTicket` 上，就是为了挡住下一个"照抄 web 票据"的人。
+- **票据不绑网关**（无 `gw`）。控制面不知道客户端会拨哪台落点（剖面给的是有序清单，客户端每轮敲全部落点、拨得通哪台算哪台），绑一个猜的值会让故障转移在切换那一刻被票据自己挡住；而向客户端要一个"我要连哪台"再照签，等于让被判定方自报判据——那是假闸。web 票据能绑 `gw` 是因为它的一次性去重需要网关维度，这条路没有一次性。
+- **票据里没有设备维度**。「按设备区分能访问哪些资源」仍需把指纹贯穿数据面，本波未做（与上文授信终端那节同一条边界）。
+- **`-allow-no-preamble` 与严格模式互斥**：无前导的连接结构上带不了票据，那条兼容路径只在 `BAIDI_GW_TUNNEL_ID_STRICT=0` 时可达（网关启动时当面说明）。`gateway/demo.sh` 第 ③ 步用 curl 直打隧道口，故两个开关一起关。
+- **升级顺序有硬要求：先控制面 → 再客户端 → 最后网关**。反过来的话，还没带票据的存量终端会在严格模式下被整批拒绝。写在 `-jwt-tunnel-pubkey` 的 flag 说明与 `deploy/install-remote.sh` 生成的网关 env 注释里。
+- **源 IP 相等仍是隐含前提**：敲门走 UDP、隧道走 TCP，端口闸与窗口复核都按网关看到的源地址匹配。某些 CGNAT 会给同一台机器的 UDP 与 TCP 分配不同出口地址——那种网络下客户端本来就敲不开门（改造前后同款），不是本次引入的。
 
 ### ✅ C/S 隧道放行留痕（wave8 行动 8：审计从「只有拒绝」到「拒绝 + 放行」）
 

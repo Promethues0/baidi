@@ -65,7 +65,34 @@ type IpsecSAState struct {
 	// ★把 NO_PROPOSAL_CHOSEN 这类码点直接甩给用户等于没说，必须带上「谁不接受什么」。
 	LastError   string `json:"lastError"`
 	LastErrorAt int64  `json:"lastErrorAt"`
+
+	// KernelForward 承载网关上、该站点地址族对应的**内核 IP 转发开关**实测值。
+	// 取值 on / off / unknown / n-a，**空串 = 网关没报**（旧版本网关）。
+	//
+	// ★它是**回执不是判定**：转发关着的隧道确实建起来了，只是没有流量能走上去，
+	// 所以它绝不参与 State 那五态。存在的理由是那种失效在别处一个字都看不见——
+	// IKE 全绿、SA 倒计时正常、界面「已建立」，只有 rx/tx 恒为 0，
+	// 连 ESP 的丢弃计数都是 0（包在内核路由那层就没了，ESP 引擎从没见过它）。
+	//
+	// ★「空串」与 unknown 必须分开呈现：前者是"我们没问过"（该升级网关），
+	// 后者是"问了但答不上来"（该去机器上看看），两者的下一步动作不同。
+	KernelForward string `json:"kernelForward,omitempty"`
+	// KernelForwardDetail 探测过程的说明（读哪个文件失败、n/a 的具体理由）。
+	// 「不可判定」不带原因等于没说。
+	KernelForwardDetail string `json:"kernelForwardDetail,omitempty"`
 }
+
+// 内核 IP 转发回执的取值（与 gateway/internal/ipsec 的四个常量一一对应）。
+//
+// ★`n-a` 这里刻意不写成数据面那侧的 `n/a`：它要进 URL 查询串与 CSS class 名，
+// 斜杠在这两处都要转义。转换只在 normalizeIpsecForward 一处做（网关报什么都收得住），
+// 别在别的地方再写一份映射。
+const (
+	IpsecForwardOn      = "on"
+	IpsecForwardOff     = "off"
+	IpsecForwardUnknown = "unknown"
+	IpsecForwardNA      = "n-a"
+)
 
 // IpsecSecret 一条站点 PSK 的**密文行**。明文只在 API 层短暂存在，绝不进 store。
 //

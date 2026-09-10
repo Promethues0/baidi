@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/json"
@@ -8,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/netip"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -41,6 +43,18 @@ type ipsecSiteDTO struct {
 	// ★这一格是专门用来对付静默失效的：未指派网关的站点在协议上完全正常、
 	// 只是没有任何网关会去承载它，界面上永远停在 connecting 且零报错。
 	ConfigWarning string `json:"configWarning,omitempty"`
+	// Forward 承载网关的**内核 IP 转发实测回执**（见 ipsec_forward.go）。
+	// nil = 这条站点还没有任何网关回报过（那时站点行上已有更强的提示）。
+	// ★它与 SA.State 并列而不是并进去：转发关着的隧道确实建起来了，
+	// 只是没有流量能走上去，两件事的下一步动作完全不同。
+	Forward *IpsecForward `json:"forward,omitempty"`
+	// PeerConflict 「同一承载网关上撞了对端 IP」。
+	//
+	// ★与 ConfigWarning 分成两个字段，是因为它们的**成因时间**不同：
+	// ConfigWarning 里那几条（未指派网关 / PSK 没配 / 套件不支持）是这条站点自己的问题，
+	// 而这一条要看**别的站点**才成立，且入口现在已经拒收——能出现在这里的只有存量数据。
+	// 合成一句的话，控制台想单独把它标红都做不到。
+	PeerConflict string `json:"peerConflict,omitempty"`
 }
 
 // fillLegacy 由实测运行态**现算** status/rxBytes/txBytes/lastUp 四个兼容字段。
@@ -118,14 +132,85 @@ func (s *Server) handleIpsec(w http.ResponseWriter, r *http.Request) {
 			latest[st.SiteID] = st
 		}
 	}
+	// 同一承载网关上的重复对端：入口现在拒收，但**存量库里可能已经有**。
+	// 它必须在读端补报，否则那对站点会一直安静地互相打架（见 ipsecDuplicatePeers）。
+	dups := ipsecDuplicatePeers(sites)
 	out := make([]ipsecSiteDTO, 0, len(sites))
 	for _, site := range sites {
 		d := ipsecSiteDTO{IpsecSite: site, SA: latest[site.ID]}
 		d.ConfigWarning = ipsecConfigWarning(site)
+		d.PeerConflict = dups[site.ID]
+		d.Forward = ipsecForwardReceipt(latest[site.ID])
 		d.fillLegacy()
 		out = append(out, d)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"sites": out, "states": states})
+}
+
+// ipsecDuplicatePeers 找出「同一承载网关 + 同一对端 IP」的重复站点，
+// 返回 站点 id → 该站点要挂的告警。没有重复时返回空 map。
+//
+// ★判据必须是 (gatewayId, 对端 IP) 这一对，两半都不能少：
+//   - 少了 gatewayId：`ipsec-e2e.sh` 里两条站点的 peer 都是 127.0.0.1、分属两台网关，
+//     它们**不冲突**（每台网关只装载自己名下的站点）。按 IP 一刀切会误伤这种正常拓扑。
+//   - 少了「只比 IP」：数据面 `ike.findSiteByPeer` 刻意**不比端口**（NAT 后的源端口
+//     是随机的），所以 `1.2.3.4:500` 与 `1.2.3.4:4500` 在响应方眼里是同一个对端。
+//     入口按带端口的字符串去重的话，管理员改个端口就能绕过这道闸，而故障照旧。
+//
+// 未指派网关（gatewayId 空）的站点不参与：控制面按 CN 精确过滤下发，
+// 它们根本不会被任何网关装载，凑不成一对（另有 ConfigWarning 单独点名这件事）。
+func ipsecDuplicatePeers(sites []store.IpsecSite) map[string]string {
+	byKey := map[string][]string{}
+	for _, s := range sites {
+		gw := strings.TrimSpace(s.GatewayID)
+		ip, ok := ipsecPeerIP(s.Peer)
+		if gw == "" || !ok {
+			continue
+		}
+		k := gw + "|" + ip.String()
+		byKey[k] = append(byKey[k], s.ID)
+	}
+	out := map[string]string{}
+	for k, ids := range byKey {
+		if len(ids) < 2 {
+			continue
+		}
+		sort.Strings(ids)
+		gw, ip, _ := strings.Cut(k, "|")
+		for _, id := range ids {
+			others := make([]string, 0, len(ids)-1)
+			for _, o := range ids {
+				if o != id {
+					others = append(others, o)
+				}
+			}
+			// 字典序最小的那条就是数据面会选中的那条（ike.findSiteByPeer 同一判据）。
+			// 把「谁会被选中」直接写出来，比笼统地说"有冲突"能少绕一大圈。
+			verdict := "本站点会被响应方选中，另外几条永远不会"
+			if id != ids[0] {
+				verdict = "响应方只会选中 " + ids[0] + "，本站点作为响应方永远不会被选中"
+			}
+			out[id] = "承载网关 " + gw + " 上还有站点 " + strings.Join(others, "、") +
+				" 使用同一个对端 IP " + ip + "：IKE_SA_INIT 阶段只有对端 IP 可用" +
+				"（IDr 要到 IKE_AUTH 才出现），网关无从区分它们——" + verdict +
+				"，且对端若要建的是别的那条，失败原因还会记到被选中的那条头上。请删掉多余的站点或改派给别的网关"
+		}
+	}
+	return out
+}
+
+// ipsecPeerIP 从 peer 字段取出对端 IP（忽略端口）。
+// 第二个返回值 false = 这不是一个能解析出 IP 的值（已被 ipsecPeerError 拦在入口，
+// 但存量库里可能有；那种行本来就跑不起来，不参与重复判定）。
+func ipsecPeerIP(v string) (netip.Addr, bool) {
+	v = strings.TrimSpace(v)
+	if ap, err := netip.ParseAddrPort(v); err == nil {
+		return ap.Addr().Unmap(), true
+	}
+	if a, err := netip.ParseAddr(v); err == nil {
+		return a.Unmap(), true
+	}
+	return netip.Addr{}, false
 }
 
 // ipsecConfigWarning 报出「配置本身注定跑不通、但界面上看不出来」的问题。
@@ -192,6 +277,23 @@ func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, msg)
 		return
 	}
+	// ★同一承载网关上不许出现两条对端 IP 相同的站点（wave11 行动 10-②）。
+	//
+	// 这道闸与 peer 拒收 FQDN 是同一条纪律的另一半——**入口与实现必须同口径**：
+	// 数据面响应方 `ike.findSiteByPeer` 在 IKE_SA_INIT 阶段**只有对端 IP 可用**
+	// （IDr 要到 IKE_AUTH 才出现，TS 更在其后），协议层面就区分不开两条同 peer 的站点。
+	// 不拦的话，管理员保存拿 200 OK，而现场是：对端每发起一次协商就随机命中一条，
+	// 命中错的那次会把一条**本来健康的**站点打成 failed，错误文案还指向对端。
+	// 那种间歇性故障从控制台上完全看不出根因（两条站点各自的配置都是对的）。
+	//
+	// 必须在 SaveIpsecSite 之前：拦在写库之后就只是"下次读的时候提醒你一下"。
+	if msg, err := s.ipsecPeerConflict(r.Context(), it); err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load ipsec sites")
+		return
+	} else if msg != "" {
+		httpx.Error(w, http.StatusBadRequest, msg)
+		return
+	}
 	// 网段引用必须指向真实存在的地址对象，挡住悬空引用。
 	for _, ref := range []string{it.LocalRef, it.RemoteRef} {
 		if ref == "" {
@@ -215,6 +317,45 @@ func (s *Server) handleSaveIpsec(w http.ResponseWriter, r *http.Request) {
 	d.ConfigWarning = ipsecConfigWarning(saved)
 	d.fillLegacy()
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "site": d})
+}
+
+// ipsecPeerConflict 检查 it 与库里既有站点是否构成「同网关 + 同对端 IP」。
+// 返回 ("", nil) 表示没有冲突；返回非空串即 400 文案。
+//
+// ★按 id 排除自己：改一条已存在的站点（比如只想改网段）不该被自己顶回来。
+// ★未指派网关（gatewayId 空）时不判：那种站点不会被任何网关装载，凑不成冲突；
+// 而它另有 ConfigWarning 点名。等管理员真的指派网关时，这道闸会在那次保存生效。
+func (s *Server) ipsecPeerConflict(ctx context.Context, it store.IpsecSite) (string, error) {
+	gw := strings.TrimSpace(it.GatewayID)
+	ip, ok := ipsecPeerIP(it.Peer)
+	if gw == "" || !ok {
+		return "", nil
+	}
+	sites, err := s.store.Ipsec(ctx)
+	if err != nil {
+		// ★读不到就拒绝保存（fail-closed）而不是放行：放行等于在读库抖动的那一刻
+		// 把这道闸整个跳过，而它拦的正是一种事后极难归因的配置。
+		return "", err
+	}
+	for _, o := range sites {
+		if o.ID == it.ID || strings.TrimSpace(o.GatewayID) != gw {
+			continue
+		}
+		oip, ok := ipsecPeerIP(o.Peer)
+		if !ok || oip != ip {
+			continue
+		}
+		return "承载网关 " + gw + " 上已有站点「" + o.Name + "」（" + o.ID + "）使用同一个对端 IP " +
+			ip.String() + "，不能再建第二条：\n" +
+			"    响应方在 IKE_SA_INIT 阶段**只有对端 IP 可以用来认站点**（IDr 要到 IKE_AUTH 才出现），" +
+			"两条同对端的站点在协议上区分不开——网关只会认其中一条，另一条永远建不起来，" +
+			"而对端来建那条建不起来的时，失败还会记到被认下的那条头上（一条健康站点被打成协商失败，" +
+			"原因却指向对端）。\n" +
+			"    出路：本实现一条站点只有**一对**流量选择器（TSi/TSr），要覆盖多个网段请把 " +
+			"localSubnet/remoteSubnet 扩成能包住它们的 CIDR；确实需要两条隧道时，请把其中一条" +
+			"改派给另一台组网网关，或改用对端的另一个 IP。", nil
+	}
+	return "", nil
 }
 
 // validateIpsecSite 装载前的结构校验。返回空串表示通过。

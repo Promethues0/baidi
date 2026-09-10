@@ -1076,6 +1076,30 @@ export interface IpsecSA {
   lastErrorCode?: string;
 }
 
+/** 内核 IP 转发回执的五态（control 的 ipsecForwardReceipt 折算）。
+ *
+ *  ★`unreported`（网关没报过，旧版本网关）与 `unknown`（报了但探不到）必须分开：
+ *  前者要去升级网关，后者要去机器上看一眼，下一步动作不同。
+ *  `n-a` 是「承载它的网关跑在 netstack 自检数据面上」，内核转发与它无关。 */
+export type IpsecForwardStatus = 'on' | 'off' | 'unknown' | 'n-a' | 'unreported';
+
+/** 内核 IP 转发实测回执（FR-IPSEC-06/07）。
+ *
+ *  它存在的理由：转发关着时 IKE 协商全绿、SA 倒计时正常、站点显示「已建立」，
+ *  只有流量计数恒为 0 —— 分支主机的包在内核路由那一层就被丢了，
+ *  ESP 层连一个包都没见过，连丢弃计数都不会动。整条链路上没有任何一处会报错。
+ *
+ *  ★它是**回执不是判定**：绝不参与 sa.state 那五态，也不由前端另算一遍。 */
+export interface IpsecForward {
+  status: IpsecForwardStatus;
+  /** 一句结论（后端原话，前端不改写）。 */
+  summary: string;
+  /** 这个结论意味着什么、下一步做什么。空 = 无需动作。 */
+  impact?: string;
+  /** 网关原样报上来的探测说明（读哪个文件失败之类），供排障。 */
+  detail?: string;
+}
+
 export interface IpsecSite {
   id: string; name: string; peer: string; localSubnet: string; remoteSubnet: string;
   ikeVersion: string; auth: 'psk' | 'cert' | 'sm2cert'; suite: 'standard' | 'gm';
@@ -1092,6 +1116,15 @@ export interface IpsecSite {
   pskVersion?: number;
   /** 网关实测运行态。缺省 = 这条站点从未被任何网关回报过（≠ 未建立，UI 要分开说）。 */
   sa?: IpsecSA;
+  /** 「配置本身注定跑不通、但协议上完全正常」的中文提示（未指派网关、CN 前缀不对、
+   *  没配 PSK、同一网关上撞了对端 IP…）。后端 ipsecConfigWarning + ipsecDuplicatePeers 现算。
+   *  ★必须渲染出来：它整类对付的就是「配置合法、什么都不发生、全程零报错」。 */
+  configWarning?: string;
+  /** 「同一承载网关上撞了对端 IP」。与 configWarning 分开是因为它要看**别的站点**
+   *  才成立，且入口已拒收——能出现的只有存量数据，控制台要单独标红。 */
+  peerConflict?: string;
+  /** 承载网关的内核 IP 转发实测回执。缺省 = 这条站点还没被任何网关回报过。 */
+  forward?: IpsecForward;
   localRef?: string; remoteRef?: string; // 本端/对端网段引用的地址对象 id（对象库复用）
 
   /** @deprecated ipsec_sites 的 status/rx_bytes/tx_bytes/last_up 四列已冻结为只读兼容：

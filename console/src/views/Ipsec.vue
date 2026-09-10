@@ -144,6 +144,9 @@
                   · 回报来自 {{ r.s.sa.gatewayId }}，与指派不符（两台网关在抢同一条站点）
                 </span>
               </div>
+              <!-- 同一网关上撞了对端 IP：入口已拒收，能出现在这里的只有存量数据。
+                   必须留在一级视图——它造成的是间歇性故障，而两条站点各自的配置看着都对。 -->
+              <div v-if="r.s.peerConflict" class="bd-err bd-ipsec__conflict">对端冲突 · {{ r.s.peerConflict }}</div>
             </td>
 
             <!-- 网段 -->
@@ -185,6 +188,15 @@
                 <div class="bd-sub3">{{ fmtTs(r.s.sa?.lastErrorAt || 0) }}</div>
               </div>
               <div v-else-if="r.stale" class="bd-warn">网关已 {{ ageText(nowSec - (r.s.sa?.reportedAt || 0)) }}未回报，下方数字非当前值</div>
+              <!-- 内核 IP 转发回执：只在**需要动作**时占一级视图的地方（关闭 / 不可判定 / 网关没报）。
+                   ★"已开启"与"不适用"刻意不画：这一格的价值是让那种「显示已建立、
+                   实际一个包都不过」的形态浮出来，把四种状态都画满会把它淹掉。
+                   完整回执（含 on / n-a）在详情抽屉里一直看得到。 -->
+              <div v-if="r.s.forward && fwdShowInline(r.s.forward.status)"
+                   class="bd-fwd" :title="r.s.forward.impact || ''">
+                <span class="bd-tg" :class="fwdTag(r.s.forward.status)">内核转发 · {{ FWD_TEXT[r.s.forward.status] }}</span>
+                <div class="bd-sub3">{{ r.s.forward.summary }}</div>
+              </div>
             </td>
 
             <!-- 套件：配置期望 vs 实际协商结果 -->
@@ -283,6 +295,29 @@
           <div class="bd-kv"><span>码点</span><b class="bd-mono">{{ detailRow.s.sa?.lastErrorCode || '—' }}</b></div>
           <div class="bd-kv"><span>原因</span><b>{{ detailRow.s.sa?.lastError }}</b></div>
           <div class="bd-kv"><span>时间</span><b class="bd-mono">{{ fmtTs(detailRow.s.sa?.lastErrorAt || 0) }}</b></div>
+        </template>
+
+        <template v-if="detailRow.s.forward">
+          <div class="bd-form-sec">内核 IP 转发（承载网关实测回执）</div>
+          <div class="bd-kv">
+            <span>状态</span>
+            <b><span class="bd-tg" :class="fwdTag(detailRow.s.forward.status)">{{ FWD_TEXT[detailRow.s.forward.status] }}</span></b>
+          </div>
+          <div class="bd-kv"><span>结论</span><b>{{ detailRow.s.forward.summary }}</b></div>
+          <div v-if="detailRow.s.forward.impact" class="bd-dhint">{{ detailRow.s.forward.impact }}</div>
+          <div v-if="detailRow.s.forward.detail" class="bd-kv"><span>探测说明</span><b class="bd-mono">{{ detailRow.s.forward.detail }}</b></div>
+          <div class="bd-dhint">
+            这是**回执不是判定**：转发关着的隧道确实建起来了（IKE 协商不经内核转发），
+            只是经本网关转发的分支主机流量会在内核路由那一层被丢弃——流量计数恒为 0，
+            而 ESP 连丢弃计数都不会动。白帝只读这个开关，不替你改它（那是宿主机的全局网络行为）。
+          </div>
+        </template>
+
+        <template v-if="detailRow.s.configWarning || detailRow.s.peerConflict">
+          <div class="bd-form-sec">配置检查</div>
+          <div v-if="detailRow.s.configWarning" class="bd-kv"><span>问题</span><b>{{ detailRow.s.configWarning }}</b></div>
+          <div v-if="detailRow.s.peerConflict" class="bd-kv"><span>对端冲突</span><b>{{ detailRow.s.peerConflict }}</b></div>
+          <div class="bd-dhint">这些问题在协议上完全正常——配置合法、网关不报错，只是什么都不会发生。后端现算，不落库。</div>
         </template>
 
         <div class="bd-form-sec">密钥材料</div>
@@ -467,6 +502,7 @@ import { Message } from '@arco-design/web-vue';
 import {
   api,
   type IpsecSite, type IpsecSA, type IpsecState, type IpsecPhase, type IpsecResp, type IpsecPskResp,
+  type IpsecForwardStatus,
   type AddrObject, type ObjectBundle, failReason, failStatus } from '@/lib/api';
 import PageHeader from '@/components/PageHeader.vue';
 import StatCard from '@/components/StatCard.vue';
@@ -568,6 +604,30 @@ const STATE_META: Record<ViewState, { t: string; c: string }> = {
 };
 function stateColor(v: ViewState) { return STATE_META[v].c; }
 function stateText(v: ViewState) { return STATE_META[v].t; }
+/* ── 内核 IP 转发回执的展示元数据 ──
+ * ★五态一个不许合：
+ *   unreported（网关没报过）要去升级网关，unknown（报了但探不到）要去机器上看一眼，
+ *   n-a（netstack 自检数据面）压根不适用——三者合成一个「未知」就等于把
+ *   「该做什么」这句话删掉了。on/off 的差别更是这一格存在的全部理由。 */
+const FWD_TEXT: Record<IpsecForwardStatus, string> = {
+  on: '已开启',
+  off: '已关闭',
+  unknown: '不可判定',
+  'n-a': '不适用',
+  unreported: '网关未上报'
+};
+/** 只有 off 是红：它是确定的坏消息。unknown/unreported 用暖色（bd-tg--gold）——
+ *  「不可判定」既不能画成绿（那是替一台可能不通的机器背书），也不该画成红（可能一切正常）。 */
+function fwdTag(v: IpsecForwardStatus) {
+  if (v === 'off') return 'bd-tg--red';
+  if (v === 'on') return 'bd-tg--green';
+  if (v === 'n-a') return 'bd-tg--grey';
+  return 'bd-tg--gold';
+}
+/** 行内只显示「需要动作」的三态；on / n-a 收进详情抽屉。
+ *  四种都画会把真正要人管的那条淹进一片装饰性标签里。 */
+function fwdShowInline(v: IpsecForwardStatus) { return v === 'off' || v === 'unknown' || v === 'unreported'; }
+
 const LEGEND: { v: ViewState; t: string }[] = [
   { v: 'up', t: '已建立' },
   { v: 'rekeying', t: '重协商中' },
@@ -1106,6 +1166,11 @@ onUnmounted(() => { if (ticker) window.clearInterval(ticker); });
 .bd-polling { display: inline-flex; align-items: center; gap: 5px; font-size: var(--bd-fs-sm); color: var(--bd-primary); }
 .bd-cell-strong { color: var(--bd-t1); font-weight: 500; }
 .bd-ipsec__net { font-size: var(--bd-fs-xs); }
+/* 对端冲突：整行占满并允许换行——这段文字长（它要说清"谁会被选中、为什么"），
+   截断成一行的话最有用的后半句正好被切掉。 */
+.bd-ipsec__conflict { margin-top: 5px; white-space: normal; }
+/* 内核转发回执：与上面的状态文字拉开一点，别读成同一句话。 */
+.bd-fwd { margin-top: 6px; }
 
 /* 行内辅助文字 */
 .bd-sub2 { margin-top: 5px; display: flex; flex-wrap: wrap; gap: var(--bd-sp-1); }

@@ -481,6 +481,9 @@ CREATE TABLE IF NOT EXISTS ipsec_sa_state (
   rx_bytes INTEGER, tx_bytes INTEGER, packets_in INTEGER, packets_out INTEGER,
   negotiated TEXT, established_at INTEGER, rekey_at INTEGER, expires_at INTEGER,
   last_error TEXT, last_error_at INTEGER, reported_at INTEGER,
+  -- 内核 IP 转发实测回执（wave11 行动 10）。空串/NULL = 网关未上报（旧网关），
+  -- 与 'unknown'（报了但探不到）是两件事，读侧必须分开呈现。
+  kernel_forward TEXT, kernel_forward_detail TEXT,
   PRIMARY KEY(site_id, gateway_id)
 );
 CREATE TABLE IF NOT EXISTS addr_objects (
@@ -922,6 +925,13 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// 而现场表现为"升级把系统弄坏了"，没人会想到是一条安全修复。
 		// INTEGER 列的默认值是 NULL，读侧一律 COALESCE(...,0)，两处同口径。
 		{"users", "tokens_valid_after", "INTEGER"},
+		// 内核 IP 转发实测回执（wave11 行动 10-①）。**刻意不配回填**——
+		// 与本文件其余补列不同，这张表每 15s 被 ReplaceIpsecSAStates 全量覆写，
+		// 既有行在一次心跳内就换掉了；在那之前读侧 COALESCE 出来的空串，
+		// 语义恰好正确：「这台网关还没报过这一项」。回填任何值都是替一台
+		// 还没说话的网关编一个答案，而这一格的全部意义就是不编。
+		{"ipsec_sa_state", "kernel_forward", "TEXT"},
+		{"ipsec_sa_state", "kernel_forward_detail", "TEXT"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e

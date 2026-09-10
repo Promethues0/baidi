@@ -13,6 +13,7 @@ import (
 
 	"baidi.dev/gateway/internal/cplane"
 	"baidi.dev/gateway/internal/ipsec"
+	"baidi.dev/gateway/internal/kernelfwd"
 )
 
 // 本文件是控制面与数据面之间的**唯一**搬运工：
@@ -82,6 +83,13 @@ type syncer struct {
 	// notes 本地判定的站点问题（key=站点 id）。只有本文件知道这些原因，
 	// 由 report 把它盖到 SiteState.LastError 上。
 	notes map[string]string
+	// siteV4 站点 id → 受保护网段是不是 IPv4（Validate 已保证两端同族）。
+	// ★内核 IP 转发的 v4/v6 是两个独立开关，回执必须按站点自己的地址族取那一格；
+	// 键缺席 = 本层不知道这条站点的网段，回执报「不可判定」而不是猜一个族。
+	siteV4 map[string]bool
+
+	// fwd 内核 IP 转发回执的取数口（见 forward.go）。
+	fwd forwardReceipt
 
 	// failStreak 连续拉取失败次数；lastOK 最近一次成功拉到配置的时刻。
 	// 两者一起决定回报里那句「配置已过期」怎么写。
@@ -95,13 +103,21 @@ type syncer struct {
 	now func() time.Time
 }
 
-func newSyncer(cp controlClient, gwID string, back ipsec.Backend, log *slog.Logger, routes func([]netip.Prefix)) *syncer {
+// newSyncer 建一轮同步的状态机。
+//
+// kernelDP 说明数据面是否真的经内核路由（tun=true / netstack=false）。
+// ★这个参数刻意**显式传**而不是从 routes==nil 反推：那个耦合是隐式的
+// （"netstack 不需要配路由"只是当前实现的巧合），而它决定的是内核转发回执
+// 报 n/a 还是报实测值——推错了就是在一台生产网关上把这一格永久标成「不适用」。
+func newSyncer(cp controlClient, gwID string, back ipsec.Backend, log *slog.Logger, routes func([]netip.Prefix), kernelDP bool) *syncer {
 	return &syncer{
 		cp: cp, gwID: gwID, back: back, log: log, routes: routes,
-		extra: map[string]ipsec.ExtraOptions{},
-		psk:   map[string]pskEntry{},
-		notes: map[string]string{},
-		now:   time.Now,
+		extra:  map[string]ipsec.ExtraOptions{},
+		psk:    map[string]pskEntry{},
+		notes:  map[string]string{},
+		siteV4: map[string]bool{},
+		fwd:    forwardReceipt{kernelDP: kernelDP, probe: kernelfwd.Probe},
+		now:    time.Now,
 	}
 }
 
@@ -171,6 +187,7 @@ func (s *syncer) convert(dtos []cplane.IpsecSiteDTO) []ipsec.SiteConfig {
 
 	s.extra = make(map[string]ipsec.ExtraOptions, len(dtos))
 	notes := make(map[string]string, len(dtos))
+	siteV4 := make(map[string]bool, len(dtos))
 	seen := make(map[string]bool, len(dtos))
 
 	out := make([]ipsec.SiteConfig, 0, len(dtos))
@@ -234,6 +251,10 @@ func (s *syncer) convert(dtos []cplane.IpsecSiteDTO) []ipsec.SiteConfig {
 			problems = append(problems, err.Error())
 		} else {
 			cfg.LocalSubnet = p
+			// 地址族取自**解析成功**的 localSubnet（Validate 另有一道「两端必须同族」）。
+			// 解析失败时不登记：那条站点本来就跑不起来，登记一个猜来的族只会让
+			// 转发回执给出一个方向可能相反的结论。
+			siteV4[id] = p.Addr().Is4()
 		}
 		if p, err := parsePrefix("remoteSubnet", d.RemoteSubnet); err != nil {
 			problems = append(problems, err.Error())
@@ -265,6 +286,7 @@ func (s *syncer) convert(dtos []cplane.IpsecSiteDTO) []ipsec.SiteConfig {
 		s.log.Info("站点已从控制面移除，清理本地密钥缓存", "站点", id)
 	}
 	s.notes = notes
+	s.siteV4 = siteV4
 	return out
 }
 
@@ -360,11 +382,18 @@ func (s *syncer) report(ctx context.Context) {
 	}
 }
 
-// enrich 把本地诊断与"配置已过期"补进回报。
+// enrich 把本地诊断、"配置已过期"与内核转发回执补进回报。
 func (s *syncer) enrich(states []ipsec.SiteState) {
 	s.mu.RLock()
 	notes := s.notes
+	siteV4 := s.siteV4
 	s.mu.RUnlock()
+
+	// ★内核 IP 转发回执：只有本进程知道自己跑在哪台机器上、用的是哪种数据面，
+	// 状态机与 Backend 都报不出来（与上面那批本地诊断同一个理由）。
+	// 它是**回执不是判定**，所以放在 State/LastError 之外的独立字段里，
+	// 绝不参与五态——转发关着的隧道确实建起来了，只是没有流量能走上去。
+	s.fwd.forSites(states, siteV4)
 
 	stale := ""
 	if s.failStreak > 0 {
@@ -446,6 +475,10 @@ func (s *syncer) shutdownReport(ctx context.Context, reason string) {
 		states[i].LastError = "承载该站点的网关 " + s.gwID + " 已退出（" + reason + "），隧道已发 Delete 拆除"
 		states[i].LastErrorAt = now
 		states[i].EstablishedAt = 0
+		// ★停机这一轮**不再探**内核转发，但也不能让字段空着：空串在控制面上的
+		// 语义是「旧版本网关，从没报过」，会把一次正常停机说成一台该升级的网关。
+		states[i].KernelForward = ipsec.KernelForwardUnknown
+		states[i].KernelForwardDetail = "网关正在退出，本轮未再探测内核转发状态"
 	}
 	if _, err := s.cp.ReportIpsecStatus(states); err != nil {
 		s.log.Warn("退出前回报状态失败：控制台上可能残留一条已不存在的隧道", "err", err.Error())

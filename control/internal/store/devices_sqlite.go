@@ -597,11 +597,15 @@ func scanDeviceTx(ctx context.Context, tx *sql.Tx, id string) (Device, error) {
 }
 
 // shortFingerprint 给设备一个可读的默认名（指纹前 12 位）。
+//
+// ★按 rune 切而不是按字节：指纹是客户端自报的字符串，非 ASCII 的一份会被
+// 字节切法从中间劈开，产出一段无效 UTF-8——它会一路进 JSON 应答与 CSV 导出。
 func shortFingerprint(fp string) string {
-	if len(fp) <= 12 {
+	rs := []rune(fp)
+	if len(rs) <= 12 {
 		return fp
 	}
-	return fp[:12]
+	return string(rs[:12])
 }
 
 // trustedDevicesBackfillMarker 存量设备一次性回填标记。

@@ -175,7 +175,9 @@ func TestOverviewDeviceStatFromLedger(t *testing.T) {
 			atk = d
 		}
 	}
-	if len(atk.Top) != 1 || atk.Risk == 0 {
+	// 隐身防线的风险分**永远算得出来**（攻击源是记账，没有"不可判定"这一档），
+	// 故 Risk 不许是 nil——nil 在这条线上只会来自忘了填。
+	if len(atk.Top) != 1 || atk.Risk == nil || *atk.Risk == 0 {
 		t.Errorf("有攻击源时隐身防线应有 TOP 与非零风险分，实得 %+v", atk)
 	}
 }

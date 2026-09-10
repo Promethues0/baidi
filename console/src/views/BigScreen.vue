@@ -158,8 +158,11 @@
                   :stroke-dashoffset="gaugeOffset(d.risk)"
                 />
               </svg>
+              <!-- ★风险分三态：后端下发 null = 这条防线一份判定材料都没有，大屏画「—」
+                   并把弧收成空。补成 0 的话仪表是满绿的「良好」，而实际含义是
+                   "一台终端都没上报过环境"——大屏正是最没人会去追问出处的那一屏。 -->
               <div class="gauge__c">
-                <b :style="{ color: riskHex(d.risk) }">{{ gaugeShown[i] }}</b>
+                <b :style="{ color: riskHex(d.risk) }">{{ riskKnown(d.risk) ? gaugeShown[i] : '—' }}</b>
               </div>
               <div class="gauge__n">{{ d.name }}</div>
               <div class="gauge__tag" :style="{ color: riskHex(d.risk), borderColor: riskHex(d.risk) }">{{ riskLabel(d.risk) }}</div>
@@ -226,9 +229,12 @@ const MOCK_OV: Overview = {
     { name: '拒绝', value: 173 }, { name: '降权', value: 39 }
   ],
   defense: [
-    { key: 'device', name: '设备防线', risk: 28, top: ['ext.zhou · 未授信-Android-3', 'li.fang · ThinkPad-08'] },
-    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] },
-    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] }
+    // 首格是隐身防线（攻击源），设备台账那格早已不在防线里——演示数据跟着后端真实形状走，
+    // 否则大屏在降级态下画的是一套后端根本不会下发的键名。
+    { key: 'attack', name: '隐身防线', risk: 28, unknown: 0, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'] },
+    { key: 'account', name: '账号防线', risk: 41, unknown: 12, top: ['li.fang', 'ext.zhou'] },
+    // 终端防线是**设备**维度：平台 · 指纹短码 · 判定档 · 账号（与后端 endpointDefense 同形）。
+    { key: 'endpoint', name: '终端防线', risk: 19, unknown: 2, top: ['Windows 11 · 指纹 9f2ac1b40d3e… · 已阻断 · li.fang'] }
   ]
 };
 const MOCK_SESS: OnlineSession[] = [
@@ -318,6 +324,8 @@ const nSessions = useCountUp(() => ov.value.sessions ?? 0);
 const nUsers = useCountUp(() => ov.value.users.total);
 const nThreat = useCountUp(() => threatTotal.value);
 const nVerdict = useCountUp(() => verdictTotal.value);
+/* 滚数只在"确实有数"时有意义；不可判定的那格模板走 '—' 分支，这里的 0 不会被渲染
+ * （与上面 nSessions 同一处理，别把 ?? 0 读成"把不可判定当 0"）。 */
 const d0 = useCountUp(() => ov.value.defense[0]?.risk ?? 0, 1100);
 const d1 = useCountUp(() => ov.value.defense[1]?.risk ?? 0, 1100);
 const d2 = useCountUp(() => ov.value.defense[2]?.risk ?? 0, 1100);
@@ -348,15 +356,19 @@ function verdictText(v: string) {
 /* 三道防线仪表（270° 弧） */
 const gaugeR = 52;
 const gaugeLen = (gaugeR * Math.PI * 270) / 180;
-function gaugeOffset(risk: number) { return gaugeLen * (1 - Math.min(risk, 100) / 100); }
-function riskHex(r: number) { return r >= 40 ? '#ff4d4f' : r >= 25 ? '#ffa940' : '#36e29b'; }
-function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
+/** 风险分三态守卫：null / undefined = 后端说这条防线没有判定材料（见 DefenseLine.risk）。 */
+function riskKnown(r: number | null | undefined): r is number { return typeof r === 'number'; }
+function gaugeOffset(r: number | null | undefined) { return riskKnown(r) ? gaugeLen * (1 - Math.min(r, 100) / 100) : gaugeLen; }
+function riskHex(r: number | null | undefined) { return !riskKnown(r) ? '#7d8ba1' : r >= 40 ? '#ff4d4f' : r >= 25 ? '#ffa940' : '#36e29b'; }
+function riskLabel(r: number | null | undefined) { return !riskKnown(r) ? '不可判定' : r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
 /* 雷达光点：三道防线 TOP 实体 + 高风险会话 */
 interface Blip { x: number; y: number; r: number; color: string; label: string; lx: number; ly: number; dur: number }
 const blips = computed<Blip[]>(() => {
   const items: { label: string; sev: 'high' | 'mid' | 'low' }[] = [];
   ov.value.defense.forEach((d) => {
-    const sev: 'high' | 'mid' | 'low' = d.risk >= 40 ? 'high' : d.risk >= 25 ? 'mid' : 'low';
+    // 不可判定的防线：它的 TOP 实体仍是真实条目（列得出来就说明那几条判得出），
+    // 只是整条线没有分值，光点按最低档画。
+    const sev: 'high' | 'mid' | 'low' = !riskKnown(d.risk) ? 'low' : d.risk >= 40 ? 'high' : d.risk >= 25 ? 'mid' : 'low';
     d.top.forEach((t) => items.push({ label: t, sev }));
   });
   sessions.value.filter((s) => s.risk === 'high').forEach((s) => items.push({ label: s.user, sev: 'high' }));

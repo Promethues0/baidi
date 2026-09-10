@@ -152,9 +152,11 @@ func (m *Memory) UserStates(_ context.Context) (UserStateBundle, error) {
 // 两处各写一份的话，键名一改就会出现"演示态与真实态的桶对不上、前端筛选失灵"。
 func userStateBuckets(count func(states ...string) int) []UserStateBucket {
 	return []UserStateBucket{
-		{Key: DisposalBlock, Label: "已阻断", Count: count(DisposalBlock), Tone: "danger"},
-		{Key: DisposalDegrade, Label: "已降权", Count: count(DisposalDegrade), Tone: "warning"},
-		{Key: DisposalGray, Label: "灰度观察", Count: count(DisposalGray), Tone: "info"},
+		// 三档的中文名走 DisposalLabel 一处（态势总览的终端防线 TOP 也用它）——
+		// 各写一份的话，同一个 degrade 会在两页上叫两个名字。
+		{Key: DisposalBlock, Label: DisposalLabel(DisposalBlock), Count: count(DisposalBlock), Tone: "danger"},
+		{Key: DisposalDegrade, Label: DisposalLabel(DisposalDegrade), Count: count(DisposalDegrade), Tone: "warning"},
+		{Key: DisposalGray, Label: DisposalLabel(DisposalGray), Count: count(DisposalGray), Tone: "info"},
 		{Key: "locked", Label: "锁定账号", Count: count("locked"), Tone: "danger"},
 		{Key: "disabled", Label: "禁用账号", Count: count("disabled"), Tone: "normal"},
 	}

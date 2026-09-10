@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 )
@@ -61,7 +62,10 @@ func TestUserStatesReal(t *testing.T) {
 	}
 }
 
-// overview：posture 高危并入账号防线 TOP；终端防线用最差报告真实化。
+// overview：账号防线取账号名、终端防线取**设备行**，两张卡不得是同一批条目。
+//
+// ★改造前 postureDefense 两条线都返回 r.User，于是「风险终端 TOP5」与
+// 「风险账号 TOP5」逐字相同、各起一个名字——看的人以为交叉印证了两次。
 func TestOverviewWithPosture(t *testing.T) {
 	s := openTestStore(t)
 	ctx := context.Background()
@@ -72,7 +76,7 @@ func TestOverviewWithPosture(t *testing.T) {
 		t.Fatal(err)
 	}
 	var accTop, epTop []string
-	var epRisk int
+	var epRisk *int
 	for _, d := range ov.Defense {
 		if d.Key == "account" {
 			accTop = d.Top
@@ -84,8 +88,20 @@ func TestOverviewWithPosture(t *testing.T) {
 	if !containsStr(accTop, "li.fang") {
 		t.Fatalf("账号防线 TOP 应含 posture 高危 li.fang: %v", accTop)
 	}
-	if len(epTop) == 0 || epRisk != 25 {
-		t.Fatalf("终端防线应由最差报告真实化: top=%v risk=%d", epTop, epRisk)
+	if epRisk == nil || *epRisk != 25 {
+		t.Fatalf("终端防线风险分应由最差报告真实化（25）: %v", epRisk)
+	}
+	if len(epTop) != 1 {
+		t.Fatalf("终端防线应有 1 台风险终端: %v", epTop)
+	}
+	// 终端行必须带得出**设备**维度的三样东西，且不能与账号行同形。
+	for _, want := range []string{"macOS", "指纹 DEV-A", "已阻断"} {
+		if !strings.Contains(epTop[0], want) {
+			t.Fatalf("终端防线 TOP 应含 %q（平台 · 指纹短码 · 判定档），实得 %q", want, epTop[0])
+		}
+	}
+	if containsStr(accTop, epTop[0]) {
+		t.Fatalf("两张卡出现了逐字相同的条目：%q", epTop[0])
 	}
 }
 

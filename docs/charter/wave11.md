@@ -180,11 +180,35 @@ fail-closed 窗口叠加后抖动即断流）——理由必须写进注释，�
 > 早已漂了六个类别（已改成指向 `store.AttackCatZh` 一处，不再抄第二份）；
 > 「三端」里 iOS/鸿蒙壳没有健康态读端，实际改到的是桌面 + 安卓 webview 两端。
 
-**12. 态势总览三道防线 — S**　PRD FR-MON-04
+**12. 态势总览三道防线 — S ✅ 已完成**　PRD FR-MON-04
 
 账号防线的风险分与 TOP 风险账号取自 `users.risk` 死列（wave9 已在用户目录页判定该列不可信
 并改成现算，安全概览这一半没跟上）；「风险终端 TOP5」给出的是账号名而不是终端，且与
 「风险账号 TOP5」是同一批条目——两张卡显示同一件事。
+
+**两条断言逐字复核属实**：`users.risk` 全仓只有 `insertUser` 一处写值、零次更新
+（把 users 表的全部更新语句逐条看过）；`postureDefense` 两条线都返回 `r.User`，
+账号防线的 TOP 更是 `highRisk ∪ epTop`，终端防线是它的**子集**。
+
+修法：风险档折算收进 `store.RiskOfDisposal` 一处（`api.riskOfAccount` 同批改成调它，
+两处同真同假有 api 侧既有用例背书）；终端防线改按 `(账号,设备指纹)` 聚合成
+`平台 · 指纹短码 · 判定档 · 账号`。同批把 `DefenseLine.Risk` 改成**三态指针**
+（nil = 一份判定材料都没有——改造前「零份 posture 上报」给的是 0 分绿色「良好」，
+那正是全新部署的常态形状）并新增 `Unknown` 计数，两个键都不许 `omitempty`。
+另外两处顺带：聚合不再走带 `ListLimit=500` 的 `PostureReports()`（26 个账号 × 20 台
+就能撑满，之后总览静默只统计「最近的那 500 台」）；`deviceStat` 那个零消费方的
+`devTop` 第二返回值删除。
+
+**7 条变异全部实跑变红**（判据换回死列 / degrade 降成 low / 终端 TOP 换回账号名 /
+风险分恒有值 / 台账孤儿恒 0 / 聚合走 `PostureReports` / unknown 不计）。
+其中「判据换回死列」与「degrade 降成 low」两条各被 4 条和 3 条断言同时抓住，
+后者还捎带打红了 api 侧既有的 `TestOnlineSession_降权账号判高风险且理由同源`——
+那正是「两页同源」这件事的可执行证据。
+
+★**一条既有用例把坏行为钉成了预期**（与 wave10 的 zhang.wei 同族）：
+`TestOverviewAuditAggregatesReal` 断言「账号防线 TOP 非空」，注释写的理由是
+「种子 li.fang / ext.zhou 为 high」——而那个 high 正是死列里的值。现已改成反向钉住
+「没有任何 posture 上报时 TOP 必须为空、Unknown 等于账号总数」。
 
 **13. NAT 自伤 DNAT 与隐身攻击面 — M**　PRD FR-NAT-12/13 / FR-SEC-SPA-05
 

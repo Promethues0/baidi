@@ -707,6 +707,14 @@ export interface AuthSourceRec {
   name: string;
   kind: AuthSrcKind | string;
   enabled: boolean;
+  /**
+   * 排列顺序（小者靠前，本地目录恒排最前）。
+   *
+   * ★**不是**"多个源时先问谁"——那个语义在 wave8 认证域路由落地时就没有了
+   * （后端 api.routeDirectory 返回值长度恒 ≤1：一次登录只问用户选定的那一个认证域）。
+   * 它今天唯一的效果是 ORDER BY：认证源卡片、用户目录页身份源选项卡、
+   * 以及登录页认证域下拉的先后。别再据此写任何与"先问谁"有关的文案。
+   */
   priority: number;
   /** 该类型的非敏感配置 JSON 字符串（敏感项在独立加密表，不在这里）。 */
   config: string;
@@ -778,7 +786,13 @@ export interface RadiusConfig {
  *  ★两项的判定时机不同：白名单**每次登录都判**（目录侧移出组后下次登录就该被拒），
  *  审批**只判首次建号**（已批过的账号不必天天再批）。 */
 export interface AdmitConfig {
-  /** auto = 认证通过即建号；approval = 首登只登记待批单。 */
+  /**
+   * auto = 认证通过即建号；approval = 首登只登记待批单。
+   *
+   * ★缺席时后端归一成 auto（store.NormalizeAdmitPolicy），那是给**存量行**的向后兼容。
+   * **新建认证源时页面预选 approval**（PRD FR-USER-13 的默认就是不允许），
+   * 见 Auth.vue 的 ADMIT_NEW / ADMIT_EXISTING——两个"默认"刻意不是同一个值。
+   */
   admitPolicy?: 'auto' | 'approval';
   allowedDomains?: string[];
   allowedGroups?: string[];

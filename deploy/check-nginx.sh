@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# 交付 nginx 站点配置的自检：限流指令 / 存活探测通路 / 烛龙共存契约 / 片段文件命名。
+# 交付 nginx 站点配置的自检：限流指令 / 安全响应头 / 存活探测通路 / 烛龙共存契约 / 片段文件命名。
 #
 # 用法：deploy/check-nginx.sh [nginx 目录]
 #   缺省查仓库里那份模板 deploy/nginx/；deploy/build.sh 传的是 _out/nginx（交付件本身）。
@@ -73,6 +73,27 @@ bad() { echo "✗ $*"; fail=1; }
 #   PowerShell 按 ANSI 读 .ps1…），没有理由在这里赌一个发行版的 awk 版本。
 strip() { sed 's/#.*//' "$CONF" | tr '\t' ' '; }
 
+# 只取**终结 TLS 的那个 server 块**的块内内容（判据：块里有 ssl_certificate）。
+#
+# ★为什么要单独有这么一个视图：install-remote.sh 在非 443 部署上会
+#   `sed '/@BD_HTTP80_BEGIN@/,/@BD_HTTP80_END@/d'` 把 80 那段**整个删掉**。安全响应头若被
+#   挪进那一段，共存机（9443，最常见的形态）上就一条都不剩，而 443 独占机上一切正常——
+#   两台机器行为相反且都不报错。所以这几条头必须断言在这个视图里出现，全文范围找会漏掉它。
+#
+# ★判据刻意**不用 @BD_HTTP80_BEGIN@ 那对标记截断**，虽然那样写更短：baidi.conf 的注释里
+#   会（也应该）提到这对标记名，而注释里那一次出现会让「截断点」提前到文件中段——
+#   于是本节四条检查全部误报"头不见了"。第一版就是这么写的，当场被自己的检查抓出来。
+#   现在按结构判：块起于 `^ *server *{`、止于**顶格** `}`（location 的收尾都是缩进的），
+#   保留其中含 ssl_certificate 的那一个。80 端口块没有证书指令，天然被排除。
+# ★先剥注释再分块：不剥的话注释里的 `server {` 会把分块整个带偏。
+https_part() {
+  strip | awk '
+    /^ *server *\{/ { inblk = 1; n = 0; want = 0; next }
+    inblk && /^\}/  { if (want) { for (i = 1; i <= n; i++) print buf[i] } inblk = 0; next }
+    inblk           { buf[++n] = $0; if ($0 ~ /ssl_certificate/) { want = 1 } }
+  '
+}
+
 # 在某个 location 花括号块**内部**查一条指令。
 # ★为什么必须限定在块内：先前 /healthz 那道写成「命中 location 后一路往下找 proxy_pass」，
 #   它会越过块边界撞上下面 `location /api/` 里的那一行，把「/healthz 只剩个空壳子」判成通过。
@@ -125,7 +146,57 @@ done <<'EOF'
 ^ *location +/downloads/ |limit_conn +baidi_dl[^A-Za-z0-9_]|下载出口 /downloads/ 块内没有 limit_conn baidi_dl（免认证大文件直发，并发是唯一的闸）
 EOF
 
-# ── ④ 存活探测通路：必须存在、必须精确匹配、必须真反代 ──────────────────────
+# ── ④ 安全响应头（NFR-SEC-08）：必须在位、必须带 always、必须在 server 级 ──────
+#
+# ★守的是什么：改造前这个站点一条安全响应头都没有，管理台与门户同源共用它，
+#   任何外部页面都能整页 iframe 进去做点击劫持。补上之后，这几条**同样是一删就静默失效**
+#   的配置——nginx -t 不会说话，页面一切正常，只有响应头空了。
+#
+# ★三组判据分别对应三种真实的改坏方式，缺一种就漏一种：
+#   ① 头本身没了 / 不带 always（后者只让 200/30x 带头，403/404/5xx 裸奔，
+#      而那些恰恰是最容易被稳定拿到、也照样能被 iframe 的响应）；
+#   ② 被挪进 80 端口块（共存机上会被 install-remote.sh 整段删掉，见 https_part 的注释）；
+#   ③ 某个 location 里出现了 add_header —— nginx 的 add_header 是**就近整组覆盖**不是叠加，
+#      那一条 location 会把 server 级这四条全部丢掉。这一条是本节里最容易踩、
+#      也最不可能被人肉发现的：加头的人只看见自己那条生效了。
+while IFS='|' read -r name why; do
+  [ -n "$name" ] || continue
+  https_part | grep -Eq "^ *add_header +$name .* always;" || bad "HTTPS server 块内缺少安全响应头 ${name}（或没带 always）：${why}"
+done <<'EOF'
+X-Frame-Options|管理台/门户同源，缺了就能被整页 iframe 做点击劫持；always 是为了让 403/404/5xx 也带上
+X-Content-Type-Options|缺了浏览器会对 /downloads/ 的安装包与 API 响应做内容嗅探
+Referrer-Policy|缺了跳转到外部业务系统时会把管理台完整 URL（含页面路径）带出去
+Content-Security-Policy|真正拦 XSS 与点击劫持的那条；frame-ancestors 是 X-Frame-Options 的现代等价物
+EOF
+
+# CSP 的内容判据：只钉两条**改了就等于没有**的。
+# ★frame-ancestors：X-Frame-Options 在现代浏览器里已被它取代，只留前者等于把防点击劫持
+#   交给一条正在退役的头。
+# ★script-src 里不得出现 unsafe-inline / unsafe-eval：那两个一加进去，CSP 对 XSS 的价值就
+#   归零，而页面看起来完全正常——这正是"页面白了就先加 unsafe-inline"的必然下场。
+#   `script-src[^;]*` 把范围严格限制在这一条指令内，不会误伤 style-src 里那个
+#   **确实必要**的 'unsafe-inline'（Vue 的 :style 绑定与 Arco 运行时组件都写元素 style 属性）。
+csp_line="$(https_part | grep -E '^ *add_header +Content-Security-Policy ' || true)"
+if [ -n "$csp_line" ]; then
+  echo "$csp_line" | grep -q "frame-ancestors" \
+    || bad "CSP 里没有 frame-ancestors（X-Frame-Options 已被它取代，只留旧头等于把防点击劫持交给一条正在退役的头）"
+  if echo "$csp_line" | grep -Eq "script-src[^;]*unsafe-(inline|eval)"; then
+    bad "CSP 的 script-src 里出现了 unsafe-inline/unsafe-eval —— CSP 对 XSS 的价值就此归零，而页面看起来完全正常。console 的 Vite 产物没有内联 script，实测不需要它们（理由与验证方式见 nginx/baidi.conf 的注释）"
+  fi
+fi
+
+# 反向断言：**任何 location 块内部都不得出现 add_header**。
+# nginx 的 add_header 就近整组覆盖 —— 一条 location 里自加一条，server 级那四条对它全部失效，
+# 且 nginx -t 通过、页面正常。真要给某个 location 单加头，必须把 server 级那四条一并抄进去。
+if strip | awk '
+    $0 ~ /^ *location /  { inloc = 1; next }
+    inloc && /^ *}/      { inloc = 0; next }
+    inloc && /add_header/ { hit = 1 }
+    END { exit !hit }'; then
+  bad "有 add_header 写在 location 块内：nginx 的 add_header 是就近整组覆盖不是叠加，该 location 会把 server 级的全部安全响应头丢掉（nginx -t 通过、页面正常，只有响应头空了）"
+fi
+
+# ── ⑤ 存活探测通路：必须存在、必须精确匹配、必须真反代 ──────────────────────
 #
 # ★没有它，`location = /healthz` 是一行谁删了都不会有人发现的配置——删掉之后 /healthz
 #   静静地落回 `location /` 的 SPA 回退，恒回 200 HTML，客户端的「控制中心可达」
@@ -139,7 +210,7 @@ EOF
 block_has '^ *location *= */healthz ' 'proxy_pass' \
   || bad "缺少精确匹配的 /healthz 反代通路（或该块内没有 proxy_pass）——客户端「控制中心可达」会变成永真指示灯"
 
-# ── ⑤ proxy 公共片段：必须随包发，且不能叫 .conf ────────────────────────────
+# ── ⑥ proxy 公共片段：必须随包发，且不能叫 .conf ────────────────────────────
 # conf.d/*.conf 会被 include 进 http{}，而这份片段全是只能出现在 location 里的
 # proxy_* 指令 → 整台机器的 nginx 起不来（含共存的烛龙）。
 [ -f "$DIR/baidi-proxy-api.inc" ] || bad "缺少 nginx/baidi-proxy-api.inc"
@@ -147,7 +218,7 @@ if ls "$DIR/"*.inc.conf >/dev/null 2>&1; then
   bad "nginx 片段不得以 .conf 结尾（会被 include 进 http{} 而炸掉整台机器的 nginx）"
 fi
 
-# ── ⑥ 80 端口块：ACME 挑战通路 + 跳转必须在 location 内 ────────────────────
+# ── ⑦ 80 端口块：ACME 挑战通路 + 跳转必须在 location 内 ────────────────────
 #
 # ★守的是什么：nginx 的 `return` 属于 rewrite 模块，**在 rewrite 阶段执行、早于 location
 #   选择**。写成 server 级的 `return 301 https://…;` 时，本 server 收到的每一个请求
@@ -193,4 +264,4 @@ if [ "$fail" -ne 0 ]; then
   echo "✗ nginx 站点配置自检未通过（见上）"
   exit 1
 fi
-echo "✓ nginx 站点配置自检通过：限流区 3 条定义 + 6 个应用点、/healthz 精确匹配且真反代、ACME 挑战通路在位且 return 301 在 location 内、片段命名合规"
+echo "✓ nginx 站点配置自检通过：限流区 3 条定义 + 6 个应用点、安全响应头 4 条（server 级 + always + 无 location 自加）、/healthz 精确匹配且真反代、ACME 挑战通路在位且 return 301 在 location 内、片段命名合规"

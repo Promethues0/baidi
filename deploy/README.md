@@ -248,6 +248,45 @@ rm -f $BD_PREFIX/etc/tls/le.crt $BD_PREFIX/etc/tls/le.key $BD_PREFIX/etc/tls/le.
 排查一句话：`curl -sS -o /dev/null -w '%{http_code}\n' https://<PUBLIC_HOST>/`（**不带 `-k`**）
 回 200 才算此刻受信。
 
+## 安全响应头（NFR-SEC-08）
+
+管理台与终端用户门户**同源共用**一个 nginx 站点，所以那个源上的四条响应头是产品配置的一部分，
+不是「运维自己加一下」的事——改造前这份配置里一条都没有。现在 `nginx/baidi.conf` 的 HTTPS
+server 块里发四条（全部带 `always`，好让 403/404/5xx 也带上）：
+
+| 头 | 值 | 挡的是什么 |
+|---|---|---|
+| `X-Frame-Options` | `DENY` | 整页 iframe 点击劫持（老浏览器那一半） |
+| `Content-Security-Policy` | 见配置 | XSS + `frame-ancestors 'none'`（现代浏览器真正认的那条） |
+| `X-Content-Type-Options` | `nosniff` | `/downloads/` 的安装包与 API 响应被内容嗅探 |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | 跳转到业务系统时带出管理台完整 URL |
+
+CSP 是**逐页实跑验证**出来的，不是抄的模板：`script-src` 里**没有** `'unsafe-inline'`/`'unsafe-eval'`
+（Vite 产物没有内联 script），`style-src` 里那个 `'unsafe-inline'` 则去不掉（Vue 的 `:style` 绑定与
+Arco 运行时组件直接写元素 style 属性）。放宽的每一项都对应一处真实用法，逐条理由写在配置注释里。
+
+三件容易踩坏、且**踩坏了完全静默**（`nginx -t` 通过、页面正常、只有响应头空了）的事，
+`deploy/check-nginx.sh` 各有一条构建期断言守着（CI 的 `server.yml` 直接跑它）：
+
+- 头被删掉或没带 `always`；
+- 头被挪进 80 端口块——非 443 部署时 `install-remote.sh` 会把那一段**整段删掉**，
+  于是共存机（9443，最常见的形态）上一条不剩而 443 独占机上一切正常；
+- 某个 `location` 里出现了自己的 `add_header`——nginx 的 `add_header` 是**就近整组覆盖**不是叠加，
+  那一条 location 会把 server 级四条全部丢掉。真要给某个 location 单加头，必须把四条一并抄进去。
+
+**刻意不发 `Strict-Transport-Security`**：HSTS 的作用域是主机不是端口（RFC 6797 §8.1），在 9443 上
+发一条等于替同一主机名的 80/443 一起打开强制 HTTPS，而那两个端口在共存机上归烛龙——症状会出现在
+**别人的站点**上；且 RFC 6797 §2.3 把 IP 地址主机排除在外，裸 IP 的演示站上它本来就是空头。
+443 独占机 + 真实域名的部署可以自行加回来。
+
+验一句话（`-D-` 看响应头，注意自签站要带 `-k`）：
+
+```bash
+curl -sS -k -D- -o /dev/null https://<PUBLIC_HOST>:<BD_HTTPS_PORT>/ | grep -iE 'x-frame|content-security|nosniff|referrer'
+# 再验一个 404 —— 这一条才检得出「忘了 always」：
+curl -sS -k -D- -o /dev/null https://<PUBLIC_HOST>:<BD_HTTPS_PORT>/api/v1/__nope | grep -ic 'x-frame-options'
+```
+
 ## 运维
 
 ```bash

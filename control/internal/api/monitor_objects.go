@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"sort"
+	"strings"
 	"time"
 
 	"baidi.dev/control/internal/httpx"
@@ -36,7 +37,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	sessions := []store.OnlineSession{}
 	// sessionSince 会话 id → 网关上报的建立时刻，供下面判定「这条是不是重连后的新会话」。
 	sessionSince := map[string]int64{}
-	// webBlind 有没有在线网关**不报**七层会话（旧版本 / 没开 -web）。
+	// webBlind **开了七层却不报会话台账**的在线网关（旧版本）。
 	// ★它必须下发给页面：这一页上的「B/S 0 人」在两种情况下长得完全一样——
 	// "确实没人用浏览器进来"，和"有一台网关根本没在报，这一页正在漏人"。
 	webBlind := []string{}
@@ -66,9 +67,14 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 		ws, reported := s.gwWebSess[id]
 		if !reported {
-			// 这台在线网关根本没报七层会话：可能没开 -web，也可能版本旧。
-			// 无论哪种，控制面对它上面的浏览器接入都不可判定——如实说出来。
-			webBlind = append(webBlind, id)
+			// ★只有**自报了七层落点**（gw.Web 非空）却不报会话台账的网关才算盲区：
+			// 那是「开了 -web 的旧版本」，它上面确实可能有浏览器接入而这一页看不见。
+			// 没开 -web 的网关根本没有 B/S 接入面，把它列进来就是一条恒亮的告警——
+			// 而混合部署（只有一台网关开七层）恰恰是最常见的形态，那样这条提示
+			// 会一直挂着，几周之后没人再看它，真出盲区时也就没人注意。
+			if strings.TrimSpace(gw.Web) != "" {
+				webBlind = append(webBlind, id)
+			}
 			continue
 		}
 		for _, se := range ws {

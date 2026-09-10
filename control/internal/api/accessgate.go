@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"baidi.dev/control/internal/httpx"
@@ -258,8 +259,14 @@ func (s *Server) webAccessCoverage() map[string]any {
 		if now-gw.LastSeen > window {
 			continue // 离线网关不参与结论：它此刻什么都没在执行
 		}
-		if _, hasWeb := s.gwWebSess[id]; !hasWeb {
-			continue // 没开七层的网关上根本没有 B/S 接入面，不该算进"未回报"
+		// ★「这台网关有没有 B/S 接入面」的判据是它**自报的七层落点**（gw.Web），
+		// 不是「它报没报会话台账」。第一版用后者，于是 idleUnreported **永远为空**：
+		// 会话台账与阈值回执由同一个上报源一起发出，报了台账的必然也报了阈值，
+		// 而真正需要被点名的「开了 -web 的旧版本网关」两个都不报、在那一版里被
+		// 当成"没开七层"跳过了——一条永远不会触发的告警，与本项目反复消灭的
+		// 假配置面是同一种东西（它还带着「已逐台核实」的措辞）。
+		if strings.TrimSpace(gw.Web) == "" {
+			continue // 没开七层：这台机器上根本没有浏览器接入面，不是"未回报"
 		}
 		if gw.WebIdleSec == nil {
 			unreported = append(unreported, id)

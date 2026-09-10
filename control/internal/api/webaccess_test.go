@@ -81,12 +81,23 @@ func TestWebTicketNotCountedAgainstDeviceQuota(t *testing.T) {
 // ★「已启用 · N 分钟」这句话在页面上对全体接入形态说，而一台还没升级的网关
 // 上的浏览器接入根本不会被注销——回执（网关报回来它在执行几秒）是唯一判据，
 // 不能拿"控制面下发了多少"当结论。
+// ★「这台网关有没有 B/S 接入面」的判据是它**自报的七层落点**（gw.Web），不是
+// 「它报没报会话台账」。第一版用后者，于是 idleUnreported **永远为空**：台账与阈值
+// 回执由同一个上报源一起发出，报了台账的必然也报了阈值，而真正该被点名的
+// 「开了 -web 的旧版本网关」两个都不报、被当成"没开七层"跳过了——一条永远不会
+// 触发的告警。本用例的 gw-old 正是那个形态（报 web、不报 webSessions/webIdleSec）。
 func TestAccessPolicyReportsWebCoverage(t *testing.T) {
 	h := newTestServer(t)
-	// 一台开了七层、但**不回报** webIdleSec 的网关（旧版本形态）。
+	// 一台开了七层、但整套七层回执都不报的网关（旧版本形态）。
 	body := map[string]any{"id": "gw-old", "proxy": webGWHost + ":18443", "spa": webGWHost + ":18201",
-		"web": "0.0.0.0:18444", "webSessions": []any{}}
+		"web": "0.0.0.0:18444"}
 	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(), body); code != http.StatusOK {
+		t.Fatal("网关注册失败")
+	}
+	// 一台**没开七层**的网关：它上面根本没有浏览器接入面，不该被点名——
+	// 混合部署（只有一台网关开七层）是最常见的形态，把它列进去就是一条恒亮的告警。
+	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+		map[string]any{"id": "gw-noweb", "proxy": webGWHost + ":18443", "spa": webGWHost + ":18201"}); code != http.StatusOK {
 		t.Fatal("网关注册失败")
 	}
 	code, out := doJSON(t, h, "GET", "/api/v1/policies/access", adminToken(), nil)
@@ -102,10 +113,12 @@ func TestAccessPolicyReportsWebCoverage(t *testing.T) {
 	}
 	un, _ := web["idleUnreported"].([]any)
 	if len(un) != 1 || un[0] != "gw-old" {
-		t.Fatalf("★不回报阈值的网关必须被点名（它上面的浏览器接入不会被注销），得 %v", web["idleUnreported"])
+		t.Fatalf("★开了七层却不回报阈值的网关必须被点名（它上面的浏览器接入不会被注销）；"+
+			"没开七层的 gw-noweb 不该在里面，得 %v", web["idleUnreported"])
 	}
 	// 换成会回报的新网关：它进 idleEnforcing。
 	body["id"] = "gw-new"
+	body["webSessions"] = []any{}
 	body["webIdleSec"] = 300
 	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(), body); code != http.StatusOK {
 		t.Fatal("网关注册失败")
@@ -201,11 +214,17 @@ func TestOnlineIncludesWebSessions(t *testing.T) {
 // 少了这条披露，后者会被读成前者（一个确定结论）。
 func TestOnlineReportsWebBlindGateways(t *testing.T) {
 	h := newTestServer(t)
-	registerWebGateway(t, h, "0.0.0.0:18444", false) // 不带 webSessions 字段 = 旧网关
+	registerWebGateway(t, h, "0.0.0.0:18444", false) // 报 web、不带 webSessions = 开了七层的旧网关
+	// 同时上线一台**没开七层**的网关：它没有 B/S 接入面，不该被点名（否则混合部署下
+	// 这条提示恒亮，几周之后没人再看它，真出盲区时也就没人注意）。
+	if code, _ := doJSON(t, h, "POST", "/api/v1/gateways/register", gatewayToken(),
+		map[string]any{"id": "gw-noweb", "proxy": webGWHost + ":18443", "spa": webGWHost + ":18201"}); code != http.StatusOK {
+		t.Fatal("网关注册失败")
+	}
 	_, out := doJSON(t, h, "GET", "/api/v1/online", adminToken(), nil)
 	blind, _ := out["webBlindGateways"].([]any)
 	if len(blind) != 1 || blind[0] != "gw-1" {
-		t.Fatalf("★不报七层会话的在线网关必须点名，得 %v", out["webBlindGateways"])
+		t.Fatalf("★只有「开了七层却不报会话台账」的在线网关该被点名，得 %v", out["webBlindGateways"])
 	}
 	// 报了空数组的网关是「开了七层、当前零人」——确定结论，不该进这张表。
 	registerWebSessions(t, h, "gw-1", []map[string]any{})

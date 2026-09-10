@@ -254,6 +254,94 @@ func OpenSQLite(path string) (*SQLiteStore, error) {
 // seedPassword 演示口令；种子/回填用它生成真实 bcrypt 哈希，demo 登录体验不变但机制真实。
 const seedPassword = "baidi@123"
 
+// legacyPassHashMarker settings 表里的一次性标记：给「史前迁移库」补 demo 口令只做一次。
+const legacyPassHashMarker = "cred.passhash.backfill.v1"
+
+// backfillLegacyPassHash 给 pass_hash 为空的历史行补一次 demo 口令哈希。
+//
+// ★这条回填此前每次启动都无条件跑，而它的判据 `pass_hash=''` 有**两种**互斥语义：
+//
+//	(a) 史前迁移库里那些建号时还没有口令列的本地用户——该补；
+//	(b) **外部目录账号**——恒不该有本地口令（authsrc_sqlite.go 建号时显式写 ''，
+//	    CLAUDE.md 把「外部账号 pass_hash 恒空」写成不变式，理由是停用认证源后
+//	    账号不能退回成"某个本地口令也能登录"）。
+//
+// 两种语义塌缩成同形之后，后果是：控制面**每重启一次**，全体 LDAP/AD/RADIUS/OIDC
+// 账号就都获得一个可用的本地口令 `baidi@123`；而门户登录是「先本地、后外部」，
+// 于是任何知道外部用户名的人都能用这个公开口令冒充他，全程不触达外部认证源，
+// 审计里是一次完全正常的本地登录。二阶后果更隐蔽：
+// api.guardLocalCredentialForAdmin 判「是不是外部账号」用的正是 `PassHash == ""`，
+// 哈希被填上之后**那道守卫整个失效**——外部目录账号可以被提为管理员，再用公开
+// 口令登进管理台。（wave10 的 zhang.wei 是同一个失效族：一条为存量准备的回填，
+// 在全新库上造出了一把公开口令的钥匙。）
+//
+// 修法与 adminRoleBackfillMarker 逐字同款，理由也同款——"每次启动都补"会让
+// **任何**能造出该形态行的路径变成「重启即获得公开口令」。全新库上 seed() 与
+// CreateUser 都自带哈希（sqlite.go 种子循环 `u.PassHash = hash`），所以这条回填
+// 在任何现役部署上本来就是空转，做成一次性没有行为代价。
+//
+// 那唯一一次也要排除外部绑定账号：史前库不可能有 auth_source_bindings 行，
+// 排除它零代价，而漏掉它就等于把上面那条通道在升级那一刻又开一次。
+//
+// **已被污染的存量库**同批清理：hash 验得过 seedPassword **且**当前有外部绑定的行
+// 清回空。判据取交集而不是只看绑定，是为了不动管理员**刻意**为外部账号重置过的
+// 本地口令（那是 guardLocalCredentialForAdmin 明写的补救路径）。
+// 清不到的残留有一类：认证源已被删除（DeleteAuthSource 连带删 auth_source_bindings）
+// 的孤儿账号——它在库里与"持出厂口令的本地账号"完全同形，无法区分，
+// 只能靠启动期 FactoryPasswordAccounts 自检点名。这条限制写在这里而不是假装没有。
+func (s *SQLiteStore) backfillLegacyPassHash(ctx context.Context) error {
+	// ① 清理存量污染（每次启动都跑：升级后第一次才真的清到东西，之后恒为空转）。
+	rows, err := s.db.QueryContext(ctx, `
+SELECT u.account, COALESCE(u.pass_hash,'') FROM users u
+ WHERE COALESCE(u.pass_hash,'') <> ''
+   AND EXISTS (SELECT 1 FROM auth_source_bindings b WHERE b.user_id = u.id)`)
+	if err != nil {
+		return err
+	}
+	var poisoned []string
+	for rows.Next() {
+		var acct, hash string
+		if err := rows.Scan(&acct, &hash); err != nil {
+			rows.Close()
+			return err
+		}
+		if auth.VerifyPassword(hash, seedPassword) {
+			poisoned = append(poisoned, acct)
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, acct := range poisoned {
+		if _, err := s.db.ExecContext(ctx,
+			`UPDATE users SET pass_hash='', pw_strength=? WHERE account=?`, auth.PwUnknown, acct); err != nil {
+			return err
+		}
+		// 回执逐个点名：清掉的是一条真实存在过的登录通道，不能只报个数。
+		slog.Warn("已清除外部目录账号上的出厂口令（外部账号不应有本地口令；此前每次重启都会被回填）",
+			"account", acct)
+	}
+
+	// ② 史前迁移库的一次性回填。
+	if _, done, err := s.Setting(ctx, legacyPassHashMarker); err != nil || done {
+		return err
+	}
+	hash, err := auth.HashPassword(seedPassword)
+	if err != nil {
+		return err
+	}
+	// 回填的是 demo 口令，强度如实标记（与 seed 同口径）。
+	if _, err := s.db.ExecContext(ctx, `
+UPDATE users SET pass_hash=?, pw_strength=?
+ WHERE (pass_hash IS NULL OR pass_hash='')
+   AND NOT EXISTS (SELECT 1 FROM auth_source_bindings b WHERE b.user_id = users.id)`,
+		hash, auth.PasswordStrength("", seedPassword)); err != nil {
+		return err
+	}
+	return s.SetSetting(ctx, legacyPassHashMarker, nowStr())
+}
+
 // ensureCredentials 幂等回填旧库的凭据地基（迁移场景）：
 //   - 权威 role 列空的用户按展示角色推断补齐；
 //   - pass_hash 空的用户回填 demo 口令哈希（否则迁移后无人能登录）；
@@ -285,22 +373,8 @@ func (s *SQLiteStore) ensureCredentials() error {
 			return err
 		}
 	}
-	// pass_hash 回填（迁移库的历史用户从来没有口令）
-	var missing int
-	if err := s.db.QueryRowContext(ctx, `SELECT COUNT(*) FROM users WHERE pass_hash IS NULL OR pass_hash=''`).Scan(&missing); err != nil {
+	if err := s.backfillLegacyPassHash(ctx); err != nil {
 		return err
-	}
-	if missing > 0 {
-		hash, err := auth.HashPassword(seedPassword)
-		if err != nil {
-			return err
-		}
-		// 回填的是 demo 口令，强度如实标记（与 seed 同口径）。
-		if _, err := s.db.ExecContext(ctx,
-			`UPDATE users SET pass_hash=?, pw_strength=? WHERE pass_hash IS NULL OR pass_hash=''`,
-			hash, auth.PasswordStrength("", seedPassword)); err != nil {
-			return err
-		}
 	}
 	// admin 账号兜底
 	var adminN int

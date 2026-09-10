@@ -216,6 +216,19 @@ func (s *Server) handleSaveAuthPolicy(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, msg)
 		return
 	}
+	// ★防自锁（PRD FR-ADMIN-20）：一条要求二次认证的策略能把全部管理员永久挡在门外，
+	// 而注册第二因子的入口本身要先登录——闸必须在**写之前**判。归一化要排在这里之前，
+	// 因为 id 与 priority 都参与 authpolicy.Match 的挑选（见 store.NormalizeAuthPolicy）。
+	p = store.NormalizeAuthPolicy(p)
+	if msg, err := s.guardAuthPolicyLockout(r.Context(), pols, replaceAuthPolicy(pols, p), "保存"); err != nil {
+		slog.Error("防自锁判定材料读取失败，拒绝保存认证策略", "策略", p.ID, "err", err.Error())
+		httpx.Error(w, http.StatusInternalServerError, "无法核对「保存后是否还有管理员登得进管理台」，本次不保存")
+		return
+	} else if msg != "" {
+		s.audit(r, "security", "拒绝保存认证策略「"+p.Name+"」：会把全部管理员挡在管理台之外", "deny")
+		httpx.Error(w, http.StatusConflict, msg)
+		return
+	}
 	saved, err := s.writer.SaveAuthPolicy(r.Context(), p)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to save auth policy")
@@ -231,6 +244,22 @@ func (s *Server) handleDeleteAuthPolicy(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	id := r.PathValue("id")
+	// ★删除同样过防自锁闸：删掉一条宽松的定向策略之后，被它命中的账号会回落到该目录的
+	// 默认策略（Match 先看范围命中者、都不命中才回落），而默认策略可能更严。
+	pols, err := s.store.AuthPolicies(r.Context())
+	if err != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load auth policies")
+		return
+	}
+	if msg, gerr := s.guardAuthPolicyLockout(r.Context(), pols, removeAuthPolicy(pols, id), "删除"); gerr != nil {
+		slog.Error("防自锁判定材料读取失败，拒绝删除认证策略", "策略", id, "err", gerr.Error())
+		httpx.Error(w, http.StatusInternalServerError, "无法核对「删除后是否还有管理员登得进管理台」，本次不删除")
+		return
+	} else if msg != "" {
+		s.audit(r, "security", "拒绝删除认证策略 "+id+"：会把全部管理员挡在管理台之外", "deny")
+		httpx.Error(w, http.StatusConflict, msg)
+		return
+	}
 	if err := s.writer.DeleteAuthPolicy(r.Context(), id); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to delete auth policy")
 		return

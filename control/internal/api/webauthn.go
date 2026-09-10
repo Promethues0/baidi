@@ -107,33 +107,59 @@ func (s *Server) secondFactor(r *http.Request, cred store.Credential, lc loginCt
 	case dec.RequireMFA:
 		// 审计记的是已经发生的事实：这次登录因为哪条条件被抬到了二次认证。
 		s.auditAs(r, cred.Account, "auth", dec.Summary(), "mfa")
-		if s.webauthnEnabled() {
+		// ★这一步的判据是 authpolicy.Blocked，与**保存策略时**的防自锁闸
+		// （api.guardAuthPolicyLockout）读同一个函数——闸算「保存后还有没有人进得来」，
+		// 靠的就是这里对同一份决策的判定。各写一份的话，闸放行了而登录挡住了，两边都不报错。
+		//
+		// 分支内的两句文案分别对应 Blocked 的两个成因，措辞不同但结局一样：
+		// 该账号既无 passkey 也无 TOTP，这次登录到此为止。
+		if authpolicy.Blocked(dec, s.webauthnEnabled()) {
+			why := "该账号尚未注册 passkey 或 TOTP"
+			if !s.webauthnEnabled() {
+				// ★RP 未配置（裸 IP 演示站）时 legacy 演示验证码本来是通的，
+				// 是策略点名了方式才把它关掉——这是 AuthPolicy.Secondary 的**唯一执行语义**：
+				// 「这条策略要求二次认证」不能由一个写死在代码里的 123456 来满足。
+				why = "策略要求的二次认证方式为「" + strings.Join(methodLabels(dec.Methods), "、") +
+					"」，而该账号尚未注册"
+			}
 			return map[string]any{
 				"ok": false, "needEnroll": true,
-				"reason": dec.Summary() + "；该账号尚未注册 passkey 或 TOTP，请先注册后再接入（可联系管理员协助录入）",
+				"reason": dec.Summary() + "；" + why + "。" + s.enrollDeadEndNote(),
 			}, true
 		}
-		// ★策略声明了可接受的二次认证方式（当前唯一真实现的是 totp）时，
-		// **legacy 演示验证码回落不成立**：「这条策略要求二次认证」不能由一个
-		// 写死在代码里的 123456 来满足——那等于把加严配置降级成一句提示。
-		// 这是 AuthPolicy.Secondary 的**唯一执行语义**，也是它不是装饰的证据。
-		// 裸 IP 演示站（RP 未配置）正是这条唯一生效的地方，出路是去门户注册 TOTP。
-		if len(dec.Methods) > 0 {
-			return map[string]any{
-				"ok": false, "needEnroll": true,
-				"reason": dec.Summary() + "；策略要求的二次认证方式为「" +
-					strings.Join(methodLabels(dec.Methods), "、") +
-					"」，而该账号尚未注册。请先在门户「安全设置」里绑定后再登录",
-			}, true
-		}
-		// 策略没声明方式（留空 = 不额外约束）：RP 未配置且未注册 TOTP 时，
-		// 保留演示验证码路径。
+		// 策略没声明方式（留空 = 不额外约束）且 RP 未配置：回落演示验证码，进得去。
 		return s.legacySecondFactor(r, cred, dec)
 	case dec.Exempted:
 		// 豁免也是一次发生过的判定，必须留痕：否则"为什么这次没要二次认证"无从回答。
 		s.auditAs(r, cred.Account, "auth", dec.Summary(), "ok")
 	}
 	return nil, false
+}
+
+// enrollDeadEndNote 「被策略抬到二次认证、却一个认证器都没注册」时给用户的补救路径。
+//
+// ★改造前这两条分支写的是「（可联系管理员协助录入）」和「请先在门户「安全设置」里绑定
+// 后再登录」——两句指的都是**不存在的路**：
+//   - 白帝没有任何「管理员代为录入认证器」的入口：/totp/enroll 与 webauthn 注册都走
+//     requireUser，只能由本人在**已登录**状态下调；管理员那侧只有 ResetWebauthnCredentials，
+//     那是清空，不是录入。
+//   - 门户「安全设置」本身要先登录才进得去，而门户登录与管理台登录过的是**同一条**
+//     认证策略（两处都按 directory 匹配、都调 secondFactor）——把人支到那里，
+//     他会在同一堵墙上再撞一次，然后开始怀疑是自己口令记错了。
+//
+// 真实存在的出路只有两条，都写在这里。第二条之所以成立，是因为保存策略那一刻有
+// guardAuthPolicyLockout 顶着：它保证「至少还有一名能登进来、且改得动这条策略的管理员」。
+func (s *Server) enrollDeadEndNote() string {
+	note := "注册入口在门户「安全设置」里、本身要求先登录，所以自助注册这条路现在走不通。" +
+		"出路有二：① 若这条策略配了「可信网络 / 授信终端」豁免，换到符合条件的网络或终端登录，进去之后立刻注册；" +
+		"② 请另一名仍能登录、且持「安全策略」权限的管理员，把你移出这条策略的适用范围、或关掉它的二次认证要求。" +
+		"管理员无法代你录入认证器——passkey / TOTP 只能由本人在已登录状态下注册。"
+	if !s.webauthnEnabled() {
+		// 裸 IP 部署（演示站就是）下 passkey 根本注册不了：浏览器规范不允许把 IP 当
+		// RP ID。不点名的话，用户会去查"为什么点了 passkey 没反应"。
+		note += "（本部署未配置 WebAuthn RP，浏览器规范不允许裸 IP 作 RP ID，因此这里能注册的第二因子只有 TOTP。）"
+	}
+	return note
 }
 
 // legacySecondFactor 未配置 WebAuthn 时的演示验证码路径（仅演示环境可达）。

@@ -127,7 +127,8 @@ func (s *SQLiteStore) System(ctx context.Context) (SystemBundle, error) {
 	rows, err := s.db.QueryContext(ctx, `
 SELECT u.id, u.name, u.account, COALESCE(u.admin_role,''), COALESCE(u.last_login,''), COALESCE(u.status,''),
        (SELECT COUNT(*) FROM webauthn_credentials c WHERE c.account = lower(trim(u.account))),
-       (SELECT COUNT(*) FROM totp_secrets t WHERE t.account = lower(trim(u.account)) AND t.confirmed = 1)
+       (SELECT COUNT(*) FROM totp_secrets t WHERE t.account = lower(trim(u.account)) AND t.confirmed = 1),
+       CASE WHEN COALESCE(u.pass_hash,'') <> '' THEN 1 ELSE 0 END, COALESCE(u.pw_strength,'')
 FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 	if err != nil {
 		return SystemBundle{}, err
@@ -136,10 +137,12 @@ FROM users u WHERE u.role='admin' ORDER BY u.created_at, u.account`)
 	admins := []AdminAccount{}
 	for rows.Next() {
 		var a AdminAccount
-		var creds, totps int
-		if err := rows.Scan(&a.ID, &a.Name, &a.Account, &a.RoleKey, &a.LastLogin, &a.Status, &creds, &totps); err != nil {
+		var creds, totps, localPw int
+		if err := rows.Scan(&a.ID, &a.Name, &a.Account, &a.RoleKey, &a.LastLogin, &a.Status, &creds, &totps,
+			&localPw, &a.PwStrength); err != nil {
 			return SystemBundle{}, err
 		}
+		a.LocalPassword = localPw == 1
 		if r, ok := byKey[a.RoleKey]; ok {
 			a.RoleName, a.Power = r.Name, r.Power
 		} else {

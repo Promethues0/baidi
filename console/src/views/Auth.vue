@@ -838,7 +838,7 @@
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message, Modal } from '@arco-design/web-vue';
 import {
-  api, failReason, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
+  api, failReason, failStatus, type AuthSrcBundle, type AuthSource, type AdaptiveRule, type RuleCond,
   type AuthPolicy, type AuthPolicyResp, type AuthRuleCapability, type AuthMethodCapability, type AuthDirectory, type EnhanceRule,
   type SecondaryMethod, type SubjectOption,
   type AuthSourceRec, type AuthSourcesResp, type ProbeResp, type SaveSourceResp,
@@ -1544,6 +1544,20 @@ function openEdit(p: AuthPolicy) {
   editing.value = normalizePolicy(JSON.parse(JSON.stringify(p)));
   editVisible.value = true;
 }
+/* reportPolicyFailure 认证策略读写失败的统一转述口（原话仍由 failReason 收口）。
+ *
+ * ★409 单独走 Modal：那是后端的**防自锁闸**（FR-ADMIN-20）——正文是一段
+ * 「谁会被挡在门外 + 两条真实存在的补救路径」的长文案，而 Message 是 3 秒后自动消失的
+ * 浮层。读不完就没了的话，管理员看到的只剩"保存失败"四个字，会去反复重试同一个
+ * 注定失败的操作；而这段话正是他唯一的出路说明。其余错误照旧走 toast。 */
+function reportPolicyFailure(title: string, e: unknown) {
+  const msg = failReason(e);
+  if (failStatus(e) === 409) {
+    Modal.error({ title, content: msg, okText: '知道了', width: 620 });
+    return;
+  }
+  Message.error(`${title}：${msg}`);
+}
 async function savePolicy(): Promise<boolean> {
   const p = editing.value;
   if (!p.name.trim()) { Message.warning('请填写策略名称'); return false; }
@@ -1563,7 +1577,7 @@ async function savePolicy(): Promise<boolean> {
     await loadPolicies();
     return true;
   } catch (e) {
-    Message.error('保存失败：' + failReason(e));
+    reportPolicyFailure('保存失败', e);
     return false;
   }
 }
@@ -1578,7 +1592,7 @@ function removePolicy(p: AuthPolicy) {
         Message.success('策略已删除');
         await loadPolicies();
       } catch (e) {
-        Message.error('删除失败：' + failReason(e));
+        reportPolicyFailure('删除失败', e);
       }
     }
   });

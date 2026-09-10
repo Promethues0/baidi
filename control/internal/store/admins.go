@@ -197,6 +197,19 @@ type AdminAccount struct {
 	Factors   []string `json:"factors"`
 	LastLogin string   `json:"lastLogin"`
 	Status    string   `json:"status"` // active | disabled | locked | idle
+	// ── 以下两项是**判定材料**而不是展示字段，故不序列化 ──
+	//
+	// LocalPassword 该账号有本地 bcrypt 口令哈希。管理台登录（api.handleAdminLogin）
+	// 只查本地哈希、没有认证域路由（外部账号 pass_hash 恒空），所以它就是
+	// 「这名管理员进不进得了管理台」的前置条件。
+	// PwStrength 口令强度标记（auth.PwWeak|PwStrong|PwUnknown），认证策略「弱密码」
+	// 增强规则的判据——防自锁闸要按它算这名管理员会不会被那条规则抬到二次认证。
+	//
+	// ★为什么挂在这里而不是另开一次查询：「谁是管理员」必须只有一个取数口。
+	// 认证策略的防自锁闸（api.guardAuthPolicyLockout）与系统管理页读同一份 System()，
+	// 各查各的话，页面上列着四名管理员而闸只看见三名——两处都不报错。
+	LocalPassword bool   `json:"-"`
+	PwStrength    string `json:"-"`
 }
 
 // ★曾经这里有一对 ClusterInfo / ClusterNode 类型与一个恒回「未部署」的构造函数。

@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"baidi.dev/control/internal/httpx"
@@ -41,20 +42,8 @@ func (s *Server) handleUpdateApp(w http.ResponseWriter, r *http.Request) {
 	// ★路径里的 id 说了算，请求体里的 id 一律忽略。两者不一致时按请求体走的话，
 	// 一次「编辑 A」会改到 B 身上，而 URL 与审计里记的都是 A。
 	a.ID = r.PathValue("id")
-	a.Name, a.Addr = strings.TrimSpace(a.Name), strings.TrimSpace(a.Addr)
-	if a.Name == "" || a.Addr == "" || a.Mode == "" {
-		httpx.Error(w, http.StatusBadRequest, "name / addr / mode 均不可为空")
-		return
-	}
-	if !validAppMode[a.Mode] {
-		httpx.Error(w, http.StatusBadRequest, "mode 只能是 tunnel | web | global")
-		return
-	}
-	if a.Status == "" {
-		a.Status = "running"
-	}
-	if a.Status != "running" && a.Status != "stopped" {
-		httpx.Error(w, http.StatusBadRequest, "status 只能是 running | stopped")
+	if err := normalizeAppInput(&a); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	before, found := s.appByID(r, a.ID)
@@ -113,6 +102,50 @@ func (s *Server) handleDeleteApp(w http.ResponseWriter, r *http.Request) {
 // validAppMode 发布形态白名单。字典外的值会让磁贴与剖面走进各自的 default 分支，
 // 而两处的 default 不一定同向。
 var validAppMode = map[string]bool{"tunnel": true, "web": true, "global": true}
+
+// normalizeAppInput 发布（POST）与编辑（PUT）**共用**的入口校验与归一。
+//
+// ★为什么必须共用：改造前 `POST /apps` 的全部校验是 `name != "" && mode != ""`，
+// 比后补的 PUT 松一大截，而 validAppMode 就放在同一个文件里。三种字典外的值
+// 各有一种「接口回 201、页面上找不出毛病、功能静默不生效」的形态：
+//
+//   - **mode 写错**（大小写不同 / 拼错 / 前端把中文 label 传上来）：判定它的三处
+//     各按自己的 default 解释——`appAccessState` 只对 `"global"` 走直连书签分支，
+//     其余一律当受控资源判；门户与移动端的 modeMeta 查不到就回落成 WEB 那一档；
+//     `alertSnapshot` 的「排除直连书签」判据也是 `a.Mode == "global"`。
+//     于是一条 `mode:"Global"` 的应用会被当成受控应用、常年挂一条「未关联受控资源」
+//     告警，而管理员在应用页上看到的是「直连书签」以外的另一个模式标签。
+//   - **addr 空**：发布向导里它是必填项，PUT 也拒空，只有 POST 放行；门户与移动端
+//     磁贴上那行地址就是空白，管理员无从判断是「没填」还是「渲染坏了」。
+//   - **status 写错**：`handlePortalApps` 与客户端剖面只放行 `status == "running"`，
+//     于是 `status:"Running"` 的应用**永远不出现在门户与终端上**，而应用页照常列着它、
+//     状态列渲染成「已停用」（那一栏的判据是 `=== 'running'`）——两个界面对同一条
+//     应用给出的答案都不是真的。
+//
+// 归一只做 TrimSpace（名称/地址前后的空白是复制粘贴来的），**不做大小写折叠**：
+// 把 `"Global"` 悄悄改成 `"global"` 等于替管理员猜他想选哪个模式，而这三个值在
+// 发布向导里是点出来的、不是打出来的——真出现别的值就是有人在直接调接口，该拒。
+func normalizeAppInput(a *store.App) error {
+	a.Name, a.Addr = strings.TrimSpace(a.Name), strings.TrimSpace(a.Addr)
+	a.Mode, a.Status = strings.TrimSpace(a.Mode), strings.TrimSpace(a.Status)
+	if a.Name == "" || a.Addr == "" || a.Mode == "" {
+		return errors.New("name / addr / mode 均不可为空")
+	}
+	if !validAppMode[a.Mode] {
+		return errors.New("mode 只能是 tunnel | web | global（收到 " + strconv.Quote(a.Mode) +
+			"）：字典外的值会让门户磁贴、客户端剖面、告警评估三处各按自己的默认分支解释它")
+	}
+	if a.Status == "" {
+		// 与 SQLiteStore.CreateApp 的缺省同值。这里先落定是为了让 PUT 也有同一个缺省，
+		// 且让下面那道枚举校验对「没填」与「填错」给出不同结论。
+		a.Status = "running"
+	}
+	if a.Status != "running" && a.Status != "stopped" {
+		return errors.New("status 只能是 running | stopped（收到 " + strconv.Quote(a.Status) +
+			"）：门户与客户端剖面只放行 running，别的值等于这个应用对所有终端都不存在")
+	}
+	return nil
+}
 
 // appByID 读一条应用（供审计写出改前值）。读不到不阻断主操作。
 func (s *Server) appByID(r *http.Request, id string) (store.App, bool) {

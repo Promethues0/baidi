@@ -99,7 +99,15 @@
                 </span>
               </div>
               <div class="bd-tile__name">{{ app.name }}</div>
-              <div class="bd-tile__addr bd-mono">{{ app.addr }}</div>
+              <!-- 地址由服务端现算（PortalTile.addrSource）：关联了受控资源就是资源的真实后端，
+                   直连书签是它自己的链接，两者都没有才回落到管理员手填的那份。
+                   ★只有 declared 那一档需要当面说明——那是一个白帝任何地方都不会去拨的值，
+                   用户拿它去填 SSH/RDP 客户端必然连不上，而门户与网关两处都不会报错。
+                   addrSource 缺席（旧后端）时一律不贴标注：判不出来就不说，别编。 -->
+              <div class="bd-tile__addr bd-mono" :title="addrTitle(app)">
+                {{ app.addr }}
+                <span v-if="app.addrSource === 'declared'" class="bd-tile__addrnote">· 管理员填写</span>
+              </div>
               <div class="bd-tile__meta">
                 <span class="bd-tg" :class="'bd-tg--' + modeMeta[app.mode].tag">{{ modeMeta[app.mode].label }}</span>
               </div>
@@ -327,6 +335,22 @@ function openLabel(app: PortalTile) {
   if (app.mode === 'global') return bookmarkURL(app) ? '打开链接' : '查看地址';
   return browserOpenable(app) ? '访问' : '接入地址';
 }
+/** 磁贴上那行地址的来源说明（hover 提示）。
+ *  ★三档各说各的、缺省什么都不说：`addrSource` 缺席是「旧后端判不出来」，
+ *  这时贴任何一句都是编的，而「来自资源」与「只是手填」会把用户支去两个相反的方向。 */
+function addrTitle(app: PortalTile) {
+  switch (app.addrSource) {
+    case 'resource':
+      return `取自关联受控资源 ${app.resourceId} 的后端地址——网关真正拨号的就是它`;
+    case 'bookmark':
+      return '直连书签的链接本身：不经白帝通道，点「打开链接」直接开它';
+    case 'declared':
+      return '管理员在发布向导里手填的展示地址：该应用没有可用的受控资源后端，'
+        + '白帝没有任何地方会按它拨号，实际能不能连通请找管理员确认';
+    default:
+      return '';
+  }
+}
 /** 直连书签的地址是不是一个能直接打开的 URL（泛域名 *.x.com 不是）。 */
 function bookmarkURL(app: PortalTile): string {
   const a = (app.addr || '').trim();
@@ -481,6 +505,8 @@ onMounted(() => {
 .bd-tile__flag { display: inline-flex; align-items: center; gap: 4px; font-weight: 600; padding: 3px 8px; }
 .bd-tile__name { font-size: var(--bd-fs-lg); font-weight: 600; color: var(--bd-t1); line-height: var(--bd-lh-tight); }
 .bd-tile__addr { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 6px; word-break: break-all; }
+/* 「管理员填写」标注：与地址同一行、更弱一档——它是对地址的限定语，不是另一条信息 */
+.bd-tile__addrnote { color: var(--bd-t4); }
 .bd-tile__meta { margin-top: var(--bd-sp-3); }
 /* 磁贴主按钮：全局 .bd-btn 的整宽变体 */
 .bd-tile__btn { margin-top: var(--bd-sp-4); width: 100%; }

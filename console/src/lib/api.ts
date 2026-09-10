@@ -1188,6 +1188,13 @@ export interface TotpStatus { enrolled: boolean; confirmed: boolean; createdAt?:
 export interface TotpEnrollResp { secret: string; uri: string }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
+  /** 上面那行 addr 是**哪来的**（服务端 portalAddr 现算，wave11 行动 15②）：
+   *   - `resource`  取自关联受控资源的 backend —— 网关真正拨号的那个地址；
+   *   - `bookmark`  直连书签自己的链接（那一档 addr 是**执行值**，「打开链接」开的就是它）；
+   *   - `declared`  管理员在发布向导里手填、**没有任何执行方**的展示值（应用没关联资源时只剩它）。
+   *  ★缺省（旧后端不下发）= 判不出来：此时不许贴任何一种标注——说它「来自资源」是编，
+   *  说它「只是手填」也是编，而两句话会把用户支去两个相反的方向。 */
+  addrSource?: 'resource' | 'bookmark' | 'declared';
   sensitivity: 'low' | 'normal' | 'high';
   /** 服务端算出的授权结论：静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
    *  ★与客户端剖面、七层票据同一个判定函数（control 侧 appAccessState）。前端不得再按

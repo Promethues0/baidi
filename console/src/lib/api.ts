@@ -1279,7 +1279,14 @@ export interface DownloadsResp { clients: ClientDownload[] }
 /* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
 /* skip = 该能力未部署（如集群），不参与健康分；渲染时对未知枚举兜底为中性样式，别让页面崩 */
 export type DiagStatus = 'pass' | 'warn' | 'fail' | 'skip';
-export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';
+/** ★这份联合类型必须与后端 DiagCheck.Category 的实际取值一一对上（api/diag.go 那批
+ *  `DiagCheck{Key: …, Category: …}`）。少一个的后果不是报错而是**降级成英文原文**：
+ *  Diag.vue 的 catLabel 兜底是 `CAT[c]?.label ?? c`，于是那一类的卡片副标题会显示
+ *  `audit` / `system` 这种给不了任何信息的字样，而导出的 Markdown 报告里也一样——
+ *  `audit-forward`（wave9 补的）与 `notify`（本波补的）此前/此刻正是这两类。 */
+export type DiagCategory =
+  | 'control' | 'storage' | 'audit' | 'dataplane' | 'stealth'
+  | 'system' | 'cluster' | 'identity' | 'posture' | 'security';
 export interface DiagItem { label: string; value: string; status?: DiagStatus }
 export interface DiagCheck {
   key: string; category: DiagCategory; name: string;

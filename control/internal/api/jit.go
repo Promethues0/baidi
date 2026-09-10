@@ -138,6 +138,15 @@ func (s *Server) handlePortalCreateAccessRequest(w http.ResponseWriter, r *http.
 		return
 	}
 	s.audit(r, "access", "申请访问资源「"+res.Name+"」（期望 "+strconv.Itoa(ttl)+" 分钟）："+req.Reason, "ok")
+	// 审批类通知（wave11 行动 17②）：这张单子在被批准之前，申请人**一步也走不下去**
+	// （网关那边没有放行），而管理员唯一的发现途径此前是自己去翻审批页。
+	// 只在**真的新建了一张单子**之后发（重复提交已在上面被 ErrDuplicateRequest 顶回），
+	// 否则一个反复点「申请」的用户就能把管理员的邮箱刷爆。
+	s.notifyApprovalPending(r.Context(), "JIT 访问申请", req.User,
+		"【白帝】待审批：JIT 访问申请 "+req.User+" → "+res.Name,
+		"用户 "+req.User+" 申请临时访问受控资源「"+res.Name+"」（"+res.ID+"）。\n\n"+
+			"申请单："+created.ID+"\n期望时长："+strconv.Itoa(ttl)+" 分钟\n申请理由："+req.Reason+"\n\n"+
+			"在批准之前该用户访问不到这个资源。请到管理台「安全防护 → JIT 即时访问」处置。")
 	httpx.JSON(w, http.StatusCreated, created)
 }
 

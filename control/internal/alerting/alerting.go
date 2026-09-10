@@ -60,6 +60,12 @@ type Snapshot struct {
 	// ForwardQueueMax 每出口的队列上界（store.DefaultForwardQueueMax 或部署配置）。
 	// 积压比例按它算；<=0 时略过积压这一维，不编一个分母。
 	ForwardQueueMax int
+	// NotifyChannels **启用中**的消息通道（含 last_status/last_detail/last_at）。
+	// nil / 空 = 没有启用中的通道：这条规则一条候选都不产生。
+	//
+	// ★取数侧只放启用中的进来，判定侧仍复核一次 Enabled——「通道被停用」是管理员的
+	// 显式动作、不是故障，两处都不许把它算成"发送失败"（见 store.AlertKindNotifyChannelFail）。
+	NotifyChannels []store.NotifyChannel
 	// AuditChain 审计链自检结论；nil = 本轮没查（存储不支持，或还没到自检周期）。
 	// ★nil 与「查了、没问题」必须区分：把没查当成没问题，正是"防篡改链没人查等于没有"。
 	AuditChain *ChainStatus
@@ -400,6 +406,34 @@ func evalRule(rule store.AlertRule, spec store.AlertKindSpec, snap Snapshot) []C
 			}
 		}
 
+	case store.AlertKindNotifyChannelFail:
+		for _, ch := range snap.NotifyChannels {
+			if !ch.Enabled {
+				// 纵深（取数侧已筛过一遍）：停用是管理员的显式动作，不是故障。
+				continue
+			}
+			// ★判据是**恰好等于 fail**，不是"不等于 ok"。三种取值走这一条 continue 的
+			// 理由各不相同，合写成一个条件是有意的（写成三段 if 时，前两段在结构上
+			// 被第三段完全吞掉——变异实测确认过：删掉「从未发过」那段，四条用例一条都不红，
+			// 那就是一段不可观测的代码）：
+			//   ""      从未真正发送过（那四列只由 api.sendVia 写）= **不可判定**，
+			//           不是"发不出去"。刚配好还没轮到、或这套部署至今一次事件都没发生，
+			//           两者都不该报警；「没有证据说它能用」由 /diag 的消息通道项以 warn 呈现。
+			//   ok      最近一次成功。
+			//   其它    将来若加了新的结果取值，这里**不替它编结论**（不认识就不报）。
+			// 三种取值各有一条用例钉住（notifychannel_test.go）。
+			if ch.LastStatus != store.NotifySendFail {
+				continue
+			}
+			out = append(out, mk("notify:"+ch.ID,
+				fmt.Sprintf("消息通道「%s」发送失败", ch.Name),
+				fmt.Sprintf("最近一次投递（%s，事件 %s）失败：%s。"+
+					"爆破锁定、终端判定阻断、业务告警三条链路都经这条通道外发——"+
+					"在它恢复之前，这些事件只会出现在控制台与审计里，不会有任何人收到通知。"+
+					"（本条告警自己也走同一条通道，多半同样发不出去；处置请到「系统 → 消息通道」点一次「测试」。）",
+					tsOf(ch.LastAt), orDash(ch.LastEvent), orDash(ch.LastDetail))))
+		}
+
 	case store.AlertKindAuditChain:
 		st := snap.AuditChain
 		if st == nil {
@@ -427,6 +461,14 @@ func overThresh(v *float64, limit float64) (float64, bool) {
 		return 0, false
 	}
 	return *v, *v > limit
+}
+
+// orDash 空串换成破折号：告警正文里一个突然出现的空白会被读成"这里本来该有内容但丢了"。
+func orDash(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "—"
+	}
+	return s
 }
 
 // grantResName 授予的资源展示名（冗余名为空时回落资源 id）。

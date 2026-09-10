@@ -94,6 +94,7 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 		s.checkNAT(ctx),
 		s.checkStealth(),
 		s.checkAutoBackup(),
+		s.checkNotifyChannels(ctx),
 		s.checkCluster(ctx),
 		s.checkAuthSources(ctx),
 		s.checkPosture(ctx),

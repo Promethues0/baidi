@@ -125,7 +125,7 @@ func TestComponentConsistency(t *testing.T) {
 	if strings.Contains(joined, "gw-2(") {
 		t.Errorf("版本已一致的网关不该被列为落后：%v", c.Warnings)
 	}
-	if !strings.Contains(joined, "gw-3") || !strings.Contains(joined, "无法校验") {
+	if !strings.Contains(joined, "gw-3") || !strings.Contains(joined, "不可判定") {
 		t.Errorf("不上报版本的网关必须如实标为不可判定：%v", c.Warnings)
 	}
 	// 一致性只警告不拦截：拦住的话，一台离线的旧网关会让整个控制面永远升不了级。
@@ -227,11 +227,11 @@ func TestChecksumAndSignatureAreBothRequired(t *testing.T) {
 func TestPackageMinSource(t *testing.T) {
 	m := Manifest{Product: "baidi", Component: "control", Version: "2.0.0",
 		MinSource: "1.5.0", SHA256: strings.Repeat("ab", 32)}
-	c := CheckPackage(m, "1.0.0", DefaultRules(), Components{})
+	c := CheckPackage(m, DefaultRules(), Components{Control: "1.0.0"})
 	if !c.Blocked || c.NextHop != "1.5.0" {
 		t.Fatalf("低于包要求的起跳版本应被拦并指出先升到哪：blocked=%v next=%q", c.Blocked, c.NextHop)
 	}
-	if c := CheckPackage(m, "1.5.0", DefaultRules(), Components{}); c.Blocked {
+	if c := CheckPackage(m, DefaultRules(), Components{Control: "1.5.0"}); c.Blocked {
 		t.Fatalf("达到起跳版本后应放行：%v", c.Reasons)
 	}
 }

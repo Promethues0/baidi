@@ -38,7 +38,30 @@ etc/tls/server.{crt,key} TLS（首装自签，生产换正式证书；**自签�
 etc/tls/le.{crt,key,csr}  Let's Encrypt IP 地址证书（仅 WITH_ACME_IP_CERT=1）；etc/acme/ 是 lego 的账户与状态目录
                           （开关、四条硬约束与续期/回退语义见下方「HTTPS 证书」一节）
 downloads/              客户端安装包 + manifest.json（先跑 clients/build-artifacts.sh 汇集到 deploy/artifacts/downloads，build.sh 携带进 _out）
+VERSION                 ★这台机器上装的是哪个交付包（semantic / commit / builtAt 三行）
 ```
+
+### 版本身份（两个字段，构建期注入）
+
+`deploy/build.sh` 往每个服务端二进制里注两样东西，两样都不能少：
+
+| 字段 | 来源 | 谁在用 |
+|---|---|---|
+| **语义版本** `x.y.z` | 仓库根的 `VERSION` 文件（`BAIDI_SEMVER` 可覆盖）——**发布动作 = 改它** | 升级判定：能不能升 / 是不是降级 / 组件一致性。只有它能排序 |
+| **构建标识** | git 短哈希 + 构建时间（UTC） | 取证。同一个 `0.3.0` 可以被构建一百次，其中九十九次含着不同的代码 |
+
+查这台机器装的是什么，有两条同源的路（都由同一次构建注入）：
+
+```bash
+cat /opt/baidi/VERSION                 # semantic=… commit=… builtAt=…
+/opt/baidi/bin/baidi-control -version  # 一行 JSON（备机也读它，别改成人话格式）
+/opt/baidi/bin/baidi-gateway -version
+/opt/baidi/bin/baidi-standby -version
+```
+
+**没经过 `build.sh` 的二进制会如实报「未注入」**，控制台与 `/diag` 也照实显示，
+且升级包校验会 fail-closed 拒绝（判不出当前版本就判不出这是升级还是降级）。
+这不是故障，是"这一份不是交付件"——修法就是用 `build.sh` 重新构建再部署。
 
 ## 一键部署
 
@@ -390,11 +413,37 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh --dry-run
 sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 ```
 
-脚本替不了的三件事，成功输出里也会再说一遍：
+干跑会额外做**版本与终端侧接管检查**（wave11 行动 18-④）：查本机 `baidi-control` 在不在、是哪一版
+（不在 = 提升的最后一步 `systemctl start baidi-control` 会失败）；从 `latest.json` 的 `primary`
+读出旧主机地址，并核对**本机是否已持有那个地址**——持有（VIP 漂移 / 同地址接管）则终端侧一动不用动，
+否则打出下面这份清单。
+
+**★切换没有自动接管，也刻意不做。** 那需要一个"终端能主动发现新主机"的服务（DNS SRV / 引导端点 /
+锚点服务），白帝一个都没有；做一个假的只会在切换当天多一层要排查的东西。所以脚本替不了的是这些：
 
 1. **确认老主机已停机**——两台同时跑就是脑裂；
-2. 各网关的 `-control` 指向新主机（mTLS 证书随库一起恢复了，白名单仍然有效）；
-3. 切换后跑一次 `/diag` 与「审计链校验」，后者能证明审计链密钥恢复正确。
+2. **各网关**：`-control` / `BAIDI_GW_CONTROL` 指向新主机后重启（mTLS 证书随库一起恢复，白名单仍有效）；
+3. **桌面客户端（每台）**：控制中心地址是本机 `localStorage` 里一个**手填的单值**（`baidi_cfg_control`），
+   没有故障转移列表 —— 必须每台在「设置」里改；
+4. **移动端（安卓 / iOS / 鸿蒙）**：控制中心地址与控制面信任锚都是**编译进安装包**的
+   （`-PbaidiApiBase` / `res/raw/baidi_control_ca.pem`）→ **必须重新出包并让用户重装**；
+5. **HTTPS 证书不在备份里**（`backupSources` 只含数据库 + 内部 CA + 四把签名密钥 + 审计链密钥），
+   每台机器的自签证书是 `install-remote.sh` 各自生成的 → 新主机出示的是**另一张叶子**，
+   而桌面端 `~/.baidi/control-ca.pem` 与安卓包里的锚钉的都是旧主机那张。桌面端要重导系统信任库，
+   移动端落在第 4 条那次重新出包上；用 LE IP 证书的部署要用新 IP 重新签一次。
+6. 切换后跑一次 `/diag` 与「审计链校验」，后者能证明审计链密钥恢复正确；顺带看一眼
+   「服务端版本身份」那一格（显示「未注入」= 这台装的不是 `build.sh` 产出的交付包）。
+
+**要让切换不牵动终端，唯一的正路是两台机器共用一个对外入口**（同一个 VIP / 同一个域名 + 同一张证书），
+而不是在切换当天补救。
+
+### 版本一致性
+
+备机每轮同步会回报两组版本身份：它自己（`baidi-standby`）与它**实测**到的同机 `baidi-control`
+（跑一次 `baidi-control -version`）。**判据只用后者**——提升后真正被启动的是它，而两个二进制同版
+只是部署脚本的约定、不是可核实的事实（"上次部署只覆盖了其中一个"正是最该在切换前发现的形态）。
+集群页与 `/diag` 三态呈现：与主机同版 / 不同版（**告警**，切换会跨版本恢复）/ 不可判定
+（旧备机不上报，如实标注、不当成"一致"）。**备机也要跟着升级**：到备机上重跑一次部署脚本即可。
 
 ## 生产化清单（上线前）
 

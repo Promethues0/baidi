@@ -545,6 +545,22 @@ export interface StandbyNodeView {
   intervalSec: number; thresholdSec: number;
   lastSyncAt: string; lastPullAt: string;
   backupVersion: string; backupCreatedAt: string; backupSha256: string;
+  /* ── 备机侧版本身份（wave11 行动 18-③）──
+   *
+   * ★两组回答两个不同的问题，别合并显示：
+   *   nodeSemver/nodeBuild       = 备机上跑的 baidi-standby（同步进程）；
+   *   controlSemver/controlBuild = 备机上那份 **baidi-control**——**切换后真正被启动的**
+   *     那个进程，也是 versionState 唯一的判据。
+   * 四项都可能是 `''` = 不可判定（旧备机不报 / 二进制未注入 / 探不到）。
+   * 旧后端不下发这些键 → undefined → 同样按不可判定渲染，绝不显示成"一致"。 */
+  nodeSemver?: string; nodeBuild?: string;
+  controlSemver?: string; controlBuild?: string;
+  /** 备机上的 baidi-control 与主机的版本关系。
+   *  ★`unknown` 与 `match` 必须分开显示：两台都不知道自己是哪一版时若显示「一致」，
+   *  方向正好与事实相反，而那恰恰是升级到本版本之前所有存量部署的形态。 */
+  versionState?: 'unknown' | 'match' | 'mismatch';
+  /** 上面那个结论的人话（后端下发，页面原样显示，不自己编）。 */
+  versionText?: string;
   lastStatus: string; lastDetail: string;
 }
 export interface ClusterInfo {
@@ -1363,7 +1379,12 @@ export interface DiagCheck {
   items?: DiagItem[];
 }
 export interface DiagBundle {
-  generatedAt: string; component: string; version: string; env: string; uptime: string;
+  generatedAt: string; component: string;
+  /** 控制面语义版本；`''` = 未注入（不可判定），页面显示「未注入」而不是任何数字。 */
+  version: string;
+  /** 控制面构建标识（提交短哈希 · 构建时间）；`''` = 未注入。 */
+  build?: string;
+  env: string; uptime: string;
   score: number; pass: number; warn: number; fail: number; skip?: number;
   checks: DiagCheck[];
 }
@@ -1556,9 +1577,19 @@ export interface UpgradeBundle {
   signKeysConfigured?: boolean;
   /** 未配置时的说明（后端下发，页面不自己编）。 */
   signKeyNote?: string;
+  /** 控制面**语义版本**；`''` = 未注入（不可判定）。
+   *  ★空串绝不能渲染成 0.3.0 或任何猜出来的数字：改造前这一格读的是源码里的
+   *  `const Version`，而 `-ldflags -X` 对常量静默无效——页面上那个版本号
+   *  与这台机器上装的是哪次构建毫无关系。 */
   control: string;
-  /** 网关 id → 上报版本；空串=旧网关不上报（判定层会标「无法校验」，不是「一致」）。 */
+  /** 控制面构建标识（提交短哈希 · 构建时间），已由后端渲染成展示文案；`''` = 未注入。 */
+  controlBuild?: string;
+  /** 语义版本未注入时的一句处置说明（后端下发，页面不自己编）。 */
+  controlNote?: string;
+  /** 网关 id → 上报的**语义版本**；空串=旧网关不上报/未注入（判定层标「不可判定」，不是「一致」）。 */
   gateways: Record<string, string>;
+  /** 网关 id → 构建标识；空串 = 不可判定。只用于取证展示，不参与任何版本比较。 */
+  gatewayBuilds?: Record<string, string>;
   rules: UpgradeRules;
   gray: GrayPlan[];
   /** 每条灰度计划**精确**命中的账号数（key = platform）。缺席 = 读取失败，

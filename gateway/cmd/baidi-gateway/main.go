@@ -39,9 +39,45 @@ import (
 	"baidi.dev/gateway/internal/webproxy"
 )
 
-// version 网关版本号，编译期注入：go build -ldflags "-X main.version=v0.x.y"。
-// 随 mTLS 心跳上报控制面（deploy/build.sh 已接线），未注入时如实报 "dev"。
-var version = "dev"
+// 网关的版本身份，编译期 -ldflags -X 注入，随 mTLS 心跳上报控制面。
+//
+// 对外是**两个字段**（见 buildID）：
+//
+//	语义版本 x.y.z —— 发布方声明，取自仓库根的 VERSION 文件。升级判定
+//	    （能不能升 / 是不是降级 / 组件一致性）只认它，因为只有它能排序。
+//	构建标识       —— 这一份二进制到底是哪次构建产出的。出事那天拿它去对代码；
+//	    语义版本对不上任何一次提交（同一个 0.3.0 可以被构建一百次）。
+//
+// ★改造前只有一个 `version`，而 deploy/build.sh 往里注的是 `git rev-parse --short HEAD`。
+// 后果不是"少了个信息"：`upgrade.CheckUpgrade` 对哈希 ParseVersion 必失败，
+// 于是**每一台按脚本装出来的网关**都被写进「升级后版本将与控制面不一致，须同步升级」，
+// 控制台那一栏恒黄，组件一致性校验退化成一句永远为真的告警。
+//
+// ★构建标识拆成 commit + builtAt 两个变量而不是一个拼好的串：
+// `-ldflags` 的值是**按空格分词**的，`-X main.build=abc123 · 2026-09-10T…` 会被
+// 链接器当成多个参数而**直接报 usage 退出**（实测过）。拼接放在 Go 里做，
+// 注入侧就永远不会出现带空格的值。
+//
+// ★缺省一律空串，不是 "dev"：非空缺省是一句"我知道我是哪一版"的谎，
+// 而控制面对空串有专门的三态处置（不可判定 ≠ 版本不一致）。
+var (
+	version = ""
+	commit  = ""
+	builtAt = ""
+)
+
+// buildID 构建标识的**机读**形式：两半都缺时是空串（不可判定），绝不是"未注入"三个字。
+// 那三个字一旦进了心跳报文，控制面就分不出「网关说它不知道」与「有个叫未注入的构建号」。
+func buildID() string {
+	switch {
+	case commit != "" && builtAt != "":
+		return commit + " · " + builtAt
+	case commit != "":
+		return commit
+	default:
+		return builtAt
+	}
+}
 
 func main() {
 	spaAddr := flag.String("spa", env("BAIDI_GW_SPA", ":18201"), "SPA 敲门 UDP 监听地址")
@@ -113,7 +149,18 @@ func main() {
 	webExtHost := flag.String("web-external-host", env("BAIDI_GW_WEB_EXTERNAL_HOST", ""),
 		"七层对外主机名（如 oa.example.com:9443），下发给后端做 X-Forwarded-Host。"+
 			"不配且对端不可信时**不下发**该头——Host 头是客户端可控的，当真实值转发即 Host header injection")
+	// -version 打印本二进制的版本身份后退出。
+	//
+	// ★它不是"顺手加的"：改造前**主机上没有任何版本戳**——版本只活在心跳报文里，
+	// 而排查现场第一件事恰恰是「这台机器上装的到底是哪个包」。运维手上只有 ssh，
+	// 没有控制台的时候（控制面挂了、或正在切换）就完全查不到。
+	showVersion := flag.Bool("version", false, "打印版本身份（语义版本 + 构建标识）后退出")
 	flag.Parse()
+
+	if *showVersion {
+		fmt.Printf("baidi-gateway 语义版本 %s，构建 %s\n", orNotInjected(version), orNotInjected(buildID()))
+		return
+	}
 
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})))
 	// 收口后网关不再持有任何共享密钥：令牌验证只靠 control 的敲门公钥。
@@ -197,7 +244,8 @@ func main() {
 		slog.Warn("⚠ 隧道身份严格模式已关闭：不带票据的连接将按**源 IP** 推断身份，" +
 			"同一出口下任意主机在放行窗内直连隧道口即可继承他人的资源授权，仅限过渡期")
 	}
-	slog.Info("baidi-gateway 启动", "version", version, "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
+	slog.Info("baidi-gateway 启动", "version", orNotInjected(version), "build", orNotInjected(buildID()),
+		"spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
 		"ttl", ttl.String(), "strictKnock", *strictKnock, "tunnelIDStrict", *tunnelIDStrict,
 		"公钥数", verifier.PublicKeyCount(), "acceptHS256", verifier.AcceptsLegacy())
 
@@ -318,7 +366,10 @@ func main() {
 		// 安全事件从此有了去处：拒绝经节流后随心跳带给控制面（落审计 + 攻击源统计）。
 		secRep.Bind(cp.QueueSecEvent)
 		secRep.StartFlusher(time.Minute)
-		cp.SetVersion(version) // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		// 版本身份随心跳上报：控制面此前连网关跑的什么版本都不知道。
+		// 两个字段分开报——语义版本进升级判定，构建标识只用于取证展示。
+		cp.SetVersion(version)
+		cp.SetBuild(buildID())
 		// 隧道身份姿态随心跳上报（**开着也报**）：控制面据此在网关页区分
 		// 「这台的逃生舱开着」与「这台根本不会报」，后者才是真正会被忽略的那种。
 		cp.SetTunnelIDStrict(*tunnelIDStrict)
@@ -733,6 +784,18 @@ func env(k, def string) string {
 		return v
 	}
 	return def
+}
+
+// orNotInjected 版本字段的**展示**兜底。
+//
+// ★只用于日志与 -version 直出，**绝不**用在上报路径上：心跳里必须原样发空串，
+// 控制面据此区分「旧网关不会报」「新网关报了但没注入」与「确实是某个版本」，
+// 而 "未注入" 这四个字一旦进了报文，就会被当成一个版本号去 ParseVersion。
+func orNotInjected(s string) string {
+	if strings.TrimSpace(s) == "" {
+		return "未注入"
+	}
+	return s
 }
 
 // envBool 读布尔环境变量（1/true/yes/on 为真，0/false/no/off 为假，其余取默认）。

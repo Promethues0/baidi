@@ -28,6 +28,7 @@ import (
 	"sync"
 	"time"
 
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/upgrade"
 )
 
@@ -161,9 +162,11 @@ func (s *Server) RunAutoBackup(ctx context.Context, cfg AutoBackupConfig, keep i
 		return
 	}
 	tmpName := tmp.Name()
+	bi := buildinfo.Current()
 	meta := upgrade.BackupMeta{
-		Version: Version, CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
-		Note: "定期自动备份",
+		Version: bi.Semantic, Build: bi.BuildID(),
+		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
+		Note:      "定期自动备份",
 	}
 	if err := upgrade.CreateBackup(tmp, meta, cfg.Passphrase, sources); err != nil {
 		tmp.Close()

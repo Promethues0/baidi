@@ -321,6 +321,18 @@ fi
 if [ -f "$HERE/promote-standby.sh" ]; then
   install -m 0755 "$HERE/promote-standby.sh" "$BD_PREFIX/bin/promote-standby.sh"
 fi
+# 主机上的版本戳：`cat $BD_PREFIX/VERSION` 回答"这台装的是哪个交付包"。
+# ★改造前主机上一个版本戳都没有，版本只活在心跳报文与控制台页面里——
+#   而控制面挂了、或正在切换温备的时候，页面恰恰是不可用的，人手上只有 ssh。
+#   二进制自身的 `-version` 是另一条同源的路（两者都由同一次 build.sh 注入）。
+if [ -f "$HERE/VERSION" ]; then
+  install -m 0644 "$HERE/VERSION" "$BD_PREFIX/VERSION"
+  echo "==> 本次交付包版本：$(tr '\n' ' ' < "$BD_PREFIX/VERSION")"
+else
+  # 不中止：老交付包没有这个文件。但要说出来——没有版本戳的机器在排查时是个黑盒。
+  echo "⚠ 交付包里没有 VERSION 文件（构建于本次改造之前？）：本机将没有版本戳，"
+  echo "  控制台上的「当前版本」也会显示「未注入」。用新版 deploy/build.sh 重新构建即可。"
+fi
 rm -rf "$BD_PREFIX/web"; mkdir -p "$BD_PREFIX/web"
 cp -R "$HERE/web/." "$BD_PREFIX/web/"
 

@@ -412,8 +412,8 @@ func validateIpsecSite(it store.IpsecSite) string {
 // 与 gateway/internal/ipsec/ike 里带 private 标记的那几个一一对应。
 var ipsecPrivateAlgs = map[string]bool{
 	"SM4-GCM": true, "SM4-CBC": true, // enc.private
-	"SM3":     true,                  // hash.private
-	"sm2p256": true,                  // dh.private
+	"SM3":     true, // hash.private
+	"sm2p256": true, // dh.private
 }
 
 // ipsecKnownAlgs 本实现认识的全部算法（大小写按前端下拉与 store 注释的规范写法）。
@@ -427,8 +427,10 @@ var ipsecKnownAlgs = map[string]bool{
 // fillIpsecSuiteDefaults 给未填算法的阶段按 suite 补一组默认值。
 //
 // 默认取种子里对应 suite 的那组（store/ipsec.go 的两条种子站点）：
-//   standard → AES256-GCM / SHA256 / group19（RFC 码点）
-//   gm       → SM4-GCM / SM3 / sm2p256（私有码点）
+//
+//	standard → AES256-GCM / SHA256 / group19（RFC 码点）
+//	gm       → SM4-GCM / SM3 / sm2p256（私有码点）
+//
 // 只补**整个阶段都为空**的情况；只填了一半（半配）交给 validateIpsecSite 报错，
 // 不替管理员猜他想要哪个——半配往往是笔误，猜错比报错更糟。
 func fillIpsecSuiteDefaults(it *store.IpsecSite) {

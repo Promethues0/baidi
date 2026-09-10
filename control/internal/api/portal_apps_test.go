@@ -87,7 +87,7 @@ func resFromMap(m map[string]any) store.Resource {
 		ID: asStr(m["id"]), Name: asStr(m["name"]), Backend: asStr(m["backend"]),
 		Sensitivity: asStr(m["sensitivity"]),
 		AllowUsers:  toStrs(m["allowUsers"]), AllowRoles: toStrs(m["allowRoles"]),
-		AllowOrgs:   toStrs(m["allowOrgs"]), AllowGroups: toStrs(m["allowGroups"]),
+		AllowOrgs: toStrs(m["allowOrgs"]), AllowGroups: toStrs(m["allowGroups"]),
 	}
 }
 
@@ -131,7 +131,7 @@ func portalMatrix(f *isoFixture) map[string]matrixCase {
 		// 收紧入口绝不能让旧行从列表里消失。
 		{backend: "10.60.0.9", want: false, unavailable: true, direct: true,
 			note: "★后端不是 host:port（剖面的第二条丢弃路径；存量行，绕入口直写）",
-			res: map[string]any{"id": "m-badbackend", "name": "缺端口资源", "sensitivity": store.SensitivityNormal}},
+			res:  map[string]any{"id": "m-badbackend", "name": "缺端口资源", "sensitivity": store.SensitivityNormal}},
 	}
 	out := map[string]matrixCase{}
 	for _, c := range cases {

@@ -12,10 +12,12 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/upgrade"
@@ -37,10 +39,23 @@ import (
 
 // upgradeBundle 升级管理页一次取全。
 type upgradeBundle struct {
-	Control  string             `json:"control"`  // 控制面当前版本
-	Gateways map[string]string  `json:"gateways"` // 网关 id → 上报版本（空串=旧网关不上报）
-	Rules    upgrade.Rules      `json:"rules"`
-	Gray     []upgrade.GrayPlan `json:"gray"`
+	// Control 控制面**语义版本**；"" = 未注入（不可判定）。
+	//
+	// ★这一格此前读的是 `const Version = "0.3.0"`，而 `-ldflags -X` 对常量静默无效——
+	// 于是它显示的永远是源码里那个数字，与这台机器上装的是哪次构建毫无关系。
+	// 现在它只可能是"构建期真的注进去的那个"或"空"，没有第三种。
+	Control string `json:"control"`
+	// ControlBuild 控制面构建标识（git 短哈希 · 构建时间），已渲染成展示文案。
+	ControlBuild string `json:"controlBuild"`
+	// ControlNote 语义版本未注入时的一句处置说明（后端下发，页面不自己编）。
+	ControlNote string `json:"controlNote,omitempty"`
+	// Gateways 网关 id → 上报的**语义版本**（空串 = 旧网关不上报 / 未注入 = 不可判定）。
+	Gateways map[string]string `json:"gateways"`
+	// GatewayBuilds 网关 id → 构建标识。与版本分开下发：同一个 0.4.0 可以是两次不同的构建，
+	// 而"这台是不是和那台同一批装的"只有它答得了。
+	GatewayBuilds map[string]string  `json:"gatewayBuilds"`
+	Rules         upgrade.Rules      `json:"rules"`
+	Gray          []upgrade.GrayPlan `json:"gray"`
 	// Coverage 每条灰度计划**精确**命中的账号数（key = platform）。
 	//
 	// ★不是 accounts×percent/100 的估算：分桶是确定性的，真实命中数能直接数出来
@@ -79,10 +94,17 @@ func upgradeBoundaries() []string {
 		"源 PRD 里的版本链（2.1.1→2.1.5→2.1.12）、包格式（.run/.ssu/.bin）、" +
 			"后台账号与默认口令是源产品的实现事实，白帝没有那段历史，故未照搬。" +
 			"强制跳跃链路机制保留，版本号由管理员在下方规则里自行配置。",
+		// ★这一条此前写的是「温备节点上没有需要升级的服务端进程——它只跑 baidi-standby」。
+		// 那是**错话**，而且方向很危险：baidi-standby 本身就是一个要跟着换版本的服务端进程，
+		// 备机上还装着 baidi-control（提升流程最后一步 `systemctl start baidi-control`
+		// 启动的就是它，也是切换后真正跑起来的那一份）。照那句话理解，运维会只升主机，
+		// 而切换那天备机上是旧版 baidi-control 去打开一个被新版迁移过的库。
 		"集群升级编排（先备后主 / 拆集群逐台）未实现：白帝控制面没有双活形态，" +
 			"只有温备（备机周期拉加密备份、不提供服务，见系统管理→集群）。" +
-			"温备节点上没有需要升级的服务端进程——它只跑 baidi-standby，" +
-			"换版本就是重跑一次部署脚本；编排一个不存在的多活拓扑没有意义。",
+			"**备机也要跟着升**：它上面装着 baidi-standby（同步进程）与 baidi-control" +
+			"（提升后真正被启动的那一份）。备机的 baidi-control 版本已随同步回报上来，" +
+			"与主机不一致时集群区块会报警——但升级动作本身仍是人工的：" +
+			"到备机上重跑一次部署脚本。控制台不代替脚本替换二进制。",
 	}
 }
 
@@ -99,7 +121,15 @@ func (s *Server) handleUpgrade(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) upgradeBundle(r *http.Request) (upgradeBundle, error) {
-	b := upgradeBundle{Control: Version, Gateways: s.gatewayVersions(), Boundaries: upgradeBoundaries()}
+	bi := buildinfo.Current()
+	b := upgradeBundle{
+		Control: bi.Semantic, ControlBuild: bi.BuildID(),
+		Gateways: s.gatewayVersions(), GatewayBuilds: s.gatewayBuilds(),
+		Boundaries: upgradeBoundaries(),
+	}
+	if !bi.Injected() {
+		b.ControlNote = buildinfo.Note
+	}
 	b.SignKeysConfigured = len(s.upgradeKeys) > 0
 	if !b.SignKeysConfigured {
 		b.SignKeyNote = "未配置升级包发布公钥（BAIDI_UPGRADE_PUBKEY），升级包校验不可用——" +
@@ -183,6 +213,18 @@ func (s *Server) gatewayVersions() map[string]string {
 	return out
 }
 
+// gatewayBuilds 取各网关上报的构建标识。与 gatewayVersions 同款三态：
+// 空串原样传下去，绝不补成"和控制面一样"。
+func (s *Server) gatewayBuilds() map[string]string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	out := make(map[string]string, len(s.gateways))
+	for id, g := range s.gateways {
+		out[id] = g.Build
+	}
+	return out
+}
+
 func (s *Server) handleSaveUpgradeRules(w http.ResponseWriter, r *http.Request) {
 	if !s.requirePerm(w, r, store.PermSystem) || !s.upgradeReady(w) {
 		return
@@ -243,13 +285,40 @@ func (s *Server) handleUpgradeCheck(w http.ResponseWriter, r *http.Request) {
 			rules = got
 		}
 	}
-	c := upgrade.CheckPackage(m, Version, rules, upgrade.Components{
-		Control: Version, Gateways: s.gatewayVersions()})
-	s.audit(r, "system", fmt.Sprintf("校验升级包 %s→%s（组件 %s）：%s",
-		Version, m.Version, m.Component, verdictWord(c.Blocked)), okFail(!c.Blocked))
+	// ★当前版本不再单独传：它已经在 Components 里了，两个入参就是两个真相来源。
+	// 组件分流在 CheckPackage 内部按 m.Component 做——此前 m.Component 只被
+	// 解析、校验、写进审计，却不参与判定，于是网关升级包一律拿控制面版本去比。
+	bi := buildinfo.Current()
+	comp := upgrade.Components{Control: bi.Semantic, Gateways: s.gatewayVersions()}
+	c := upgrade.CheckPackage(m, rules, comp)
+	// 审计里写清"拿谁的版本判的"：只写控制面版本的话，一条 component=gateway 的校验
+	// 记录读起来会像是在升控制面。
+	s.audit(r, "system", fmt.Sprintf("校验升级包 → %s（组件 %s，当前 %s）：%s",
+		m.Version, m.Component, upgradeCurrentText(m.Component, comp), verdictWord(c.Blocked)),
+		okFail(!c.Blocked))
 	httpx.JSON(w, http.StatusOK, map[string]any{
 		"blocked": c.Blocked, "reasons": c.Reasons, "warnings": c.Warnings,
 		"nextHop": c.NextHop, "manifest": m})
+}
+
+// upgradeCurrentText 审计正文里那句「当前 X」——按包的组件说清是**谁**的当前版本。
+func upgradeCurrentText(component string, comp upgrade.Components) string {
+	if component == upgrade.ComponentGateway {
+		if len(comp.Gateways) == 0 {
+			return "网关：无已注册网关"
+		}
+		ids := make([]string, 0, len(comp.Gateways))
+		for id := range comp.Gateways {
+			ids = append(ids, id)
+		}
+		sort.Strings(ids)
+		parts := make([]string, 0, len(ids))
+		for _, id := range ids {
+			parts = append(parts, id+"="+orElse(comp.Gateways[id], "未注入"))
+		}
+		return "网关 " + strings.Join(parts, " ")
+	}
+	return "控制面 " + orElse(comp.Control, "未注入")
 }
 
 func verdictWord(blocked bool) string {
@@ -402,8 +471,10 @@ func (s *Server) handleBackup(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	bkbi := buildinfo.Current()
 	meta := upgrade.BackupMeta{
-		Version: Version, CreatedAt: time.Now().Format("2006-01-02 15:04:05"), Note: body.Note,
+		Version: bkbi.Semantic, Build: bkbi.BuildID(),
+		CreatedAt: time.Now().Format("2006-01-02 15:04:05"), Note: body.Note,
 	}
 	var buf bytes.Buffer
 	if err := upgrade.CreateBackup(&buf, meta, body.Passphrase, sources); err != nil {
@@ -439,10 +510,22 @@ func (s *Server) handleBackupInspect(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// ★三态：一致 / 确定不一致 / **不可判定**。
+	//
+	// 改造前这里是一句 `meta.Version != Version`。版本身份改成构建期注入之后，
+	// 两边都可能是空串——而 "" == "" 会走进"一致"分支，把「两边都不知道自己是哪一版」
+	// 显示成「版本相符，可以恢复」，方向正好相反。
+	cur := buildinfo.Current().Semantic
 	warn := ""
-	if meta.Version != Version {
+	switch {
+	case meta.Version == "" || cur == "":
+		warn = fmt.Sprintf("跨版本兼容性**不可判定**：备份记录的版本是 %s，当前运行的是 %s。"+
+			"未注入版本的二进制不是 deploy/build.sh 产出的交付件——"+
+			"恢复前请自行确认两者是同一批构建，数据库结构不兼容时系统会起不来。",
+			orElse(meta.Version, "未注入"), orElse(cur, "未注入"))
+	case meta.Version != cur:
 		warn = fmt.Sprintf("这份备份来自 %s，当前运行 %s：跨版本恢复可能与数据库结构不兼容。",
-			meta.Version, Version)
+			meta.Version, cur)
 	}
 	httpx.JSON(w, http.StatusOK, map[string]any{"meta": meta, "warning": warn})
 }

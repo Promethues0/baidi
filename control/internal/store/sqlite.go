@@ -858,6 +858,17 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// 在七层路径上被当成 http 去撞，症状是空白页而不是报错。
 		{"resources", "web_scheme", "TEXT"},
 		{"resources", "web_entry", "TEXT"},
+		// 温备节点的版本身份（wave11 行动 18）：备机上 baidi-standby 自身的版本 +
+		// 它实测到的同机 **baidi-control** 版本（切换后真正被启动的那个进程）。
+		//
+		// ★**刻意不回填**，而且这是那条「补列迁移必须配回填」纪律的正确应用而非例外：
+		// 回填方向必须恒定为"不生效 / 不下结论"，而空串在 standby.versionVerdict 里
+		// 恰好就是 unknown（不可判定）。回填成主机版本 = 替一台还没说过话的备机
+		// 宣布"我们一致"，而这四列存在的全部意义就是发现不一致。
+		{"standby_nodes", "node_semver", "TEXT"},
+		{"standby_nodes", "node_build", "TEXT"},
+		{"standby_nodes", "control_semver", "TEXT"},
+		{"standby_nodes", "control_build", "TEXT"},
 		{"ipsec_sites", "local_ref", "TEXT"}, {"ipsec_sites", "remote_ref", "TEXT"},
 		{"users", "pass_hash", "TEXT"}, {"users", "role", "TEXT"},
 		// 首登强制改密标志（回填见 backfillMustChangePw）。

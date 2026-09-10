@@ -15,6 +15,7 @@ package upgrade
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -143,6 +144,15 @@ type Components struct {
 // 管理员唯一的选择就是绕过它（去后台手工升），那这道闸等于没有。
 func CheckUpgrade(current, target string, rules Rules, comp Components) Check {
 	var c Check
+	if strings.TrimSpace(current) == "" {
+		// ★空 = 版本身份**未注入**，与"版本号写错了"是两回事，措辞必须分开：
+		// 后者会让人去检查自己粘的 manifest，而真正该做的是换一个 deploy/build.sh 产出的二进制。
+		// fail-closed：拿一个猜出来的当前版本去判「是不是降级」，判错的代价是数据库被旧版打开。
+		c.block("当前运行版本不可判定：该二进制未注入语义版本（不是 deploy/build.sh 产出的交付件）。" +
+			"没有当前版本就无法判定这是升级还是降级，故拒绝——" +
+			"请用 deploy/build.sh 重新构建并部署（语义版本取自仓库根的 VERSION 文件）。")
+		return c
+	}
 	cur, err := ParseVersion(current)
 	if err != nil {
 		c.block("无法解析当前版本 %q：%v", current, err)
@@ -183,25 +193,59 @@ func CheckUpgrade(current, target string, rules Rules, comp Components) Check {
 
 	// FR-UPG-07 分离式组件一致性。
 	if rules.RequireComponentMatch {
-		var stale []string
-		for id, v := range comp.Gateways {
-			if strings.TrimSpace(v) == "" {
-				// 旧网关不上报版本：无法判定，如实说不可判定而不是当成一致。
-				c.Warnings = append(c.Warnings,
-					fmt.Sprintf("网关 %s 未上报版本（版本低于 v0.4 的网关不上报），无法校验组件一致性。", id))
-				continue
-			}
-			gv, err := ParseVersion(v)
-			if err != nil || gv.Compare(tgt) != 0 {
-				stale = append(stale, fmt.Sprintf("%s(%s)", id, v))
-			}
-		}
-		if len(stale) > 0 {
-			c.Warnings = append(c.Warnings,
-				fmt.Sprintf("升级后以下网关版本将与控制面不一致，须同步升级：%s。"+
-					"控制面与网关版本不一致时，新增的下发字段旧网关读不到（表现为策略配了不生效）。",
-					strings.Join(stale, "、")))
-		}
+		c.Warnings = append(c.Warnings, gatewayConsistency(tgt, comp.Gateways)...)
 	}
 	return c
+}
+
+// gatewayConsistency 「升到 tgt 之后，各网关会不会与控制面版本不一致」。
+//
+// ★三态，一个都不能合并：
+//
+//	空串        —— 这台网关根本没上报语义版本（旧网关不发这个字段，
+//	               或新网关的二进制没经过 deploy/build.sh）→ **不可判定**；
+//	解析不出来  —— 报了，但报上来的不是一个语义版本 → 也是**不可判定**，
+//	               但成因完全不同（多半是构建时把 git 短哈希注进了语义版本那一格），
+//	               所以要单列并点名那个值，否则运维只会看到"版本不一致"而去升一台其实没问题的网关；
+//	解析出来了但 ≠ tgt —— 这才是**确定不一致**。
+//
+// ★改造前后两种被合并成一条 stale：而 deploy/build.sh 注入的恰恰是 `git rev-parse --short HEAD`，
+// 于是**每一台按脚本装出来的网关**都落进 stale，控制台那一栏恒黄、这条校验永远为真——
+// 一条永远为真的告警与没有告警等价，真正的版本不一致反而淹没在里面。
+func gatewayConsistency(tgt Version, gateways map[string]string) []string {
+	var stale, unknown []string
+	// map 遍历序随机，而这几句是直接呈现给人的文案——不排序的话同一份数据每次刷新都换顺序。
+	ids := make([]string, 0, len(gateways))
+	for id := range gateways {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		v := strings.TrimSpace(gateways[id])
+		if v == "" {
+			unknown = append(unknown, fmt.Sprintf("%s（未上报）", id))
+			continue
+		}
+		gv, err := ParseVersion(v)
+		if err != nil {
+			unknown = append(unknown, fmt.Sprintf("%s（上报的是 %q，不是语义版本）", id, v))
+			continue
+		}
+		if gv.Compare(tgt) != 0 {
+			stale = append(stale, fmt.Sprintf("%s(%s)", id, v))
+		}
+	}
+	var out []string
+	if len(stale) > 0 {
+		out = append(out, fmt.Sprintf("升级后以下网关版本将与控制面不一致，须同步升级：%s。"+
+			"控制面与网关版本不一致时，新增的下发字段旧网关读不到（表现为策略配了不生效）。",
+			strings.Join(stale, "、")))
+	}
+	if len(unknown) > 0 {
+		out = append(out, fmt.Sprintf("以下网关的语义版本**不可判定**，组件一致性对它们没有结论：%s。"+
+			"这不等于"+`"`+"版本不一致"+`"`+"——常见成因是网关二进制不是 deploy/build.sh 产出的"+
+			"（手工 go build 不带 -ldflags 注入），或版本低于本次改造前的旧网关。",
+			strings.Join(unknown, "、")))
+	}
+	return out
 }

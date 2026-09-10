@@ -68,7 +68,7 @@ func TestAdminPowerSeparationMatrix(t *testing.T) {
 		{
 			name: "新建用户（安全权）", method: "POST", path: "/api/v1/users",
 			bodyPerRole: map[string]any{
-				"root":     map[string]any{"name": "u-root", "account": "probe.root"}, "password": testStrongPw,
+				"root": map[string]any{"name": "u-root", "account": "probe.root"}, "password": testStrongPw,
 				"system":   map[string]any{"name": "u-sys", "account": "probe.sys"},
 				"security": map[string]any{"name": "u-sec", "account": "probe.sec"},
 				"audit":    map[string]any{"name": "u-aud", "account": "probe.aud"},

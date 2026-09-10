@@ -28,9 +28,10 @@ func (n *natErrStore) NATPolicies(ctx context.Context) ([]store.NATPolicy, error
 
 // 下发 NAT 策略是**三态**，不是两态（同 gwMetrics/Ifaces/Stealth 的 nil 判定、
 // posture 的 unknown）：
-//   ① 字段缺席 = 不可判定 → 网关保持内核规则现状；
-//   ② nat: []  = 本网关确实无策略 → 网关清空规则；
-//   ③ 有策略   = 按清单灌。
+//
+//	① 字段缺席 = 不可判定 → 网关保持内核规则现状；
+//	② nat: []  = 本网关确实无策略 → 网关清空规则；
+//	③ 有策略   = 按清单灌。
 //
 // ★改造前读库失败也走 ②（"本轮按空集下发"），而网关侧 natPresent = (r.NAT != nil)
 // 对 JSON 的 `[]` 判 present=true → natfw n==0 → `nft delete table ip baidi_nat`

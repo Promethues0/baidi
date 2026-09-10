@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/standby"
 	"baidi.dev/control/internal/upgrade"
@@ -64,8 +65,13 @@ func (s *Server) handleStandbyBackup(w http.ResponseWriter, r *http.Request) {
 		httpx.Error(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
+	bi := buildinfo.Current()
 	meta := upgrade.BackupMeta{
-		Version:   Version,
+		// ★两个字段都记进备份头：切换那天要回答的不是"这份备份是 0.3.0 的吗"，
+		// 而是"它是不是这台机器上正要启动的那份 baidi-control 认得的库"——
+		// 语义版本相同的两次构建之间可以隔着几十次 schema 迁移。
+		Version:   bi.Semantic,
+		Build:     bi.BuildID(),
 		CreatedAt: time.Now().Format("2006-01-02 15:04:05"),
 		Note:      "温备同步 → " + node,
 	}
@@ -111,6 +117,12 @@ func (s *Server) handleStandbyStatus(w http.ResponseWriter, r *http.Request) {
 		BackupVersion   string `json:"backupVersion"`
 		BackupCreatedAt string `json:"backupCreatedAt"`
 		SHA256          string `json:"sha256"`
+		// 备机侧版本身份（wave11 行动 18）。旧备机不发这四个键 → 空串 → 不可判定。
+		// ★同款纪律：不在这里补任何默认值，尤其不能补成主机自己的版本。
+		NodeVersion    string `json:"nodeVersion"`
+		NodeBuild      string `json:"nodeBuild"`
+		ControlVersion string `json:"controlVersion"`
+		ControlBuild   string `json:"controlBuild"`
 	}
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&b); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid payload")
@@ -122,6 +134,8 @@ func (s *Server) handleStandbyStatus(w http.ResponseWriter, r *http.Request) {
 		NodeID: node, Addr: trimTo(b.Addr, 128), IntervalSec: b.IntervalSec,
 		BackupVersion: trimTo(b.BackupVersion, 64), BackupCreatedAt: trimTo(b.BackupCreatedAt, 32),
 		BackupSHA256: trimTo(b.SHA256, 64), LastDetail: trimTo(b.Detail, 512),
+		NodeSemver: trimTo(b.NodeVersion, 64), NodeBuild: trimTo(b.NodeBuild, 128),
+		ControlSemver: trimTo(b.ControlVersion, 64), ControlBuild: trimTo(b.ControlBuild, 128),
 	}
 	if err := s.sb.SaveStandbyStatus(r.Context(), n, ok, now); err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "登记同步状态失败")
@@ -178,7 +192,9 @@ func (s *Server) clusterView(ctx context.Context) standby.ClusterView {
 	if err != nil {
 		return standby.Unknown("备机台账 standby_nodes 读取失败：" + err.Error())
 	}
-	v := standby.Evaluate(nodes, time.Now(), s.standbyStale, s.issuedStandbyCNs(ctx)...)
+	bi := buildinfo.Current()
+	v := standby.Evaluate(nodes, time.Now(), s.standbyStale,
+		standby.Self{Semver: bi.Semantic, Build: bi.BuildID()}, s.issuedStandbyCNs(ctx)...)
 	// 配了备机却没配口令 = 同步端点一律 503，备机会持续失败。这件事在节点状态上
 	// 要过几轮才看得出来（先是"最近一次失败"，再是"落后"），在这里当场说清楚。
 	if v.Deployed && s.standbyPass == "" {

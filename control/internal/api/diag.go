@@ -7,6 +7,7 @@ import (
 	"sort"
 	"time"
 
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/config"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/standby"
@@ -52,17 +53,21 @@ type DiagCheck struct {
 
 // DiagBundle 一次运维体检的完整结果（控制面真实探测，非种子）。
 type DiagBundle struct {
-	GeneratedAt string      `json:"generatedAt"`
-	Component   string      `json:"component"`
-	Version     string      `json:"version"`
-	Env         string      `json:"env"`
-	Uptime      string      `json:"uptime"`
-	Score       int         `json:"score"` // 0-100 健康分（pass=1 / warn=0.5 / fail=0 加权；skip 不进分母）
-	Pass        int         `json:"pass"`
-	Warn        int         `json:"warn"`
-	Fail        int         `json:"fail"`
-	Skip        int         `json:"skip"`
-	Checks      []DiagCheck `json:"checks"`
+	GeneratedAt string `json:"generatedAt"`
+	Component   string `json:"component"`
+	// Version 控制面语义版本；"" = 未注入（不可判定）。
+	Version string `json:"version"`
+	// Build 控制面构建标识（git 短哈希 · 构建时间）；"未注入" 是展示文案，
+	// 与 Version 的空串不同——它已经过 buildinfo.BuildText() 渲染，不参与任何判定。
+	Build  string      `json:"build"`
+	Env    string      `json:"env"`
+	Uptime string      `json:"uptime"`
+	Score  int         `json:"score"` // 0-100 健康分（pass=1 / warn=0.5 / fail=0 加权；skip 不进分母）
+	Pass   int         `json:"pass"`
+	Warn   int         `json:"warn"`
+	Fail   int         `json:"fail"`
+	Skip   int         `json:"skip"`
+	Checks []DiagCheck `json:"checks"`
 }
 
 // pinger 可选的存储健康探测能力（SQLiteStore 实现）。
@@ -78,12 +83,14 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	up := humanizeDuration(time.Since(bootTime))
 
+	bi := buildinfo.Current()
 	checks := []DiagCheck{
 		{
 			Key: "control", Category: "control", Name: "控制面 baidi-control",
 			Status: "pass", Summary: "控制中心进程运行正常，API 响应中",
-			Metric: "v" + Version + " · 运行 " + up,
+			Metric: bi.SemanticText() + " · 运行 " + up,
 		},
+		s.checkVersion(),
 		s.checkDatabase(ctx),
 		s.checkAuditDisk(ctx),
 		s.checkAuditWrite(),
@@ -104,7 +111,9 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 	b := DiagBundle{
 		GeneratedAt: time.Now().Format("2006-01-02 15:04:05"),
 		Component:   "baidi-control · 控制中心",
-		Version:     Version, Env: s.env, Uptime: up,
+		// Version 是**语义版本原文**（未注入即空串）：机读三态留给消费方，
+		// 展示层自己去渲染"未注入"，不在这里塞一个会被当成版本号解析的中文串。
+		Version: bi.Semantic, Build: bi.BuildID(), Env: s.env, Uptime: up,
 		Checks: checks,
 	}
 	for _, c := range checks {
@@ -127,6 +136,44 @@ func (s *Server) handleDiag(w http.ResponseWriter, r *http.Request) {
 
 	s.audit(r, "admin", "运行系统自检（运维诊断）", "ok")
 	httpx.JSON(w, http.StatusOK, b)
+}
+
+// checkVersion 服务端版本身份自检（PRD FR-UPG-07/14）。
+//
+// ★为什么单独成一项而不是并进上面那格「控制面运行正常」：那一格回答的是
+// "进程还活着吗"，这一格回答的是"我到底是谁"——后者是升级判定、组件一致性、
+// 温备切换三件事的**共同前置**，判不出来时它们的结论全部不成立。
+//
+// ★未注入判 **warn 不判 skip**（与 checkAutoBackup 同一条理由、与 checkNAT 相反）：
+// skip 的语义是"这个能力没部署"，而版本身份不是一个可选功能；一台生产机上跑着
+// 一份不知道自己是哪一版的二进制，是每套部署都该关心的事。
+// 开发机上 go run 会稳定看到这条 warn——那正是事实，不该被藏起来。
+func (s *Server) checkVersion() DiagCheck {
+	c := DiagCheck{Key: "version", Category: "control", Name: "服务端版本身份"}
+	bi := buildinfo.Current()
+	c.Items = []DiagItem{
+		{Label: "语义版本", Value: bi.SemanticText()},
+		{Label: "构建标识", Value: bi.BuildText()},
+	}
+	c.Metric = bi.SemanticText() + " · " + bi.BuildText()
+	if !bi.Injected() {
+		c.Status = "warn"
+		c.Summary = "控制面的语义版本未注入：当前版本不可判定"
+		c.Hint = buildinfo.Note
+		return c
+	}
+	if bi.Commit == "" && bi.BuiltAt == "" {
+		// ★半缺席要单独说：语义版本在、构建标识没有，说明有人手工注了版本号
+		// 却绕过了 deploy/build.sh。升级判定能用，但出事那天对不出是哪次构建。
+		c.Status = "warn"
+		c.Summary = "语义版本 " + bi.Semantic + " 已注入，但构建标识缺席"
+		c.Hint = "语义版本相同的两份二进制之间可以隔着几十次提交（含数据库结构迁移）。" +
+			"用 deploy/build.sh 构建即可同时带上 git 短哈希与构建时间。"
+		return c
+	}
+	c.Status = "pass"
+	c.Summary = "版本身份完整：语义版本 " + bi.Semantic + "，构建 " + bi.BuildText()
+	return c
 }
 
 // checkDatabase 探测管理数据库连接健康与往返延迟。

@@ -19,6 +19,7 @@ import (
 
 	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/authsrc"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/httpx"
 	"baidi.dev/control/internal/lockout"
 	"baidi.dev/control/internal/notify"
@@ -27,8 +28,14 @@ import (
 	"baidi.dev/control/internal/webauthnx"
 )
 
-// Version 控制中心版本号。
-const Version = "0.3.0"
+// 控制中心的版本身份**不在这里**，也不再是一个常量：它由构建期 -ldflags -X 注入，
+// 唯一来源是 buildinfo 包（语义版本 + 构建标识两个字段）。
+//
+// ★这里此前是 `const Version = "0.3.0"`，而 `-ldflags -X` **对常量静默无效**
+// （Go 链接器只改可写字符串变量；实测：对 const 注入后二进制里仍是旧值且退出码 0）。
+// 于是「当前版本」与发布动作彻底脱钩——构建脚本注了个寂寞，页面上却言之凿凿。
+// 改造后未注入时如实回空串（不可判定），绝不回落成任何写死的数字。
+// 取值一律经 buildinfo.Current()，本包不再持有第二个版本真相来源。
 
 // tokenTTL 会话令牌有效期；knockTTL 短时效一次性敲门令牌有效期；
 // kickBanTTL 强制下线后的接入封禁时长（期内拒发敲门令牌、网关拒敲门，到期自然恢复）。
@@ -183,8 +190,8 @@ type Server struct {
 	// 状态是 offline 而点不到；管理员想再踢一次都没有入口。
 	// 现在按「这条会话的建立时刻是否晚于处置时刻」判定：晚于即是重连后的新会话，
 	// 覆盖层自动失效。
-	kicked    map[string]kickMark
-	revoked   map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
+	kicked  map[string]kickMark
+	revoked map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// knockIssued 敲门令牌签发审计的节流水位：(账号|指纹) → 上次落审计的 Unix 秒。
 	// 敲门是 15s 一次的保活热路径，不节流会把审计冲成噪声（见 auditKnockIssued）。
 	knockIssued map[string]throttleMark
@@ -312,7 +319,12 @@ type GatewayInfo struct {
 	Clients  int    `json:"clients"` // 当前放行窗口内已授权源数
 	Tunnels  int    `json:"tunnels"` // 活跃隧道连接数
 	Uptime   int64  `json:"uptime"`  // 网关运行秒数
-	Version  string `json:"version"` // 网关上报的二进制版本（编译期注入）；旧网关不上报则为空，前端显示 "—"
+	// Version 网关上报的**语义版本**（编译期注入）；旧网关不上报、或新网关未注入时为空。
+	// 空 = 不可判定，前端显示"未注入/无法校验"，**绝不当成与控制面一致**。
+	Version string `json:"version"`
+	// Build 网关上报的**构建标识**（git 短哈希 · 构建时间）；只用于取证展示，
+	// 绝不参与版本比较——它排不出序，拿它去比大小正是改造前那个恒黄告警的成因。
+	Build string `json:"build"`
 	// Web 七层 Web 代理的监听地址；空 = 这台网关没开（旧网关也是空）。
 	// 控制面据此拼浏览器该跳的入口 URL；为空就如实说"未开启"，绝不猜一个地址。
 	Web    string `json:"web"`
@@ -498,12 +510,16 @@ func (s *Server) Routes() http.Handler {
 
 	// 产品元信息
 	mux.HandleFunc("GET /api/v1/meta", func(w http.ResponseWriter, _ *http.Request) {
+		bi := buildinfo.Current()
 		httpx.JSON(w, http.StatusOK, map[string]any{
 			"product":   "白帝",
 			"subtitle":  "零信任访问控制系统",
 			"component": "baidi-control · 控制中心",
-			"version":   Version,
-			"env":       s.env,
+			// version 是**语义版本**，未注入时是空串（不可判定）——消费方据此显示「未注入」。
+			// build 是构建标识（git 短哈希 · 构建时间），两个字段各自独立缺席。
+			"version": bi.Semantic,
+			"build":   bi.BuildID(),
+			"env":     s.env,
 		})
 	})
 
@@ -1809,7 +1825,10 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// Version / Events / Metrics 是新网关才上报的字段：旧网关缺省即零值，处理逻辑
 		// 对空值必须无感（version 空串照存、events 空切片零循环、metrics 为 nil 即不落点），
 		// 不得因缺字段报错。
-		Version string `json:"version"` // 网关二进制版本（编译期注入）
+		Version string `json:"version"` // 网关语义版本（编译期注入；空 = 未注入/旧网关）
+		// Build 构建标识（git 短哈希 · 构建时间）。与 Version 同款兼容：旧网关不发这个键，
+		// 空串即"不知道"，**不补任何默认值**。
+		Build string `json:"build"`
 		// Web / WebTLS 七层 Web 代理落点。未开启的网关**连字段都不发**，
 		// 空串即"没开"，控制面据此如实回报而不是拼一个 http://host:/ 的坏地址。
 		Web    string    `json:"web"`
@@ -1896,7 +1915,8 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	s.mu.Lock()
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
-		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
+		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime,
+		Version: b.Version, Build: b.Build,
 		Web: b.Web, WebTLS: b.WebTLS, SkewSec: skew, TunnelIDStrict: b.TunnelIDStrict,
 		WebIdleSec: b.WebIdleSec,
 	}

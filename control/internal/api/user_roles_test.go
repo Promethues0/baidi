@@ -14,9 +14,11 @@ import (
 // 而新建用户组的弹窗恰好写着「改不了成员，只能改角色」——把管理员指向一条死路。
 //
 // 用这种组授权的后果分两个方向，都很难归因：
-//   · 资源侧 → SubjectIndex 展开为空 → 下发 DenyAllSubject 哨兵 → 那条资源对**所有人**
-//     拒绝（原本"不限"的人也进不去，表现为「明明授权了却打不开」）；
-//   · 认证策略 / 安全基线的 scopeGroups → covers 恒 false → 永不命中（fail-open）。
+//
+//	· 资源侧 → SubjectIndex 展开为空 → 下发 DenyAllSubject 哨兵 → 那条资源对**所有人**
+//	  拒绝（原本"不限"的人也进不去，表现为「明明授权了却打不开」）；
+//	· 认证策略 / 安全基线的 scopeGroups → covers 恒 false → 永不命中（fail-open）。
+//
 // 演示库上完全看不出来，因为 7 个种子账号带着 roles。
 func TestRoleDerivedGroupGetsMembers(t *testing.T) {
 	f := newIsoFixture(t)

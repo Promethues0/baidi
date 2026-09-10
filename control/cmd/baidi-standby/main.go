@@ -34,11 +34,14 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"time"
 
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/standby"
 )
 
@@ -60,10 +63,25 @@ func main() {
 		extract = flag.Bool("extract", false, "校验并把 -file 解开到 -out 后退出")
 		file    = flag.String("file", "", "-verify / -extract 的输入备份文件")
 		out     = flag.String("out", "", "-extract 的输出目录")
+		// controlBin 同机 baidi-control 的路径（**切换后真正会被启动的那个进程**）。
+		// 默认取自己旁边那一个：两个二进制由同一次 build.sh 产出、由 install-remote.sh
+		// 装进同一个 bin 目录，"旁边那个"是唯一不需要额外配置就成立的判据。
+		controlBin = flag.String("control-bin", "",
+			"同机 baidi-control 的路径（默认取本进程同目录下的 baidi-control）。"+
+				"每轮同步时跑一次它的 -version 并回报——主机据此判断切换后会不会跨版本恢复")
+		showVersion = flag.Bool("version", false, "打印版本身份（一行 JSON）后退出")
 	)
 	flag.Parse()
 
 	switch {
+	case *showVersion:
+		bi := buildinfo.Current()
+		b, _ := json.Marshal(map[string]string{
+			"component": "baidi-standby",
+			"semantic":  bi.Semantic, "commit": bi.Commit, "builtAt": bi.BuiltAt,
+		})
+		fmt.Println(string(b))
+		return
 	case *status:
 		os.Exit(runStatus(*dir))
 	case *verify:
@@ -108,11 +126,22 @@ func main() {
 	a := &agent{
 		cli: cli, primary: strings.TrimRight(*primary, "/"), node: node,
 		dir: *dir, pass: pass, addr: self, interval: iv,
+		controlBin: resolveControlBin(*controlBin),
 	}
 
+	bi := buildinfo.Current()
 	slog.Info("baidi-standby 启动（温备：只拉备份，不提供任何服务）",
 		"node", node, "primary", a.primary, "dir", a.dir, "interval", iv.String(),
-		"RPO", "= 同步间隔 "+iv.String())
+		"RPO", "= 同步间隔 "+iv.String(),
+		"version", bi.SemanticText(), "build", bi.BuildText(),
+		"controlBin", orText(a.controlBin, "（未找到）"))
+	// ★探不到同机 baidi-control 要当场说，而不是只在主机页面上显示一个"—"：
+	// 备机上没有 baidi-control 意味着**这台机器提升不了**（promote-standby.sh
+	// 最后一步 systemctl start baidi-control 会失败），而那是切换当天才会发现的事。
+	if a.controlBin == "" {
+		slog.Warn("⚠ 找不到同机 baidi-control：无法回报「切换后会启动哪一版」；" +
+			"若这台机器确实没装 baidi-control，提升流程最后一步会失败。用 -control-bin 指定路径")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -145,6 +174,69 @@ type agent struct {
 	pass     string
 	addr     string
 	interval time.Duration
+	// controlBin 同机 baidi-control 的路径；"" = 找不到（不可判定，如实回报空）。
+	controlBin string
+}
+
+// controlVersionProbe 同机 baidi-control 的版本身份（`baidi-control -version` 的输出）。
+type controlVersionProbe struct {
+	Semantic string `json:"semantic"`
+	Commit   string `json:"commit"`
+	BuiltAt  string `json:"builtAt"`
+}
+
+// resolveControlBin 定位同机 baidi-control：显式给了就用给的，否则取本进程同目录那个。
+//
+// 返回 "" = 没找到。**绝不回落成 PATH 查找**：PATH 上那个可能是另一次部署留下的
+// 别的目录里的二进制，而这里要回答的是"切换后 systemd 会启动的是哪一份"——
+// 猜错的后果是主机页面显示一个与实际不符的版本，比显示"不可判定"更坏。
+func resolveControlBin(explicit string) string {
+	if p := strings.TrimSpace(explicit); p != "" {
+		if st, err := os.Stat(p); err == nil && !st.IsDir() {
+			return p
+		}
+		slog.Warn("-control-bin 指定的路径不可用，将不回报同机控制面版本", "path", p)
+		return ""
+	}
+	self, err := os.Executable()
+	if err != nil {
+		return ""
+	}
+	p := filepath.Join(filepath.Dir(self), "baidi-control")
+	if st, err := os.Stat(p); err == nil && !st.IsDir() {
+		return p
+	}
+	return ""
+}
+
+// probeControlVersion 跑一次 `baidi-control -version` 取同机控制面的版本身份。
+//
+// ★为什么值得 exec 一次而不是拿 baidi-standby 自己的版本顶替：切换后被启动的是
+// **baidi-control**，不是本进程。两者由同一次构建产出是部署脚本的约定，不是可核实的事实——
+// 手工替换过其中一个、或两次部署只覆盖了一半，恰恰是最需要在切换前发现的情形。
+// ★出任何错都回零值（空），由主机侧折成"不可判定"：这条信息再有用也不能让同步失败。
+func (a *agent) probeControlVersion(ctx context.Context) controlVersionProbe {
+	if a.controlBin == "" {
+		return controlVersionProbe{}
+	}
+	// 5s 足够一个只打印一行就退出的进程；给上限是因为它跑在同步循环里，
+	// 一个卡住的二进制不该把温备同步一起拖停。
+	cctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(cctx, a.controlBin, "-version").Output()
+	if err != nil {
+		slog.Warn("探测同机 baidi-control 版本失败（不影响本轮同步）",
+			"bin", a.controlBin, "err", err)
+		return controlVersionProbe{}
+	}
+	var p controlVersionProbe
+	if err := json.Unmarshal(bytes.TrimSpace(out), &p); err != nil {
+		// 旧版 baidi-control 没有 -version：它会把这个当未知 flag 报错走上面那条分支；
+		// 走到这里说明输出格式变了，同样如实回不可判定。
+		slog.Warn("同机 baidi-control 的版本输出解析失败（不影响本轮同步）", "bin", a.controlBin)
+		return controlVersionProbe{}
+	}
+	return p
 }
 
 // syncOnce 拉一轮：取 → 校验 → 落盘 → 回报。
@@ -194,10 +286,21 @@ func (a *agent) fetch(ctx context.Context) ([]byte, error) {
 // report 把本轮结果回报给主机。失败只记日志——回报不上不影响盘上那份的价值，
 // 而主机侧会因为「久未回报」自己把这台备机判成落后（那正是正确的表现）。
 func (a *agent) report(ctx context.Context, st standby.LocalState, ok bool, detail string) {
+	bi := buildinfo.Current()
+	cv := a.probeControlVersion(ctx)
 	payload := map[string]any{
 		"addr": a.addr, "intervalSec": int(a.interval / time.Second),
 		"status": statusWord(ok), "detail": detail,
 		"backupVersion": st.BackupVersion, "backupCreatedAt": st.BackupCreatedAt, "sha256": st.SHA256,
+		// ★备机的版本身份分两组，回答的是两个不同的问题：
+		//   nodeVersion/nodeBuild —— 本进程（baidi-standby）是哪一版。它决定这台备机
+		//       会不会报下面那组字段，也是"这台机器上的包是什么时候装的"的旁证。
+		//   controlVersion/controlBuild —— 同机那份 **baidi-control** 是哪一版。
+		//       它才是切换后真正会被启动的进程，也是主机侧唯一该拿去比对的那个值。
+		// 两组都可能是空串（未注入 / 探不到），**原样发出去**由主机折成"不可判定"。
+		"nodeVersion": bi.Semantic, "nodeBuild": bi.BuildID(),
+		"controlVersion": cv.Semantic,
+		"controlBuild":   buildinfo.Info{Commit: cv.Commit, BuiltAt: cv.BuiltAt}.BuildID(),
 	}
 	b, err := json.Marshal(payload)
 	if err != nil {
@@ -368,6 +471,14 @@ func commonName(certPath string) (string, error) {
 		return c.Subject.CommonName, nil
 	}
 	return "", errors.New("证书文件里没有 CERTIFICATE 块")
+}
+
+// orText 空串时的展示兜底（只用于日志，不用于上报）。
+func orText(s, def string) string {
+	if strings.TrimSpace(s) == "" {
+		return def
+	}
+	return s
 }
 
 func statusWord(ok bool) string {

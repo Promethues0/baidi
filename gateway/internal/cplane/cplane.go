@@ -40,9 +40,16 @@ type Client struct {
 	// tunnelFP 本网关隧道 TLS/TLCP 证书的 SHA-256 指纹（hex）。随注册心跳上报，
 	// 由控制面转发给客户端做证书钉扎——网关证书自签，客户端没有别的途径确认对端身份。
 	tunnelFP string
-	// version 网关二进制版本号（编译期 -ldflags 注入，缺省 "dev"）。随心跳上报，
+	// 网关的版本身份是**两个字段**（编译期 -ldflags 注入，未注入即空串）。随心跳上报，
 	// 补上「控制面连网关跑的是什么版本都不知道」的盲区。
+	//
+	//   version —— 语义版本 x.y.z，**升级判定唯一认的那个**（只有它能排序）；
+	//   build   —— git 短哈希 · 构建时间，只用于取证展示，绝不进版本比较。
+	//
+	// ★两者都可能是空串，且必须**原样**发出去：控制面对空串有专门的三态处置
+	// （不可判定 ≠ 版本不一致）。在这里补个 "dev"/"unknown" 会被对面当版本号去解析。
 	version string
+	build   string
 	// events 数据面回执队列：网关把「控制面指令已实际生效」的事实攒在这里，
 	// 随下次心跳带给控制面落审计——否则「已下发」与「已生效」全系统不可区分。
 	events eventQueue
@@ -86,8 +93,15 @@ type Client struct {
 // SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
 func (c *Client) SetTunnelFP(fp string) { c.tunnelFP = fp }
 
-// SetVersion 设置随注册心跳上报的网关版本号。
+// SetVersion 设置随注册心跳上报的网关**语义版本**（升级判定用）。
 func (c *Client) SetVersion(v string) { c.version = v }
+
+// SetBuild 设置随注册心跳上报的**构建标识**（git 短哈希 · 构建时间，取证用）。
+//
+// ★与 SetVersion 分开是这次改造的要点：合成一个字段就必然二选一，
+// 而 deploy/build.sh 此前选的是 git 哈希 —— 于是每台网关的"版本"都排不出序，
+// 组件一致性校验对所有按脚本装出来的网关恒判「不一致」。
+func (c *Client) SetBuild(v string) { c.build = v }
 
 // SetWeb 登记七层 Web 代理的监听地址（空=未开启，不上报该字段）。
 func (c *Client) SetWeb(addr string, tlsOn bool) { c.web, c.webTLS = addr, tlsOn }
@@ -409,6 +423,7 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 		"clients": clients, "tunnels": tunnels, "uptime": uptimeSec, "sessions": sessions,
 		"tunnelFp": c.tunnelFP, // 供控制面转发给客户端做隧道证书钉扎
 		"version":  c.version,
+		"build":    c.build,
 		"events":   evs,
 		// now：网关此刻的本机时钟（Unix 秒），供控制面比对两侧时钟偏差。
 		// ★为什么值得上报：敲门令牌是控制面按自己的钟签的短时效凭据（exp=签发+90s），

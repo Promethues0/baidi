@@ -76,6 +76,11 @@ on:
       # 与「一条全仓检查只有一个子树的触发面」是同一个拓扑错误，只是高一层。
       # （实测踩到：6e3bfbb 只动 scripts/，clients.yml 一轮都没起。）
       - 'scripts/**'
+      # control/internal/auth/**：端上写给用户看的口令要求（pwchange.ts 的 PW_RULE_HINT）
+      # 有一条跨轨守卫读 strength.go 的 minStrongLen / longPassphraseLen。**只改后端那两个
+      # 常量**是最可能发生的漂移方向，而它恰好只动 control/ 子树——不列进来的话，
+      # 这条守卫在真正该红的那一次一轮都不会起（与上面 scripts/** 是同一个拓扑错误）。
+      - 'control/internal/auth/**'
       - '.github/workflows/clients.yml'
   pull_request:
     paths:
@@ -84,6 +89,7 @@ on:
       - 'gateway/cmd/baidi-knock/**'
       - 'gateway/internal/dataplane/**'
       - 'scripts/**'
+      - 'control/internal/auth/**'
       - '.github/workflows/clients.yml'
 
 permissions:

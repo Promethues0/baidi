@@ -11,16 +11,89 @@ function apiBase(): string {
   return origin() + '/api/v1';
 }
 
+/**
+ * 后端**明确拒绝**（HTTP 4xx/5xx，带 httpx.Error 的中文原因）。
+ *
+ * ★与 NetworkError 分开是有意的，两者该说的话完全相反：前者要原样转述后端那句话，
+ *   后者才该说"连不上控制中心"。移动端此前**没有这个区分**——`api()` 一律
+ *   `throw new Error(\`${res.status} ${res.statusText}\`)`，连后端 message 都不解，
+ *   于是登录页那句 bare catch 把每一种拒绝都说成「无法连接控制中心（baidi-control）」：
+ *   防爆破锁（403「登录失败次数过多，请约 N 分钟后重试」）、账号被禁用、
+ *   首登改密时的 400「新口令强度不足：<哪一条不达标>」全被换成一个方向相反的归因，
+ *   用户于是去查网络、去重试，而每重试一次都在给自己续锁。
+ *   桌面端与控制台早有这两个类型，移动端是同一条纪律没做的那一半。
+ */
+export class ApiError extends Error {
+  // ★字段显式声明 + 构造函数里赋值，**不能**写成 TS 的「参数属性」（`readonly status: number`
+  //   写在参数表里）：移动端用例跑在 `node --experimental-strip-types` 的 strip-only 模式下，
+  //   那种语法要真正的类型转译，node 会当场抛 ERR_UNSUPPORTED_TYPESCRIPT_SYNTAX，
+  //   于是整个测试文件挂掉——而它离被测代码有两层 import，报错看起来与本文件毫无关系。
+  status: number;
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ApiError';
+    this.status = status;
+  }
+}
+
+/** 请求压根没到后端（fetch 抛 TypeError：控制面没起 / 网络断 / TLS 被拒 / CORS 拦）。 */
+export class NetworkError extends Error {
+  cause: unknown;
+  constructor(cause: unknown) {
+    super('连不上控制中心');
+    this.name = 'NetworkError';
+    this.cause = cause;
+  }
+}
+
+/** 取后端的错误文案（httpx.Error 的 {"error":{"message":…}}），拿不到才退回状态行。 */
+async function errText(res: Response): Promise<string> {
+  try {
+    const body = (await res.json()) as { error?: { message?: string } };
+    const msg = body?.error?.message;
+    if (msg) return msg;
+  } catch { /* 非 JSON 应答（反代 502 之类）：退回状态行 */ }
+  return `${res.status} ${res.statusText}`;
+}
+
+/**
+ * failReason 把一次失败翻译成该给用户看的那句话：后端明确拒绝 → **原样转述**，一个字不改；
+ * 请求没到后端 → 这时才该说"连不上"。**唯一收口**，别在页面里另写归因。
+ */
+export function failReason(e: unknown): string {
+  if (e instanceof ApiError) return e.message;
+  if (e instanceof NetworkError) return '无法连接控制中心（baidi-control），请检查网络与「我的」页里的控制中心地址';
+  if (e instanceof Error && e.message) return e.message;
+  return '未知错误';
+}
+
+/** failStatus 取失败的 HTTP 状态码（不是 ApiError 就回 0）。
+ *  ★判状态码只能用它：api() 抛出的 message 是**后端中文原文**，永远不以状态码开头。 */
+export function failStatus(e: unknown): number {
+  return e instanceof ApiError ? e.status : 0;
+}
+
 export async function api<T>(path: string, init?: RequestInit): Promise<T> {
-  const res = await fetch(apiBase() + path, {
-    headers: {
-      Accept: 'application/json',
-      ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
-      ...(init?.headers ?? {})
-    },
-    ...init
-  });
-  if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+  // ★headers 必须先从 init 里摘出来再单独合并。原写法是 `{ headers: {…合并…}, ...init }`，
+  //   而 `...init` 里**也有** headers，展开在后就把合并结果整个顶掉——于是任何一个
+  //   传了 headers 的调用（改密要带 Authorization + Content-Type）会静默丢掉
+  //   `Accept` 与自动注入的 Bearer，症状是一次谁也解释不了的 401。
+  //   桌面端 api.ts 早已是这个写法，移动端是同一条纪律没做的那一半。
+  const { headers: extra, ...rest } = init ?? {};
+  let res: Response;
+  try {
+    res = await fetch(apiBase() + path, {
+      ...rest,
+      headers: {
+        Accept: 'application/json',
+        ...(session.token ? { Authorization: `Bearer ${session.token}` } : {}),
+        ...(extra ?? {})
+      }
+    });
+  } catch (e) {
+    throw new NetworkError(e);
+  }
+  if (!res.ok) throw new ApiError(await errText(res), res.status);
   return (await res.json()) as T;
 }
 
@@ -77,6 +150,19 @@ export interface PortalLoginResp {
   needTotp?: boolean;     // TOTP 动态验证码：配合 ticket 走 POST /auth/totp
   needWebauthn?: boolean; // passkey 断言（移动客户端做不了，引导去浏览器门户）
   ticket?: string;        // 「口令已验」一次性票据（3min）
+  /**
+   * 首登强制改密（FR-DEPLOY-09）：认证**已经通过**，但初始口令没换，于是 token 不是 8h
+   * 会话令牌而是 15min 受限令牌（`Use=pwreset`），中间件只放行 `POST /auth/password`
+   * 与 `GET /auth/me`，其余端点（含 /knock-token）一律 403。
+   *
+   * ★它与 `ok:true, token:…` 同时出现，所以**必须先判它**：先判 `ok && token` 就会
+   * 拿受限令牌 login() 并 replace('/connect')，然后应用列表与接入逐个 403——而
+   * `BAIDI_SEED_MUST_CHANGE` 默认 1、管理员每次重置口令也置这一位，也就是说
+   * 每台按脚本装出来的机器上、每一个新用户的首次登录都会走这条路。
+   */
+  mustChangePassword?: boolean;
+  /** 本回合第一因子来自外部认证源：后端不再校验旧口令（他不可能知道管理员设的**本地**旧口令）。 */
+  skipOldPassword?: boolean;
   reason?: string; token?: string; displayName?: string;
   /** needDirectory 配了 ≥2 个外部认证域又没指定：服务端**拒绝登录**并带回候选。
    *  ★不是"可选项"——挨个去问等于把明文口令投递给排在前面的每一台目录服务器

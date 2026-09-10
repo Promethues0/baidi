@@ -9,10 +9,20 @@
             <path d="M9 12l2 2 4-4" stroke="#165DFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" />
           </svg>
         </div>
-        <div class="ck-login__t">登录白帝安全接入</div>
-        <div class="ck-login__s">{{ needTotp ? '请输入认证器 App 的动态验证码' : needMfa ? '请完成二次认证' : '使用企业账号登录终端客户端' }}</div>
+        <div class="ck-login__t">{{ needPwChange ? '修改初始口令' : '登录白帝安全接入' }}</div>
+        <div class="ck-login__s">{{ loginSubtitle }}</div>
 
-        <template v-if="!needMfa && !needTotp">
+        <!--
+          首登强制改密（FR-DEPLOY-09）。★这一支必须排在最前：它与 needTotp/needMfa 互斥，
+          但与「已登录」不互斥——服务端回的 ok=true + token 是一张只够改密的受限令牌。
+        -->
+        <template v-if="needPwChange">
+          <div class="ck-mfa-tip"><icon-exclamation-circle-fill /> {{ pwReason }}</div>
+          <a-input-password v-model="pwForm.pw" size="large" placeholder="新口令" class="ck-inp" @keyup.enter="doChangePw"><template #prefix><icon-lock /></template></a-input-password>
+          <a-input-password v-model="pwForm.pw2" size="large" placeholder="再次输入新口令" class="ck-inp" @keyup.enter="doChangePw"><template #prefix><icon-lock /></template></a-input-password>
+          <div class="ck-pwrule">{{ PW_RULE_HINT }}</div>
+        </template>
+        <template v-else-if="!needMfa && !needTotp">
           <a-input v-model="form.username" size="large" placeholder="企业账号" class="ck-inp"><template #prefix><icon-user /></template></a-input>
           <a-input-password v-model="form.password" size="large" placeholder="登录口令" class="ck-inp" @keyup.enter="doLogin(false)"><template #prefix><icon-lock /></template></a-input-password>
         </template>
@@ -26,8 +36,11 @@
         </template>
 
         <div v-if="err" class="ck-err"><icon-close-circle-fill /> {{ err }}</div>
-        <button class="dk-btn ck-login__btn" :disabled="loading" @click="needTotp ? doTotp() : doLogin(needMfa)">{{ loading ? '验证中…' : (needMfa || needTotp) ? '验证并登录' : '登 录' }}</button>
-        <div class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · passkey 二次认证请用浏览器门户，TOTP 可直接在此输入</div>
+        <button class="dk-btn ck-login__btn" :disabled="loading" @click="onLoginBtn">{{ loginBtnLabel }}</button>
+        <button v-if="needPwChange" class="dk-btn dk-btn--ghost ck-login__btn2" :disabled="loading" @click="backToLogin">返回重新登录</button>
+        <!-- 改密那一步不显示演示口令：那行字会被读成"新口令可以填 baidi@123"，
+             而它恰好是后端弱口令表里的一条，提交必被拒。 -->
+        <div v-if="!needPwChange" class="ck-login__hint">演示 <code>li.fang / baidi@123</code> · passkey 二次认证请用浏览器门户，TOTP 可直接在此输入</div>
       </div>
     </div>
 
@@ -245,6 +258,7 @@
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
 import { api, fetchProfile, checkClientUpdate, ApiError, failReason, failStatus, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
+import { PW_RULE_HINT, checkNewPassword } from '@/lib/pwchange';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
 import { tauriRuntime, tunnelStart, tunnelStop, tunnelStatus, openAppUrl, nextDataplaneNotice, controlCaInfo, controlCaSay, CONTROL_CA_SCOPE_NOTE, type TunView, type DataplaneNotice, type ControlCaInfo } from '@/lib/tunnel';
@@ -274,6 +288,84 @@ const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOT
 const mfaReason = ref('');
 const err = ref('');
 const loading = ref(false);
+
+/* ── 首登强制改密（FR-DEPLOY-09）────────────────────────────────────────────
+ * 服务端 mustChangeLogin 的产出：ok=true + 一张 15min 受限令牌（Use=pwreset），
+ * 它只能调 POST /auth/password 与 GET /auth/me，其余端点一律 403。
+ * ★受限令牌**不写进 session**（不入 localStorage）：写进去 authed() 立刻为真、
+ *   界面跳进接入 hub，然后剖面/敲门/应用列表逐个 403——那正是本波要修掉的形态。
+ *   它只活在这个 ref 里，改密成功即丢弃。
+ */
+const needPwChange = ref(false);
+const pwToken = ref('');
+const pwReason = ref('');
+const pwForm = reactive({ pw: '', pw2: '' });
+
+const loginSubtitle = computed(() => {
+  if (needPwChange.value) return '认证已通过，但初始口令尚未修改——改完才会发放正式会话';
+  if (needTotp.value) return '请输入认证器 App 的动态验证码';
+  if (needMfa.value) return '请完成二次认证';
+  return '使用企业账号登录终端客户端';
+});
+const loginBtnLabel = computed(() => {
+  if (loading.value) return needPwChange.value ? '提交中…' : '验证中…';
+  if (needPwChange.value) return '修改并登录';
+  return (needMfa.value || needTotp.value) ? '验证并登录' : '登 录';
+});
+function onLoginBtn(): void {
+  if (needPwChange.value) { void doChangePw(); return; }
+  if (needTotp.value) { void doTotp(); return; }
+  void doLogin(needMfa.value);
+}
+
+/** 进入改密步骤。抽出来是因为口令登录与 TOTP 第二回合**两条路**都会走到（服务端两处都调 mustChangeLogin）。 */
+function enterPwChange(r: PortalLoginResp): void {
+  needPwChange.value = true;
+  needTotp.value = false; needMfa.value = false; totpTicket.value = '';
+  pwToken.value = r.token || '';
+  pwForm.pw = ''; pwForm.pw2 = '';
+  // 文案原样用后端那句：它会点名「旧口令 = 管理员为你设置的**本地**初始口令」，
+  // 或在外部认证源认过的那一回合改口成「无需再填写旧口令」。自己编一句必然漏掉其中一种。
+  pwReason.value = r.reason || '首次登录须修改初始口令';
+  err.value = '';
+}
+
+function backToLogin(): void {
+  needPwChange.value = false;
+  pwToken.value = ''; pwReason.value = '';
+  pwForm.pw = ''; pwForm.pw2 = '';
+  err.value = '';
+}
+
+/**
+ * 提交改密：受限令牌调 POST /auth/password，成功后用**新口令**自动重登换正式会话。
+ *
+ * ★Authorization 显式带 pwToken：session.token 此刻是空的（受限令牌刻意没入库），
+ *   api() 的自动注入拿不到东西，不显式带就是一个必然 401 的请求。
+ * ★失败一律 failReason 原样转述：这里最高频的拒绝是 400「新口令强度不足：<哪一条不达标>」，
+ *   编一句"请重试"会让人反复撞同一堵墙且屏幕上从没出现过原因。
+ */
+async function doChangePw(): Promise<void> {
+  const bad = checkNewPassword(pwForm.pw, pwForm.pw2, form.password);
+  if (bad) { err.value = bad; return; }
+  loading.value = true; err.value = '';
+  try {
+    const r = await api<{ ok: boolean; reason?: string }>('/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwToken.value}` },
+      body: JSON.stringify({ old: form.password, new: pwForm.pw })
+    });
+    if (!r.ok) { err.value = r.reason || '口令修改失败'; return; }
+    // 换成新口令重新走一遍完整登录：这一次服务端会发 8h 会话令牌。
+    // 有 TOTP 的账号会再要一次动态码（上一个已被消费），doLogin 照常把流程引过去。
+    Message.success('口令已修改，正在重新登录…');
+    form.password = pwForm.pw;
+    backToLogin();
+    await doLogin(false);
+  } catch (e) {
+    err.value = failReason(e);
+  } finally { loading.value = false; }
+}
 /** 登录时带上本机终端指纹：控制面的认证策略用它判「授信终端」豁免
  *  （这台设备以本账号上报过 posture 且判定通过 → 免掉策略性二次认证）。
  *  ★采集失败不阻断登录：不带指纹 = 未知设备 = 不给豁免，方向是 fail-closed。
@@ -296,7 +388,10 @@ async function doLogin(withMfa: boolean) {
         mfaCode: withMfa ? form.mfaCode : '', deviceId: await localDeviceID()
       })
     });
-    if (r.ok && r.token) {
+    // ★这一支必须排在 `r.ok && r.token` 前面：首登强制改密的应答同样带 ok=true + token，
+    //   顺序反过来就会拿受限令牌 login() 并跳进接入 hub，然后每个业务端点 403。
+    if (r.mustChangePassword && r.token) { enterPwChange(r); }
+    else if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);
       await loadProfile(); // 登录即取接入剖面：接入所需的网关落点/路由表/资源映射全在其中
       void checkUpdate();  // 不 await：检查更新是旁路观测，不该让登录多等一个 RTT
@@ -357,7 +452,10 @@ async function doTotp() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ticket: totpTicket.value, code: form.mfaCode.trim() })
     });
-    if (r.ok && r.token) {
+    // 与口令路径同一道判定：TOTP 第二回合的 handleTotpLogin 同样会走 mustChangeLogin。
+    // 少了这一支，开了 TOTP 的新用户就是本波要修的那条死路的另一半。
+    if (r.mustChangePassword && r.token) { enterPwChange(r); }
+    else if (r.ok && r.token) {
       needTotp.value = false; totpTicket.value = '';
       login(r.token, r.displayName || form.username);
       await loadProfile();
@@ -745,6 +843,9 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-mfa-tip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-warning); background: var(--bd-tag-gold-bg); border-radius: 7px; padding: 8px 10px; margin-bottom: 12px; }
 .ck-err { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-danger); margin: -4px 0 10px; }
 .ck-login__btn { width: 100%; height: 40px; justify-content: center; font-size: 14px; letter-spacing: 2px; margin-top: 2px; }
+.ck-login__btn2 { width: 100%; height: 34px; justify-content: center; font-size: 13px; margin-top: 8px; }
+/* 口令要求：常驻显示（不是报错才出现），让人一次写对而不是反复试 */
+.ck-pwrule { font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; text-align: left; margin: -2px 0 10px; }
 .ck-login__hint { font-size: 11.5px; color: var(--bd-t3); margin-top: 14px; line-height: 1.7; }
 .ck-login__hint code { color: var(--bd-primary); background: var(--bd-primary-1); padding: 1px 5px; border-radius: 4px; font-family: ui-monospace, monospace; }
 

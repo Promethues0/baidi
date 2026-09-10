@@ -46,6 +46,10 @@ on:
       - 'gateway/mobile/**'
       - 'gateway/internal/dataplane/**'
       - 'gateway/internal/knock/**'
+      # control/internal/auth/**：端上的口令要求文案有一条跨轨守卫读 strength.go 的
+      # minStrongLen / longPassphraseLen。**只改后端那两个常量**是最可能的漂移方向，
+      # 而它只动 control/ 子树——不列进来，这条守卫在真正该红的那一次一轮都不会起。
+      - 'control/internal/auth/**'
       - 'clients/build-artifacts.sh'
       - '.github/workflows/clients-mobile.yml'
   pull_request:
@@ -54,6 +58,7 @@ on:
       - 'gateway/mobile/**'
       - 'gateway/internal/dataplane/**'
       - 'gateway/internal/knock/**'
+      - 'control/internal/auth/**'
       - 'clients/build-artifacts.sh'
       - '.github/workflows/clients-mobile.yml'
 

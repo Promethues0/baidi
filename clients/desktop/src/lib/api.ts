@@ -131,6 +131,19 @@ export interface PortalLoginResp {
   needTotp?: boolean;     // TOTP 动态验证码：配合 ticket 走 POST /auth/totp
   needWebauthn?: boolean; // passkey 断言（客户端做不了 WebAuthn 仪式，引导去浏览器门户）
   ticket?: string;        // 「口令已验」一次性票据（3min）
+  /**
+   * 首登强制改密（FR-DEPLOY-09）：认证**已经通过**，但初始口令没换，于是 token 不是 8h
+   * 会话令牌而是 15min 受限令牌（`Use=pwreset`），中间件只放行 `POST /auth/password`
+   * 与 `GET /auth/me`，其余端点（含 /knock-token）一律 403。
+   *
+   * ★它与 `ok:true, token:…` 同时出现，所以**必须先判它**：先判 `ok && token` 就会
+   * 拿受限令牌 login() 并跳进主界面，然后剖面、敲门、应用列表逐个 403——而
+   * `BAIDI_SEED_MUST_CHANGE` 默认 1、管理员每次重置口令也置这一位，也就是说
+   * 每台按脚本装出来的机器上、每一个新用户的首次登录都会走这条路。
+   */
+  mustChangePassword?: boolean;
+  /** 本回合第一因子来自外部认证源：后端不再校验旧口令（他不可能知道管理员设的**本地**旧口令）。 */
+  skipOldPassword?: boolean;
   reason?: string; token?: string; displayName?: string;
 }
 export interface PortalTile {

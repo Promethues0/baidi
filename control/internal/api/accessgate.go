@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log/slog"
 	"net/http"
+	"sort"
 	"strconv"
 	"time"
 
@@ -122,6 +123,49 @@ func (s *Server) accessSessionGate(w http.ResponseWriter, r *http.Request, accou
 	return false
 }
 
+// accessWebGate 接入策略闸在 **B/S（浏览器）** 这一侧的执行方（wave11 行动 14 ①）。
+//
+// 返回 false 时响应已写好。挂在 handleWebTicket 上，位置与 accessSessionGate 在
+// handleKnockToken 上的位置对应：过完三道账号闸（entryGates）之后、解析应用之前。
+//
+// ★改造前这两条 P0 规则**只**挂在敲门令牌上，而浏览器不敲门——于是
+// 「同时在线设备上限 = 0（PRD 原文：禁止登录）」这条最强的配置封不住 B/S：
+// 管理员设成 0，隧道全断，所有人照样能从门户点开 Web 应用。
+//
+// ★这里只判「上限 0」，**不判超时注销**：取票是一次性动作（浏览器不会每 15s 回来
+// 续票），在取票口判空闲只会挡住一个正要开始工作的人；B/S 的超时注销执行方在网关
+// 逐请求那一侧（webIdleSec → webproxy 会话台账），判据是真实的业务请求。
+//
+// ★也**不记账**：不给浏览器造一行 device_sessions。那张表的键是设备指纹，
+// 塞一个编出来的键进去，「当前接入会话」那张表就会开始显示不存在的终端。
+func (s *Server) accessWebGate(w http.ResponseWriter, r *http.Request, account string) bool {
+	d := store.EvaluateWebAccess(s.accessPolicy(r.Context()))
+	if d.Allowed {
+		return true
+	}
+	s.auditWebAccessDenied(r, account, d.Reason)
+	httpx.Error(w, http.StatusForbidden, d.Reason)
+	return false
+}
+
+// auditWebAccessDenied B/S 接入被接入策略拒绝的节流审计（5min/账号）。
+//
+// 节流理由与 auditAccessDenied 同款：被挡住的人会反复点门户上那个按钮。
+// 键里**不带资源 id**——这道闸判的是"这个账号此刻能不能经浏览器接入"，
+// 与他点的是哪个应用无关，带上资源会让一个人点五个应用刷出五条同样的审计。
+func (s *Server) auditWebAccessDenied(r *http.Request, account, reason string) {
+	key := "webaccess:" + account
+	s.mu.Lock()
+	due, suppressed := throttleAdmit(s.accessDenied, key, accessDeniedInterval,
+		deviceObserveMaxKeys, time.Now().Unix())
+	s.mu.Unlock()
+	if !due {
+		return
+	}
+	s.audit(r, "security", "拒发 Web 访问票据："+account+"（"+reason+"）"+
+		throttleNote(suppressed, accessDeniedInterval), "deny")
+}
+
 // devicePlatform 取这台终端的平台（分平台计数用）。
 //
 // 唯一真实来源是 posture 上报（`trusted_devices.platform`）——敲门令牌请求里没有平台字段，
@@ -191,7 +235,51 @@ func (s *Server) handleAccessPolicy(w http.ResponseWriter, r *http.Request) {
 			out["idleReady"] = known > 0
 		}
 	}
+	// ── B/S（浏览器）覆盖面（wave11 行动 14 ①）──
+	// 两条规则在浏览器这条路上的兑现程度不同，页面必须逐条说清是哪一种，
+	// 而不是让管理员以为「策略是全局的、当然管所有接入形态」。
+	out["web"] = s.webAccessCoverage()
 	httpx.JSON(w, http.StatusOK, out)
+}
+
+// webAccessCoverage 接入策略在 B/S 这一侧的**真实**覆盖面（策略页据此逐条说明）。
+//
+// ★三项都是可判定的事实，不是文案：
+//   - deviceLimit：只兑现 0 这一档（浏览器没有设备指纹，见 store.EvaluateWebAccess）；
+//   - idleEnforcing / idleUnreported：**逐台网关**的回执——控制面下发了多少与
+//     网关在执行多少是两件事（同 stealth/nat 的回执纪律）。一台还没升级的网关
+//     上的浏览器接入不会被注销，而策略页此前只会显示「已启用 · N 分钟」。
+func (s *Server) webAccessCoverage() map[string]any {
+	now := time.Now().Unix()
+	window := int64(gatewayOnlineWindow / time.Second)
+	enforcing, unreported := []string{}, []string{}
+	s.mu.Lock()
+	for id, gw := range s.gateways {
+		if now-gw.LastSeen > window {
+			continue // 离线网关不参与结论：它此刻什么都没在执行
+		}
+		if _, hasWeb := s.gwWebSess[id]; !hasWeb {
+			continue // 没开七层的网关上根本没有 B/S 接入面，不该算进"未回报"
+		}
+		if gw.WebIdleSec == nil {
+			unreported = append(unreported, id)
+			continue
+		}
+		if *gw.WebIdleSec > 0 {
+			enforcing = append(enforcing, id)
+		}
+	}
+	s.mu.Unlock()
+	// map 遍历序随机——页面上那两串网关 id 不该每次刷新都换顺序。
+	sort.Strings(enforcing)
+	sort.Strings(unreported)
+	return map[string]any{
+		// deviceLimitTier 说明「同时在线设备上限」在 B/S 上只兑现哪一档。
+		// 值是给代码看的枚举，中文由页面写——两处各写一份中文必然漂移。
+		"deviceLimitTier": "zero-only",
+		"idleEnforcing":   enforcing,
+		"idleUnreported":  unreported,
+	}
 }
 
 // handleSaveAccessPolicy PUT /api/v1/policies/access（PermSecurity）。

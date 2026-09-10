@@ -65,7 +65,10 @@ type Client struct {
 	// tunnelIDStrict L4 隧道身份严格模式姿态。nil = 未装（不上报），
 	// 但新网关的 main 一律会调 SetTunnelIDStrict——见那里的注释。
 	tunnelIDStrict *bool
-	httpc          *http.Client
+	// webSess 七层 Web 会话快照源 + 本网关此刻正在执行的超时注销阈值（秒）。
+	// nil = 本进程没开 -web（不上报，控制面据此知道「这台网关没有 B/S 接入面」）。
+	webSess func() ([]WebSession, int)
+	httpc   *http.Client
 
 	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
 	// 两者分开存是必须的：nil（旧控制面不认识 NAT）与空数组（本网关无策略）
@@ -73,6 +76,11 @@ type Client struct {
 	mu         sync.Mutex
 	lastNAT    []natfw.Policy
 	natPresent bool
+	// webIdleSec 上一次策略响应里的「接入超时注销」阈值（秒，0=不生效）。
+	// ★这里刻意**不做三态**：控制面缺这个字段（旧版本）与它明说 0（管理员把规则关了）
+	// 在网关的动作上完全相同——都是不注销任何人。真正需要区分的是**披露**，
+	// 那由网关把自己在执行的值随心跳报回去，控制面在页面上分开呈现。
+	webIdleSec int
 }
 
 // SetTunnelFP 设置随注册上报的隧道证书指纹。证书在监听前就已备妥，故可在首次 Register 前调用。
@@ -102,6 +110,33 @@ type ReachResult struct {
 
 // SetReach 装上后端可达性快照源；不调用即不上报（旧网关形态）。
 func (c *Client) SetReach(fn func() []ReachResult) { c.reach = fn }
+
+// WebSession 一条七层 Web 会话（与 webproxy.SessionInfo 同构；
+// 这里另定义一份是依赖方向使然——cplane 是底层传输，不该 import 上层的 webproxy）。
+//
+// ★它是「在线用户」页里 **B/S 那一半**的唯一来源。此前心跳只报 al.Sessions()
+// （SPA 放行表，即 C/S 隧道会话），于是一个整天用浏览器访问 OA 的人在那一页上
+// 从来不存在——既数不到，「强制下线」按钮也点不到他。
+type WebSession struct {
+	ID   string `json:"id"`
+	User string `json:"user"`
+	Role string `json:"role"`
+	Res  string `json:"res"`
+	IP   string `json:"ip"`
+	// Since 会话建立时刻；LastActive 最近一次通过逐请求鉴权的业务请求时刻。
+	//
+	// ★这两个都是**普通 int64 不是指针**，与 Session.LastActive 的三态刻意不同：
+	// L7 的活跃时刻由网关自己在逐请求鉴权后写，只要这条会话在报文里出现，
+	// 它就必然有一个真实值（建会话那一刻起算）。那边要三态是因为
+	// 「网关会不会报」在 L4 上真的不确定（旧版本不报）；这边整个字段一起缺席就是那个语义。
+	Since      int64 `json:"since"`
+	LastActive int64 `json:"lastActive"`
+	Exp        int64 `json:"exp"`
+}
+
+// SetWebSessions 装上七层 Web 会话快照源（同时回报本网关正在执行的超时注销阈值，秒）。
+// 不调用即不上报——控制面据此区分「这台网关没开七层」与「开了但当前零会话」。
+func (c *Client) SetWebSessions(fn func() ([]WebSession, int)) { c.webSess = fn }
 
 // NATHit 一条 NAT 规则的命中计数（与 natfw.Hit 同构，理由同 ReachResult）。
 type NATHit struct {
@@ -412,6 +447,18 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	if c.stealth != nil {
 		payload["stealth"] = c.stealth()
 	}
+	// 七层 Web 会话台账 + 本网关正在执行的超时注销阈值（wave11 行动 14）。
+	// ★nil 切片必须先归一成空数组：json 会把 nil 编成 null，而控制面那侧用
+	// `*[]GwWebSession` 区分「旧网关不报这个字段」与「报了、当前零条」，
+	// null 解出来同样是 nil 指针——两种相反的语义会被压成同一个。
+	if c.webSess != nil {
+		ss, idleSec := c.webSess()
+		if ss == nil {
+			ss = []WebSession{}
+		}
+		payload["webSessions"] = ss
+		payload["webIdleSec"] = idleSec
+	}
 	body, _ := json.Marshal(payload)
 	resp, err := c.do(http.MethodPost, "/api/v1/gateways/register", body)
 	if err != nil {
@@ -460,6 +507,8 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 		Resources []resourceDTO  `json:"resources"`
 		Revoked   []Revoked      `json:"revoked"`
 		NAT       []natfw.Policy `json:"nat"`
+		// WebIdleSec 「接入超时注销」阈值（秒，0/缺席=不生效）。见 Client.webIdleSec 注释。
+		WebIdleSec int `json:"webIdleSec"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
 		return nil, nil, err
@@ -476,8 +525,21 @@ func (c *Client) Policy() ([]resource.Resource, []Revoked, error) {
 	// 被读成「把 NAT 全删掉」——那会在升级控制面的瞬间把生产 NAT 规则清空。
 	c.mu.Lock()
 	c.lastNAT, c.natPresent = r.NAT, r.NAT != nil
+	c.webIdleSec = r.WebIdleSec
 	c.mu.Unlock()
 	return out, r.Revoked, nil
+}
+
+// WebIdleSeconds 返回上一次 Policy() 取回的「接入超时注销」阈值（秒，0 = 不生效）。
+//
+// ★与 NATPolicies 的 present 三态刻意不同：那边缺字段要「保持内核规则现状」
+// （按空集下发 = 把生产 NAT 表整个删掉），两种处置相反所以必须分得开；
+// 这边缺字段与显式 0 的处置完全相同（不注销任何人），且**回落方向恒定为不生效**——
+// 与 store.ParseAccessPolicy 对坏数据的回落方向逐字同源。
+func (c *Client) WebIdleSeconds() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.webIdleSec
 }
 
 // NATPolicies 返回上一次 Policy() 取回的地址转换策略，以及控制面**是否下发了**该字段。

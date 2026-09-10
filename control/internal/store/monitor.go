@@ -25,7 +25,22 @@ type OnlineSession struct {
 	// Auth 接入方式。会话经 SPA 敲门 + 隧道建立，这是它唯一确定的事实——
 	// **不是**登录因子（口令/MFA/证书）：那发生在控制面登录时，与这条隧道会话不同源，
 	// 网关也无从得知。页面表头据此写「接入方式」而不是「认证方式」。
-	Auth     string `json:"auth"`
+	Auth string `json:"auth"`
+	// Kind 接入形态：tunnel（C/S 客户端隧道）| web（B/S 浏览器）。
+	//
+	// ★这两种会话的来源、判据与可处置方式都不同，页面必须分得开：
+	// tunnel 来自 SPA 放行表（键是源 IP，身份来自敲门票据），web 来自网关的
+	// 七层会话台账（键是网关生成的会话 id，身份来自 Web 票据）。
+	// 改造前这一页**只有 tunnel**——一个整天用浏览器访问 OA 的人在这里根本不存在，
+	// 既数不到也点不到「强制下线」。
+	Kind string `json:"kind"`
+	// Resource 该会话正在访问的资源 id（只有 web 会话有：L7 的会话本就绑定单个资源，
+	// 而隧道会话可以同时路由到多个资源，那一格填任何值都是假的）。
+	Resource string `json:"resource,omitempty"`
+	// Idle 该会话已经多久没有业务流量（秒）。**只有 web 会话有**：L7 逐请求鉴权
+	// 天然带这个信号，而隧道那侧的活跃时刻是三态的（旧网关不报），不可判定时
+	// 这一格必须缺席而不是 0，故干脆只在能判的那类会话上给。
+	Idle     *int64 `json:"idleSec,omitempty"`
 	Gateway  string `json:"gateway"` // 接入网关
 	LoginAt  string `json:"loginAt"`
 	Duration string `json:"duration"` // 在线时长

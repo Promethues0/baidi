@@ -684,8 +684,8 @@ func TestUpgradedConnectionKilledOnForcedLogout(t *testing.T) {
 		t.Fatalf("★已升级连接必须进可切断台账，当前 %d 条", h.ws.UpgradedCount())
 	}
 
-	if n := h.ws.KillUser("zhangsan"); n != 1 {
-		t.Fatalf("★强制下线应切断 1 条七层长连接，得 %d", n)
+	if n, sess := h.ws.KillUser("zhangsan"); n != 1 || sess != 1 {
+		t.Fatalf("★强制下线应切断 1 条七层长连接并注销 1 条 Web 会话，得 conns=%d sessions=%d", n, sess)
 	}
 	_ = c.SetReadDeadline(time.Now().Add(3 * time.Second))
 	if _, err := br.ReadByte(); err == nil {

@@ -63,6 +63,13 @@ func (s *Server) handleWebTicket(w http.ResponseWriter, r *http.Request) {
 	if !s.entryGates(w, r, c.Name, "Web 访问票据") {
 		return
 	}
+	// ★接入策略的第四道闸（wave11 行动 14 ①）。位置与 accessSessionGate 在敲门那侧
+	// 一致：账号闸之后、解析目标之前。设备准入那道对浏览器不适用（浏览器无指纹），
+	// 而「同时在线设备上限 = 0 = 禁止接入」是账号维度的，必须在这条路上同样兑现——
+	// 否则管理员把它设成 0 之后隧道全断，而所有人照样能从门户点开 Web 应用。
+	if !s.accessWebGate(w, r, account) {
+		return
+	}
 
 	app, res, err := s.resolveWebApp(r, body.AppID)
 	if err != nil {

@@ -31,6 +31,13 @@ type Session struct {
 	// 攻击者手工构造请求头时不受浏览器 Path 规则约束。两道缺一不可。
 	Res string `json:"s"`
 	Exp int64  `json:"e"` // 过期 Unix 秒
+	// Sid 会话在网关本机台账（sessionTracker）里的 id。
+	//
+	// ★它让这张 Cookie 从"自包含的凭据"变成"台账的一把钥匙"：逐请求都要能在台账里
+	// 查到，查不到即拒。摘除只有两个来源——强制下线与超时注销，两者都该拒。
+	// 没有它的话，强制下线对 B/S 普通请求只能靠 5 分钟的账号封禁窗去挡，
+	// 而 Cookie 活 15 分钟：封禁一过，被"下线"的人拿同一张 Cookie 接着访问。
+	Sid string `json:"i"`
 }
 
 // NewSessionKey 生成本机 Cookie 签名密钥（32 字节）。
@@ -78,6 +85,13 @@ func Open(key []byte, tok string) (Session, error) {
 	}
 	if s.User == "" || s.Res == "" {
 		return Session{}, errors.New("会话 Cookie 缺账号或资源绑定")
+	}
+	// ★缺 sid 的 Cookie 一律不认。它只可能来自本网关上一个版本签的 Cookie，而
+	// SessionKey 每次启动重新生成——换句话说这条分支在真实部署里走不到，留着是因为
+	// "查不到台账就拒"这条判据的前提是 sid 必然存在：允许空 sid 会让它退化成
+	// "空 sid 一律查不到 → 拒"或（更坏）某天被人顺手改成"空 sid 跳过台账检查"。
+	if s.Sid == "" {
+		return Session{}, errors.New("会话 Cookie 缺台账 id")
 	}
 	if s.Exp <= time.Now().Unix() {
 		return Session{}, fmt.Errorf("会话已过期（%s）", time.Unix(s.Exp, 0).Format("15:04:05"))

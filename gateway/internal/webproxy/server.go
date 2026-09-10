@@ -13,6 +13,7 @@ import (
 	"net/netip"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"baidi.dev/gateway/internal/auth"
@@ -90,6 +91,11 @@ type Server struct {
 	tickets *knock.Cache
 	// upgraded 已升级连接（WebSocket）的台账，见 upgraded.go。
 	upgraded *upgradeTracker
+	// sessions L7 会话台账，见 websess.go。它同时是「在线用户」页里 B/S 那一半的
+	// 唯一来源，也是强制下线与超时注销在普通请求上的执行方。
+	sessions *sessionTracker
+	// idleTimeout 「接入超时注销」阈值（纳秒，0 = 不生效），由控制面随策略下发。
+	idleTimeout atomic.Int64
 }
 
 // ctxKey 把已解析的目标资源从 handler 传给 ReverseProxy.Rewrite。
@@ -133,7 +139,8 @@ func New(cfg Config) (*Server, error) {
 	if cfg.UpgradeRecheck <= 0 {
 		cfg.UpgradeRecheck = defaultUpgradeRecheck
 	}
-	s := &Server{cfg: cfg, tickets: knock.NewCache(), upgraded: newUpgradeTracker()}
+	s := &Server{cfg: cfg, tickets: knock.NewCache(), upgraded: newUpgradeTracker(),
+		sessions: newSessionTracker()}
 	s.proxy = &httputil.ReverseProxy{
 		Rewrite:        s.rewrite,
 		ModifyResponse: s.modifyResponse,
@@ -242,7 +249,19 @@ func (s *Server) handleEnter(w http.ResponseWriter, r *http.Request) {
 		writeNotice(w, http.StatusForbidden, "无访问授权", "你当前对该应用没有访问权限。")
 		return
 	}
-	sess := Session{User: c.Name, Role: c.Role, Res: c.Res, Exp: time.Now().Add(s.cfg.SessionTTL).Unix()}
+	// 会话进本机台账：它是「在线用户」页里 B/S 那一半的来源，也是强制下线与
+	// 超时注销在普通请求上的执行方（见 websess.go）。生成不出 id 就**不建会话**——
+	// 建一条查不到台账的会话，下一个请求就会被自己的台账判据拒掉，症状是"点进去又被弹回门户"。
+	sid, serr := newSessionID()
+	if serr != nil {
+		slog.Error("L7 入口拒绝（会话台账 id 生成失败）", "src", ip, "user", c.Name, "err", serr.Error())
+		writeNotice(w, http.StatusInternalServerError, "会话无法建立", "网关内部错误，请稍后重试或联系管理员。")
+		return
+	}
+	now := time.Now()
+	exp := now.Add(s.cfg.SessionTTL).Unix()
+	sess := Session{User: c.Name, Role: c.Role, Res: c.Res, Exp: exp, Sid: sid}
+	s.sessions.start(sid, c.Name, c.Role, c.Res, ip, now.Unix(), exp)
 	prefix := AppPrefix(c.Res)
 	http.SetCookie(w, &http.Cookie{
 		Name:  CookieName,
@@ -292,16 +311,25 @@ func (s *Server) peerOf(r *http.Request) Peer {
 	return ResolvePeer(r, s.cfg.TrustedProxies, s.cfg.TLSTerminated, s.cfg.ExternalHost)
 }
 
-// KillUser 切断某账号在七层上的全部已升级连接（WebSocket），返回条数。
+// KillUser 强制下线在七层的执行方：切断该账号全部已升级连接（WebSocket）+
+// 注销他全部 Web 会话台账。返回 (已切断的长连接数, 已注销的会话数)。
 //
-// ★强制下线的 L7 执行方，与 L4 的 proxy.KillUser 成对。少了它，管理台显示"已切断"、
-// 回执写着"切断 N 条隧道"，而那条 WS 仍在网关里双向搬运业务数据。
-func (s *Server) KillUser(user string) int {
-	n := s.upgraded.killUser(user)
-	if n > 0 {
-		slog.Warn("L7 强制下线执行：切断已升级连接", "user", user, "conns", n)
+// ★两个数必须分开返回，不能相加：回执里「切断 N 条七层长连接」与「注销 M 条 Web 会话」
+// 是两件不同的事——前者是当场断开的 TCP，后者是让下一个 HTTP 请求拿不到通行权。
+// 合成一个数的话，一个只用普通请求访问 OA 的人被下线时回执写「切断 1 条长连接」，
+// 而实际上一条长连接都没有。
+//
+// ★会话台账那一半是新补的。此前只切 WS，普通请求靠 spa.Allowlist 的账号封禁挡，
+// 而封禁窗只有 kickBanTTL（5 分钟）、Cookie 却活 15 分钟：封禁一过，
+// 被"强制下线"的人拿同一张 Cookie 继续访问，管理台上写着「已下线」。
+func (s *Server) KillUser(user string) (conns int, sessions int) {
+	conns = s.upgraded.killUser(user)
+	sessions = s.sessions.endUser(user)
+	if conns > 0 || sessions > 0 {
+		slog.Warn("L7 强制下线执行：切断已升级连接 + 注销 Web 会话",
+			"user", user, "conns", conns, "sessions", sessions)
 	}
-	return n
+	return conns, sessions
 }
 
 // UpgradedCount 当前存活的已升级连接数（供日志/自检）。
@@ -363,6 +391,41 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 			"这个请求是从另一个应用的页面发起的。若确属正常业务，请给该应用配置专属访问域名。")
 		return
 	}
+	// ── 会话台账复核（强制下线与超时注销在普通请求上的执行方）──
+	//
+	// ★查不到即拒。摘除只有两个来源（强制下线 / 超时注销），两者都该拒；
+	// 而"台账空了 Cookie 还在"这种形态不存在——网关重启时 SessionKey 重新生成，
+	// 所有 Cookie 当场失效。少了这一道，强制下线对 B/S 普通请求就只剩
+	// spa.Allowlist 那个 5 分钟封禁窗在挡，而 Cookie 活 15 分钟：
+	// 封禁一过，被"下线"的人拿同一张 Cookie 接着访问，管理台上写着「已下线」。
+	live, tracked := s.sessions.get(sess.Sid)
+	if !tracked {
+		slog.Warn("L7 拒绝（会话已在网关台账中注销）", "src", ip, "user", sess.User, "resource", resID)
+		s.cfg.SecEvents.Report("web-session-gone", ip,
+			"L7 拒绝（账号 "+sess.User+" 的 Web 会话已被注销，Cookie 仍在手上）")
+		writeNotice(w, http.StatusUnauthorized, "会话已被注销",
+			"这条会话已被终止（管理员强制下线，或长时间无业务流量被自动注销）。请回到应用门户重新进入。")
+		return
+	}
+	// FR-POLICY-30 接入超时注销在 B/S 这一侧的执行方。判据是**上一次业务请求**的时刻
+	// （live 是 touch 之前的快照），阈值由控制面随策略下发，网关不做任何推导。
+	//
+	// ★只作用于普通请求：101 升级之后的连接是裸字节转发，网关**看不见**上面还有没有
+	// 流量——把"没有 HTTP 请求"当成"没有业务流量"会把一条正在传数据的 WebSocket
+	// 判成空闲并切断。已升级连接另有一条硬上界（不超过会话 Cookie 寿命，见 guardUpgraded），
+	// 这条边界写在 docs/ARCHITECTURE.md 第七节，别顺手"补齐"。
+	if idle := s.IdleTimeout(); idle > 0 {
+		if d := time.Since(time.Unix(live.lastActive, 0)); d > idle {
+			s.sessions.end(sess.Sid)
+			slog.Warn("L7 会话超时注销（无业务流量）", "src", ip, "user", sess.User,
+				"resource", resID, "idle", d.Truncate(time.Second).String(), "limit", idle.String())
+			s.cfg.SecEvents.Report("web-idle", ip,
+				"L7 会话超时注销（账号 "+sess.User+" 连续 "+d.Truncate(time.Second).String()+" 无业务流量，阈值 "+idle.String()+"）")
+			writeNotice(w, http.StatusUnauthorized, "接入已超时注销",
+				"这条会话连续 "+d.Truncate(time.Second).String()+" 没有业务流量，已按接入策略自动注销。请回到应用门户重新进入。")
+			return
+		}
+	}
 	// ── 逐请求重新鉴权（本设计的核心）──
 	// 强制下线、风险降权（DenyUsers）、JIT 到期都会在下一次策略轮询后从这里生效。
 	if s.cfg.Allow.UserDenied(sess.User) {
@@ -383,6 +446,11 @@ func (s *Server) handleAny(w http.ResponseWriter, r *http.Request) {
 			"你对该应用的访问权限已变更（可能是授权调整、终端降级或临时授予到期）。")
 		return
 	}
+
+	// ★活跃时刻在**全部复核之后**才刷新。与 spa.Allowlist.Touch 同一条纪律：
+	// 放在前面的话，往 L7 口打一个必然被拒的请求就能替别人续命，
+	// 「无业务流量超时」于是可以被任何人从外面免费关掉。
+	s.sessions.touch(sess.Sid, time.Now().Unix())
 
 	// 交给反代：路径去掉 /app/<id> 前缀，其余原样。
 	rr := r.Clone(context.WithValue(r.Context(), ctxKey{},

@@ -30,6 +30,47 @@ HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 : "${ACME_SERVER:=https://acme-v02.api.letsencrypt.org/directory}"
 ACME_PROFILE=shortlived             # 常量：IP 证书在 LE 上只有这一个 profile 可用
 
+# ── 主机侧定期自动备份（NFR-AVL-04 / FR-OPS-04）────────────────────────────
+#
+# ★这四项的执行方（control 的 StartAutoBackupLoop）在 wave9 就做好了，却**既不在
+#   config.env.example 里、也不在 deploy.sh 的转发白名单里** —— 于是在任何按脚本装出来的
+#   机器上它都是关的，而 `/diag` 那条 warn 的补救提示恰恰指着那份没有它的模板
+#   （"配置 BAIDI_BACKUP_DIR + BAIDI_BACKUP_PASSPHRASE（见 deploy/config.env.example）"）。
+#   照着提示翻过去，那里一个字都没有——这是本项目反复出现的那一族：链路上少一环、零报错。
+#
+# ★缺省与 deploy.sh 逐字一致：**全空**（= 不启用）。口令刻意不给默认值——写在模板或脚本里
+#   的默认口令等于没有加密，而这份归档里装着内部 CA 私钥、三把签名私钥、审计链 HMAC 密钥
+#   与全部凭据密文。"目录用哪个"只有一处决定（下面那段），deploy.sh 只负责原样转发。
+: "${BAIDI_BACKUP_DIR:=}"
+: "${BAIDI_BACKUP_PASSPHRASE:=}"
+: "${BAIDI_BACKUP_INTERVAL:=}"
+: "${BAIDI_BACKUP_KEEP:=}"
+
+# 口令的形状必须在**动这台机器之前**判（本段所在位置就是为此），两条理由：
+#   ① 长度：不足 12 时 upgrade.CreateBackup 每一轮都失败，机器上的姿态是「已启用、
+#      一次都没成功过」——只有翻 /diag 才看得见。12 这个数与 Go 侧 upgrade.minPassphrase
+#      同源，**那边才是真执行方**，这里只是早一步、说人话。
+#   ② 字符集：口令要经 systemd 的 EnvironmentFile 传给控制面，而那个格式只是 shell 的一个
+#      子集——空白、引号、$、反引号、反斜杠、# 等会被解析掉或把值截断。被悄悄改形的口令是
+#      本功能**最坏**的失败形态：备份天天在做、也确实加密了，只是用的不是运维记下的那一串，
+#      直到恢复那天才发现全部归档打不开。宁可当场拒收，也不接一个会静默改形的值。
+if [ -n "$BAIDI_BACKUP_PASSPHRASE" ]; then
+  case $BAIDI_BACKUP_PASSPHRASE in
+    *[!A-Za-z0-9._:@+/=~^-]*)
+      echo "✗ BAIDI_BACKUP_PASSPHRASE 含无法经 systemd EnvironmentFile 安全传递的字符。"
+      echo "  允许的字符集：A-Z a-z 0-9 以及 . _ - : @ + / = ~ ^"
+      echo "  （空白、引号、\$、反引号、反斜杠、# 会被那个格式解析掉或把值截断——"
+      echo "    后果是备份照做、也确实加密了，但用的不是你记下的那串口令，恢复那天才发现。）"
+      echo "  生成一个合规的强口令：openssl rand -base64 48 | tr -d '=+/' | cut -c1-40"
+      exit 1 ;;
+  esac
+  if [ "${#BAIDI_BACKUP_PASSPHRASE}" -lt 12 ]; then
+    echo "✗ BAIDI_BACKUP_PASSPHRASE 至少 12 个字符（备份里装着 CA 私钥与全部凭据）。"
+    echo "  短于这个长度时控制面每一轮备份都会失败，而机器上的姿态是「已启用、一次都没成功过」。"
+    exit 1
+  fi
+fi
+
 echo "==> 目标：prefix=$BD_PREFIX user=$BD_USER control_port=$CONTROL_PORT https_port=$BD_HTTPS_PORT"
 
 # ── 部署前环境基线自检（FR-DEPLOY-01）────────────────────────────────────────
@@ -346,6 +387,65 @@ if [ -n "${BAIDI_UPGRADE_PUBKEY:-}" ] && ! grep -q '^BAIDI_UPGRADE_PUBKEY=' "$BD
 else
   echo "==> 未配置 BAIDI_UPGRADE_PUBKEY：升级包校验将 fail-closed 地拒绝所有包"
   echo "    不使用「上传升级包」功能时这是正常的；需要时见 deploy/config.env.example"
+fi
+
+# ── 主机侧定期自动备份的四项写进 control 的 env（NFR-AVL-04）────────────────
+#
+# env_put 用「滤掉旧行 + 追加新行 + 原子换名」而**不是 sed -i**：值里可能出现 `&`（sed 的
+# 替换串里它代表整个匹配）、`|`（分隔符）、`\`（转义），用 sed 会把口令**静默改形**——
+# 而改形后的口令一样能加密、一样不报错，只在恢复那天暴露。printf 不解释任何字符。
+env_put() {
+  _k="$1"; _v="$2"; _f="$BD_PREFIX/etc/baidi.env"; _t="$_f.tmp.$$"
+  { grep -v "^${_k}=" "$_f" 2>/dev/null || true; printf '%s=%s\n' "$_k" "$_v"; } > "$_t"
+  chmod 0600 "$_t"; mv -f "$_t" "$_f"
+}
+env_has() { grep -q "^$1=" "$BD_PREFIX/etc/baidi.env" 2>/dev/null; }
+# ★末尾的 `|| true` 不是装饰：本文件是 `set -euo pipefail`，文件不存在时 sed 非零退出，
+#   而 pipefail 会把整条管道判成失败 → 命令替换失败 → 脚本在这里**静默中止**。
+env_get() { sed -n "s|^$1=||p" "$BD_PREFIX/etc/baidi.env" 2>/dev/null | tail -n1 || true; }
+
+# ★写入语义与本文件其它项都不同，三条各有理由：
+#   · 传进来是**空** → 一个字节都不动机器上已有的那一行。口令有第二条合法来源：介意它
+#     经 ssh 命令行短暂出现在目标机 `ps`（以及 sudo 的 auth.log）里的部署，会选择登上机器
+#     手工往 baidi.env 里追加。若"空就删/覆盖"，那种部署每重新部署一次就被静默关掉一次。
+#     代价说在明处：**留空关不掉已经配好的自动备份**，要关得登机器删那一行再 restart；
+#     而每次部署结尾都会当面复述当前姿态，所以它不会变成一个没人知道的状态。
+#   · 传进来**非空** → 覆盖（不是"已有就不动"）。间隔/份数/目录是运维旋钮，改了 config.env
+#     再部署一次就该生效；"幂等追加一次"会让第二次起的修改全部无效而零报错
+#     （BAIDI_CLIENT_SRC_REV 那一项踩过同款）。口令同理，但换口令要当面提醒——
+#     **旧归档只认旧口令**，换掉之后它们不会自动重新加密。
+#   · 目录留空 + 口令非空 + 机器上还没登记过目录 → 落默认 $BD_PREFIX/backups。
+#     "少填一项就整个不启用"正是这一条要消灭的形态；而已登记过目录时绝不拿默认值去覆盖它。
+if [ -n "$BAIDI_BACKUP_PASSPHRASE" ]; then
+  if env_has BAIDI_BACKUP_PASSPHRASE && [ "$(env_get BAIDI_BACKUP_PASSPHRASE)" != "$BAIDI_BACKUP_PASSPHRASE" ]; then
+    echo "⚠ 备份口令与本机上一次登记的**不同**，已按 config.env 覆盖。"
+    echo "  注意：$BD_PREFIX 下已有的旧归档仍然只能用**旧口令**解开（归档不会被重新加密）。"
+  fi
+  env_put BAIDI_BACKUP_PASSPHRASE "$BAIDI_BACKUP_PASSPHRASE"
+fi
+if [ -n "$BAIDI_BACKUP_DIR" ]; then
+  env_put BAIDI_BACKUP_DIR "$BAIDI_BACKUP_DIR"
+elif [ -n "$BAIDI_BACKUP_PASSPHRASE" ] && ! env_has BAIDI_BACKUP_DIR; then
+  env_put BAIDI_BACKUP_DIR "$BD_PREFIX/backups"
+fi
+# ★这两处用 if 而不是 `[ -n … ] && env_put …`：后者在条件为假（= 没配这一项，最常见的情况）
+#   时整条语句返回 1，而本文件是 set -e —— 安装会在这里**静默中止**。同坑本文件上面
+#   已踩过一次（baidi-standby 那个 `[ -f ] && install`）。
+if [ -n "$BAIDI_BACKUP_INTERVAL" ]; then env_put BAIDI_BACKUP_INTERVAL "$BAIDI_BACKUP_INTERVAL"; fi
+if [ -n "$BAIDI_BACKUP_KEEP" ]; then env_put BAIDI_BACKUP_KEEP "$BAIDI_BACKUP_KEEP"; fi
+
+# 备份目录必须由**装机脚本**建好并交给 BD_USER：控制面以 BD_USER 跑，而 $BD_PREFIX 归 root，
+# 进程自己 os.MkdirAll 会 permission denied → 功能停在「未启用：备份目录不可创建」。
+# ★建不出来时只告警不中止：控制面对这一步有自己的如实回执（/diag 那格会写明原因），
+#   为一个备份目录把整次部署掐掉是明显的错误取舍。
+bk_dir="$(env_get BAIDI_BACKUP_DIR)"
+if [ -n "$bk_dir" ]; then
+  if install -d -m 0700 "$bk_dir" 2>/dev/null && chown "$BD_USER": "$bk_dir" 2>/dev/null; then
+    echo "==> 备份目录就绪 → $bk_dir（0700，属主 $BD_USER）"
+  else
+    echo "⚠ 备份目录 $bk_dir 建不出来或改不了属主。控制面以 $BD_USER 运行，自己建会 permission denied，"
+    echo "  自动备份会停在「未启用：备份目录不可创建」，/diag 的「主机侧定期自动备份」那格会如实写明原因。"
+  fi
 fi
 
 # 客户端源码版本 → control 的 clientSourceRev() 用它与 manifest 里各包的 sourceCommit 比对新旧。
@@ -945,6 +1045,46 @@ else
   echo "    而那个口令写在本项目的 README、CLAUDE.md 与在线演示站说明里。"
   echo "    这只适合演示机。生产请删掉 config.env 里那一行（默认即为开启）后**重建数据库**，"
   echo "    或立刻用管理员改掉全部种子账号的口令——该开关只在首次建库时生效。"
+  echo ""
+fi
+# 主机侧定期自动备份的姿态：**未启用时必须醒目告警**（同首登改密那条纪律）。
+#
+# ★为什么这一条也要喊：单机部署（参考形态，也是演示站的形态）此前**一份自动备份都没有**——
+#   upgrade.CreateBackup 的两个非测试调用方是「管理员手点导出」（产物直接 stream 给浏览器，
+#   服务器上一个字节都不落）与「备机来拉时现造」（要另有一台机器）。而"没有备份"这件事
+#   与"有备份"在机器上完全同形，只在恢复那天区分得出来，那时候再说已经晚了。
+# ★判据是**机器上 baidi.env 里现在真写着什么**，不是本次传进来的变量：口令允许由运维直接
+#   写在机器上（见上面 env_put 那段的理由），只看本次入参会把那种部署误报成"未启用"。
+bk_pass_set=no
+if env_has BAIDI_BACKUP_PASSPHRASE && [ -n "$(env_get BAIDI_BACKUP_PASSPHRASE)" ]; then bk_pass_set=yes; fi
+bk_dir_now="$(env_get BAIDI_BACKUP_DIR)"
+if [ "$bk_pass_set" = yes ] && [ -n "$bk_dir_now" ]; then
+  bk_int="$(env_get BAIDI_BACKUP_INTERVAL)"; bk_keep="$(env_get BAIDI_BACKUP_KEEP)"
+  echo "  ✓ 主机侧定期自动备份：已启用 → $bk_dir_now（间隔 ${bk_int:-24h（默认）} · 保留 ${bk_keep:-7（默认）} 份）"
+  echo "    ★口令丢了 = 全部历史归档永久解不开，请与备份**分开**保存。"
+  echo "    ★归档落在本机：它挡的是「备份被拷到别处」，挡不住「机器整台没了」——异地副本要么靠温备节点，"
+  echo "      要么由运维把该目录同步出去（那时归档是加密的，正是这个口令的意义）。"
+  echo "    生效与否的判据只有一个：/diag 的「主机侧定期自动备份」那一格（它报的是最近一次真的写盘成功）。"
+else
+  echo ""
+  echo "  ⚠ 主机侧定期自动备份**未启用**：这台机器上没有任何自动产生的配置备份。"
+  if [ "$bk_pass_set" != yes ]; then
+    echo "    原因：没有备份口令（BAIDI_BACKUP_PASSPHRASE）。它**刻意没有默认值**——"
+    echo "    写在模板或二进制里的默认口令等于没有加密，而归档里装着内部 CA 私钥、三把签名私钥、"
+    echo "    审计链 HMAC 密钥与全部凭据密文。"
+  else
+    # 这一支只在「口令是运维直接写在机器上的、但没写目录」时才到得了：落默认目录那条规则
+    # 看的是**本次入参**里的口令（见上面 env_put 那段），机器上已有的那份不触发它。
+    echo "    原因：机器上有备份口令、但没有备份目录（BAIDI_BACKUP_DIR）。"
+    echo "    补救（二选一）：在 $BD_PREFIX/etc/baidi.env 里补一行 BAIDI_BACKUP_DIR=$BD_PREFIX/backups"
+    echo "    并 systemctl restart baidi-control；或把口令改填进 deploy/config.env 后重新部署"
+    echo "    （那条路会顺带把默认目录建好并交给 $BD_USER）。"
+  fi
+  echo "    要开启：在 deploy/config.env 里填 BAIDI_BACKUP_PASSPHRASE（目录/间隔/份数可留空取默认），重新部署。"
+  echo "    ★「手点导出」不能替代它：那条路的产物直接 stream 给浏览器，服务器上一个字节都不落；"
+  echo "      「备机拉取」也不能——那要另外部署一台温备节点，单机部署一条都享受不到。"
+  echo "    /diag 的「主机侧定期自动备份」那一格会持续判 warn（**不是 skip**：这不是「没用这个功能」，"
+  echo "    而是每套部署都该关心的事——恢复那天没有备份，不会因为当初没配就变得不严重）。"
   echo ""
 fi
 # CORS：默认 "*"。与首登改密同一条纪律——默认值就是绝大多数部署的真实姿态，

@@ -1,4 +1,5 @@
-node_modules/
+# 不带斜杠是有意的（软链形态的 node_modules 也要忽略），理由见仓库根的 .gitignore
+node_modules
 dist/
 .DS_Store
 *.log

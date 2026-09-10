@@ -124,5 +124,13 @@ fi
 #   实测删掉全部 5 个 limit_req 应用点仍然五条全绿。
 "$HERE/check-nginx.sh" "$OUT/nginx"
 
+# 自检：部署入参的转发白名单（config.env.example 的每一项 deploy.sh 都要真的带过去）。
+#
+# ★这一条查的是**仓库里的源文件**而不是产物：deploy.sh 压根不进交付包（它跑在运维本机上），
+#   而漏转的后果落在装出来的机器上——config.env 里写了、部署报「✓ 部署完成」，那一项却根本
+#   没生效。本仓已因此踩到三次（WITH_IPSEC / WITH_STEALTH / BAIDI_BACKUP_* 与 MTLS_PORT+GW_ID），
+#   理由与豁免名单逐条写在 check-deploy-env.sh 里。CI 的 server.yml 也直接跑它。
+"$HERE/check-deploy-env.sh"
+
 echo "✓ 构建完成 → $OUT"
 ls -la "$OUT" "$OUT/bin"

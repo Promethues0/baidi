@@ -99,12 +99,17 @@ jobs:
   # ★它查的是仓库里那份**模板**；build.sh 继续查 `_out/nginx` 那份**产物**
   #   （两者之间隔着一次 cp，历史上出过旧模板混进产物的事）。同一份实现两个调用方。
   deploy-nginx:
-    name: 部署交付件（nginx 限流应用点 / 存活探测通路）
+    name: 部署交付件（nginx 限流/安全响应头 · 部署入参转发白名单）
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - name: nginx 站点配置自检
         run: bash deploy/check-nginx.sh
+      # 部署入参转发白名单：config.env.example 里每一项 deploy.sh 都要真的带给远端。
+      # 漏转的症状恒定是「config.env 里写了、部署报成功、机器上没生效」，零报错——
+      # 本仓踩过三次，最近一次是主机侧定期自动备份的四项（在每台机器上都是关的）。
+      - name: 部署入参转发自检
+        run: bash deploy/check-deploy-env.sh
 
   go:
     name: Go · ${{ matrix.mod }}（vet + test）

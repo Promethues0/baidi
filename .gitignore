@@ -1,4 +1,9 @@
-node_modules/
+# ★写 `node_modules` 而不是 `node_modules/`：带斜杠的模式**只匹配目录**。
+#   把依赖目录做成软链（跨 worktree 共用、pnpm 等）是常见做法，那时它是一个 symlink
+#   而不是目录，会**逃过忽略**被 `git add -A` 收进提交——库里从此躺着一条指向某台机器
+#   绝对路径的死链接，而 clone 下来的人只会看到一个进不去的 node_modules。
+#   2026-09-10 真踩到过一次（本波施工时为跑 console 构建临时软链过去）。
+node_modules
 dist/
 *.log
 .DS_Store

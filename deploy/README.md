@@ -126,10 +126,16 @@ sudo BD_DNS_PROBE_HOST=idp.corp.example … bash install-remote.sh
 | `BD_MIN_DISK_MB` / `BD_REC_DISK_MB` | `600` / `4096` | 可用磁盘硬下限 / 推荐值（MiB） |
 | `BD_DNS_PROBE_HOST` | `archive.ubuntu.com` | DNS 自检探的域名 |
 
-> ★**这几个变量必须给在远端那条命令上**。`deploy.sh` 只显式转发固定几个变量
-> （`BD_PREFIX`/`BD_USER`/`CONTROL_PORT`/`WITH_GATEWAY`/`WITH_IPSEC`/…），**不含**上表任何一项——
-> 写进 `config.env` 到不了远端，且不会有任何提示。要走 `deploy.sh` 又要覆盖，
-> 得先给 `deploy.sh` 的 ssh 命令行补上转发。
+> ★**上表七项现在都在 `deploy.sh` 的转发白名单里**，写进 `config.env` 走 `deploy.sh` 即可生效
+> （此前这段写的是「不含上表任何一项」——那句话对其中五项**是错的**，`BD_FORCE` /
+> `BD_MIN_CPU` / `BD_MIN_MEM_MB` / `BD_MIN_DISK_MB` / `BD_DNS_PROBE_HOST` 早就在转发里，
+> 只有两个 `BD_REC_*` 确实漏着，本次一并补上）。
+>
+> 但请记住这条机制本身：`install-remote.sh` 是经 ssh 起的**新 shell**，`config.env` 里的值
+> 不会自动过去，那条 ssh 命令行是一张**显式白名单**。漏一项的症状恒定是「`config.env` 里写了、
+> 部署报『✓ 部署完成』、机器上那项根本没生效」，全程零报错。`config.env.example` 里列出的
+> 每一项都有 `deploy/check-deploy-env.sh` 守着（CI 每次跑）；上表这些是**逃生舱**、刻意不进模板，
+> 因而不在那道守卫的覆盖面内——加新的逃生舱时请自己记得补转发。
 
 ### 这道自检**没有**覆盖的
 
@@ -248,6 +254,45 @@ rm -f $BD_PREFIX/etc/tls/le.crt $BD_PREFIX/etc/tls/le.key $BD_PREFIX/etc/tls/le.
 排查一句话：`curl -sS -o /dev/null -w '%{http_code}\n' https://<PUBLIC_HOST>/`（**不带 `-k`**）
 回 200 才算此刻受信。
 
+## 安全响应头（NFR-SEC-08）
+
+管理台与终端用户门户**同源共用**一个 nginx 站点，所以那个源上的四条响应头是产品配置的一部分，
+不是「运维自己加一下」的事——改造前这份配置里一条都没有。现在 `nginx/baidi.conf` 的 HTTPS
+server 块里发四条（全部带 `always`，好让 403/404/5xx 也带上）：
+
+| 头 | 值 | 挡的是什么 |
+|---|---|---|
+| `X-Frame-Options` | `DENY` | 整页 iframe 点击劫持（老浏览器那一半） |
+| `Content-Security-Policy` | 见配置 | XSS + `frame-ancestors 'none'`（现代浏览器真正认的那条） |
+| `X-Content-Type-Options` | `nosniff` | `/downloads/` 的安装包与 API 响应被内容嗅探 |
+| `Referrer-Policy` | `strict-origin-when-cross-origin` | 跳转到业务系统时带出管理台完整 URL |
+
+CSP 是**逐页实跑验证**出来的，不是抄的模板：`script-src` 里**没有** `'unsafe-inline'`/`'unsafe-eval'`
+（Vite 产物没有内联 script），`style-src` 里那个 `'unsafe-inline'` 则去不掉（Vue 的 `:style` 绑定与
+Arco 运行时组件直接写元素 style 属性）。放宽的每一项都对应一处真实用法，逐条理由写在配置注释里。
+
+三件容易踩坏、且**踩坏了完全静默**（`nginx -t` 通过、页面正常、只有响应头空了）的事，
+`deploy/check-nginx.sh` 各有一条构建期断言守着（CI 的 `server.yml` 直接跑它）：
+
+- 头被删掉或没带 `always`；
+- 头被挪进 80 端口块——非 443 部署时 `install-remote.sh` 会把那一段**整段删掉**，
+  于是共存机（9443，最常见的形态）上一条不剩而 443 独占机上一切正常；
+- 某个 `location` 里出现了自己的 `add_header`——nginx 的 `add_header` 是**就近整组覆盖**不是叠加，
+  那一条 location 会把 server 级四条全部丢掉。真要给某个 location 单加头，必须把四条一并抄进去。
+
+**刻意不发 `Strict-Transport-Security`**：HSTS 的作用域是主机不是端口（RFC 6797 §8.1），在 9443 上
+发一条等于替同一主机名的 80/443 一起打开强制 HTTPS，而那两个端口在共存机上归烛龙——症状会出现在
+**别人的站点**上；且 RFC 6797 §2.3 把 IP 地址主机排除在外，裸 IP 的演示站上它本来就是空头。
+443 独占机 + 真实域名的部署可以自行加回来。
+
+验一句话（`-D-` 看响应头，注意自签站要带 `-k`）：
+
+```bash
+curl -sS -k -D- -o /dev/null https://<PUBLIC_HOST>:<BD_HTTPS_PORT>/ | grep -iE 'x-frame|content-security|nosniff|referrer'
+# 再验一个 404 —— 这一条才检得出「忘了 always」：
+curl -sS -k -D- -o /dev/null https://<PUBLIC_HOST>:<BD_HTTPS_PORT>/api/v1/__nope | grep -ic 'x-frame-options'
+```
+
 ## 运维
 
 ```bash
@@ -257,6 +302,54 @@ systemctl restart baidi-control       # 重启（SQLite 数据保留）
 ```
 
 入口：控制台 `https://<server>/`（首次跳 `/login`，演示 `admin / baidi@123`）；终端用户门户 `https://<server>/portal/login`。
+
+## 主机侧定期自动备份（NFR-AVL-04）
+
+控制面自带一个定期备份循环（`StartAutoBackupLoop`），产出的归档与「系统页手点导出」
+**逐字节同源**（同一个 `upgrade.CreateBackup`，同一份材料清单：库的一致性快照 + 三把签名私钥
++ 内部 CA + 审计链 HMAC 密钥 + 各类凭据），只是落在本机磁盘上而不是流给浏览器。
+
+> ★这个循环在 wave9 就写好了，但四个环境变量**既不在 `config.env.example` 里、也不在
+> `deploy.sh` 的转发白名单里** —— 于是在任何按脚本装出来的机器上它都是关的，而 `/diag`
+> 那条 warn 的补救提示恰恰写着「见 deploy/config.env.example」。现在两处都补上了，
+> 并有 `deploy/check-deploy-env.sh` 守着「模板里的每一项都真的被转发」。
+
+在 `config.env` 里填一项就够（其余三项留空取默认）：
+
+```bash
+BAIDI_BACKUP_PASSPHRASE=Kx7-p_Q2.aZ:9@vT+1s...   # 留空 = 不启用；没有默认值
+# BAIDI_BACKUP_DIR=        # 留空取 $BD_PREFIX/backups（装机脚本按 0700 建好并交给 BD_USER）
+# BAIDI_BACKUP_INTERVAL=24h  # 留空取 24h。★裸数字按「秒」解释，写 24 是每 24 秒一次
+# BAIDI_BACKUP_KEEP=7      # 留空取 7；按文件名排序删旧（mtime 会被 rsync 改写）
+```
+
+几条必须知道的：
+
+- **口令没有默认值，也不会有**：归档里装着内部 CA 私钥、三把 Ed25519 签名私钥、审计链 HMAC
+  密钥与全部凭据密文。写在模板或二进制里的默认口令等于没有加密。留空 = **不启用**，
+  装机脚本会当面告警，`/diag` 持续判 **warn**（不是 skip——「没有任何自动备份」是每套部署都
+  该关心的事，恢复那天不会因为当初没配就变得不严重）。
+- **口令丢了 = 全部历史归档永久解不开**，请与备份分开保存。换口令之后**旧归档只认旧口令**
+  （归档不会被重新加密），装机脚本检出口令变化时会当面提醒。
+- **口令的两条硬约束**，装机脚本在动这台机器之前就校验、不合规当场拒：≥12 个字符
+  （与控制面 `upgrade.minPassphrase` 同源，那边才是真执行方），且只能用
+  `A-Z a-z 0-9 . _ - : @ + / = ~ ^`。后一条是因为它要经 systemd 的 `EnvironmentFile` 传给
+  控制面，而那个格式只是 shell 的一个子集——空白/引号/`$`/反引号/反斜杠/`#` 会被解析掉或把值
+  截断。**被悄悄改形的口令是本功能最坏的失败形态**：备份天天在做、也确实加密了，只是用的不是
+  你记下的那一串，直到恢复那天才发现全部归档打不开。生成一个合规的强口令：
+  `openssl rand -base64 48 | tr -d '=+/' | cut -c1-40`
+- **口令经 ssh 命令行转发**，会短暂出现在目标机的 `ps` 输出里，`sudo` 也可能把整条命令记进
+  `auth.log`。介意的部署把 `config.env` 里那一项**留空**，改成登上目标机手工往
+  `$BD_PREFIX/etc/baidi.env`（0600）追加一行再 `systemctl restart baidi-control`——装机脚本
+  对空值**一个字节都不动**，重新部署不会抹掉它。反过来的代价：留空关不掉已经配好的自动备份，
+  要关得登机器删掉那一行再 restart（每次部署结尾都会复述当前姿态，不会变成没人知道的状态）。
+- **归档落在被备份的这台机器上**：它挡的是「归档被拷到别处」（异地同步、误发），挡不住
+  「机器整台没了」。异地副本要么靠温备节点（下一节），要么由运维把这个目录同步出去——
+  那时归档是加密的，正是这个口令的意义。
+- **判据只有一个**：`/diag` 的「主机侧定期自动备份」那一格，它报的是**最近一次真的写盘成功**
+  （不是"配置看起来对"）。「已启用但一次都没成功过」会判 fail 并写出原因。
+
+恢复用 `deploy/promote-standby.sh` 的同一套解包逻辑，或 `baidi-standby -h` 里的校验/解包子命令。
 
 ## 控制面温备（warm standby，PRD 15.5）
 
@@ -320,6 +413,9 @@ sudo BAIDI_STANDBY_PASSPHRASE=… /opt/baidi/bin/promote-standby.sh
 - [ ] 网关证书可随时吊销：`POST /api/v1/pki/gateway-certs/{fingerprint}/revoke`（指纹白名单是执行点，下次握手即被拒）
 - [ ] 备份 `etc/keys/` 与 `etc/pki/`：**丢了这两个目录，所有已分发公钥的网关会全部拒绝敲门**，且日志只显示「令牌无效」而非「密钥换了」
 - [ ] 首登强制改密**已默认强制**（`BAIDI_SEED_MUST_CHANGE` 缺省 1，`deploy.sh` 与 `install-remote.sh` 两处一致）；演示机在 `config.env` 里显式关掉的，注意它**只在首次建库时生效**：演示机若已建库，开回该值无效，需重建库（删 `data/baidi.db` 重灌种子）或手工给种子账号置首登改密——种子口令 `baidi@123` 是公开的
-- [ ] `data/baidi.db` 纳入定期备份（WAL，可热备 `.backup`）
+- [ ] **主机侧定期自动备份已开启**：`config.env` 里填了 `BAIDI_BACKUP_PASSPHRASE`，
+      且 `/diag` 的「主机侧定期自动备份」那一格显示**最近一次成功**的时间戳（不是"配置看起来对"）。
+      留空 = 不启用，装机脚本会当面告警、该格持续判 warn。口令与备份**分开**保存——丢了口令，
+      全部历史归档永久解不开。归档在本机，异地副本另需温备节点或运维把目录同步出去（见上方一节）
 - [ ] 要冗余就装温备（上一节）；装了之后**定期看一眼系统页的同步新鲜度**——备机静默落后与没有备机，只在切换那天才区分得出来
 - [ ] 安全组放行 443（仅 nginx 对外；8090 仅本机）

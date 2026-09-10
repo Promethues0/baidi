@@ -261,3 +261,78 @@ func TestLegacyDatabaseWithExistingExternalUsersNotPoisoned(t *testing.T) {
 			"这正是升级那一刻把公开口令发给全体 LDAP/AD 用户的路径", acct, cred.PassHash)
 	}
 }
+
+// TestRoleBackfillNeverPromotesByDisplayLabel role 回填不得从中文展示标签推出鉴权角色。
+//
+// ★这是 wave10「种子不再从展示标签推导权威角色」那条纪律没覆盖到的另一半，而且
+// 更隐蔽：ensureCredentials 的 role 回填**每次启动都跑**（命中 `role IS NULL OR role=''`），
+// 且排在 backfillAdminRoles **之前**——后者会把「role='admin' 且无 admin_role」的行
+// 补成 root。于是存量库升级那一刻，任何展示标签里带「管理员」三个字的普通用户
+// （"部门管理员"、"资产管理员"…）被连续两跳提成超级管理员，页面上看不出来。
+//
+// ★变异：把回填改回 roleFromDisplay（含「管理员」→admin）→ 本用例变红。
+func TestRoleBackfillNeverPromotesByDisplayLabel(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+
+	// 造一个"史前行"：role 列空，展示标签里带「管理员」。
+	if err := s.insertUser(DirUser{
+		ID: "u-labeled", Name: "李资产", Account: "li.asset", Org: "行政", OrgKey: "ops",
+		Device: "—", IP: "—", Auth: "口令", LastLogin: "—", Status: "active", Risk: "none",
+		Roles: []string{"行政", "资产管理员"}, Role: "user", PassHash: "x",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET role='' WHERE id='u-labeled'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := s.ensureCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	var role, adminRole string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(role,''),COALESCE(admin_role,'') FROM users WHERE id='u-labeled'`).
+		Scan(&role, &adminRole); err != nil {
+		t.Fatal(err)
+	}
+	if role != "user" {
+		t.Fatalf("展示标签「资产管理员」把权威角色推成了 %q——权威角色只能来自显式声明，"+
+			"中文文案是管理员随时可改的展示数据", role)
+	}
+
+	// 顺带把第二跳也钉住：backfillAdminRoles 不该给他 root。
+	if err := s.backfillAdminRoles(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(role,''),COALESCE(admin_role,'') FROM users WHERE id='u-labeled'`).
+		Scan(&role, &adminRole); err != nil {
+		t.Fatal(err)
+	}
+	if adminRole != "" {
+		t.Fatalf("升级两跳之后 li.asset 拿到了管理员角色 %q（第二跳 backfillAdminRoles 补的），"+
+			"这正是 wave10 zhang.wei 那把公开口令超管钥匙的升级路径版本", adminRole)
+	}
+}
+
+// TestRoleBackfillKeepsBuiltinAdmin 内置 admin 账号是防自锁链的锚点，回填不得把它降成 user。
+func TestRoleBackfillKeepsBuiltinAdmin(t *testing.T) {
+	s := openTestStore(t)
+	ctx := context.Background()
+	if _, err := s.db.ExecContext(ctx, `UPDATE users SET role='' WHERE account='admin'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ensureCredentials(); err != nil {
+		t.Fatal(err)
+	}
+	var role string
+	if err := s.db.QueryRowContext(ctx,
+		`SELECT COALESCE(role,'') FROM users WHERE account='admin'`).Scan(&role); err != nil {
+		t.Fatal(err)
+	}
+	if role != "admin" {
+		t.Fatalf("内置 admin 被降成 %q——没人能登进管理台了（默认 user 的 fail-closed 方向"+
+			"必须给这个锚点留显式豁免）", role)
+	}
+}

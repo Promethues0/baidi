@@ -343,7 +343,7 @@ UPDATE users SET pass_hash=?, pw_strength=?
 }
 
 // ensureCredentials 幂等回填旧库的凭据地基（迁移场景）：
-//   - 权威 role 列空的用户按展示角色推断补齐；
+//   - 权威 role 列空的用户补成 user（内置 admin 账号除外）——**不按展示标签推导**；
 //   - pass_hash 空的用户回填 demo 口令哈希（否则迁移后无人能登录）；
 //   - admin 账号不存在则补建（role=admin）。
 //
@@ -351,15 +351,16 @@ UPDATE users SET pass_hash=?, pw_strength=?
 func (s *SQLiteStore) ensureCredentials() error {
 	ctx := context.Background()
 	// role 回填
-	rows, err := s.db.QueryContext(ctx, `SELECT id,roles FROM users WHERE role IS NULL OR role=''`)
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT id,COALESCE(account,'') FROM users WHERE role IS NULL OR role=''`)
 	if err != nil {
 		return err
 	}
-	type ru struct{ id, roles string }
+	type ru struct{ id, account string }
 	var pending []ru
 	for rows.Next() {
 		var r ru
-		if err := rows.Scan(&r.id, &r.roles); err != nil {
+		if err := rows.Scan(&r.id, &r.account); err != nil {
 			rows.Close()
 			return err
 		}
@@ -367,9 +368,27 @@ func (s *SQLiteStore) ensureCredentials() error {
 	}
 	rows.Close()
 	for _, r := range pending {
-		var roles []string
-		_ = json.Unmarshal([]byte(r.roles), &roles)
-		if _, err := s.db.ExecContext(ctx, `UPDATE users SET role=? WHERE id=?`, roleFromDisplay(roles), r.id); err != nil {
+		// ★权威角色**不从展示标签推导**。此前这里是 roleFromDisplay(roles)，判据是
+		// strings.Contains(r, "管理员")——wave10 已经在 seed() 里因为同一个判据把种子用户
+		// zhang.wei（标签 ["研发","管理员"]）判成了 admin，于是每台机器上都有第二把
+		// 公开口令的超管钥匙。这里是它没被覆盖到的另一半，而且更隐蔽：
+		//
+		//   ① 这段回填**每次启动都跑**，命中条件是 `role IS NULL OR role=''`；
+		//   ② 它排在 backfillAdminRoles **之前**（见 OpenSQLite 的调用顺序），
+		//      而那条回填会把「role='admin' 但没有 admin_role」的行补成 **root**。
+		//
+		// 于是存量库升级那一刻，任何展示标签里带「管理员」三个字的普通用户
+		// （"部门管理员"、"资产管理员"、"IT 管理员"…）会被连续两跳提成超级管理员，
+		// 而页面上完全看不出来。判据必须是权限键与显式声明，不是给人看的中文文案。
+		//
+		// 默认 user 是 fail-closed 方向：真管理员被降权只是"去找超管重新授权"，
+		// 而按标签误升是"悄悄多了一个全权账号"。内置 admin 账号显式豁免——
+		// 它是那条防自锁链的锚点，下面「admin 账号兜底」也认同一个名字。
+		role := "user"
+		if strings.EqualFold(strings.TrimSpace(r.account), "admin") {
+			role = "admin"
+		}
+		if _, err := s.db.ExecContext(ctx, `UPDATE users SET role=? WHERE id=?`, role, r.id); err != nil {
 			return err
 		}
 	}
@@ -1509,15 +1528,15 @@ VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 	return err
 }
 
-// roleFromDisplay 从展示角色推断权威鉴权角色：含"管理员"→admin，否则 user。
-func roleFromDisplay(roles []string) string {
-	for _, r := range roles {
-		if strings.Contains(r, "管理员") {
-			return "admin"
-		}
-	}
-	return "user"
-}
+// ★roleFromDisplay 已删除（wave11）。它做的事是「从中文展示标签推导权威鉴权角色」
+// （判据 strings.Contains(r, "管理员")），而那正是本仓已经栽过两次的判据：
+// wave10 在 seed() 里因它造出了一把公开口令的超管钥匙（zhang.wei）；
+// wave11 发现 ensureCredentials 的 role 回填与 CreateUser 的默认值还在用它，
+// 前者每次启动都跑且排在 backfillAdminRoles 之前，等于存量库升级时
+// 「标签里带『管理员』」→ role=admin → admin_role=root 两跳静默提权。
+// 三处调用点都已改成显式声明（不声明即 user），函数本身一并删除——
+// 留着一个零调用方的「按文案判角色」helper，等于给下一个人留一把上了膛的枪。
+// 相关用例：TestSeedHasExactlyOneRoot、TestRoleBackfillNeverPromotesByDisplayLabel。
 
 func b2i(b bool) int {
 	if b {
@@ -1661,7 +1680,12 @@ func (s *SQLiteStore) CreateUser(ctx context.Context, u DirUser) (DirUser, error
 		u.Roles = []string{}
 	}
 	if u.Role == "" {
-		u.Role = roleFromDisplay(u.Roles)
+		// 不声明即普通用户。三个调用方（handleCreateUser / users_csv 导入 / handleCreateAdmin）
+		// 现在都显式给 Role，所以这条分支走不到——但它此前是 roleFromDisplay(u.Roles)，
+		// 也就是「哪天有人加一条不给 Role 的建号路径，带『管理员』字样的展示标签就会
+		// 静默变成鉴权角色」。与 seed()、ensureCredentials 同一条纪律：权威角色只由
+		// 显式声明产生，展示标签是给人看的数据，管理员随时可以改。
+		u.Role = "user"
 	}
 	// 组织归属：id 必须真实存在，同时把展示用的 org/org_key 对齐到组织表，
 	// 否则新用户的列表行会显示调用方随手传来的部门名。

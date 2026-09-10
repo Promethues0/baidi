@@ -6,7 +6,24 @@
       <div class="lg__sub">ZTNA / SDP · 移动终端</div>
     </div>
 
-    <div class="lg__form">
+    <!--
+      首登强制改密（FR-DEPLOY-09）。整块与登录表单互斥：服务端 mustChangeLogin 回的
+      ok=true + token 是一张 15min 受限令牌（Use=pwreset），只够调 POST /auth/password，
+      拿它进主界面的话应用列表与接入会逐个 403、而界面上一句解释也没有。
+      ★端内改密而不是"请去浏览器门户"：受限令牌本来就能调那个端点，而这台手机
+      很可能正是因为还没接入才打不开门户。
+    -->
+    <div v-if="needPwChange" class="lg__form">
+      <div class="lg__mustpw">{{ pwReason }}</div>
+      <div class="lg__f"><icon-lock class="lg__ic" /><input v-model="pwForm.pw" type="password" placeholder="新口令" @keyup.enter="submitPwChange" /></div>
+      <div class="lg__f"><icon-lock class="lg__ic" /><input v-model="pwForm.pw2" type="password" placeholder="再次输入新口令" @keyup.enter="submitPwChange" /></div>
+      <div class="lg__rule">{{ PW_RULE_HINT }}</div>
+      <div v-if="err" class="lg__err">{{ err }}</div>
+      <button class="m-btn" :disabled="loading" @click="submitPwChange">{{ loading ? '提交中…' : '修改并登录' }}</button>
+      <button class="lg__back" :disabled="loading" @click="backToLogin">返回重新登录</button>
+    </div>
+
+    <div v-else class="lg__form">
       <!-- 认证域：只有配了 ≥2 个外部认证源时才出现（GET /auth/domains 在单源时回空）。
            ★它不是"多一个可选项"——不选的话服务端**拒绝登录**，因为挨个去问等于把
            明文口令投递给排在前面的每一台目录服务器（wave8 行动 12 的核心不变式：
@@ -38,7 +55,8 @@
 <script setup lang="ts">
 import { ref, reactive, onMounted } from 'vue';
 import { useRouter } from 'vue-router';
-import { api, type PortalLoginResp, type AuthDomainOption } from '@/lib/api';
+import { api, failReason, failStatus, type PortalLoginResp, type AuthDomainOption } from '@/lib/api';
+import { PW_RULE_HINT, checkNewPassword } from '@/lib/pwchange';
 import { login } from '@/lib/store';
 
 const router = useRouter();
@@ -59,6 +77,65 @@ const mfaReason = ref('');
 const err = ref('');
 const loading = ref(false);
 
+/* ── 首登强制改密（FR-DEPLOY-09）────────────────────────────────────────────
+ * ★受限令牌**不写进 session**（不入 localStorage）：写进去 authed() 立刻为真、
+ *   路由守卫放行进主界面，然后应用列表与接入逐个 403——那正是要修掉的形态。
+ *   它只活在这个 ref 里，改密成功即丢弃。
+ */
+const needPwChange = ref(false);
+const pwToken = ref('');
+const pwReason = ref('');
+const pwForm = reactive({ pw: '', pw2: '' });
+
+/** 进入改密步骤。抽出来是因为口令登录与 TOTP 第二回合**两条路**都会走到
+ *  （服务端 handlePortalLogin 与 handleTotpLogin 两处都调 mustChangeLogin）。 */
+function enterPwChange(r: PortalLoginResp) {
+  needPwChange.value = true;
+  needTotp.value = false; needMfa.value = false; totpTicket.value = '';
+  pwToken.value = r.token || '';
+  pwForm.pw = ''; pwForm.pw2 = '';
+  // 原样用后端那句：它会点名「旧口令 = 管理员为你设置的**本地**初始口令」，
+  // 或在外部认证源认过的那一回合改口成「无需再填写旧口令」。自己编一句必然漏掉其中一种。
+  pwReason.value = r.reason || '首次登录须修改初始口令';
+  err.value = '';
+}
+
+function backToLogin() {
+  needPwChange.value = false;
+  pwToken.value = ''; pwReason.value = '';
+  pwForm.pw = ''; pwForm.pw2 = '';
+  err.value = '';
+}
+
+/**
+ * 提交改密：受限令牌调 POST /auth/password，成功后用**新口令**自动重登换正式会话。
+ *
+ * ★Authorization 显式带 pwToken：session.token 此刻是空的（受限令牌刻意没入库），
+ *   api() 的自动注入拿不到东西，不显式带就是一个必然 401 的请求。
+ * ★失败一律 failReason 原样转述：这里最高频的拒绝是 400「新口令强度不足：<哪一条不达标>」，
+ *   编一句"请重试"会让人反复撞同一堵墙且屏幕上从没出现过原因。
+ */
+async function submitPwChange() {
+  const bad = checkNewPassword(pwForm.pw, pwForm.pw2, form.password);
+  if (bad) { err.value = bad; return; }
+  loading.value = true; err.value = '';
+  try {
+    const r = await api<{ ok: boolean; reason?: string }>('/auth/password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${pwToken.value}` },
+      body: JSON.stringify({ old: form.password, new: pwForm.pw })
+    });
+    if (!r.ok) { err.value = r.reason || '口令修改失败'; return; }
+    // 换新口令重走一遍完整登录：这一次服务端才会发 8h 会话令牌。
+    // 有 TOTP 的账号会再要一次动态码（上一个已被消费），submit() 照常把流程引过去。
+    form.password = pwForm.pw;
+    backToLogin();
+    await submit();
+  } catch (e) {
+    err.value = failReason(e);
+  } finally { loading.value = false; }
+}
+
 async function submit() {
   if (needTotp.value) { await submitTotp(); return; }
   if (!form.username || !form.password) { err.value = '请输入账号与口令'; return; }
@@ -68,7 +145,11 @@ async function submit() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ username: form.username, password: form.password, mfaCode: needMfa.value ? form.mfaCode : '', directory: form.directory })
     });
-    if (r.ok && r.token) {
+    // ★这一支必须排在 `r.ok && r.token` 前面：首登强制改密的应答同样带 ok=true + token，
+    //   顺序反过来就会拿受限令牌 login() 并跳进主界面，然后每个业务端点 403。
+    if (r.mustChangePassword && r.token) {
+      enterPwChange(r);
+    } else if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);
       router.replace('/connect');
     } else if (r.needTotp && r.ticket) {
@@ -87,7 +168,14 @@ async function submit() {
     } else {
       err.value = r.reason || '登录失败';
     }
-  } catch { err.value = '无法连接控制中心（baidi-control）'; } finally { loading.value = false; }
+  } catch (e) {
+    // ★后端在**口令校验之前**就会定性拒绝：防爆破锁 403「登录失败次数过多，请约 N 分钟后
+    //   重试」、账号被禁用、认证域没选。改造前这里是 bare catch + 一句编造的归因
+    //   「无法连接控制中心（baidi-control）」——被锁的人照着去查网络、去重试，
+    //   而每重试一次都在续锁，屏幕上从没出现过"已被临时锁定"。
+    //   失败一律 failReason 收口：后端说了什么就转述什么，没到后端才说连不上。
+    err.value = failReason(e);
+  } finally { loading.value = false; }
 }
 
 /** TOTP 第二回合：票据 + 动态验证码换会话令牌（同码只能成功一次）。 */
@@ -99,12 +187,20 @@ async function submitTotp() {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ticket: totpTicket.value, code: form.mfaCode.trim() })
     });
-    if (r.ok && r.token) {
+    // 与口令路径同一道判定：handleTotpLogin 同样会走 mustChangeLogin。
+    // 少了这一支，开了 TOTP 的新用户就是本波要修的那条死路的另一半。
+    if (r.mustChangePassword && r.token) {
+      enterPwChange(r);
+    } else if (r.ok && r.token) {
       login(r.token, r.displayName || form.username);
       router.replace('/connect');
     } else { err.value = r.reason || '验证码不正确或已使用'; }
-  } catch {
-    err.value = '验证码不正确或已使用；若停留过久请返回重新登录';
+  } catch (e) {
+    // ★改造前这句把每一种拒绝都说成"验证码不正确"——包括 403 防爆破锁（TOTP 第二回合
+    //   同样过 loginGateLocked）与 403「账号已被禁用」。被锁的人于是照着提示一遍遍重输，
+    //   每输一次都在续锁。401 要额外**改状态**：票据 3 分钟就过期，得退回口令那一步重来。
+    err.value = failReason(e);
+    if (failStatus(e) === 401) { needTotp.value = false; totpTicket.value = ''; }
   } finally { loading.value = false; }
 }
 </script>
@@ -123,6 +219,12 @@ async function submitTotp() {
 .lg__ic { color: var(--bd-t3); font-size: 18px; flex: none; }
 .lg__f input { flex: 1; border: none; outline: none; background: transparent; font-size: 15px; color: var(--bd-t1); min-width: 0; }
 .lg__mfa { font-size: 12px; color: var(--bd-warning); margin: -4px 2px 12px; }
+/* 首登强制改密：后端原话（点名"本地初始口令"或"无需填写旧口令"）+ 常驻的口令要求 */
+.lg__mustpw { font-size: 12.5px; color: var(--bd-warning); background: #FFF7E8;
+  border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; line-height: 1.7; }
+.lg__rule { font-size: 11.5px; color: var(--bd-t3); line-height: 1.7; margin: -4px 2px 12px; }
+.lg__back { width: 100%; margin-top: 10px; height: 40px; border: 1px solid var(--bd-border);
+  background: #fff; color: var(--bd-t2); border-radius: 12px; font-size: 14px; }
 .lg__err { font-size: 13px; color: var(--bd-danger); margin: -4px 2px 12px; }
 .lg__demo { text-align: center; font-size: 11px; color: var(--bd-t3); margin-top: 16px; line-height: 1.7; }
 .lg__demo b { color: var(--bd-primary); font-weight: 600; }

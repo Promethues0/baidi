@@ -46,7 +46,8 @@ func runBootstrap() bool {
 }
 
 // issueGatewayBundle 签发并落盘网关所需的全部身份材料：
-// 客户端证书/私钥（mTLS 机器身份）+ CA 公证书（校验控制面）+ 敲门公钥（验令牌）。
+// 客户端证书/私钥（mTLS 机器身份）+ CA 公证书（校验控制面）+ 三把验证公钥
+// （敲门 / 七层票据 / L4 隧道身份票据）。
 func issueGatewayBundle(gwID, outDir string) error {
 	cfg := config.Load()
 
@@ -56,7 +57,7 @@ func issueGatewayBundle(gwID, outDir string) error {
 	if err != nil {
 		return fmt.Errorf("内部 CA: %w", err)
 	}
-	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, cfg.JWTWebKeyPath, nil, false)
+	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, cfg.JWTWebKeyPath, cfg.JWTTunnelKeyPath, nil, false)
 	if err != nil {
 		return fmt.Errorf("签名密钥: %w", err)
 	}
@@ -93,6 +94,9 @@ func issueGatewayBundle(gwID, outDir string) error {
 		{"knock.pub", keys.KnockPublicPEM(), 0o644}, // SPA 敲门监听用；会话令牌在数据面验不过
 		// 七层 Web 代理监听用。与 knock.pub 分开签、分开发：拿错路径的票据在对面连签名都验不过。
 		{"web.pub", keys.WebPublicPEM(), 0o644},
+		// L4 隧道监听用（-jwt-tunnel-pubkey）。★这一份**必须随包发**：网关默认严格
+		// （BAIDI_GW_TUNNEL_ID_STRICT=1），没装它的网关会拒绝启动而不是静默退回按源 IP 定身份。
+		{"tunnel.pub", keys.TunnelPublicPEM(), 0o644},
 	}
 	for _, f := range files {
 		if err := os.WriteFile(filepath.Join(outDir, f.name), f.data, f.perm); err != nil {
@@ -102,7 +106,8 @@ func issueGatewayBundle(gwID, outDir string) error {
 
 	slog.Info("网关身份材料已签发",
 		"gwid", gwID, "out", outDir, "指纹", iss.Fingerprint[:16]+"…",
-		"有效期至", iss.NotAfter.Format("2006-01-02"), "knockKid", keys.KnockKid(), "webKid", keys.WebKid())
-	fmt.Printf("✓ 网关 %s 的身份材料已写入 %s（gw.crt.pem / gw.key.pem / ca.crt.pem / knock.pub / web.pub）\n", gwID, outDir)
+		"有效期至", iss.NotAfter.Format("2006-01-02"),
+		"knockKid", keys.KnockKid(), "webKid", keys.WebKid(), "tunnelKid", keys.TunnelKid())
+	fmt.Printf("✓ 网关 %s 的身份材料已写入 %s（gw.crt.pem / gw.key.pem / ca.crt.pem / knock.pub / web.pub / tunnel.pub）\n", gwID, outDir)
 	return nil
 }

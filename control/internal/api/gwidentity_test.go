@@ -167,7 +167,7 @@ func mustProfileGateways(s *Server) []ProfileGateway {
 // ★`standby-` 是保留命名空间：HTTP 签发端点不得签出温备节点身份。
 //
 // CN 前缀是温备同步端点的唯一分权判据，签得出 CN=standby-x 的证书，就等于
-// 持 PermSystem 的系统管理员能拉走整套信任材料（CA 私钥 + 三把签名私钥 + 整个库）。
+// 持 PermSystem 的系统管理员能拉走整套信任材料（CA 私钥 + 四把签名私钥 + 整个库）。
 // 备机证书的正路是主机上的离线 CLI。
 func TestIssueGatewayCertRejectsReservedStandbyPrefix(t *testing.T) {
 	st := openTestSQLite(t)

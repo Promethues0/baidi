@@ -38,6 +38,15 @@ const (
 	kickBanTTL = 5 * time.Minute
 	// pwResetTTL 首登强制改密受限令牌（Use=pwreset）的有效期：够完成一次改密，不够当会话用。
 	pwResetTTL = 15 * time.Minute
+	// tunnelTicketTTL L4 隧道身份票据（Use=tunnel）有效期。
+	//
+	// ★为什么比敲门令牌长：敲门令牌是"一个包用一次"，而这张票要盖住**两次保活之间
+	// 新建的每一条业务 TCP 流**（客户端每 15s 重敲一次门、每次换新票）。取值只需
+	// 显著大于保活间隔 + 时钟偏移，不需要短到极致——真正的时效闸是网关那 30s 的
+	// 放行窗口：控制面一断，窗口在 30s 内自然关闭，票再长也进不去。
+	// 反过来把它压到 90s 只会让偏差稍大的终端间歇性被拒，而症状（"隧道时通时不通"）
+	// 与网络抖动完全同形。网关侧另有 -tunnel-ticket-max-ttl 上界兜底（纵深）。
+	tunnelTicketTTL = 5 * time.Minute
 	// seedInitialPassword 新建用户未指定初始口令时的 demo 默认口令。
 	seedInitialPassword = "baidi@123"
 )
@@ -1559,12 +1568,35 @@ func (s *Server) handleKnockToken(w http.ResponseWriter, r *http.Request) {
 	tok := s.keys.Sign(auth.Claims{
 		Sub: c.Sub, Role: c.Role, Name: c.Name, Jti: auth.RandJTI(), Use: auth.UseKnock,
 	}, knockTTL)
+	// ── L4 隧道身份票据（wave11 行动 3，PRD FR-INTRO-06/FR-ARCH-02/FR-AUDIT-05）──
+	//
+	// ★与敲门令牌**同一次调用**签出，理由是它们的判据完全相同：这张票就是"刚才那五道闸
+	// 都过了"的可携带凭证。另开一个端点的话，客户端会为每条业务 TCP 流各取一次票，
+	// 把控制面放进数据路径（见下面 checkTunnelTicket 那侧关于"不做一次性"的同款理由）。
+	//
+	// ★不带 Jti：这张票**刻意不做一次性**，理由写在 gateway/internal/proxy 的
+	// checkTunnelTicket 上。签一个没人去重的 jti 只会让下一个人以为一次性已经做了。
+	//
+	// ★不带 Gw：控制面**不知道**这张票会被拿去拨哪台网关——剖面下发的是有序落点清单，
+	// 客户端每轮敲全部落点、拨得通哪台算哪台（见 dataplane.picker）。写一个猜的值
+	// 会让故障转移在切换那一刻被票据绑定挡住；而向客户端要一个"我要连哪台"再照签，
+	// 等于让被判定方自报判据（他填空就拿到不绑定的票），那是假闸不是闸。
+	// web 票据能绑 Gw 是因为那条路上入口 URL 由控制面算出来，这里没有对应物。
+	ticket := s.keys.Sign(auth.Claims{
+		Sub: c.Sub, Role: c.Role, Name: c.Name, Use: auth.UseTunnel,
+	}, tunnelTicketTTL)
 	// ★放行也要留痕（wave8 行动 8）。此前这条**主路径**成功时零审计，而同一函数与
 	// entryGates 里五处拒绝全部落审计——于是审计里只有拒绝没有放行。
 	// 对照最刺眼的是：过同一道 entryGates 的 B/S 路径**签票时是落审计的**。
 	// wave7 那句「拒绝比放行更需要留痕」是排序不是排除。
 	s.auditKnockIssued(r, c.Name, kb.Device)
-	httpx.JSON(w, http.StatusOK, map[string]any{"token": tok, "expires_in": int(knockTTL.Seconds())})
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"token": tok, "expires_in": int(knockTTL.Seconds()),
+		// 旧客户端读不到这两个字段也照常工作（网关侧的严格模式才是拒绝它们的地方）——
+		// 升级顺序必须是「先控制面、再客户端、最后网关」，见 -jwt-tunnel-pubkey 的 flag 说明。
+		"tunnelTicket":          ticket,
+		"tunnelTicketExpiresIn": int(tunnelTicketTTL.Seconds()),
+	})
 }
 
 // entryGates 是「这个账号此刻还能不能进数据面」的三道**账号维度**闸，

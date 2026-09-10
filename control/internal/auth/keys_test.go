@@ -79,8 +79,9 @@ func TestLoadOrCreateKeysPersistence(t *testing.T) {
 	path := filepath.Join(dir, "sub", "jwt.pem")
 	kpath := filepath.Join(dir, "sub", "jwt-knock.pem")
 	wpath := filepath.Join(dir, "sub", "jwt-web.pem")
+	tpath := filepath.Join(dir, "sub", "jwt-tunnel.pem")
 
-	k1, err := LoadOrCreateKeys(path, kpath, wpath, nil, false)
+	k1, err := LoadOrCreateKeys(path, kpath, wpath, tpath, nil, false)
 	if err != nil {
 		t.Fatalf("首启应生成密钥: %v", err)
 	}
@@ -96,16 +97,27 @@ func TestLoadOrCreateKeysPersistence(t *testing.T) {
 		t.Fatalf("公钥应旁路落盘供分发: %v", err)
 	}
 
-	k2, err := LoadOrCreateKeys(path, kpath, wpath, nil, false)
+	k2, err := LoadOrCreateKeys(path, kpath, wpath, tpath, nil, false)
 	if err != nil {
 		t.Fatalf("二次载入应成功: %v", err)
 	}
-	if k1.SessKid() != k2.SessKid() || k1.KnockKid() != k2.KnockKid() {
-		t.Fatalf("重启后两把 kid 都应稳定: %s/%s vs %s/%s",
-			k1.SessKid(), k1.KnockKid(), k2.SessKid(), k2.KnockKid())
+	if k1.SessKid() != k2.SessKid() || k1.KnockKid() != k2.KnockKid() ||
+		k1.WebKid() != k2.WebKid() || k1.TunnelKid() != k2.TunnelKid() {
+		t.Fatalf("重启后四把 kid 都应稳定: %s/%s/%s/%s vs %s/%s/%s/%s",
+			k1.SessKid(), k1.KnockKid(), k1.WebKid(), k1.TunnelKid(),
+			k2.SessKid(), k2.KnockKid(), k2.WebKid(), k2.TunnelKid())
 	}
-	if k1.SessKid() == k1.KnockKid() {
-		t.Fatal("会话密钥与敲门密钥必须是两把不同的密钥")
+	// 四把必须互不相同：合用任意两把，对应的两条入场路径就只剩 Claims.Use
+	// 一个字符串在隔离，而阶段 3 花力气做的正是把它从"唯一防线"降级成纵深。
+	kids := map[string]string{
+		"sess": k1.SessKid(), "knock": k1.KnockKid(), "web": k1.WebKid(), "tunnel": k1.TunnelKid(),
+	}
+	seen := map[string]string{}
+	for name, kid := range kids {
+		if other, dup := seen[kid]; dup {
+			t.Fatalf("%s 与 %s 是同一把密钥（kid=%s），四把必须互相独立", name, other, kid)
+		}
+		seen[kid] = name
 	}
 	// k1 签的令牌 k2 能验（同一把密钥）
 	if _, err := k2.Verify(k1.Sign(Claims{Sub: "u", Role: "user", Name: "u"}, time.Hour)); err != nil {

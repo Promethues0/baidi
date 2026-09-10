@@ -219,7 +219,7 @@ func keysOf(m map[string][]byte) []string {
 	return out
 }
 
-// TestBackupContainsAuditChainKeyAndSigningKeys 备份必须含审计链密钥与**三把**签名私钥。
+// TestBackupContainsAuditChainKeyAndSigningKeys 备份必须含审计链密钥与**四把**签名私钥。
 //
 // 回归背景（温备落地时发现）：
 //   - 审计链 HMAC 密钥原先按 `os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE")` 收集，而该变量
@@ -240,22 +240,23 @@ func keysOf(m map[string][]byte) []string {
 //     给了一种虚假的安全感。现在改成：**一个环境变量都不设**，用真实装载的
 //     Keys/CA（它们各自记住自己实际装载自哪里），与 store.AuditKeyPath() 同构。
 //
-// 现在：库/审计密钥/三把签名私钥/内部 CA，一律问**真正在用它们的那个对象**要路径。
+// 现在：库/审计密钥/四把签名私钥/内部 CA，一律问**真正在用它们的那个对象**要路径。
 func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 	dir := t.TempDir()
 	// ★一个环境变量都不设——这正是标准部署的形态，也是旧判据失效的地方。
 	for _, k := range []string{
-		"BAIDI_PKI_DIR", "BAIDI_JWT_KEY", "BAIDI_JWT_KNOCK_KEY", "BAIDI_JWT_WEB_KEY",
+		"BAIDI_PKI_DIR", "BAIDI_JWT_KEY", "BAIDI_JWT_KNOCK_KEY", "BAIDI_JWT_WEB_KEY", "BAIDI_JWT_TUNNEL_KEY",
 		"BAIDI_AUDIT_HMAC_KEY_FILE",
 	} {
 		t.Setenv(k, "")
 		_ = os.Unsetenv(k)
 	}
-	// 三把私钥落在真实路径上；LoadOrCreateKeys 会记住它们（auth.Keys.Paths()）。
+	// 四把私钥落在真实路径上；LoadOrCreateKeys 会记住它们（auth.Keys.Paths()）。
 	realKeys, err := auth.LoadOrCreateKeys(
 		filepath.Join(dir, "jwt-ed25519.pem"),
 		filepath.Join(dir, "jwt-ed25519-knock.pem"),
-		filepath.Join(dir, "jwt-ed25519-web.pem"), testSecret, true)
+		filepath.Join(dir, "jwt-ed25519-web.pem"),
+		filepath.Join(dir, "jwt-ed25519-tunnel.pem"), testSecret, true)
 	if err != nil {
 		t.Fatalf("生成签名密钥: %v", err)
 	}
@@ -290,6 +291,9 @@ func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 		"jwt-ed25519.pem", "jwt-ed25519.pem.pub",
 		"jwt-ed25519-knock.pem", "jwt-ed25519-knock.pem.pub",
 		"jwt-ed25519-web.pem", "jwt-ed25519-web.pem.pub",
+		// ★第四把（L4 隧道身份票据）。漏掉它的症状是 web 那把的镜像：恢复之后
+		// B/S 一切正常，而所有 C/S 隧道连接被拒（网关装的还是旧公钥，新票的 kid 查不到）。
+		"jwt-ed25519-tunnel.pem", "jwt-ed25519-tunnel.pem.pub",
 	} {
 		if _, ok := files[want]; !ok {
 			t.Errorf("备份里缺 %s（恢复出来的系统会以一种没人看得出的方式坏掉）；实际：%v",
@@ -311,7 +315,7 @@ func TestBackupContainsAuditChainKeyAndSigningKeys(t *testing.T) {
 
 // ★备份导出要 PermSystem ∩ PermAdmins（实际只有 root）。
 //
-// 这份备份就是温备端点吐出来的那一份：CA 私钥 + 三把签名私钥 + 审计链密钥 + 整个库，
+// 这份备份就是温备端点吐出来的那一份：CA 私钥 + 四把签名私钥 + 审计链密钥 + 整个库，
 // 口令还由导出者自己指定。单 PermSystem 时三权分立有一条直路可绕：系统管理员导出备份
 // → 解出 BAIDI_JWT_KEY → 自签一张 Name=某 root 的会话令牌 → 角色按账号现算，直接全权
 // （含他本不该有的 PermAudit）。「能拿走全部信任材料」等价于「能造任意管理员」。

@@ -49,6 +49,9 @@ func (k keypair) publicPEM() []byte {
 // 数据面上两条入场路径（UDP 敲门 / L7 票据）各验各的公钥，谁也验不过对方那张票。
 // 少了这一把、把 web 票据也用 knock 密钥签的话，两条路径就只剩 Claims.Use
 // 一个字符串判断在隔离——那正是阶段 3 花力气从"唯一防线"降级掉的东西。
+//
+// ★L4 隧道身份票据（wave11 行动 3）是第四把。数据面上从此有三条入场路径，
+// 各持一把公钥：SPA 敲门口只装 knock、L7 只装 web、L4 隧道口只装 tunnel。
 
 // Keys 持有签发/验证材料。legacy 为迁移期的 HS256 密钥。
 type Keys struct {
@@ -56,10 +59,18 @@ type Keys struct {
 	knock keypair // 只签敲门令牌；其公钥分发给数据面的 SPA 监听
 	// web 只签七层 Web 代理的访问票据（Use=UseWeb）；其公钥分发给数据面的 L7 监听。
 	// 与 knock 分开是为了让「敲门路径拒 web 票据 / L7 路径拒敲门令牌」在密码学层就成立。
-	web          keypair
+	web keypair
+	// tunnel 只签 L4 隧道身份票据（Use=UseTunnel）；其公钥分发给数据面的隧道监听。
+	//
+	// ★第四把的理由与 web 那把逐字同款，只是保护的入场路径不同：隧道口此前**没有身份**
+	// （TLS/TLCP 都不设 ClientAuth、前导只有 CONNECT <资源id>），网关只能按源 IP 反查。
+	// 单独一把密钥让「敲门口拒隧道票 / 隧道口拒敲门令牌 / L7 口拒这两者」在密码学层就成立，
+	// use 字段判断退化成纵深。合用 knock 那把的话，一张敲门令牌就能直接当隧道身份用——
+	// 而敲门令牌是**沿链路广播**的（每 15s 向全部落点各发一个 UDP 包），截获门槛低得多。
+	tunnel       keypair
 	legacy       []byte
 	acceptLegacy bool
-	// paths 三把私钥**实际装载自**哪些路径，按 LoadOrCreateKeys 收到的参数原样记下。
+	// paths 四把私钥**实际装载自**哪些路径，按 LoadOrCreateKeys 收到的参数原样记下。
 	//
 	// ★为什么要记：配置备份此前读 os.Getenv("BAIDI_JWT_KEY") 等三个环境变量来找它们，
 	// 而这三项在 config 里都有非空默认值（jwt-ed25519*.pem）——标准部署根本不设那些
@@ -70,12 +81,12 @@ type Keys struct {
 	paths KeyPaths
 }
 
-// KeyPaths 三把签名私钥的实际路径（公钥恒为同名 .pub）。
+// KeyPaths 四把签名私钥的实际路径（公钥恒为同名 .pub）。
 type KeyPaths struct {
-	Sess, Knock, Web string
+	Sess, Knock, Web, Tunnel string
 }
 
-// Paths 返回三把私钥实际装载自哪里。供配置备份收集材料——**不要再去读环境变量**。
+// Paths 返回四把私钥实际装载自哪里。供配置备份收集材料——**不要再去读环境变量**。
 func (k *Keys) Paths() KeyPaths {
 	if k == nil {
 		return KeyPaths{}
@@ -91,13 +102,13 @@ func KidOf(pub ed25519.PublicKey) string {
 	return b64.EncodeToString(sum[:8])
 }
 
-// LoadOrCreateKeys 载入/生成三把 Ed25519 私钥（0600 原子写），
-// 并把各自公钥写到同名 .pub（0644）。knock 与 web 两把公钥是分发给网关的那份
-// （分别给 SPA 敲门监听与七层 Web 代理监听），sess 公钥**不分发**。
+// LoadOrCreateKeys 载入/生成四把 Ed25519 私钥（0600 原子写），
+// 并把各自公钥写到同名 .pub（0644）。knock / web / tunnel 三把公钥是分发给网关的那份
+// （分别给 SPA 敲门监听、七层 Web 代理监听与 L4 隧道监听），sess 公钥**不分发**。
 //
 // legacy/acceptLegacy 控制迁移期是否接受存量 HS256 令牌：迁移期必须接受，
 // 否则升级瞬间所有在线会话（8h TTL）与网关自签的 role=gateway 令牌全部 401。
-func LoadOrCreateKeys(sessPath, knockPath, webPath string, legacy []byte, acceptLegacy bool) (*Keys, error) {
+func LoadOrCreateKeys(sessPath, knockPath, webPath, tunnelPath string, legacy []byte, acceptLegacy bool) (*Keys, error) {
 	sess, err := loadKeypair(sessPath)
 	if err != nil {
 		return nil, fmt.Errorf("会话签名密钥: %w", err)
@@ -110,8 +121,12 @@ func LoadOrCreateKeys(sessPath, knockPath, webPath string, legacy []byte, accept
 	if err != nil {
 		return nil, fmt.Errorf("Web 票据签名密钥: %w", err)
 	}
-	return &Keys{sess: sess, knock: knock, web: web, legacy: legacy, acceptLegacy: acceptLegacy,
-		paths: KeyPaths{Sess: sessPath, Knock: knockPath, Web: webPath}}, nil
+	tunnel, err := loadKeypair(tunnelPath)
+	if err != nil {
+		return nil, fmt.Errorf("隧道票据签名密钥: %w", err)
+	}
+	return &Keys{sess: sess, knock: knock, web: web, tunnel: tunnel, legacy: legacy, acceptLegacy: acceptLegacy,
+		paths: KeyPaths{Sess: sessPath, Knock: knockPath, Web: webPath, Tunnel: tunnelPath}}, nil
 }
 
 func loadKeypair(path string) (keypair, error) {
@@ -129,7 +144,8 @@ func loadKeypair(path string) (keypair, error) {
 
 // NewTestKeys 生成一次性内存密钥对（测试用，不落盘）。
 func NewTestKeys(legacy []byte, acceptLegacy bool) *Keys {
-	return &Keys{sess: genKeypair(), knock: genKeypair(), web: genKeypair(), legacy: legacy, acceptLegacy: acceptLegacy}
+	return &Keys{sess: genKeypair(), knock: genKeypair(), web: genKeypair(), tunnel: genKeypair(),
+		legacy: legacy, acceptLegacy: acceptLegacy}
 }
 
 func genKeypair() keypair {
@@ -141,6 +157,9 @@ func (k *Keys) SessKid() string  { return k.sess.kid }
 func (k *Keys) KnockKid() string { return k.knock.kid }
 func (k *Keys) WebKid() string   { return k.web.kid }
 
+// TunnelKid L4 隧道票据签名公钥的 kid。
+func (k *Keys) TunnelKid() string { return k.tunnel.kid }
+
 // SessPublicPEM 会话签名公钥（control 自用/审计；**不分发给网关**）。
 func (k *Keys) SessPublicPEM() []byte { return k.sess.publicPEM() }
 
@@ -150,6 +169,9 @@ func (k *Keys) KnockPublicPEM() []byte { return k.knock.publicPEM() }
 // WebPublicPEM 七层 Web 代理票据的验证公钥——分发给数据面的 L7 监听。
 func (k *Keys) WebPublicPEM() []byte { return k.web.publicPEM() }
 
+// TunnelPublicPEM L4 隧道身份票据的验证公钥——分发给数据面的隧道监听（-jwt-tunnel-pubkey）。
+func (k *Keys) TunnelPublicPEM() []byte { return k.tunnel.publicPEM() }
+
 // AcceptsLegacy 报告是否仍接受存量 HS256 令牌（迁移窗口未关闭）。供 /diag 暴露真实姿态。
 func (k *Keys) AcceptsLegacy() bool { return k.acceptLegacy && len(k.legacy) > 0 }
 
@@ -157,8 +179,8 @@ func (k *Keys) AcceptsLegacy() bool { return k.acceptLegacy && len(k.legacy) > 0
 func (k *Keys) LegacyIs(s string) bool { return string(k.legacy) == s }
 
 // Sign 按令牌用途选密钥签发（alg=EdDSA，header 带 kid）；自动填充 Iat/Exp。
-// Use=knock 走 knock 密钥、Use=web 走 web 密钥，其余（会话令牌、MFA 票据）走 sess 密钥——
-// 调用点无需关心选哪把，用途字段本身就是路由依据。
+// Use=knock 走 knock 密钥、Use=web 走 web 密钥、Use=tunnel 走 tunnel 密钥，
+// 其余（会话令牌、MFA 票据）走 sess 密钥——调用点无需关心选哪把，用途字段本身就是路由依据。
 func (k *Keys) Sign(c Claims, ttl time.Duration) string {
 	kp := k.sess
 	switch c.Use {
@@ -166,6 +188,8 @@ func (k *Keys) Sign(c Claims, ttl time.Duration) string {
 		kp = k.knock
 	case UseWeb:
 		kp = k.web
+	case UseTunnel:
+		kp = k.tunnel
 	}
 	now := time.Now()
 	c.Iat = now.Unix()
@@ -176,7 +200,7 @@ func (k *Keys) Sign(c Claims, ttl time.Duration) string {
 	return body + "." + b64.EncodeToString(ed25519.Sign(kp.priv, []byte(body)))
 }
 
-// byKid 按 kid 定位公钥（两把密钥并存，也为将来轮换留位）。
+// byKid 按 kid 定位公钥（四把密钥并存，也为将来轮换留位）。
 func (k *Keys) byKid(kid string) (ed25519.PublicKey, bool) {
 	// 空 kid 一律查不到。少了这一句，一个不带 kid 的 EdDSA 令牌会去匹配"某把尚未
 	// 装载的密钥"（零值 keypair 的 kid 也是空串），拿到一把 nil 公钥交给
@@ -191,6 +215,8 @@ func (k *Keys) byKid(kid string) (ed25519.PublicKey, bool) {
 		return k.knock.pub, true
 	case k.web.kid:
 		return k.web.pub, true
+	case k.tunnel.kid:
+		return k.tunnel.pub, true
 	}
 	return nil, false
 }

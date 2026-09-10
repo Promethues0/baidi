@@ -108,14 +108,17 @@ func main() {
 	secret := []byte(cfg.JWTSecret)
 	// 令牌签名切非对称：control 私钥签、数据面只持公钥。迁移期仍接受存量 HS256 令牌
 	// （BAIDI_ACCEPT_HS256=0 收口）。公钥写在 <私钥路径>.pub，由 deploy 分发给网关。
-	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, cfg.JWTWebKeyPath, secret, cfg.AcceptHS256)
+	keys, err := auth.LoadOrCreateKeys(cfg.JWTKeyPath, cfg.JWTKnockKeyPath, cfg.JWTWebKeyPath, cfg.JWTTunnelKeyPath, secret, cfg.AcceptHS256)
 	if err != nil {
 		slog.Error("载入/生成 JWT 签名密钥失败", "path", cfg.JWTKeyPath, "err", err)
 		os.Exit(1)
 	}
 	slog.Info("令牌签名：Ed25519 按用途分密钥",
-		"sessKid", keys.SessKid(), "knockKid", keys.KnockKid(), "webKid", keys.WebKid(),
-		"分发给网关的公钥", cfg.JWTKnockKeyPath+".pub（敲门）/"+cfg.JWTWebKeyPath+".pub（七层 Web 代理）",
+		"sessKid", keys.SessKid(), "knockKid", keys.KnockKid(),
+		"webKid", keys.WebKid(), "tunnelKid", keys.TunnelKid(),
+		"分发给网关的公钥", cfg.JWTKnockKeyPath+".pub（敲门）/"+
+			cfg.JWTTunnelKeyPath+".pub（L4 隧道身份票据）/"+
+			cfg.JWTWebKeyPath+".pub（七层 Web 代理）",
 		"acceptHS256", cfg.AcceptHS256)
 	if cfg.AcceptHS256 {
 		slog.Warn("⚠ 逃生舱开启（BAIDI_ACCEPT_HS256=1）：仍接受存量 HS256 共享密钥令牌，" +

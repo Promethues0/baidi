@@ -311,7 +311,7 @@ func TestGatewayPolicyCarriesWebScheme(t *testing.T) {
 // ★L7 访问票据不得当控制面会话令牌用。
 //
 // 退回旧实现（中间件只拦 pwreset）这条用例立刻红：Keys.Verify 按 kid 同时认
-// sess/knock/web 三把公钥，于是一张本该"只开一扇门 60s"的资源级票据等价于该账号
+// sess/knock/web/tunnel 四把公钥，于是一张本该"只开一扇门 60s"的资源级票据等价于该账号
 // 60s 的全量 API 会话——admin 的票就是 60s 全权管理台，还能拿它再调一次
 // /portal/web-ticket 自我续签，把"短时效"结构性抵消掉。
 func TestDataplaneTicketsRejectedOnControlPlane(t *testing.T) {

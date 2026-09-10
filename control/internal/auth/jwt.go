@@ -26,6 +26,18 @@ const UseKnock = "knock"
 // 签（见 Keys.web），所以拿错路径的票据在对面**连签名都验不过**——use 判断退化成纵深。
 const UseWeb = "web"
 
+// UseTunnel L4 隧道连接的身份票据用途标记（Claims.Use）。
+//
+// ★它补的是隧道上**唯一**一处没有身份的地方：TLS/TLCP 两条监听都不设 ClientAuth，
+// 前导此前只有 "CONNECT <资源id>"，敲门令牌只走 UDP 口。于是网关只能拿
+// spa.Allowlist 按**源 IP** 反查身份——门槛从"持有白帝账号"塌成"共享源 IP"，
+// 同出口任意主机（NAT / CGNAT / 咖啡厅 / 云主机同公网 IP）只要有人处在放行窗内，
+// 直连隧道口就继承其全部资源授权、JIT 与降权结论。
+//
+// 与敲门令牌一样由控制面签、数据面验，但**刻意不做一次性**（无 jti 去重），
+// 理由写在 gateway/internal/proxy 的 checkTunnelTicket 上。
+const UseTunnel = "tunnel"
+
 // UsePwReset 首登强制改密的受限令牌用途标记（Claims.Use）。
 // 口令验证通过但 must_change_pw=1 时签发（15min），中间件只放行改密与查身份两个端点；
 // 它由 sess 密钥签出且 use≠knock，故既调不到业务 API，也从密码学与语义两层都敲不开门。
@@ -43,7 +55,7 @@ type Claims struct {
 	Exp  int64  `json:"exp"`           // 过期 Unix 秒
 	Iat  int64  `json:"iat,omitempty"` // 签发 Unix 秒
 	Jti  string `json:"jti,omitempty"` // 令牌唯一 id（短时效敲门令牌用，网关按它一次性去重）
-	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；空=会话令牌/MFA 票据
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；tunnel=L4 隧道身份票据；空=会话令牌/MFA 票据
 	// Res 票据绑定的受控资源 id（只有 Use=UseWeb 时有值）。
 	//
 	// ★它是「一张票只开一扇门」的载体：网关据此把 Cookie 绑到 (账号, 资源)，

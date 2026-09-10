@@ -98,7 +98,7 @@ func (s *Server) StartAutoBackupLoop(ctx context.Context, cfg AutoBackupConfig) 
 		set("未配置备份目录（BAIDI_BACKUP_DIR）")
 		return
 	case strings.TrimSpace(cfg.Passphrase) == "":
-		// 不允许"不加密地存一份"：备份里装着 CA 私钥、三把签名私钥与审计链密钥。
+		// 不允许"不加密地存一份"：备份里装着 CA 私钥、四把签名私钥与审计链密钥。
 		set("未配置备份口令（BAIDI_BACKUP_PASSPHRASE）——备份含 CA 私钥与全部凭据，不允许不加密存盘")
 		return
 	case cfg.Interval <= 0:

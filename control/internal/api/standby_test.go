@@ -65,7 +65,7 @@ func (f *sbFixture) callMTLS(t *testing.T, method, path, cn, body string) *httpt
 
 // ── ① 身份闸 ──
 
-// TestStandbyBackupRejectsAdminToken **这条最要紧**：一份备份 = CA 私钥 + 三把签名私钥 +
+// TestStandbyBackupRejectsAdminToken **这条最要紧**：一份备份 = CA 私钥 + 四把签名私钥 +
 // 审计链密钥 + 全部凭据 + 整个库。它绝不能挂在明文口 + Bearer 上，否则一次令牌泄露
 // 等于整套系统被完整复制走，而现场只留下一条看起来很正常的审计。
 func TestStandbyBackupRejectsAdminToken(t *testing.T) {

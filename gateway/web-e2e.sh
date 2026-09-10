@@ -5,7 +5,7 @@
 # 这条验的是**浏览器路径**——门户取票 → 网关验票换 Cookie → 反代到真后端。
 # 两条路共用同一份资源注册表与同一套授权判定，但入场方式完全不同。
 #
-# 九条断言（每一条都是"只有真做成了才可能成立"的性质）：
+# 十条断言（每一条都是"只有真做成了才可能成立"的性质）：
 #   ① 不带票据直连 L7 端点 → 拒（含伪造票据）
 #   ② 票据换 Cookie 成功，且 Cookie 带 HttpOnly/Secure/SameSite + 路径限定
 #   ③ 经代理拿到后端**真实内容**（不是网关自己编的页面）
@@ -15,6 +15,8 @@
 #   ⑦ 票据**真是一次性**：同一张票换第二次会话被拒（此前四处文案都这么写，实际可无限重放）
 #   ⑧ 网关自己的会话 Cookie 不转发给后端；客户端可控的 Host 不当 X-Forwarded-Host 下发
 #   ⑨ Web 票据不能当控制面 Bearer 用（用途闸的控制面这一侧）
+#   ⑩ B/S 会话出现在「在线用户」页、可强制下线，且处置后同一张 Cookie 立即失效
+#      （改造前心跳只报 SPA 放行表里的隧道会话，浏览器接入在那一页上根本不存在）
 #
 # 自带起栈、无需 root / Docker。
 set -uo pipefail
@@ -361,6 +363,41 @@ if [ "$c" = "403" ]; then
   ok "撤权后同一 Cookie 立即被拒（逐请求重新鉴权，不是只在建会话时判一次）"
 else
   bad "★撤权后仍能访问（HTTP ${c}）——说明没有逐请求鉴权"
+fi
+
+# ⑩ 放在最后：它会强制下线 admin，而那一步同时注销 $ADMIN 这张控制面令牌
+#    （wave11 行动 4），之后所有管理 API 调用都会 401。任何新增断言都要排在它前面。
+echo "⑩ B/S 会话进「在线用户」页且可强制下线"
+CK3=$(enter "$(ticket a2)")   # 用财务应用另开一条会话（oa 的授权刚在 ⑤ 里被撤掉）
+if [ -z "$CK3" ]; then
+  bad "取不到财务应用的会话 Cookie，无法判定"
+else
+  # 先确认这条会话真的能访问，否则下面那个"被拒"可能来自别的原因。
+  pre=$(code -H "Cookie: baidi_web=$CK3" "$WEB/app/finance/")
+  # 等心跳把七层会话台账带到控制面（-poll 2s，取 20s 死线）。
+  wait_for "七层会话上报到控制面" 20 \
+    "curl -s -H 'Authorization: Bearer $ADMIN' '$CONTROL/api/v1/online' | grep -q '\"kind\":\"web\"'" || true
+  SESS=$(curl -s -H "Authorization: Bearer $ADMIN" "$CONTROL/api/v1/online" \
+    | python3 -c "import sys,json;print(next((s['id'] for s in json.load(sys.stdin).get('sessions',[]) if s.get('kind')=='web'),''))" 2>/dev/null)
+  if [ "$pre" != "200" ]; then
+    bad "前置：财务应用的新会话应能访问，实得 HTTP ${pre}"
+  elif [ -z "$SESS" ]; then
+    # 改造前这里必然为空：心跳只报 SPA 放行表里的隧道会话，浏览器接入
+    # 在「在线用户」页上根本不存在——既数不到，也点不到「强制下线」。
+    bad "★浏览器会话没有出现在「在线用户」页：$(curl -s -H "Authorization: Bearer $ADMIN" "$CONTROL/api/v1/online" | head -c 200)"
+  else
+    kc=$(code -X POST -H "Authorization: Bearer $ADMIN" -H 'Content-Type: application/json' \
+          -d '{"reason":"e2e"}' "$CONTROL/api/v1/online/$SESS/kick")
+    # 强制下线经策略轮询下发到网关后，同一张 Cookie 的下一个请求必须被拒。
+    wait_for "强制下线在网关侧生效" 20 \
+      "[ \"\$(code -H 'Cookie: baidi_web=$CK3' '$WEB/app/finance/')\" != 200 ]" || true
+    post=$(code -H "Cookie: baidi_web=$CK3" "$WEB/app/finance/")
+    if [ "$kc" = "200" ] && [ "$post" != "200" ]; then
+      ok "B/S 会话可见于在线用户页（$SESS）、可强制下线，且同一张 Cookie 立即失效（HTTP ${post}）"
+    else
+      bad "★B/S 会话处置未闭环：kick=${kc} 处置后访问=${post}"
+    fi
+  fi
 fi
 
 echo ""

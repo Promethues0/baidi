@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"sort"
+	"strings"
 	"time"
 
 	"baidi.dev/control/internal/httpx"
@@ -35,6 +37,10 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 	sessions := []store.OnlineSession{}
 	// sessionSince 会话 id → 网关上报的建立时刻，供下面判定「这条是不是重连后的新会话」。
 	sessionSince := map[string]int64{}
+	// webBlind **开了七层却不报会话台账**的在线网关（旧版本）。
+	// ★它必须下发给页面：这一页上的「B/S 0 人」在两种情况下长得完全一样——
+	// "确实没人用浏览器进来"，和"有一台网关根本没在报，这一页正在漏人"。
+	webBlind := []string{}
 	s.mu.Lock()
 	for id, sess := range s.gwSess {
 		gw, ok := s.gateways[id]
@@ -46,12 +52,49 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 			sessionSince[id+":"+se.IP] = se.Since
 			sessions = append(sessions, store.OnlineSession{
 				ID: id + ":" + se.IP, User: se.User, Account: se.User,
-				IP: se.IP, Auth: "SPA 敲门 + 隧道", Gateway: id,
+				IP: se.IP, Auth: "SPA 敲门 + 隧道", Kind: sessionKindTunnel, Gateway: id,
 				LoginAt: loginT.Format("15:04"), Duration: humanizeDuration(now.Sub(loginT)),
 				Status: "online",
 			})
 		}
 	}
+	// B/S 那一半（wave11 行动 14 ②）：网关七层会话台账。
+	// ★会话 id 用 webSessionID 拼（gwid:web:<sid>），与隧道那条的 gwid:ip **不同构**——
+	// 一个人同时用客户端和浏览器进来时，两条会话必须是两行、能分别处置。
+	for id, gw := range s.gateways {
+		if now.Unix()-gw.LastSeen > window {
+			continue
+		}
+		ws, reported := s.gwWebSess[id]
+		if !reported {
+			// ★只有**自报了七层落点**（gw.Web 非空）却不报会话台账的网关才算盲区：
+			// 那是「开了 -web 的旧版本」，它上面确实可能有浏览器接入而这一页看不见。
+			// 没开 -web 的网关根本没有 B/S 接入面，把它列进来就是一条恒亮的告警——
+			// 而混合部署（只有一台网关开七层）恰恰是最常见的形态，那样这条提示
+			// 会一直挂着，几周之后没人再看它，真出盲区时也就没人注意。
+			if strings.TrimSpace(gw.Web) != "" {
+				webBlind = append(webBlind, id)
+			}
+			continue
+		}
+		for _, se := range ws {
+			sid := webSessionID(id, se.ID)
+			loginT := time.Unix(se.Since, 0)
+			sessionSince[sid] = se.Since
+			idle := now.Unix() - se.LastActive
+			if idle < 0 {
+				idle = 0 // 两侧时钟偏差，别显示负数
+			}
+			sessions = append(sessions, store.OnlineSession{
+				ID: sid, User: se.User, Account: se.User,
+				IP: se.IP, Auth: "门户票据 + 浏览器会话", Kind: sessionKindWeb,
+				Resource: se.Res, Idle: &idle, Gateway: id,
+				LoginAt: loginT.Format("15:04"), Duration: humanizeDuration(now.Sub(loginT)),
+				Status: "online",
+			})
+		}
+	}
+	sort.Strings(webBlind) // map 遍历序随机，页面上那句提示不该每 5 秒换一次网关顺序
 	s.mu.Unlock()
 	// ★组织 / 授信态 / 风险档由控制面**按账号**从库里现取，绝不硬编码。
 	// 此前这三格分别是 "—" / "trusted" / "none"，其中后两个是**正向断言**：
@@ -73,12 +116,31 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	s.mu.Unlock()
-	httpx.JSON(w, http.StatusOK, map[string]any{
+	out := map[string]any{
 		"sessions":    sessions,
 		"generatedAt": now.Format(time.RFC3339),
 		"source":      "live",
-	})
+	}
+	if len(webBlind) > 0 {
+		// 页面据此挂一条提示：这一页此刻**可能漏掉**这几台网关上的浏览器接入。
+		// 不给这条的话，「B/S 0 人」会被读成一个确定结论。
+		out["webBlindGateways"] = webBlind
+	}
+	httpx.JSON(w, http.StatusOK, out)
 }
+
+// 接入形态取值。页面按它区分 C/S 与 B/S 两种会话（处置方式与判据都不同）。
+const (
+	sessionKindTunnel = "tunnel" // C/S 客户端隧道（SPA 放行表）
+	sessionKindWeb    = "web"    // B/S 浏览器（网关七层会话台账）
+)
+
+// webSessionID 七层会话在控制台上的 id：gwid:web:<网关侧会话 id>。
+//
+// ★中间那段 "web" 不是装饰：隧道会话的 id 是 gwid:ip，而网关侧的会话 id 是
+// base64url（可能含 - 与 _，但不含冒号）。少了这一段，两类 id 在
+// handleKickSession 的字符串比对里就有可能撞上——处置错人是这一页最坏的失败。
+func webSessionID(gwID, sid string) string { return gwID + ":web:" + sid }
 
 // handleKickSession 强制下线一条会话（admin）——真实的数据面处置：
 // 除显示覆盖层外，把账号记入封禁表（kickBanTTL）；网关下次轮询即撤销放行窗口、
@@ -97,6 +159,20 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	for gwid, sess := range s.gwSess {
 		for _, se := range sess {
 			if gwid+":"+se.IP == id {
+				user = se.User
+			}
+		}
+	}
+	// B/S 会话同样可处置（wave11 行动 14 ②）。★少了这一段，浏览器接入的那几行
+	// 在页面上看得见、点「强制下线」却回 404——比不显示更糟：管理员以为处置过了。
+	//
+	// ★处置动作与 C/S **完全相同**（封禁账号 + 注销控制面令牌），因为撤销通道
+	// 本来就是账号维度的：网关拿到 revoked 名单后会同时切隧道、切七层长连接、
+	// 注销该账号的全部 Web 会话台账。这里刻意不做"只踢这一条 Web 会话"——
+	// 那需要一条按会话 id 的下发通道，而「强制下线」这四个字在产品语义上就是账号维度。
+	for gwid, ws := range s.gwWebSess {
+		for _, se := range ws {
+			if webSessionID(gwid, se.ID) == id {
 				user = se.User
 			}
 		}

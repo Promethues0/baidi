@@ -21,8 +21,9 @@
       <div class="bd-notice">
         <icon-info-circle />
         <div class="bd-notice__body">
-          这两条规则的执行点是<b>敲门令牌</b>（客户端每 15 秒回控制面续一次）：改动最迟在一个保活周期内生效，
-          被拒的终端会收到写明原因的提示。<b>不涉及</b>按组织/用户组分级——本版本的接入策略是全局的，
+          C/S 客户端这条路的执行点是<b>敲门令牌</b>（客户端每 15 秒回控制面续一次）：改动最迟在一个保活周期内生效，
+          被拒的终端会收到写明原因的提示。B/S（浏览器）那条路另有执行点，覆盖面<b>逐条不同</b>，见每条规则下的说明。
+          <b>不涉及</b>按组织/用户组分级——本版本的接入策略是全局的，
           PRD 的策略继承（FR-POLICY-02~05）未实现，见下方「本版本未实现」。
         </div>
       </div>
@@ -88,6 +89,26 @@
             <a-input-number v-model="p.maxDevicesMobile" :min="0" :max="1000" size="small" class="bd-num bd-num--s" @change="save" />
             <span class="bd-row__unit">台</span>
           </div>
+          <!-- ★B/S 覆盖面必须逐字说清，而不是让人以为「策略是全局的、当然管所有接入形态」。
+               浏览器没有设备指纹：拿源 IP 当键会让同 NAT 出口两人共用一个名额（互相顶替），
+               换个网络又多一个名额；而且它会与 C/S 抢同一个名额池，一次网页访问就能把
+               一台正在用的终端挤下线。所以「上限 N 台」只统计 C/S，只有 0 那一档兼管浏览器。 -->
+          <div class="bd-notice bd-notice--warn bd-rule__notice">
+            <icon-info-circle />
+            <div class="bd-notice__body">
+              <b>浏览器（B/S）接入</b>：上限台数<b>只统计 C/S 客户端</b>——浏览器没有设备指纹，
+              把源 IP 或 Cookie 当"设备"会让这个数字变成假话（同一出口两人共用一个名额、换个网络又多一个）。
+              <template v-if="p.maxDevices === 0">
+                当前上限为 <b>0（禁止接入）</b>：这一档是账号维度的，<b>浏览器接入同样被拒</b>（按 PC 计）。
+              </template>
+              <template v-else>
+                只有把上限设为 <b>0（禁止接入）</b>时才会连浏览器一起挡住。
+              </template>
+              <template v-if="p.splitPlatform">
+                分平台计数下，浏览器没有平台判据，与"从未上报 posture 的终端"同一条约定——<b>落进 PC 桶</b>。
+              </template>
+            </div>
+          </div>
         </template>
       </div>
 
@@ -106,8 +127,9 @@
         <div v-if="p.idleEnabled && live && resp.storeReady && !resp.idleReady" class="bd-notice bd-notice--warn bd-rule__notice">
           <icon-exclamation-circle-fill />
           <div class="bd-notice__body">
-            目前<b>没有任何网关</b>报过业务活跃时刻（需网关升级到带 <code>lastActive</code> 回执的版本）。
-            在此之前这条规则<b>不会注销任何人</b>——判据缺席时一律放行，绝不拿「探不到」当「没有流量」。
+            目前<b>没有任何网关</b>报过 C/S 隧道会话的业务活跃时刻（需网关升级到带 <code>lastActive</code> 回执的版本）。
+            在此之前这条规则<b>不会注销任何客户端接入</b>——判据缺席时一律放行，绝不拿「探不到」当「没有流量」。
+            <b>浏览器接入不受这句话影响</b>：那条路的活跃度由网关逐请求判定，覆盖面见下方。
           </div>
         </div>
         <template v-if="p.idleEnabled">
@@ -118,6 +140,32 @@
             </div>
             <a-input-number v-model="p.idleMinutes" :min="5" :max="525600" size="small" class="bd-num" @change="save" />
             <span class="bd-row__unit">分钟</span>
+          </div>
+          <!-- ★B/S 这条路是**真兑现**的（L7 逐请求鉴权天然带活跃度信号），但执行方在网关侧：
+               「控制面下发了多少」与「网关在执行多少」是两件事，只能靠网关回执来判。
+               一台还没升级的网关上的浏览器接入不会被注销，而这一页此前只会写「已启用 · N 分钟」。 -->
+          <div class="bd-notice bd-rule__notice">
+            <icon-info-circle />
+            <div class="bd-notice__body">
+              <b>浏览器（B/S）接入</b>：本规则同样生效，执行点在网关的七层代理上（每个 HTTP 请求都是业务流量，
+              超时即注销该会话并要求回门户重新进入）。<b>门户登录态本身不受影响</b>——注销单条浏览器会话
+              不能连带注销该账号的控制面令牌，那会把他的 C/S 隧道一起断掉。
+              <b>WebSocket 等已升级的长连接不受本规则约束</b>：101 之后是裸字节转发，网关看不见上面还有没有流量，
+              按"无请求即空闲"去切会切断正在传数据的连接；它们另有一条硬上界（不超过会话 Cookie 寿命）。
+              <div v-if="webCoverageKnown" class="bd-hint">
+                <template v-if="webCov.idleEnforcing.length">
+                  正在执行的网关：<b>{{ webCov.idleEnforcing.join('、') }}</b>。
+                </template>
+                <template v-if="webCov.idleUnreported.length">
+                  <b class="bd-warn-t">网关 {{ webCov.idleUnreported.join('、') }} 未回报执行阈值</b>（多为旧版本）——
+                  经它们接入的浏览器<b>不会</b>被注销。
+                </template>
+                <template v-if="!webCov.idleEnforcing.length && !webCov.idleUnreported.length">
+                  当前没有在线网关开启七层 Web 代理，本规则在 B/S 上暂无适用对象。
+                </template>
+              </div>
+              <div v-else class="bd-hint">当前控制面未下发 B/S 覆盖面，哪几台网关在执行<b>判不出来</b>。</div>
+            </div>
           </div>
         </template>
       </div>
@@ -265,7 +313,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, onMounted } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, type AccessPolicy, type AccessPolicyResp, type DeviceSessionRow, type LockoutConfig, failReason } from '@/lib/api';
+import { api, type AccessPolicy, type AccessPolicyResp, type AccessPolicyWebCoverage, type DeviceSessionRow, type LockoutConfig, failReason } from '@/lib/api';
 import PageHeader from '@/components/PageHeader.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import SkeletonBlock from '@/components/SkeletonBlock.vue';
@@ -291,6 +339,10 @@ const resp = reactive<{ onlineWindowSec: number; storeReady: boolean; idleReady:
   onlineWindowSec: 90, storeReady: true, idleReady: false
 });
 const sessions = ref<DeviceSessionRow[]>([]);
+/** B/S 覆盖面（后端 api.webAccessCoverage）。★null = 后端没下发这一段（旧控制面）：
+ *  此时"哪几台网关在执行"是**判不出来**，页面必须这么说，不能默认成"全都在执行"。 */
+const webCov = ref<AccessPolicyWebCoverage>({ deviceLimitTier: 'zero-only', idleEnforcing: [], idleUnreported: [] });
+const webCoverageKnown = ref(false);
 
 /** ★未实现项必须逐条列出并说明理由，否则下一次审计会把它当"漏做"再实现一遍。 */
 const ACCESS_UNIMPL: { label: string; why: string }[] = [
@@ -321,6 +373,10 @@ async function loadAccess() {
     resp.storeReady = r.storeReady !== false;
     resp.idleReady = !!r.idleReady;
     sessions.value = r.sessions ?? [];
+    // ★三态：字段缺席 = 旧控制面，覆盖面判不出来（webCoverageKnown=false）；
+    //   有值就原样用。默认成空数组会把"判不出来"渲染成"没有网关在执行"。
+    webCoverageKnown.value = !!r.web;
+    if (r.web) webCov.value = r.web;
     live.value = true; accessErr.value = '';
   } catch (e) {
     // ★接住 e：原话是这一页唯一能指导下一步的信息（403 缺哪个权限 / 存储怎么了）。
@@ -449,6 +505,12 @@ onMounted(async () => {
 .bd-rule__d { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); margin-top: 5px; }
 .bd-fr { margin-left: var(--bd-sp-2); font-size: var(--bd-fs-xs); font-weight: 500; color: var(--bd-t4); }
 .bd-rule__notice { margin: var(--bd-sp-3) 0 0; }
+/* 提示行（后端原话 / 覆盖面明细）。此前本页三处用了 .bd-hint 却没有定义，
+   于是那几行按正文字号渲染，与结论混成一片。 */
+.bd-hint { font-size: var(--bd-fs-sm); color: var(--bd-t3); line-height: var(--bd-lh-loose); margin-top: 4px; }
+/* 「未回报」这半句是本条提示里唯一需要被看见的坏消息：一台不执行的网关，
+   与"已启用"这句话并排显示时，不上色就会被整段读过去。 */
+.bd-warn-t { color: var(--bd-warning-t); }
 .bd-rule__h { padding-bottom: var(--bd-sp-3); }
 /* 规则卡里的设置行：与头部之间用行线分隔（行线在上、不在下，末行不留悬空线） */
 .bd-rule .bd-row { border-top: 1px solid var(--bd-border-2); border-bottom: none; }

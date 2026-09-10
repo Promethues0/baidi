@@ -168,6 +168,49 @@ func EvaluateAccess(p AccessPolicy, sessions []DeviceSession, self DeviceSession
 	return AccessDecision{Allowed: true}
 }
 
+// WebIdleSeconds 「接入超时注销」在 B/S 这一侧的下发值（秒；0 = 不生效）。
+//
+// 消费方是 `api.handleGatewayPolicy` 的 webIdleSec 字段 → 网关 `webproxy.SetIdleTimeout`。
+// 单独抽出来是为了让「规则关着」与「阈值多少」只有一处换算——两处各写一遍的话，
+// 关掉规则时忘了把秒数一起归零，网关会照着上一个阈值继续注销人。
+func WebIdleSeconds(p AccessPolicy) int {
+	if !p.IdleEnabled {
+		return 0
+	}
+	return p.IdleMinutes * 60
+}
+
+// EvaluateWebAccess 浏览器（B/S）接入此刻是否被接入策略挡住（纯判定，无 IO）。
+//
+// ★**只兑现「上限 = 0 = 禁止接入」这一档**，不做名额计数。理由不是省事：
+//
+//	浏览器没有设备指纹。要计数就得臆造一个键，而两个可选的键都会给出假答案——
+//	按源 IP：同一 NAT 出口的两个人共用一个名额（互相顶替 = 拒绝服务），
+//	         同一个人从 Wi-Fi 切到 4G 就变成两个名额（上限形同虚设）；
+//	按会话 Cookie：一个人开两个应用就是两条会话，"设备数"随他点了几个应用变。
+//	更糟的是无论哪种都会与 C/S 抢同一个名额池：名额是按 first_seen 先到先得的，
+//	一次网页访问就能把一台正在用的终端挤下线，而被挤掉的人在任何地方都看不到原因。
+//	这正是「判据不能臆造」——页面上那句「同时在线设备 2/3」会变成一句假话。
+//
+// 而 0 这一档不需要任何设备身份：PRD 原文就是「禁止登录」，它是对**这个账号**说的。
+// 挡住它是这条策略最强、也最容易被绕过的那一档（改造前浏览器完全不受它约束）。
+//
+// ★平台桶取 PC：浏览器同样没有平台判据，与 IsMobilePlatform("") 的既有约定
+// （不可判定按 PC 计）保持同一条，而不是另立一条只在这里成立的规则。
+// 这条与它的后果（分平台计数 + PC 上限 0 时，手机浏览器也会被挡）在策略页上写明。
+func EvaluateWebAccess(p AccessPolicy) AccessDecision {
+	if !p.DeviceLimitEnabled || p.MaxDevices != 0 {
+		return AccessDecision{Allowed: true}
+	}
+	scope := "终端"
+	if p.SplitPlatform {
+		scope = "PC 端"
+	}
+	return AccessDecision{Rule: "concurrency",
+		Reason: "接入策略已把「同时在线" + scope + "上限」设为 0（= 禁止接入），" +
+			"浏览器接入同样适用（浏览器没有设备指纹，按 PC 计），请联系管理员"}
+}
+
 // onlineDevices 当前算作"在线"的同类终端指纹，**含本机**，按「首次接入时间 → 指纹」排序。
 //
 // 排序键必须带指纹这一维：first_seen 是秒级的，两台同一秒接入的终端会让顺序在

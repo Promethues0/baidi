@@ -40,6 +40,8 @@ var AttackCatZh = map[string]string{
 	"web-cross-origin":  "Web 跨应用请求",
 	"web-banned":        "Web 会话封禁期拒绝",
 	"web-authz":         "Web 逐请求鉴权拒绝",
+	"web-session-gone":  "Web 会话已注销（Cookie 仍在手上）",
+	"web-idle":          "Web 会话无业务流量超时注销",
 	"proxy-capacity":    "网关并发已达上限（我方容量，非攻击）",
 	"knock-cache-full":  "敲门去重表已满（正被洪泛，本次来源未必是洪泛者）",
 }
@@ -75,6 +77,13 @@ var AttackExemptCats = map[string]bool{
 	// 而近距离（≤30s）的被动重放走的是 knock-envelope（nonce 重复）、主动重放走
 	// knock-replay（jti 重复），**两条真信号都照常计入**。
 	"knock-clockskew": true,
+	// 下面两条是**我方处置**打到自己人身上的结果，归因不在对端：
+	// web-idle 是管理员配的接入超时注销真的生效了；web-session-gone 多半是
+	// 强制下线之后那个人又点了一下浏览器。把他们列进「攻击源 TOP5」，
+	// 管理员会照着面板去封自己刚处置过的员工，而真正的攻击者被挤出榜单。
+	// 拒绝本身照旧落审计（那两件事确实发生了、也确实需要可查）。
+	"web-idle":         true,
+	"web-session-gone": true,
 }
 
 // attackCatLabel 类别中文名（未知类别原样回 key，不编造）。

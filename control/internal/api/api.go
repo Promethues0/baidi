@@ -159,6 +159,10 @@ type Server struct {
 	// autoBackup 主机侧定期自动备份的运行状态（未配置时 Enabled=false + Reason）。
 	autoBackup *autoBackupState
 	gwSess     map[string][]GwSession // 各网关上报的活跃会话，按网关 id（监控中心真实在线用户来源）
+	// gwWebSess 各网关上报的**七层 Web 会话**台账，按网关 id（wave11 行动 14 ②）。
+	// ★键存在与否本身就是判据：不在表里 = 这台网关没开七层或版本旧，
+	// 控制面对它的 B/S 接入一无所知；在表里但为空数组 = 开了七层、当前零人。
+	gwWebSess map[string][]GwWebSession
 	// gwTunnelFP 各网关隧道 TLS 证书的 SHA-256 指纹，按网关 id。网关证书是启动期自签的，
 	// 无公共 CA 可依赖；控制面作为信任根，把指纹转发给客户端做证书钉扎（见 clientprofile.go）。
 	// 网关每次重启会换证书，故指纹随注册心跳刷新，不落库。
@@ -325,6 +329,30 @@ type GatewayInfo struct {
 	// 不带票据的连接按**源 IP** 推断身份——同出口他人可继承该账号的资源授权。
 	// 塌缩成 bool 会让一台还没升级的网关显示成"已开启"，而它正按旧模型在跑。
 	TunnelIDStrict *bool `json:"tunnelIdStrict"`
+	// WebIdleSec 该网关**正在执行**的七层接入超时注销阈值（秒）。★指针三态：
+	// nil = 没开七层 / 旧网关（不可判定）；&0 = 开着七层但规则不生效；&N = 按 N 秒执行。
+	// 它是回执不是断言——控制面下发多少与网关在执行多少是两件事。
+	WebIdleSec *int `json:"webIdleSec"`
+}
+
+// GwWebSession 网关上报的一条**七层 Web 会话**（B/S 免客户端接入）。
+//
+// ★与 GwSession 分开是必须的：那条是 SPA 放行表里的隧道会话（键是源 IP、身份来自
+// 敲门票据），这条是 webproxy 的会话台账（键是网关生成的会话 id、身份来自 Web 票据）。
+// 两者的「在线」含义、可处置方式、活跃度判据都不同，混成一张表就分不出
+// 「这个人是用客户端还是用浏览器进来的」——而那正是决定怎么处置他的第一个问题。
+type GwWebSession struct {
+	ID   string `json:"id"`
+	User string `json:"user"`
+	Role string `json:"role"`
+	Res  string `json:"res"`
+	IP   string `json:"ip"`
+	// Since 会话建立时刻；LastActive 最近一次通过逐请求鉴权的业务请求时刻。
+	// 两者都是普通 int64：L7 的活跃时刻由网关自己在鉴权后写，
+	// 只要这条会话出现在报文里就必然有真实值（不存在 GwSession 那种"报不报"的三态）。
+	Since      int64 `json:"since"`
+	LastActive int64 `json:"lastActive"`
+	Exp        int64 `json:"exp"`
 }
 
 // GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
@@ -348,7 +376,8 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
 		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
-		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked:    map[string]kickMark{},
+		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{},
+		gwWebSess: map[string][]GwWebSession{}, kicked: map[string]kickMark{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
 		gwNAT:           map[string]gwNATInfo{},
 		gwStealth:       map[string]gwStealthInfo{},
@@ -1806,6 +1835,17 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// 「我的逃生舱开着，不带票据的连接按源 IP 推断身份」。两者必须分得开——
 		// 塌缩成 bool 会让还没升级的网关显示成"已开启"，而它正按旧模型在跑。
 		TunnelIDStrict *bool `json:"tunnelIdStrict"`
+		// WebSessions 七层 Web 会话台账（wave11 行动 14 ②）。★指针三态：
+		// nil（字段缺席）= 这台网关没开七层（或版本旧），控制面对它的 B/S 接入
+		// **一无所知**；空数组 = 开了七层、当前零条会话。两者必须分得开——
+		// 塌缩的话，「在线用户」页上「B/S 0 人」会同时表示"确实没人用浏览器"和
+		// "有一台网关根本没在报"，而后者意味着这一页正在漏人。
+		WebSessions *[]GwWebSession `json:"webSessions"`
+		// WebIdleSec 该网关此刻**正在执行**的接入超时注销阈值（秒）。★同款三态指针：
+		// nil = 没开七层/旧网关（不可判定），&0 = 开着七层但规则不生效，&N = 按 N 秒执行。
+		// 它是**回执不是断言**：控制面下发了多少与网关在执行多少是两件事
+		// （同 stealth / nat 的回执纪律），策略页据此说清哪几台真的在执行。
+		WebIdleSec *int `json:"webIdleSec"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -1849,8 +1889,19 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
 		Web: b.Web, WebTLS: b.WebTLS, SkewSec: skew, TunnelIDStrict: b.TunnelIDStrict,
+		WebIdleSec: b.WebIdleSec,
 	}
 	s.gwSess[id] = b.Sessions
+	// 七层会话台账：nil（旧网关/没开七层）时**删掉**这台网关的记录而不是保留旧值。
+	// ★与 gwNAT/gwStealth 的"不覆盖不清空"方向相反，因为语义不同：那两个是
+	// 「运行态配置」（一次心跳没说不代表变了），这个是**此刻的在线会话快照**——
+	// 保留上一轮的话，一台刚关掉 -web 的网关会让「在线用户」页永远挂着一批
+	// 早就不存在的浏览器会话，且点「强制下线」还会真的封禁那个账号。
+	if b.WebSessions != nil {
+		s.gwWebSess[id] = *b.WebSessions
+	} else {
+		delete(s.gwWebSess, id)
+	}
 	s.gwTunnelFP[id] = b.TunnelFP
 	// 后端拨测快照：旧网关（nil）不覆盖不清空——它没说任何事。
 	if b.Reach != nil {
@@ -2051,6 +2102,15 @@ func (s *Server) handleGatewayPolicy(w http.ResponseWriter, r *http.Request) {
 	// 而网关那侧紧挨着 natPresent 的注释写的正是相反的要求（"别让缺字段被读成把 NAT
 	// 全删掉"）——三态区分本来就在，只是控制面这一侧把「取不到」塞进了「确实没有」。
 	resp := map[string]any{"resources": gwRes, "revoked": revoked}
+	// 「接入超时注销」在 B/S 这一侧的阈值（wave11 行动 14 ①）。执行方是网关的
+	// webproxy 会话台账——网关不做任何推导，只按控制面算好的秒数执行。
+	//
+	// ★恒下发（含 0=规则关着）：这里不做 nat 那样的三态。缺字段与显式 0 在网关的
+	// 动作上完全相同（不注销任何人），做成三态只会多一个永远走同一分支的判定。
+	// 需要区分的是**披露**——「这台网关到底在按几分钟执行」由网关随心跳回报
+	// （GatewayInfo.WebIdleSec），策略页据此分开显示「已按 N 分钟执行」与
+	// 「该网关未回报（旧版本，其上的浏览器接入不会被注销）」。
+	resp["webIdleSec"] = store.WebIdleSeconds(s.accessPolicy(r.Context()))
 	if s.nat != nil {
 		if all, err := s.nat.NATPolicies(r.Context()); err == nil {
 			resp["nat"] = store.NATForGateway(all, gatewayIDFrom(r))
@@ -2620,6 +2680,18 @@ func (s *Server) onlineAccounts() (accounts map[string]bool, known bool) {
 			out[normUser(se.User)] = true
 		}
 	}
+	// B/S 接入同样算"在线"（wave11 行动 14 ②）：这三页问的是「此刻要不要处置他」，
+	// 而一个正用浏览器访问 OA 的人当然连着。少了这一段，用户目录与用户状态页
+	// 会把他画成灰点「离线」——比不显示更坏，那是个确定的错结论。
+	for id, ws := range s.gwWebSess {
+		gw, ok := s.gateways[id]
+		if !ok || now-gw.LastSeen > window {
+			continue
+		}
+		for _, se := range ws {
+			out[normUser(se.User)] = true
+		}
+	}
 	return out, known
 }
 
@@ -2720,6 +2792,19 @@ func (s *Server) sessionIPsByAccount() map[string]string {
 			}
 		}
 	}
+	// B/S 会话的来源 IP 同源（wave11 行动 14 ②）：一个只用浏览器接入的人，
+	// 这一列此前恒为「—」，而控制面手里明明有网关报来的对端地址。
+	for id, ws := range s.gwWebSess {
+		gw, ok := s.gateways[id]
+		if !ok || now-gw.LastSeen > window {
+			continue
+		}
+		for _, se := range ws {
+			if se.IP != "" {
+				out[normUser(se.User)] = se.IP
+			}
+		}
+	}
 	return out
 }
 
@@ -2769,6 +2854,17 @@ func (s *Server) onlineSessionCount() int {
 		}
 		hasLiveGw = true
 		count += len(sess)
+	}
+	// B/S 会话同样是「当前活跃接入」（wave11 行动 14 ②）。少了这一段，一套
+	// 全靠浏览器接入的部署在态势总览上永远显示「活跃接入 0」。
+	// ★这里**不**把"有网关报了七层"当作 hasLiveGw：那个判据是"有没有在线网关"，
+	// 与它报不报七层无关（上面那个循环已经算过了）。
+	for id, ws := range s.gwWebSess {
+		gw, ok := s.gateways[id]
+		if !ok || now.Unix()-gw.LastSeen > window {
+			continue
+		}
+		count += len(ws)
 	}
 	if !hasLiveGw {
 		return -1

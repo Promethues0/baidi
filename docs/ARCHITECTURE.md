@@ -181,14 +181,15 @@ graph TB
 
 | # | 门 | 位置 | 拦什么 |
 |---|---|---|---|
-| 1 | **票据签发闸** | [api/webproxy.go `handleWebTicket`](../control/internal/api/webproxy.go) | 与敲门**共用** `entryGates`：强制下线 / 账号禁用锁定 / 终端合规；再加一次资源鉴权（`accessibleFor`，与剖面同一入口） |
+| 1 | **票据签发闸** | [api/webproxy.go `handleWebTicket`](../control/internal/api/webproxy.go) | 与敲门**共用** `entryGates`：强制下线 / 账号禁用锁定 / 终端合规；再加接入策略闸（`accessWebGate`，只兑现「上限 0 = 禁止接入」）与一次资源鉴权（`accessibleFor`，与剖面同一入口） |
 | 2 | **票据校验** | [webproxy.VerifyTicket](../gateway/internal/webproxy/ticket.go) | 签名（只装 web 公钥）、`use=web`、jti、绑定资源、TTL 上界、角色白名单 |
-| 3 | **会话 Cookie 绑定** | [webproxy/session.go](../gateway/internal/webproxy/session.go) | HttpOnly+Secure+SameSite=Lax + Path 限定到 `/app/<资源id>/`，服务端再复核 Cookie 里的资源与路径一致 |
-| 4 | **强制下线名单** | `spa.Allowlist.UserDenied` | 控制面下发的封禁名单对两条路径同时生效 |
+| 3 | **会话 Cookie 绑定 + 台账** | [webproxy/session.go](../gateway/internal/webproxy/session.go)、[websess.go](../gateway/internal/webproxy/websess.go) | HttpOnly+Secure+SameSite=Lax + Path 限定到 `/app/<资源id>/`，服务端再复核 Cookie 里的资源与路径一致；Cookie 里的 `sid` 逐请求必须在本机会话台账里查得到（摘除只有强制下线与超时注销两个来源） |
+| 4 | **强制下线名单** | `spa.Allowlist.UserDenied` + `webproxy.Server.KillUser` | 控制面下发的封禁名单对两条路径同时生效；`KillUser` 同时切已升级连接与注销会话台账 |
 | 5 | **逐请求资源鉴权** | [registry.go `Authorize`](../gateway/internal/resource/registry.go) | **每个 HTTP 请求**都重查一次（含 DenyUsers 否决）——不是只在建会话时判一次 |
 
 第 5 道是这条链的关键：它让强制下线 / 风险降权 / JIT 到期在**一个策略轮询周期内**自然生效，
-不必等票据或 Cookie 过期。`./web-e2e.sh` 的第 ⑤ 条断言专门验证「撤权后同一个 Cookie 的下一个请求就被拒」。
+不必等票据或 Cookie 过期。`./web-e2e.sh` 的第 ⑤ 条断言专门验证「撤权后同一个 Cookie 的下一个请求就被拒」，
+第 ⑩ 条验证「B/S 会话出现在在线用户页、可强制下线、处置后同一张 Cookie 立即失效」。
 
 ### fail-closed 的代价与补偿
 
@@ -385,7 +386,7 @@ sequenceDiagram
 | **认证策略驱动二次认证（自适应认证真接进登录链路）** | [authpolicy.go](../control/internal/authpolicy/authpolicy.go)、[authpolicy_test.go](../control/internal/authpolicy/authpolicy_test.go)、[api/authpolicy_test.go](../control/internal/api/authpolicy_test.go) |
 | **管理员分级分权 / 三权分立（有真执行方 + 防自锁）** | [admins_sqlite.go](../control/internal/store/admins_sqlite.go)、[api/admins.go](../control/internal/api/admins.go)、[adminrbac_test.go](../control/internal/api/adminrbac_test.go)、[admins_sqlite_test.go](../control/internal/store/admins_sqlite_test.go) |
 | **消息通道 SMTP / Webhook（真发；STARTTLS 不降级；安全事件真通知）** | [internal/notify/](../control/internal/notify/)、[smtp_test.go](../control/internal/notify/smtp_test.go)（进程内 SMTP 服务端跑真协议）、[api/notify_test.go](../control/internal/api/notify_test.go)。★`kind=sms` 就是 webhook，不是短信网关实现 |
-| **七层 Web 代理（B/S 免客户端：票据换会话 + 逐请求重新鉴权 + 反代）** | `./web-e2e.sh` 九条断言；[gateway/internal/webproxy/](../gateway/internal/webproxy/)、[api/webproxy.go](../control/internal/api/webproxy.go)、[api/webproxy_test.go](../control/internal/api/webproxy_test.go) |
+| **七层 Web 代理（B/S 免客户端：票据换会话 + 逐请求重新鉴权 + 反代 + 会话台账/超时注销/可强制下线）** | `./web-e2e.sh` 十条断言；[gateway/internal/webproxy/](../gateway/internal/webproxy/)、[api/webproxy.go](../control/internal/api/webproxy.go)、[api/webproxy_test.go](../control/internal/api/webproxy_test.go) |
 | **业务告警实体与规则（八类触发源全部读真实信号 + 冷却去重 + 处置状态机）** | [internal/alerting/](../control/internal/alerting/)、[alerting_test.go](../control/internal/alerting/alerting_test.go)、[api/alerts_test.go](../control/internal/api/alerts_test.go)（真把心跳调旧 / 真连错口令锁账号 / 真篡改一行审计） |
 
 **按组织 / 用户组授权（真，判定权全在控制面）**：资源授权从「角色 + 账号」两维扩到四维，新增 `resources.allow_groups / allow_orgs`（补列 + 回填 `[]`，既有行语义不变）。组织**含子树**——授权给某组织即涵盖其全部后代组织的用户。
@@ -564,6 +565,41 @@ PRD 8.3.3 / FR-INTRO-09/12。改造前网关只有 L4 CONNECT 隧道，全库没
   也不留一个迟早被永久打开的开关；要收紧应当给内网应用签发内部 CA 证书后再做这件事。
 - **设备准入（授信终端）这道闸对浏览器不生效**。它需要客户端自报的终端指纹，浏览器没有。
   三道账号闸（强制下线 / 账号状态 / 终端合规）两条路共用同一段代码（`api.entryGates`），第四道不共用。
+- **接入策略（FR-POLICY-29/30）在 B/S 上的覆盖面逐条不同**（wave11 行动 14）。改造前这两条 P0
+  只挂在敲门令牌上，而浏览器不敲门——「同时在线设备上限 = 0（PRD 原文：禁止登录）」这条最强的配置
+  于是封不住 B/S：管理员设成 0，隧道全断，所有人照样从门户点开 Web 应用。现在：
+  - **同时在线设备上限：只兑现 0 这一档**（`store.EvaluateWebAccess` → `api.accessWebGate` →
+    `handleWebTicket`）。「上限 N 台」**只统计 C/S 客户端**，这是取舍不是遗漏——浏览器没有设备指纹，
+    任何编出来的键都会给出假答案：按源 IP 则同一 NAT 出口的两人共用一个名额（互相顶替 = 拒绝服务）、
+    同一个人换网络就多一个名额；按会话 Cookie 则"设备数"随他点了几个应用变。更糟的是无论哪种都会与
+    C/S 抢同一个名额池（名额按 `first_seen` 先到先得），**一次网页访问就能把一台正在用的终端挤下线**，
+    而被挤掉的人在任何地方都看不到原因。平台桶取 PC，与 `IsMobilePlatform("")` 的既有约定同一条。
+    策略页当面写明这两句，不留一个看起来管所有接入形态的旋钮。
+  - **接入超时注销：完整兑现**，执行方在网关侧（`webproxy` 会话台账逐请求判 `lastActive`）。
+    阈值由控制面随 `gateways/policy` 的 `webIdleSec` 下发（**恒下发含 0**：缺字段与 0 在网关侧动作
+    完全相同，不做三态），网关只执行不推导。**但 WebSocket 等已升级的长连接不受它约束**——
+    101 之后是裸字节转发，网关看不见上面还有没有流量，按"没有 HTTP 请求"当"没有业务流量"会切断
+    一条正在传数据的实时连接；它们另有硬上界（不超过会话 Cookie 寿命，见 `guardUpgraded`）。
+    **门户登录态本身也不受影响**：注销单条浏览器会话不能连带注销该账号的控制面令牌，那会把他的
+    C/S 隧道一起断掉（与 `accesspolicy.go` 里「刻意不接账号级强制下线通道」同一条理由）。
+  - **「谁在执行」是回执不是断言**：网关把自己正在执行的阈值随心跳报回（`GatewayInfo.WebIdleSec`
+    三态指针），`api.webAccessCoverage` 逐台折算成 `idleEnforcing` / `idleUnreported`，策略页据此
+    分开显示「已按 N 分钟执行」与「该网关未回报（旧版本，其上的浏览器接入不会被注销）」。
+- **B/S 会话进「在线用户」页且可处置**（wave11 行动 14）。改造前网关心跳只报 `al.Sessions()`
+  （SPA 放行表 = C/S 隧道会话），一个整天用浏览器访问 OA 的人在那一页上**根本不存在**——既数不到，
+  「强制下线」也点不到他。现在 `webproxy` 有会话台账（sid 签在 Cookie 里，逐请求必须查得到），
+  随心跳上报 `webSessions`，控制面按 `kind=tunnel|web` 分开呈现并给出 B/S 独有的两格
+  （绑定资源、空闲时长——L7 逐请求鉴权天然带这个信号，隧道那侧是三态的）。三条纪律：
+  - **台账查不到即拒**（摘除只有强制下线与超时注销两个来源，两者都该拒）。这同时补上了一个真洞：
+    此前 `KillUser` 只切 WebSocket，普通请求靠 `spa.Allowlist` 的账号封禁挡，而封禁窗只有 5 分钟、
+    Cookie 却活 15 分钟——封禁一过，被"强制下线"的人拿同一张 Cookie 接着访问，管理台上写着「已下线」。
+  - **网关不再报（关掉 `-web` / 版本旧）时那批会话立刻消失**，与 `gwNAT`/`gwStealth` 的
+    「nil 不覆盖不清空」方向相反：那两个是运行态配置，这个是此刻的在线快照。保留旧值会让页面
+    永远挂着一批早就不存在的浏览器会话，点「强制下线」还会真的封禁那个账号。
+  - **有在线网关不报七层会话时当面说出来**（`webBlindGateways`）：「B/S 0 人」在两种情况下长得
+    完全一样——确实没人用浏览器，和一台网关根本没在报（这一页正在漏人）。
+  - **处置粒度仍是账号维度**：撤销通道本就没有会话维度，点一条 B/S 会话同样会切断这个人的隧道。
+    确认弹窗按这个事实写，不说成「断开这条会话」。
 - **`BAIDI_POSTURE_ENFORCE=strict` 与 B/S 接入互斥**：浏览器上报不了 posture，strict 下会被
   「缺报即拒」一并拦住。这是刻意的 fail-closed（判不了 ≠ 合规），不是遗漏。
 - **会话 Cookie 不做滑动续期**，15 分钟到期回门户重新点开应用。续期会让活跃会话无限延长，

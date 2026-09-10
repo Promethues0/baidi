@@ -17,7 +17,7 @@ func testKey(t *testing.T) []byte {
 
 func TestSealOpenRoundTrip(t *testing.T) {
 	k := testKey(t)
-	in := Session{User: "zhangsan", Role: "user", Res: "oa", Exp: time.Now().Add(time.Minute).Unix()}
+	in := Session{User: "zhangsan", Role: "user", Res: "oa", Sid: "s-1", Exp: time.Now().Add(time.Minute).Unix()}
 	got, err := Open(k, Seal(k, in))
 	if err != nil {
 		t.Fatalf("往返应成功: %v", err)
@@ -31,7 +31,7 @@ func TestSealOpenRoundTrip(t *testing.T) {
 // 完全可控的输入，任何"部分可信"都等于可伪造。
 func TestOpenRejectsTamperedOrExpired(t *testing.T) {
 	k := testKey(t)
-	good := Seal(k, Session{User: "u", Role: "user", Res: "oa", Exp: time.Now().Add(time.Minute).Unix()})
+	good := Seal(k, Session{User: "u", Role: "user", Res: "oa", Sid: "s-1", Exp: time.Now().Add(time.Minute).Unix()})
 	payload, sig, _ := strings.Cut(good, ".")
 
 	cases := map[string]string{
@@ -51,7 +51,7 @@ func TestOpenRejectsTamperedOrExpired(t *testing.T) {
 	if _, err := Open(testKey(t), good); err == nil {
 		t.Fatal("换一把密钥必须验不过（网关重启即所有 Web 会话失效）")
 	}
-	expired := Seal(k, Session{User: "u", Role: "user", Res: "oa", Exp: time.Now().Add(-time.Second).Unix()})
+	expired := Seal(k, Session{User: "u", Role: "user", Res: "oa", Sid: "s-1", Exp: time.Now().Add(-time.Second).Unix()})
 	if _, err := Open(k, expired); err == nil {
 		t.Fatal("过期会话必须被拒")
 	}

@@ -32,6 +32,16 @@
       </div>
     </div>
 
+    <!-- ★「B/S 0 人」在两种情况下长得完全一样：确实没人用浏览器，和一台网关根本没在报。
+         后者意味着这一页正在漏人，必须当面说出来而不是让那个 0 被当成结论。 -->
+    <div v-if="webBlind.length" class="bd-notice bd-notice--warn">
+      <icon-exclamation-circle-fill />
+      <div class="bd-notice__body">
+        网关 <b>{{ webBlind.join('、') }}</b> 没有上报<b>浏览器（B/S）会话</b>——它们可能未开启七层 Web 代理（<code>-web</code>），
+        也可能版本较旧。这一页<b>可能漏掉</b>经这些网关接入的浏览器用户，对他们的「强制下线」也点不到。
+      </div>
+    </div>
+
     <!-- P10 聚合头：四张 KPI 同时是筛选入口，选中态由 StatCard 的 :active 承接 -->
     <div class="bd-ol__kpis">
       <StatCard label="在线会话总数" :value="onlineCount" foot="当前活跃接入会话" clickable
@@ -54,6 +64,9 @@
       <div class="bd-toolbar">
         <a-radio-group v-model="filter" type="button" size="small">
           <a-radio value="all">全部</a-radio>
+          <!-- 接入形态是这一页最基本的分组：两种会话的处置粒度与判据都不同 -->
+          <a-radio value="tunnel">客户端隧道</a-radio>
+          <a-radio value="web">浏览器</a-radio>
           <a-radio value="high">高风险</a-radio>
           <a-radio value="untrusted">未授信</a-radio>
           <a-radio value="unknown">不可判定</a-radio>
@@ -71,8 +84,9 @@
             <!-- ★删掉了「接入地点 / 终端 / 当前应用」三列：网关按会话上报的只有
                  {IP, 账号, 角色, 建立时刻}，这三格此前对每条真实会话都渲染成 "—"。
                  三列永远空着的表头不是"暂无数据"，是在暗示这些维度存在而恰好没取到。
-                 「认证方式」同理改名为「接入方式」：会话经 SPA 敲门 + 隧道建立是它唯一
-                 确定的事实，登录因子（口令/MFA/证书）发生在控制面登录时，网关不知道。 -->
+                 「认证方式」同理改名为「接入方式」：会话经 SPA 敲门 + 隧道（C/S）或
+                 门户票据 + 浏览器会话（B/S）建立，这是它唯一确定的事实；登录因子
+                 （口令/MFA/证书）发生在控制面登录时，网关不知道。 -->
             <th>用户</th>
             <th>组织</th>
             <th>来源 IP</th>
@@ -96,7 +110,18 @@
             </td>
             <td>{{ s.org || '—' }}</td>
             <td><span class="bd-mono">{{ s.ip }}</span></td>
-            <td>{{ s.auth }}</td>
+            <td>
+              <span class="bd-tg" :class="kindOf(s) === 'web' ? 'bd-tg--gold' : 'bd-tg--blue'">
+                {{ kindOf(s) === 'web' ? 'B/S 浏览器' : 'C/S 隧道' }}
+              </span>
+              <div class="bd-cellsub">{{ s.auth }}</div>
+              <!-- 只有 B/S 会话有这两格：L7 会话本就绑单个资源、逐请求鉴权天然带活跃度。
+                   隧道那侧填任何值都是假的（一条隧道可路由到多个资源，活跃时刻是三态）。 -->
+              <div v-if="kindOf(s) === 'web'" class="bd-cellsub">
+                资源 <span class="bd-mono">{{ s.resource || '—' }}</span>
+                <template v-if="s.idleSec != null"> · 空闲 {{ humanIdle(s.idleSec) }}</template>
+              </div>
+            </td>
             <td><span class="bd-mono">{{ s.gateway }}</span></td>
             <td>
               <div class="bd-cellsub">{{ loginStamp(s.loginAt) }} 起</div>
@@ -114,7 +139,10 @@
             </td>
             <td class="r">
               <template v-if="s.status === 'online'">
-                <a-popconfirm content="确认强制下线该会话？将立即断开隧道并要求重新认证。" type="warning" @ok="kick(s)">
+                <!-- ★文案必须说清真实影响面：强制下线是**账号维度**的（撤销通道本就没有
+                     会话维度），点一条 B/S 会话同样会把这个人的隧道一起断掉。
+                     写成「断开这条会话」会让管理员以为只影响他正开着的那个浏览器页面。 -->
+                <a-popconfirm :content="kickHint(s)" type="warning" @ok="kick(s)">
                   <button type="button" class="bd-link bd-link--danger">强制下线</button>
                 </a-popconfirm>
               </template>
@@ -149,7 +177,7 @@ import StatCard from '@/components/StatCard.vue';
 import EmptyState from '@/components/EmptyState.vue';
 import SkeletonBlock from '@/components/SkeletonBlock.vue';
 
-type Filter = 'all' | 'high' | 'untrusted' | 'unknown';
+type Filter = 'all' | 'tunnel' | 'web' | 'high' | 'untrusted' | 'unknown';
 
 /* 头像底色色板（按用户名哈希取色，只服务头像；KPI / 标签的语义色一律走 --bd-* 类）。 */
 const PALETTE = ['#165DFF', '#00B42A', '#FF7D00', '#F53F3F', '#722ED1', '#0FC6C2'];
@@ -166,7 +194,7 @@ const MOCK: OnlineResp = {
     { id: 'sess-1004', user: '陈晨', account: 'chen.chen', org: '研发中心 / 算法组', ip: '198.51.100.22', auth: 'SPA 敲门 + 隧道', gateway: 'gw-sz-03', loginAt: '2026-06-24T10:05:11', duration: '37m', trust: 'unknown', risk: 'unknown', trustNote: '该账号名下没有任何已登记终端', riskNote: '该账号从未上报过终端环境（observe 模式下仍可接入）', status: 'online' },
     { id: 'sess-1005', user: '孙倩', account: 'sun.qian', org: '市场部', ip: '10.20.8.66', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T08:30:19', duration: '2h11m', trust: 'trusted', risk: 'none', status: 'online' },
     { id: 'sess-1006', user: '周强', account: 'zhou.qiang', org: '研发中心 / 测试组', ip: '172.16.4.9', auth: 'SPA 敲门 + 隧道', gateway: 'gw-bj-04', loginAt: '2026-06-24T10:38:02', duration: '4m', trust: 'untrusted', risk: 'low', trustNote: '该账号名下 2 台终端：1 台已授信 / 1 台待审批', status: 'online' },
-    { id: 'sess-1007', user: '吴霜', account: 'wu.shuang', org: '人力资源部', ip: '203.0.113.140', auth: 'SPA 敲门 + 隧道', gateway: 'gw-gz-05', loginAt: '2026-06-24T09:48:27', duration: '53m', trust: 'unknown', risk: 'unknown', status: 'online' },
+    { id: 'sess-1007', user: '吴霜', account: 'wu.shuang', org: '人力资源部', ip: '203.0.113.140', auth: '门户票据 + 浏览器会话', kind: 'web', resource: 'oa', idleSec: 138, gateway: 'gw-gz-05', loginAt: '2026-06-24T09:48:27', duration: '53m', trust: 'unknown', risk: 'unknown', status: 'online' },
     { id: 'sess-1008', user: '郑昊', account: 'svc-bot-04', org: '系统 / 服务账号', ip: '10.20.1.200', auth: 'SPA 敲门 + 隧道', gateway: 'gw-hz-01', loginAt: '2026-06-24T07:10:00', duration: '—', trust: 'trusted', risk: 'none', status: 'offline', kickReason: '管理员手动下线 · 09:55' }
   ]
 };
@@ -180,6 +208,8 @@ const live = ref<boolean | undefined>(undefined);
 /** 读取失败时后端那句原话（failReason 收口，前端不编造归因）。 */
 const loadErr = ref('');
 const source = ref<'live' | 'demo'>('demo'); // live=数据面网关上报的真实敲门会话；demo=演示种子
+/** 在线、但没上报七层会话的网关（这一页可能正在漏掉它们上面的浏览器接入）。 */
+const webBlind = ref<string[]>([]);
 const filter = ref<Filter>('all');
 const keyword = ref<string>('');
 /** 首屏是否已完成第一次加载：只决定骨架屏何时让位（成功 / 降级都算完成），不改任何数据流。 */
@@ -196,9 +226,31 @@ const untrustedCount = computed<number>(() => sessions.value.filter((s) => s.tru
 const unknownCount = computed<number>(() =>
   sessions.value.filter((s) => s.trust === 'unknown' || s.risk === 'unknown').length);
 
+/** 接入形态。★旧后端不发 kind 时按 tunnel 渲染——那时这一页本来就只有隧道会话，
+ *  默认成 'web' 会把一整页 C/S 会话说成浏览器接入，而两者的处置粒度完全不同。 */
+function kindOf(s: OnlineSession): 'tunnel' | 'web' {
+  return s.kind === 'web' ? 'web' : 'tunnel';
+}
+/** 强制下线的确认文案：把**账号维度**这件事说在前面。
+ *  后端 handleKickSession 把该账号记进封禁名单 + 注销其控制面令牌，网关随下一轮策略
+ *  同时切隧道、切七层长连接、注销全部 Web 会话——不存在"只踢这一条"。 */
+function kickHint(s: OnlineSession): string {
+  return kindOf(s) === 'web'
+    ? `确认强制下线 ${s.user}？处置是账号维度的：他的浏览器会话与客户端隧道会一起被切断，并需重新认证。`
+    : `确认强制下线 ${s.user}？处置是账号维度的：他的隧道与浏览器会话会一起被切断，并需重新认证。`;
+}
+/** 空闲时长的人话。0 秒是「刚刚还有流量」，不是「不可判定」——不可判定时字段整个缺席。 */
+function humanIdle(sec: number): string {
+  if (sec < 60) return `${sec} 秒`;
+  if (sec < 3600) return `${Math.floor(sec / 60)} 分钟`;
+  return `${Math.floor(sec / 3600)} 小时`;
+}
+
 const shown = computed<OnlineSession[]>(() => {
   const kw = keyword.value.trim().toLowerCase();
   return sessions.value.filter((s) => {
+    if (filter.value === 'tunnel' && kindOf(s) !== 'tunnel') return false;
+    if (filter.value === 'web' && kindOf(s) !== 'web') return false;
     if (filter.value === 'high' && s.risk !== 'high') return false;
     if (filter.value === 'untrusted' && s.trust !== 'untrusted') return false;
     if (filter.value === 'unknown' && s.trust !== 'unknown' && s.risk !== 'unknown') return false;
@@ -248,12 +300,16 @@ async function load(): Promise<void> {
     sessions.value = r.sessions;
     generatedAt.value = r.generatedAt;
     source.value = r.source ?? 'demo';
+    webBlind.value = r.webBlindGateways ?? [];
     live.value = true;
     loadErr.value = '';
   } catch (e) {
     sessions.value = MOCK.sessions;
     generatedAt.value = MOCK.generatedAt;
     source.value = 'demo';
+    // 降级演示时不挂那条提示：它说的是"真实数据源有一块盲区"，
+    // 而此刻整页都不是真实数据（页顶那条 warn 已经把这件事说清了）。
+    webBlind.value = [];
     live.value = false;
     loadErr.value = failReason(e);
   } finally {

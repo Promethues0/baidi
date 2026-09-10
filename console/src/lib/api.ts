@@ -179,6 +179,21 @@ export interface AccessPolicyResp {
   activityKnown?: number;
   /** false = 目前没有任何活跃回执，开了「接入超时注销」也不会触发。页面必须当面说清。 */
   idleReady?: boolean;
+  /** 这两条规则在 **B/S（浏览器）** 接入上的真实覆盖面（api.webAccessCoverage）。
+   *  ★缺席 = 后端还没这一段（旧控制面），页面按「判不出来」渲染，不能当成"全覆盖"。 */
+  web?: AccessPolicyWebCoverage;
+}
+/** 接入策略在浏览器接入上的覆盖面。三项都是可判定的事实，不是文案。 */
+export interface AccessPolicyWebCoverage {
+  /** 「同时在线设备上限」在 B/S 上兑现到哪一档。
+   *  zero-only = 只兑现 0（禁止接入）；上限 N 台只统计 C/S 客户端——
+   *  浏览器没有设备指纹，编一个键出来只会让页面上那句「2/3 台」变成假话。 */
+  deviceLimitTier: 'zero-only';
+  /** 正在按下发阈值执行超时注销的在线网关 id。 */
+  idleEnforcing: string[];
+  /** 开了七层、但**没回报**自己在执行几秒的在线网关（旧版本）。
+   *  它们上面的浏览器接入不会被注销，而策略页此前只会显示「已启用 · N 分钟」。 */
+  idleUnreported: string[];
 }
 
 /* ── 应用管理（store.AppBundle）── */
@@ -1000,9 +1015,19 @@ export interface GatewaysResp { gateways: GatewayReg[] }
 export interface OnlineSession {
   id: string; user: string; account: string; org: string;
   ip: string;
-  /** 接入方式（恒为「SPA 敲门 + 隧道」）。**不是**登录因子：那发生在控制面登录时，
-   *  与这条隧道会话不同源，网关也无从得知。 */
+  /** 接入方式（「SPA 敲门 + 隧道」/「门户票据 + 浏览器会话」）。**不是**登录因子：
+   *  那发生在控制面登录时，与这条数据面会话不同源，网关也无从得知。 */
   auth: string; gateway: string;
+  /** 接入形态：tunnel = C/S 客户端隧道；web = B/S 浏览器（网关七层会话台账）。
+   *  ★两者的来源、判据与可处置粒度都不同，页面必须分得开——改造前这一页只有 tunnel，
+   *  一个整天用浏览器访问 OA 的人在这里根本不存在。旧后端不发这个字段，按 tunnel 渲染。 */
+  kind?: 'tunnel' | 'web';
+  /** 该 Web 会话绑定的资源 id（只有 kind=web 有：L7 会话本就绑单个资源，
+   *  而隧道会话可同时路由到多个资源，那一格填任何值都是假的）。 */
+  resource?: string;
+  /** 已经多久没有业务流量（秒）。**只有 kind=web 有**：L7 逐请求鉴权天然带这个信号，
+   *  隧道那侧是三态的（旧网关不报），不可判定时字段缺席而不是 0。 */
+  idleSec?: number;
   loginAt: string; duration: string;
   /** 该**账号**名下终端的授信态（会话上报里没有设备指纹，定位不到具体哪一台）。
    *  一台都没登记 = unknown，不是 trusted。 */
@@ -1016,7 +1041,13 @@ export interface OnlineSession {
   status: 'online' | 'offline';
   kickReason?: string;
 }
-export interface OnlineResp { sessions: OnlineSession[]; generatedAt: string; source?: 'live' | 'demo' }
+export interface OnlineResp {
+  sessions: OnlineSession[]; generatedAt: string; source?: 'live' | 'demo';
+  /** 在线、但**没上报**七层会话的网关 id（没开 -web 或版本旧）。
+   *  ★页面必须据此挂提示：「B/S 0 人」在两种情况下长得完全一样——确实没人用浏览器，
+   *  和一台网关根本没在报（这一页正在漏人）。缺席 = 每台在线网关都报过。 */
+  webBlindGateways?: string[];
+}
 
 /* ── 监控中心 · 用户状态（store.UserStateBundle）── */
 export interface UserStateBucket { key: string; label: string; count: number; tone: 'danger' | 'warning' | 'info' | 'normal' }

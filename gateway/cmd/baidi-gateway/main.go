@@ -357,6 +357,22 @@ func main() {
 			}
 			return out
 		})
+		// 七层 Web 会话台账随心跳上报（wave11 行动 14）：「在线用户」页里 B/S 那一半。
+		// ★没开 -web 就**不装**这个源，控制面于是分得出「这台网关没有 B/S 接入面」与
+		// 「开了七层但当前零会话」（空数组）——两者的下一步动作完全不同。
+		// 顺带回报本网关此刻在执行的超时注销阈值：控制面据此在策略页上区分
+		// 「已按 N 分钟执行」与「该网关未回报（旧版本，其上的浏览器接入不会被注销）」。
+		if webSrv != nil {
+			cp.SetWebSessions(func() ([]cplane.WebSession, int) {
+				ss := webSrv.Sessions()
+				out := make([]cplane.WebSession, 0, len(ss))
+				for _, s := range ss {
+					out = append(out, cplane.WebSession{ID: s.ID, User: s.User, Role: s.Role,
+						Res: s.Res, IP: s.IP, Since: s.Since, LastActive: s.LastActive, Exp: s.Exp})
+				}
+				return out, int(webSrv.IdleTimeout() / time.Second)
+			})
+		}
 		cp.SetIfaces(sysstat.Ifaces) // 网卡清单随心跳上报，供控制面配置地址转换时选接口
 		// 应用控制面下发的强制下线撤销名单：封禁敲门 + 撤销放行窗口 + 切断活跃隧道。
 		// 处置幂等由本地 applied[user]=until 自管，而非依赖 DenyUser 返回值——后者在网关
@@ -394,13 +410,17 @@ func main() {
 				n := proxy.KillUser(rv.User)
 				// ★七层的已升级连接（WebSocket）也要切。少了这一条，回执里"切断 N 条隧道"
 				// 只统计 L4，而一条 Web 终端的 WS 会继续搬运业务数据直到用户自己关标签页。
-				nw := 0
+				// ★nws = 注销掉的 Web 会话台账条数（wave11 行动 14）：一个只用普通请求
+				// 访问 OA 的人一条长连接都没有，此前"强制下线"对他只剩 5 分钟封禁窗，
+				// 而 Cookie 活 15 分钟——封禁一过他拿同一张 Cookie 就回来了。
+				nw, nws := 0, 0
 				if webSrv != nil {
-					nw = webSrv.KillUser(rv.User)
+					nw, nws = webSrv.KillUser(rv.User)
 				}
 				// 本机日志每轮都打（排障要看得见"闸一直在执行"），审计不。
 				slog.Warn("强制下线执行：封禁敲门 + 撤销放行 + 切断隧道",
-					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n, "killed_web_conns", nw,
+					"user", rv.User, "revoked_ips", ips, "killed_tunnels", n,
+					"killed_web_conns", nw, "killed_web_sessions", nws,
 					"until", until.Format("15:04:05"))
 				// 数据面回执：三元组动作**已执行完毕**才入队（措辞是已发生的事实，
 				// 控制面原样落审计——「已下发」与「已生效」从此可区分）。
@@ -410,10 +430,10 @@ func main() {
 				// 刻意写成 if 而不是 continue：continue 会连带跳过后面那段 pf 放行回收。
 				// 今天它恰好安全（effect==0 蕴含 len(ips)==0，那个循环本就是空转），
 				// 但下一个在这后面加动作的人不会知道这层依赖。
-				if reported.should(rv.User, len(ips)+n+nw) {
+				if reported.should(rv.User, len(ips)+n+nw+nws) {
 					webPart := ""
 					if webSrv != nil {
-						webPart = fmt.Sprintf("、切断 %d 条七层长连接", nw)
+						webPart = fmt.Sprintf("、切断 %d 条七层长连接、注销 %d 条 Web 会话", nw, nws)
 					}
 					cp.QueueEvent("revoke-applied", fmt.Sprintf(
 						"已撤销用户 %s 的放行窗口：封禁敲门至 %s、撤销放行 %d 个源IP、切断 %d 条隧道%s",
@@ -562,6 +582,21 @@ func main() {
 				}
 			}
 		}
+		// applyWebIdle 把控制面下发的「接入超时注销」阈值交给七层执行方。
+		// ★网关不做任何推导：它不知道管理员配的是几分钟、对谁生效、为什么。
+		// 拉策略失败时**不调用**——保留上一轮的阈值而不是清零，与 applyPolicy
+		// 「保留上次策略」同一条纪律（一次网络抖动不该悄悄关掉一条安全规则）。
+		applyWebIdle := func() {
+			if webSrv == nil {
+				return
+			}
+			sec := cp.WebIdleSeconds()
+			if before := webSrv.IdleTimeout(); before != time.Duration(sec)*time.Second {
+				slog.Info("七层接入超时注销阈值已更新", "before", before.String(),
+					"after", (time.Duration(sec) * time.Second).String())
+			}
+			webSrv.SetIdleTimeout(time.Duration(sec) * time.Second)
+		}
 		if err := cp.Register(report()); err != nil {
 			slog.Warn("控制面注册失败（继续轮询重试）", "err", err.Error())
 		}
@@ -571,6 +606,7 @@ func main() {
 			applyPolicy(rs)
 			applyRevoked(rv)
 			applyNAT()
+			applyWebIdle()
 			slog.Info("控制面策略已拉取", "control", *control, "count", reg.Count())
 		}
 		go func() {
@@ -582,6 +618,7 @@ func main() {
 					applyPolicy(rs)
 					applyRevoked(rv)
 					applyNAT()
+					applyWebIdle()
 				} else {
 					slog.Warn("轮询拉策略失败（保留上次策略）", "err", err.Error())
 				}

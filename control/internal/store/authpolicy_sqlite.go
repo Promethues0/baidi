@@ -9,6 +9,27 @@ import (
 
 // ── 认证策略（落库覆盖 Memory 种子）──
 
+// NormalizeAuthPolicy 补齐落库前的缺省值（新 id / 缺省优先级 / 空切片不留 nil）。幂等。
+//
+// ★抽出来是因为**保存前的防自锁闸必须对着这一份归一化后的策略求值**：
+// id 与 priority 都参与 authpolicy.Match 的挑选（优先级小者先，同优先级按 id 定序）。
+// 拿未归一的那份去算，闸看到的"适用策略"可能不是登录时真正生效的那一条——
+// 典型形态是新建策略不填优先级：闸眼里 priority=0（排在所有人前面），
+// 落库却是 50（可能被另一条 priority=10 的策略压住），两边挑中不同的策略而都不报错。
+func NormalizeAuthPolicy(p AuthPolicy) AuthPolicy {
+	if p.ID == "" {
+		p.ID = "ap-" + uuid.NewString()[:8]
+	}
+	if p.Priority == 0 {
+		p.Priority = 50
+	}
+	p.Secondary = nonNil(p.Secondary)
+	p.Exempt.Networks = nonNil(p.Exempt.Networks)
+	p.ScopeOrgs = nonNil(p.ScopeOrgs)
+	p.ScopeGroups = nonNil(p.ScopeGroups)
+	return p
+}
+
 // AuthPolicies 从库读取认证策略，按目录 + 优先级排序（优先级小者先匹配）。
 //
 // ★one_click 列不再读：它对应的「一键上线」已从模型删除（见 authpolicy.go 注释）。
@@ -79,16 +100,7 @@ ON CONFLICT(id) DO UPDATE SET name=excluded.name, directory=excluded.directory, 
 // 语义校验（冻结开关、可信网络必配网段、非默认策略必须绑定范围）在 API 层，
 // 与"保存即校验、不静默接受不生效的配置"的口径一致。
 func (s *SQLiteStore) SaveAuthPolicy(ctx context.Context, p AuthPolicy) (AuthPolicy, error) {
-	if p.ID == "" {
-		p.ID = "ap-" + uuid.NewString()[:8]
-	}
-	if p.Priority == 0 {
-		p.Priority = 50
-	}
-	p.Secondary = nonNil(p.Secondary)
-	p.Exempt.Networks = nonNil(p.Exempt.Networks)
-	p.ScopeOrgs = nonNil(p.ScopeOrgs)
-	p.ScopeGroups = nonNil(p.ScopeGroups)
+	p = NormalizeAuthPolicy(p)
 	if err := s.upsertAuthPolicy(ctx, p); err != nil {
 		return AuthPolicy{}, err
 	}

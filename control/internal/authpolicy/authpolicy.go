@@ -276,6 +276,72 @@ func Evaluate(pols []store.AuthPolicy, in Input) Decision {
 	return d
 }
 
+// Blocked 报告「按这份决策，一个**既没有 passkey 也没有 TOTP** 的账号会不会被挡在登录之外」。
+//
+// ★这不是对 api.secondFactor 的复述，而是那两条 needEnroll 分支的判据本身——
+// 两处必须调同一个函数。判据是：
+//   - RP 已配置 → 引导去注册 passkey/TOTP，不放行；
+//   - 策略点名了二次认证方式（Secondary 非空）→ legacy 演示验证码回落不成立，同样不放行。
+//
+// 两条都不成立时才回落 legacy 演示验证码（123456），那条路进得去，不算挡住。
+//
+// 保存认证策略时的防自锁闸（api.guardAuthPolicyLockout）读的就是它：各写一份的话，
+// 闸算出「还有人能进」而登录链路把他挡在门外，**而两处都不报错**——这正是本函数
+// 存在的全部理由。
+func Blocked(d Decision, rpConfigured bool) bool {
+	return d.RequireMFA && (rpConfigured || len(d.Methods) > 0)
+}
+
+// EvaluateLockout 防自锁闸专用的求值：这份策略集对该账号是否构成
+// **任何时刻、任何来源都躲不开**的二次认证要求。
+//
+// 与登录链路的 Evaluate 有两处刻意差异，两处的方向各自都是"别把可恢复的算成锁死、
+// 也别把不可恢复的算成安全"：
+//
+//   - Now 取该策略工作时段内的一个时刻 → **非工作时段增强不算锁死**：管理员等到上班
+//     时间就进得去，那是可等待的。若直接拿 time.Now() 求值，同一条策略白天存得下去、
+//     晚上存不下去，管理员只会以为系统在随机拒绝他。
+//   - 豁免（可信网络 / 授信终端）一律按**不命中**求值 → **豁免不算退路**：它取决于
+//     管理员将来从哪台机器、哪个网络登录，保存那一刻无从知道。按"他一定会在办公网里"
+//     求值，就会把「回家之后再也登不进来」算成安全。
+//
+// ★调用方传进来的 Input 只需带 Account / Directory / PwStrength / Subjects——
+// 其余几项在这里被显式覆盖，免得调用方以为自己填的 Now 或 ClientIP 会生效。
+func EvaluateLockout(pols []store.AuthPolicy, in Input) Decision {
+	p, ok := Match(pols, in)
+	if !ok {
+		return Decision{}
+	}
+	// Match 不看 Now/ClientIP/DeviceID，所以下面这次 Evaluate 一定挑中同一条 p，
+	// 用它的工作时段来构造"落在窗内"的时刻是自洽的。
+	in.Now = inWorkWindow(p.Enhance)
+	in.ClientIP = netip.Addr{}
+	in.DeviceID, in.DeviceKnown, in.DeviceVerdict = "", false, ""
+	return Evaluate(pols, in)
+}
+
+// inWorkWindow 构造一个**落在该策略工作时段内**的时刻（EvaluateLockout 专用）。
+//
+// 取工作日清单里的第一天 + 工作时段起点：offHours 判的是 `cur < start || cur >= end`，
+// 起点那一分钟恒在窗内。基准日 2024-01-01 是周一，故 ISO 星期 wd 对应偏移 wd-1。
+// 时段解析不出来时无所谓——那种配置下 offHours 本身就兜底返回 false。
+func inWorkWindow(e store.EnhanceRule) time.Time {
+	days := e.WorkDays
+	if len(days) == 0 {
+		days = []int{1, 2, 3, 4, 5}
+	}
+	wd := days[0]
+	if wd < 1 || wd > 7 {
+		wd = 1
+	}
+	start, ok := parseHM(orDefault(e.WorkStart, defaultWorkStart))
+	if !ok {
+		start = 9 * 60
+	}
+	base := time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC) // 周一
+	return base.AddDate(0, 0, wd-1).Add(time.Duration(start) * time.Minute)
+}
+
 // Match 挑出对该账号生效的策略：同目录、已启用的策略中，
 // **先看适用范围命中者**（按优先级升序，小者先匹配，同优先级按 id 定序保证结果稳定），
 // 都不命中再回落到该目录的默认策略。

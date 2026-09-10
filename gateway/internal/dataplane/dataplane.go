@@ -275,6 +275,19 @@ type tunneler struct {
 	denyOnce sync.Once
 	fetch    *knock.Fetcher // 取敲门令牌（携带 cfg.ControlTLS 的信任材料；nil 配置=系统信任库）
 
+	// ticketMu/ticket 最近一次成功取到的 L4 隧道身份票据（use=tunnel）。
+	//
+	// ★为什么是**一张**而不是逐落点各一张：与敲门令牌相反。敲门令牌必须逐落点各取一张，
+	// 因为 jti 去重是每台网关各自做的，同一封包发两处等于让截获者能给自己开一扇窗；
+	// 而身份票据**不做一次性、也不绑网关**（见 proxy.checkTunnelTicket），它只是
+	// "控制面刚认过这个人"的可携带凭证，一张就够，也不会因为多用一次而被削弱。
+	//
+	// 空串 = 还没取到（首轮敲门前）或控制面尚未升级到会发它。**空就不往前导上挂**，
+	// 绝不用敲门令牌顶替：那张令牌用另一把密钥签，在隧道口连签名都验不过，
+	// 挂上去只会把"控制面没升级"变成一条更难查的"票据无效"。
+	ticketMu sync.RWMutex
+	ticket   string
+
 	// ── 真实健康状态（供客户端展示与移动端绑定层读取）──
 	// 状态本体搬去 health.go 的 HealthState（那里有完整的来龙去脉）。这里用**内嵌指针**，
 	// 于是 t.markKnock() / t.knockOK 这些既有写法一字不改地继续可用；而同一份状态又能
@@ -334,9 +347,10 @@ func (t *tunneler) knock() {
 
 // knockOne 敲一个落点。返回 true 表示遇到了控制面的定性拒绝（**账号级**判定，与落点无关）。
 func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
-	tok, err := t.fetch.Fetch(t.cfg.Control, t.cfg.Token, t.cfg.Device)
+	grant, err := t.fetch.FetchGrant(t.cfg.Control, t.cfg.Token, t.cfg.Device)
 	switch {
 	case err == nil:
+		t.setTicket(grant.Tunnel)
 	case errors.Is(err, knock.ErrDenied):
 		t.denyOnce.Do(func() { t.deny <- err })
 		return true
@@ -355,12 +369,32 @@ func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
 		return false
 	}
 	defer uc.Close()
-	if sealed, e := knock.Seal(tok); e == nil {
+	if sealed, e := knock.Seal(grant.Knock); e == nil {
 		if _, werr := uc.Write(sealed); werr == nil {
 			t.markKnock() // 真的发出去了才算——此前界面只看"保活 ticker 起来了没有"
 		}
 	}
 	return false
+}
+
+// setTicket 记下最近一次取到的隧道身份票据。
+//
+// ★空值**不覆盖**已有的那张：多落点是并发敲门的，其中一台的取令牌请求偶发失败
+// （或对上了一个还没升级的控制面副本）不该把手里能用的票据抹掉——那会让下一条业务流
+// 退回无票据形态，在严格网关上表现为"隧道时通时不通"，与网络抖动完全同形。
+func (t *tunneler) setTicket(tk string) {
+	if tk == "" {
+		return
+	}
+	t.ticketMu.Lock()
+	t.ticket = tk
+	t.ticketMu.Unlock()
+}
+
+func (t *tunneler) currentTicket() string {
+	t.ticketMu.RLock()
+	defer t.ticketMu.RUnlock()
+	return t.ticket
 }
 
 // tunnel 把一条被 TUN 捕获的 TCP 流，经 SPA 敲门后拨入网关隧道并双向拷贝。
@@ -395,7 +429,15 @@ func (t *tunneler) tunnel(local net.Conn, dst string) {
 			"提示", "该地址在受保护网段内却不在 resmap 里：请刷新接入剖面；若资源已下架，应同时收回路由")
 		return
 	}
-	if _, err := remote.Write([]byte("CONNECT " + rid + "\n")); err != nil {
+	// 前导 = 资源 id + 隧道身份票据。票据为空时退回两段的老格式——**不是**为了兼容图省事，
+	// 而是因为"控制面还没发票据"与"这条连接没有身份"是两件事：前者该由网关按自己的
+	// 严格姿态去拒（它知道 BAIDI_GW_TUNNEL_ID_STRICT 是什么，客户端不知道），
+	// 而客户端在这里编一个值或塞别的令牌，只会把它伪装成一次"票据无效"。
+	preamble := "CONNECT " + rid
+	if tk := t.currentTicket(); tk != "" {
+		preamble += " " + tk
+	}
+	if _, err := remote.Write([]byte(preamble + "\n")); err != nil {
 		slog.Warn("发送 CONNECT 前导失败", "captured_dst", dst, "resource", rid, "err", err.Error())
 		return
 	}

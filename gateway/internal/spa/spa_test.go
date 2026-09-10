@@ -84,13 +84,13 @@ func TestRevokeUser(t *testing.T) {
 	if len(ips) != 2 {
 		t.Fatalf("应撤销 li.fang 的 2 个放行窗口，实际 %v", ips)
 	}
-	if _, _, ok := al.Allowed("10.0.0.1"); ok {
+	if al.Allowed("10.0.0.1") {
 		t.Fatal("撤销后 10.0.0.1 不应再在放行窗口内")
 	}
-	if _, _, ok := al.Allowed("10.0.0.2"); ok {
+	if al.Allowed("10.0.0.2") {
 		t.Fatal("撤销后 10.0.0.2 不应再在放行窗口内")
 	}
-	if _, _, ok := al.Allowed("10.0.0.3"); !ok {
+	if !al.Allowed("10.0.0.3") {
 		t.Fatal("其他用户的放行窗口不应被殃及")
 	}
 	if got := al.RevokeUser("li.fang"); len(got) != 0 {
@@ -123,6 +123,22 @@ func TestCheckKnockRejectsWebTicket(t *testing.T) {
 	}
 }
 
+// ★用途闸的第四向（wave11 行动 3）：L4 隧道身份票据（use=tunnel）也绝不能敲开门。
+//
+// 生产里同样有密码学隔离（隧道票据用第四把密钥签，SPA 侧只装 knock 公钥，kid 查不到）；
+// 这里测的是语义闸本身。少了它，一张隧道票就能开一扇 SPA 窗口——而隧道票**不做一次性**，
+// 于是"一次性敲门"这条纪律会被整个绕过（同一张票能反复开窗直到过期）。
+func TestCheckKnockRejectsTunnelTicket(t *testing.T) {
+	now := time.Now()
+	tun := auth.Claims{Sub: "u", Role: "user", Name: "u", Use: auth.UseTunnel,
+		Iat: now.Unix(), Exp: now.Add(5 * time.Minute).Unix()}
+	if err := checkKnock(tun, true, 5*time.Minute); err == nil {
+		t.Fatal("★隧道身份票据必须敲不开门")
+	} else if !strings.Contains(err.Error(), "非敲门令牌") {
+		t.Fatalf("应因用途不符被拒，得: %v", err)
+	}
+}
+
 // ── wave8 行动 13-①：业务活跃时刻（FR-POLICY-30 的信号源）──
 
 // TestKeepaliveDoesNotCountAsActivity 敲门保活**不是**业务流量。
@@ -137,7 +153,7 @@ func TestKeepaliveDoesNotCountAsActivity(t *testing.T) {
 		t.Fatalf("刚放行、还没有任何业务连接时，活跃时刻必须是零值（不可判定），得到 %v", s.LastActive)
 	}
 	// 一次业务连接。
-	al.Touch("10.0.0.9")
+	al.Touch("10.0.0.9", "li.fang")
 	first := sessionOf(t, al, "10.0.0.9").LastActive
 	if first.IsZero() {
 		t.Fatal("Touch 之后应记下活跃时刻")
@@ -152,7 +168,7 @@ func TestKeepaliveDoesNotCountAsActivity(t *testing.T) {
 	// 行为上看不出差别——因为 Sessions()/Allowed() 都按 until 过滤。
 	// 保留断言是为了钉住"过滤"这件事本身。
 	al2 := NewAllowlist()
-	al2.Touch("10.0.0.9")
+	al2.Touch("10.0.0.9", "li.fang")
 	if len(al2.Sessions()) != 0 {
 		t.Fatal("没有放行窗口时 Touch 不该凭空造出会话")
 	}

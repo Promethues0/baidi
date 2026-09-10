@@ -340,12 +340,14 @@ func TestInboundForwardedHeadersAreStripped(t *testing.T) {
 	}
 }
 
-// use 语义闸（这一侧）：敲门令牌不得换出 Web 会话。
-// 另一侧（敲门路径拒 use=web）由 spa 包的用例守着，两条必须成对存在。
+// use 语义闸（这一侧）：敲门令牌与 L4 隧道身份票据都不得换出 Web 会话。
+// 另外三向（敲门路径拒 web/tunnel、隧道路径拒 knock/web、控制面入站三者全拒）
+// 分别由 spa、proxy 与 control 的用例守着——四向必须齐备，少一向就有一张票能开两条闸。
 func TestKnockTokenRejectedOnWebPath(t *testing.T) {
 	h := newHarness(t)
 	for name, c := range map[string]auth.Claims{
 		"敲门令牌":    {Sub: "u", Role: "user", Name: "u", Jti: "j", Use: auth.UseKnock, Res: "oa"},
+		"隧道身份票据":  {Sub: "u", Role: "user", Name: "u", Use: auth.UseTunnel, Res: "oa"},
 		"会话令牌":    {Sub: "u", Role: "user", Name: "u"},
 		"未绑定资源":   {Sub: "u", Role: "user", Name: "u", Jti: "j", Use: auth.UseWeb},
 		"网关身份":    {Sub: "gw", Role: "gateway", Name: "gw", Jti: "j", Use: auth.UseWeb, Res: "oa"},

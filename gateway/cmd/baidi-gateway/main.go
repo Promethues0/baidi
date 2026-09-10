@@ -71,6 +71,16 @@ func main() {
 	jwtPub := flag.String("jwt-pubkey", env("BAIDI_GW_JWT_PUBKEY", ""),
 		"control 的**敲门**公钥 PEM 路径（部署期分发的 <knock 私钥>.pub），逗号分隔可装多把供轮换。"+
 			"只装 knock 公钥即可——会话令牌用另一把密钥签，其 kid 在本地查不到，从密码学上就敲不开门")
+	tunnelPub := flag.String("jwt-tunnel-pubkey", env("BAIDI_GW_TUNNEL_JWT_PUBKEY", ""),
+		"control 的**隧道身份票据**公钥 PEM 路径（部署期分发的 <BAIDI_JWT_TUNNEL_KEY>.pub），逗号分隔可装多把供轮换。"+
+			"★升级顺序必须是「先控制面、再客户端、最后网关」：这把公钥与客户端前导上的票据是一对，"+
+			"网关先升的话，还没带票据的存量终端会在严格模式下被整批拒绝")
+	tunnelIDStrict := flag.Bool("tunnel-id-strict", envBool("BAIDI_GW_TUNNEL_ID_STRICT", true),
+		"隧道身份严格模式：每条隧道连接必须在 CONNECT 前导上自带 use=tunnel 票据。"+
+			"关闭则允许不带票据的老客户端接入，身份退回**按源 IP 推断**——同一出口（企业 NAT/CGNAT/"+
+			"公共 Wi-Fi/同公网 IP 的云主机）下任意主机只要有人在放行窗内，直连隧道口即继承其全部资源授权。仅限过渡")
+	tunnelTicketTTL := flag.Duration("tunnel-ticket-max-ttl", 15*time.Minute,
+		"隧道身份票据寿命上界（纵深防御；须 ≥ control 的 tunnelTicketTTL=5min）")
 	acceptHS256 := flag.Bool("accept-hs256", envBool("BAIDI_GW_ACCEPT_HS256", false),
 		"是否接受旧的 HS256 共享密钥令牌（阶段4 起默认 false）；=true 为过渡逃生舱，会让持共享密钥者可伪造令牌")
 	statDisk := flag.String("stat-disk", env("BAIDI_GW_STAT_DISK", "/"),
@@ -160,8 +170,35 @@ func main() {
 				"前置 nginx 终结 TLS 的部署请把 nginx 的地址填进 -web-trusted-proxies")
 		}
 	}
+	// ── 隧道身份票据的验证材料（wave11 行动 3）──
+	//
+	// ★严格模式下没有公钥就**拒绝启动**，与 -web 那条同款纪律：起一个每条连接都验不过的
+	// 隧道口，管理员看到的是"功能开着但谁都连不上"，而真正的原因只是没分发公钥。
+	// 更要紧的是不能反过来——「没配公钥就悄悄退回按源 IP 定身份」正是这次要消灭的形态，
+	// 那会让一次遗漏的分发把整台网关静默降回旧的信任模型。
+	var tunnelVerifier *auth.Verifier
+	if *tunnelPub != "" {
+		tunnelVerifier, err = auth.NewVerifier(*tunnelPub, nil, false)
+		if err != nil {
+			log.Fatalf("载入隧道票据公钥失败: %v", err)
+		}
+	} else if *tunnelIDStrict {
+		log.Fatal("拒绝启动：隧道身份严格模式（默认开）必须配 -jwt-tunnel-pubkey（control 的 <BAIDI_JWT_TUNNEL_KEY>.pub）。\n" +
+			"  它与敲门公钥、Web 票据公钥是三把不同的密钥，不能互相顶替；\n" +
+			"  bootstrap 会把它连同 knock.pub / web.pub 一起签发到网关材料目录（tunnel.pub）。\n" +
+			"  过渡期确需兼容不带票据的老客户端时用 BAIDI_GW_TUNNEL_ID_STRICT=0，但那条路上身份按源 IP 推断。")
+	}
+	tunnelID := proxy.TunnelID{Verifier: tunnelVerifier, Strict: *tunnelIDStrict, MaxTTL: *tunnelTicketTTL}
+	if !*tunnelIDStrict {
+		// ★逃生舱当面告警（同 BAIDI_GW_KNOCK_STRICT=0 / -allow-no-preamble 那条纪律）。
+		// 每条真正回落的连接另有 secevent 留痕（proxy.resolveIdentity），两处都要有：
+		// 只有启动告警的话，日志滚掉之后没人知道它还开着；只有逐连接留痕的话，
+		// 一台没人用的网关上这个开关会一直是隐形的。
+		slog.Warn("⚠ 隧道身份严格模式已关闭：不带票据的连接将按**源 IP** 推断身份，" +
+			"同一出口下任意主机在放行窗内直连隧道口即可继承他人的资源授权，仅限过渡期")
+	}
 	slog.Info("baidi-gateway 启动", "version", version, "spa", *spaAddr, "proxy", *proxyAddr, "backend", *backend,
-		"ttl", ttl.String(), "strictKnock", *strictKnock,
+		"ttl", ttl.String(), "strictKnock", *strictKnock, "tunnelIDStrict", *tunnelIDStrict,
 		"公钥数", verifier.PublicKeyCount(), "acceptHS256", verifier.AcceptsLegacy())
 
 	al := spa.NewAllowlist()
@@ -176,6 +213,14 @@ func main() {
 			"默认后端", *backend,
 			"风险", "若默认后端是控制面自身的回环口，任意已敲门账号即可绕过前置限流直达控制面并伪造 X-Forwarded-For",
 			"建议", "仅在兼容老客户端时临时开启；新客户端一律经剖面下发 resmap 并发 CONNECT 前导")
+		// ★与隧道身份严格模式**互斥**，必须当面说：无前导的连接结构上带不了身份票据
+		// （票据挂在 "CONNECT <资源id> <票据>" 上），于是严格模式下这条兼容路径
+		// 一条连接都过不去。不说的话，管理员会看到「开关开着、日志里那句告警也在，
+		// 老客户端却一个都连不上」，而两个开关分别看都是对的。
+		if *tunnelIDStrict {
+			slog.Warn("⚠ -allow-no-preamble 与隧道身份严格模式同时开着：无前导的连接带不了身份票据，" +
+				"这条兼容路径实际不可达。要用它必须同时 BAIDI_GW_TUNNEL_ID_STRICT=0")
+		}
 	}
 	if *resources != "" {
 		if err := reg.LoadFile(*resources); err != nil {
@@ -274,6 +319,14 @@ func main() {
 		secRep.Bind(cp.QueueSecEvent)
 		secRep.StartFlusher(time.Minute)
 		cp.SetVersion(version) // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		if !*tunnelIDStrict {
+			// ★逃生舱在**中心侧**也要看得见。本机 slog 会随日志轮转灭失，而这个开关一旦
+			// 打开就倾向于永久开着（"先临时关掉，回头再说"）。一条开机回执落进审计，
+			// 管理员在网关页/审计中心能查到"这台网关是什么时候、以什么姿态起来的"。
+			cp.QueueEvent("tunnel-id-strict-off",
+				"本网关的隧道身份严格模式已关闭（BAIDI_GW_TUNNEL_ID_STRICT=0）："+
+					"不带票据的连接按源 IP 推断身份，同出口他人可继承该账号的资源授权。请在存量客户端升级完成后关回")
+		}
 		// 七层落点随心跳上报：控制面据此拼出浏览器该跳的入口 URL。没开就不上报，
 		// 控制面于是能对门户如实回「本网关未开启七层 Web 代理」，而不是发一张跳不通的票。
 		cp.SetWeb(*webAddr, *webCert != "" && *webKey != "")
@@ -366,7 +419,7 @@ func main() {
 				if *pf {
 					for _, ip := range ips {
 						// 与 TTL reaper 同款防误删：该 IP 若已被其他账号重新敲门放行则跳过
-						if _, _, ok := al.Allowed(ip); ok {
+						if al.Allowed(ip) {
 							continue
 						}
 						if err := darkfw.DenyIP(ip); err == nil {
@@ -550,7 +603,7 @@ func main() {
 			for range t.C {
 				for _, ip := range al.Reap() {
 					// 回收前再确认：若该 IP 已被重新敲门放行，别让陈旧 Deny 误删内核放行规则
-					if _, _, ok := al.Allowed(ip); ok {
+					if al.Allowed(ip) {
 						continue
 					}
 					if err := darkfw.DenyIP(ip); err == nil {
@@ -616,13 +669,13 @@ func main() {
 	// 证书已在上文备妥（指纹须先于注册上报），这里只负责监听。
 	if *gm {
 		slog.Info("隧道加密：国密 TLCP（持久化 CA 签发的 SM2 双证书）", "certdir", *certDir)
-		if err := proxy.ServeTLCP(*proxyAddr, tlcpCerts, reg, al, secRep); err != nil {
+		if err := proxy.ServeTLCP(*proxyAddr, tlcpCerts, reg, al, secRep, tunnelID); err != nil {
 			log.Fatalf("TLCP 代理监听失败: %v", err)
 		}
 		return
 	}
 	slog.Info("隧道加密：通用 TLS（自签）")
-	if err := proxy.Serve(*proxyAddr, tlsCert, reg, al, secRep); err != nil {
+	if err := proxy.Serve(*proxyAddr, tlsCert, reg, al, secRep, tunnelID); err != nil {
 		log.Fatalf("代理监听失败: %v", err)
 	}
 }

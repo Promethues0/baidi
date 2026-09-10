@@ -23,6 +23,17 @@ const UseKnock = "knock"
 // 连签名都验不过——use 判断是纵深，不是唯一防线。
 const UseWeb = "web"
 
+// UseTunnel L4 隧道身份票据的用途标记（Claims.Use）。
+//
+// ★它是隧道连接**自带身份**的载体。此前 proxy.handle 从 spa.Allowlist 按源 IP 反查
+// 身份，于是门槛不是"持有白帝账号"而是"共享源 IP"：同一出口下任意主机，只要有人
+// 处在放行窗内，直连隧道口即继承其全部资源授权。票据由控制面在 /knock-token
+// 同一次调用里签发，客户端挂在 "CONNECT <资源id> <票据>" 前导上。
+//
+// ★用途闸四向：敲门拒 tunnel/web，L7 拒 knock/tunnel，隧道拒 knock/web，
+// 控制面入站三者全拒。四条路径各装一把密钥，拿错票在对面连签名都验不过。
+const UseTunnel = "tunnel"
+
 type Claims struct {
 	Sub  string `json:"sub"`
 	Role string `json:"role"`
@@ -30,7 +41,7 @@ type Claims struct {
 	Exp  int64  `json:"exp"`
 	Iat  int64  `json:"iat,omitempty"`
 	Jti  string `json:"jti,omitempty"` // 短时效敲门/Web 票据的唯一 id，网关据此一次性去重
-	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；空=会话令牌/MFA 票据（strict 下拒绝）
+	Use  string `json:"use,omitempty"` // 令牌用途：knock=敲门令牌；web=L7 访问票据；tunnel=L4 隧道身份票据；空=会话令牌/MFA 票据（strict 下拒绝）
 	// Res 票据绑定的受控资源 id（只有 Use=UseWeb 时有值）。网关据此把会话 Cookie
 	// 钉死在 (账号, 资源) 上——一个应用的 Cookie 换不到另一个应用。
 	Res string `json:"res,omitempty"`

@@ -22,7 +22,12 @@ PUB="${BAIDI_GW_JWT_PUBKEY:-$HERE/../control/jwt-ed25519-knock.pem.pub}"
 #   资源鉴权（Lookup/Authorize/DenyUsers 全跳过），而参考部署的默认后端正是控制面自身。
 #   这里显式开启是为了让这个「暗→敲门→通→重暗」的最小演示仍然跑得动；**真实客户端
 #   不走这条路**：它们经接入剖面拿到 resmap，每条连接都发 `CONNECT <资源id>` 并逐条鉴权。
-nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -allow-no-preamble -ttl 30s -jwt-pubkey "$PUB" >/tmp/baidi-gateway.log 2>&1 &
+# ★同时关掉隧道身份严格模式（-tunnel-id-strict=false）：本演示第③步用 curl 直打隧道口，
+#   而**无前导的连接结构上带不了身份票据**（票据挂在 "CONNECT <资源id> <票据>" 上）。
+#   两个开关是配套的——`-allow-no-preamble` 只在严格模式关掉时才真的可达，网关启动时
+#   也会当面把这条互斥说出来。真实客户端两条都不走：它们发前导、也带票据。
+nohup "$GW" -spa "$SPA" -proxy "$PROXY" -backend "$BACKEND" -allow-no-preamble -tunnel-id-strict=false \
+  -ttl 30s -jwt-pubkey "$PUB" >/tmp/baidi-gateway.log 2>&1 &
 sleep 1
 
 echo ""; echo "① 敲门前：curl 隧道端口（期望失败=对未授权者隐身）"

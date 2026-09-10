@@ -8,10 +8,11 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
+
+	"baidi.dev/gateway/internal/kernelfwd"
 )
 
 // backend 内核后端。与 darkfw 同款探测方式，但两者的表互不相干。
@@ -238,24 +239,18 @@ func EnableForwarding() error {
 	return fmt.Errorf("不支持的平台：%s", runtime.GOOS)
 }
 
-// ForwardingEnabled 读取当前转发状态；读不到回 (false,false)。
+// ForwardingEnabled 读取当前 IPv4 转发状态；读不到回 (false,false)。
+//
+// ★实现委托给 internal/kernelfwd，本函数只做"取 v4 那一格"的收窄。
+// 不留第二份读 /proc 的代码是有意的：baidi-ipsec 也要读同一个开关（站点组网的
+// 分支流量同样经内核转发），两处各写一遍就会出现"NAT 说开着、组网说关着"这种
+// 谁也解释不清的分歧，而它们读的本该是同一个内核变量。
 func ForwardingEnabled() (on bool, known bool) {
-	switch runtime.GOOS {
-	case "linux":
-		b, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
-		if err != nil {
-			return false, false
-		}
-		return strings.TrimSpace(string(b)) == "1", true
-	case "darwin":
-		out, err := exec.Command("sysctl", "-n", "net.inet.ip.forwarding").Output()
-		if err != nil {
-			return false, false
-		}
-		v, err := strconv.Atoi(strings.TrimSpace(string(out)))
-		return v == 1, err == nil
+	st := kernelfwd.Probe()
+	if st.V4 == nil {
+		return false, false
 	}
-	return false, false
+	return *st.V4, true
 }
 
 func run(bin string, args ...string) error {

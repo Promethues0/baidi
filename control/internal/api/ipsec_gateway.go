@@ -227,6 +227,9 @@ func (s *Server) handleGatewayIpsecStatus(w http.ResponseWriter, r *http.Request
 			st.ReportedAt = now // 由控制面盖时间戳：界面上的「最近更新 3s 前」不该依赖网关时钟
 		}
 		st.State = normalizeIpsecState(st.State)
+		// 内核转发回执同样要归一后再落库（数据面用 "n/a"、库与前端用 "n-a"，
+		// 认不出的值一律折成 unknown 而不是好值）——归一只在 normalizeIpsecForward 一处。
+		st.KernelForward = normalizeIpsecForward(st.KernelForward)
 		accepted = append(accepted, st)
 	}
 	// 全量覆写：本网关不再回报的站点行随之消失。这正是「站点被删了、

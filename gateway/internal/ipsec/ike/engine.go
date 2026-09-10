@@ -10,6 +10,8 @@ import (
 	"log/slog"
 	"net/netip"
 	"runtime/debug"
+	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -47,6 +49,10 @@ type Engine struct {
 	cookies  *cookieJar
 	halfOpen *halfOpenTracker
 	limiter  *rateLimiter
+
+	// dupPeerWarn 「同一对端配了多条站点」告警的节流表（对端 IP → 上次喊话时刻）。
+	// 键只可能来自已配置站点的 peer，故有界（见 warnDuplicatePeer）。
+	dupPeerWarn map[netip.Addr]time.Time
 
 	closed bool
 }
@@ -124,13 +130,14 @@ func NewEngine(opt EngineOptions) *Engine {
 		opt.Tick = 200 * time.Millisecond
 	}
 	return &Engine{
-		opt:       opt,
-		sites:     make(map[string]*site),
-		saByLocal: make(map[[8]byte]*IKESA),
-		childSite: make(map[uint32]string),
-		cookies:   newCookieJar(opt.Now, opt.Rand),
-		halfOpen:  newHalfOpenTracker(),
-		limiter:   newRateLimiter(opt.Now),
+		opt:         opt,
+		sites:       make(map[string]*site),
+		saByLocal:   make(map[[8]byte]*IKESA),
+		childSite:   make(map[uint32]string),
+		cookies:     newCookieJar(opt.Now, opt.Rand),
+		halfOpen:    newHalfOpenTracker(),
+		limiter:     newRateLimiter(opt.Now),
+		dupPeerWarn: map[netip.Addr]time.Time{},
 	}
 }
 
@@ -889,17 +896,81 @@ func siteFingerprint(c ipsec.SiteConfig) string {
 //
 // ★只比 IP 不比端口：对端在 NAT 后时源端口是 NAT 随机分配的，比端口必然匹配不上，
 // 症状是"NAT 后的对端永远连不进来"，而日志里连一条记录都没有（静默丢包）。
+//
+// ★★同一对端配了两条站点时**必须确定性地选一条**（这里取站点 id 最小的那条）。
+// 原实现是 `for _, s := range e.sites { … return s }`——Go 的 map 迭代序是**随机**的，
+// 于是本机作为响应方时，对端每发起一次协商就掷一次骰子：
+//
+//	选中的若不是对端想建的那条 → 用错的 spec1/网段去谈 → NO_PROPOSAL_CHOSEN 或
+//	TS_UNACCEPTABLE → failSite 把**那条被随机选中的、本来健康的站点**打成 failed，
+//	而 LastError 写的是「对端的提案不可接受」——方向完全相反，管理员会去改对端配置。
+//
+// 而且它是间歇的：下一次协商可能选对，站点自己"好了"，再下一次又坏。
+//
+// 确定性不等于正确：本实现在 IKE_SA_INIT 阶段**只有对端 IP 可用**（IDr 要到 IKE_AUTH
+// 才出现，TS 更在其后），因此「同一对端两条站点」在协议层面就无法区分。真正的修法
+// 是入口不许出现这种配置（控制面 handleSaveIpsec 已拒），这里做两件事：
+// 让失败可复现（不再掷骰子），以及**喊出来**——不喊的话，存量库里那对重复站点
+// 会一直安静地互相打架。
 func (e *Engine) findSiteByPeer(remote netip.AddrPort) *site {
 	ip := remote.Addr().Unmap()
+	var best *site
+	n := 0
 	for _, s := range e.sites {
 		if !s.cfg.Enabled {
 			continue
 		}
-		if s.cfg.Peer.Addr().Unmap() == ip {
-			return s
+		if s.cfg.Peer.Addr().Unmap() != ip {
+			continue
+		}
+		n++
+		// 站点 id 字典序最小的那条。**不能用"先遇到的"**——那正是随机源。
+		if best == nil || s.cfg.ID < best.cfg.ID {
+			best = s
 		}
 	}
-	return nil
+	if n > 1 {
+		e.warnDuplicatePeer(ip, best, n)
+	}
+	return best
+}
+
+// dupPeerWarnEvery 同一对端 IP 的重复站点告警节流窗口。
+//
+// ★必须节流：IKE_SA_INIT 是**未认证**报文，对端（或任何伪造源地址的人）能随手把它
+// 打成高频。5 分钟与本项目其余节流（auditGrayObserved / secevent）同一档。
+// 不节流的后果不是性能，而是**这条告警会把日志冲成噪声，从而失去它自己的作用**。
+const dupPeerWarnEvery = 5 * time.Minute
+
+// warnDuplicatePeer 喊出「同一对端配了多条站点」。
+//
+// 键空间有界：只有**已配置站点的 peer**才走到这里，伪造源地址的报文在
+// findSiteByPeer 里根本匹配不上（n==0），进不来。
+func (e *Engine) warnDuplicatePeer(ip netip.Addr, chosen *site, n int) {
+	if e.dupPeerWarn == nil {
+		// NewEngine 一定会建它；这道兜底只为「有人直接 new(Engine) 」的路径——
+		// 往 nil map 里写会 panic，而这里在**未认证报文**的处理路径上。
+		e.dupPeerWarn = map[netip.Addr]time.Time{}
+	}
+	now := e.now()
+	if last, ok := e.dupPeerWarn[ip]; ok && now.Sub(last) < dupPeerWarnEvery {
+		return
+	}
+	e.dupPeerWarn[ip] = now
+
+	ids := make([]string, 0, n)
+	for _, s := range e.sites {
+		if s.cfg.Enabled && s.cfg.Peer.Addr().Unmap() == ip {
+			ids = append(ids, s.cfg.ID)
+		}
+	}
+	sort.Strings(ids)
+	e.opt.Log.Warn("同一对端 IP 配了多条已启用的站点，响应方无从区分",
+		"对端", ip.String(), "站点", strings.Join(ids, ","), "本次选中", chosen.cfg.ID,
+		"含义", "IKE_SA_INIT 阶段只有对端 IP 可用（IDr 要到 IKE_AUTH 才出现），"+
+			"本实现按站点 id 字典序确定性地选第一条；其余几条**永远不会被响应方选中**，"+
+			"且对端若想建的是别的那条，协商会以 NO_PROPOSAL_CHOSEN / TS_UNACCEPTABLE 失败，"+
+			"错误还会记到被选中的这条头上。请在控制面把同一对端上多余的站点删掉或改派给别的网关")
 }
 
 // ── SA 生命周期 ──

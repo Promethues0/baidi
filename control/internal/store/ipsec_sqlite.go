@@ -258,12 +258,23 @@ func (s *SQLiteStore) IpsecSecret(ctx context.Context, siteID string) (IpsecSecr
 
 const ipsecSAStateCols = `site_id,gateway_id,state,ike_spi_i,ike_spi_r,child_spi_in,child_spi_out,
  rx_bytes,tx_bytes,packets_in,packets_out,negotiated,established_at,rekey_at,expires_at,
- last_error,last_error_at,reported_at`
+ last_error,last_error_at,reported_at,kernel_forward,kernel_forward_detail`
+
+// ipsecSAStateSelect 读侧列清单：两个后补的列用 COALESCE 兜 NULL。
+//
+// ★这一列**不需要回填**（与 ipsec_sites.peer_nat_port 同款理由，但根据更硬）：
+// 整张表每 15s 被 ReplaceIpsecSAStates 全量覆写一次，既有行在一次心跳内就被换掉了；
+// 而在那之前读到的空串，语义恰好就是正确的那个——「网关还没报过这一项」。
+// 换句话说，这里回填任何值都是在替一台还没说话的网关编一个答案。
+const ipsecSAStateSelect = `site_id,gateway_id,state,ike_spi_i,ike_spi_r,child_spi_in,child_spi_out,
+ rx_bytes,tx_bytes,packets_in,packets_out,negotiated,established_at,rekey_at,expires_at,
+ last_error,last_error_at,reported_at,
+ COALESCE(kernel_forward,''),COALESCE(kernel_forward_detail,'')`
 
 // IpsecSAStates 全部网关回报的运行态行。
 func (s *SQLiteStore) IpsecSAStates(ctx context.Context) ([]IpsecSAState, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT `+ipsecSAStateCols+` FROM ipsec_sa_state ORDER BY site_id, gateway_id`)
+		`SELECT `+ipsecSAStateSelect+` FROM ipsec_sa_state ORDER BY site_id, gateway_id`)
 	if err != nil {
 		return nil, err
 	}
@@ -275,7 +286,8 @@ func (s *SQLiteStore) IpsecSAStates(ctx context.Context) ([]IpsecSAState, error)
 		if err := rows.Scan(&st.SiteID, &st.GatewayID, &st.State, &st.IKESPIi, &st.IKESPIr,
 			&spiIn, &spiOut, &st.RxBytes, &st.TxBytes, &st.PacketsIn, &st.PacketsOut,
 			&st.NegotiatedProposal, &st.EstablishedAt, &st.RekeyAt, &st.ExpiresAt,
-			&st.LastError, &st.LastErrorAt, &st.ReportedAt); err != nil {
+			&st.LastError, &st.LastErrorAt, &st.ReportedAt,
+			&st.KernelForward, &st.KernelForwardDetail); err != nil {
 			return nil, err
 		}
 		st.ChildSPIIn = uint32(spiIn)
@@ -304,12 +316,13 @@ func (s *SQLiteStore) ReplaceIpsecSAStates(ctx context.Context, gatewayID string
 	}
 	for _, st := range states {
 		if _, err := tx.ExecContext(ctx, `INSERT INTO ipsec_sa_state(`+ipsecSAStateCols+`)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 			st.SiteID, gatewayID, st.State, st.IKESPIi, st.IKESPIr,
 			int64(st.ChildSPIIn), int64(st.ChildSPIOut),
 			st.RxBytes, st.TxBytes, st.PacketsIn, st.PacketsOut,
 			st.NegotiatedProposal, st.EstablishedAt, st.RekeyAt, st.ExpiresAt,
-			st.LastError, st.LastErrorAt, st.ReportedAt); err != nil {
+			st.LastError, st.LastErrorAt, st.ReportedAt,
+			st.KernelForward, st.KernelForwardDetail); err != nil {
 			return err
 		}
 	}

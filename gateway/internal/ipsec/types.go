@@ -123,7 +123,41 @@ type SiteState struct {
 	// ★把 NO_PROPOSAL_CHOSEN 这类码点直接甩给用户等于没说，必须带上「谁不接受什么」。
 	LastError   string `json:"lastError"`
 	LastErrorAt int64  `json:"lastErrorAt"`
+
+	// KernelForward 承载本站点的那台机器上，**该站点地址族对应的**内核 IP 转发开关的
+	// 实测值。取值见下面四个常量；**空串 = 网关没报**（旧版本网关），
+	// 控制面必须把它与 KernelForwardUnknown 分开呈现——前者是"我们没问过"，
+	// 后者是"问了但答不上来"，运维的下一步动作不同。
+	//
+	// ★为什么这一格必须存在：站点组网从来不设置也不检查内核转发，而转发关着时
+	// IKE 协商全绿、SA 倒计时正常、界面显示「已建立」，只有字节数恒为 0——
+	// 分支 PC 的包在内核里就被丢了，**根本走不到 TUN 上**，ESP 层连一个包都没见过，
+	// 于是连 dropHint 那几个丢弃计数都是 0。这是一种没有任何一处会报错的失效。
+	//
+	// ★它是**回执不是断言**：白帝只读不写这个开关（改它是在改宿主机的全局网络行为，
+	// 那台机器上可能还跑着别的东西），也不据此改变任何判定——站点该 up 还是 up。
+	KernelForward string `json:"kernelForward,omitempty"`
+	// KernelForwardDetail 探测过程中的异常说明（读哪个文件失败、命令报什么错），
+	// 以及 n/a 时的具体理由。控制面原样呈现——「不可判定」不带原因等于没说。
+	KernelForwardDetail string `json:"kernelForwardDetail,omitempty"`
 }
+
+// 内核 IP 转发回执的取值。**空串是第五种状态**（网关未上报），刻意不给它常量：
+// 它不是网关能报出来的值，只可能由"字段缺席"产生，给个常量会诱使谁去写它。
+const (
+	// KernelForwardOn 实测开着。
+	KernelForwardOn = "on"
+	// KernelForwardOff 实测关着——这就是那条「显示正常、实际不通」。
+	KernelForwardOff = "off"
+	// KernelForwardUnknown 探不到（非 Linux/macOS、procfs 被屏蔽、命令失败）。
+	// ★绝不塌成 off：塌成 off 是虚警（运维会去开一个本来就开着的开关），
+	// 塌成 on 是替一台可能什么都不通的机器背书。
+	KernelForwardUnknown = "unknown"
+	// KernelForwardNA 本进程的数据面不经内核（-datapath=netstack 自检模式），
+	// 这一项对它不适用。★必须与 off 分开：netstack 自检里内核转发永远无关紧要，
+	// 报 off 会让 ipsec-e2e.sh 每次都挂出一条假告警，久了就没人看这一格了。
+	KernelForwardNA = "n/a"
+)
 
 // Counters ESP 层的真实字节/包计数。UI 上的流量数字只允许来自这里。
 type Counters struct {

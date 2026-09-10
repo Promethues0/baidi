@@ -13,6 +13,7 @@ import (
 
 	"baidi.dev/gateway/internal/cplane"
 	"baidi.dev/gateway/internal/ipsec"
+	"baidi.dev/gateway/internal/kernelfwd"
 )
 
 // ── 测试替身 ──
@@ -104,9 +105,19 @@ func (b *fakeBackend) lastApply(t *testing.T) []ipsec.SiteConfig {
 
 func quietLog() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// testSyncer 造一个用 TUN 数据面（kernelDP=true）的同步器。
+//
+// ★默认取 true 而不是 false：内核转发回执在 kernelDP=false 时**恒为 n/a**，
+// 用 false 当默认会让所有回执用例在一条"什么都不探"的分支上绿着跑完，
+// 而生产走的恰恰是另一条。要测 netstack 那一支请显式改 s.fwd.kernelDP。
 func testSyncer(cp controlClient, back ipsec.Backend) *syncer {
-	s := newSyncer(cp, "ipsec-1", back, quietLog(), nil)
+	s := newSyncer(cp, "ipsec-1", back, quietLog(), nil, true)
 	s.now = func() time.Time { return time.Unix(1_800_000_000, 0) }
+	// 探针默认换成"探不到"，让既有用例不受本机内核状态影响
+	// （本机 CI 上 ip_forward 的真实值是什么都不该改变别的断言的结果）。
+	s.fwd.probe = func() kernelfwd.State {
+		return kernelfwd.State{Platform: "test", Detail: "用例未注入探测结果"}
+	}
 	return s
 }
 

@@ -277,7 +277,7 @@ func assemble(o nodeOptions) (*node, error) {
 		return nil, fmt.Errorf("内部错误：NewUDPTransport 返回了非 *UDPTransport（%T），无从得知实际绑定的落点", tr)
 	}
 
-	dp, routes, err := buildDatapath(o.Datapath, o.TUNName, o.TUNAddr, o.MTU, log)
+	dp, routes, kernelDP, err := buildDatapath(o.Datapath, o.TUNName, o.TUNAddr, o.MTU, log)
 	if err != nil {
 		_ = udp.Close()
 		return nil, fmt.Errorf("初始化数据面失败：%w", err)
@@ -293,7 +293,7 @@ func assemble(o nodeOptions) (*node, error) {
 		Log:       log,
 	})
 
-	sy := newSyncer(o.Control, o.GatewayID, nil, log, routes)
+	sy := newSyncer(o.Control, o.GatewayID, nil, log, routes, kernelDP)
 	backend, err := site.NewBackend(site.BackendOptions{
 		GatewayID: o.GatewayID,
 		Transport: tr,
@@ -373,8 +373,14 @@ func certCN(certFile string) (string, error) {
 	return "", fmt.Errorf("%s 里没有 CERTIFICATE 块（是不是把私钥文件填到 -mtls-cert 上了？）", certFile)
 }
 
-// buildDatapath 建数据面，并返回一个"把该进隧道的网段写进路由表"的钩子（netstack 模式为 nil）。
-func buildDatapath(kind, name, addr string, mtu int, log *slog.Logger) (ipsec.Datapath, func([]netip.Prefix), error) {
+// buildDatapath 建数据面，并返回一个"把该进隧道的网段写进路由表"的钩子（netstack 模式为 nil），
+// 以及**这条数据面是否真的经内核路由**。
+//
+// ★第三个返回值不是可以从 routes==nil 反推的：那只是当前实现的巧合，
+// 而它决定内核 IP 转发回执报「实测值」还是报「不适用」（见 forward.go）。
+// 推错的后果分两个方向——生产网关被永久标成「不适用」（真关着也看不出来），
+// 或自检数据面每轮挂一条永远消不掉的假告警。
+func buildDatapath(kind, name, addr string, mtu int, log *slog.Logger) (ipsec.Datapath, func([]netip.Prefix), bool, error) {
 	// ★MTU 宁小勿大。配大了的症状极具迷惑性：小包（ping、DNS、TCP 握手）全通，
 	// 一旦发满载数据段就被丢弃，表现为「能 ping 通、SSH 能登录、HTTP 一传大文件就卡死」，
 	// 而隧道状态自始至终是 up。本实现不做 PMTUD，算错了没有任何自愈机制。
@@ -390,7 +396,7 @@ func buildDatapath(kind, name, addr string, mtu int, log *slog.Logger) (ipsec.Da
 		if v := strings.TrimSpace(addr); v != "" {
 			a, err := parseTunAddr(v)
 			if err != nil {
-				return nil, nil, err
+				return nil, nil, false, err
 			}
 			local = a
 		}
@@ -398,11 +404,13 @@ func buildDatapath(kind, name, addr string, mtu int, log *slog.Logger) (ipsec.Da
 		// 路由全部交给 routeAdder 在每轮同步后按控制面下发的 remoteSubnet 补齐。
 		d, err := ipsec.NewTUNDatapathWithAddr(name, mtu, local, nil)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		ra := &routeAdder{dev: d.Name(), log: log, done: map[netip.Prefix]bool{}}
 		log.Info("数据面：TUN（生产）", "接口", d.Name(), "本端地址", addr, "MTU", mtu)
-		return d, ra.ensure, nil
+		// 经内核：分支主机的包要先被内核从局域网口转发到这张 TUN 上，
+		// 内核 IP 转发关着时它们在路由那一层就没了（ESP 引擎连一个包都见不到）。
+		return d, ra.ensure, true, nil
 
 	case "netstack":
 		// ★自检数据面：协商、密钥派生、ESP 加解密、状态回报**全都是真的**，
@@ -410,19 +418,20 @@ func buildDatapath(kind, name, addr string, mtu int, log *slog.Logger) (ipsec.Da
 		// 存在的唯一理由是让 ipsec-e2e.sh 能在无 root、无 Docker 的机器上跑完整协商链路。
 		p, err := netip.ParsePrefix(strings.TrimSpace(addr))
 		if err != nil {
-			return nil, nil, fmt.Errorf("-datapath=netstack 需要 -tun-ip 写成带前缀长度的形式"+
+			return nil, nil, false, fmt.Errorf("-datapath=netstack 需要 -tun-ip 写成带前缀长度的形式"+
 				"（如 10.20.0.1/16，前缀长度决定哪些地址算同网段直连）：%w", err)
 		}
 		d, err := ipsec.NewNetstackDatapath(p, mtu)
 		if err != nil {
-			return nil, nil, err
+			return nil, nil, false, err
 		}
 		log.Warn("⚠ 数据面：netstack 自检模式——协商与状态回报都是真的，" +
 			"但这条隧道**不承载任何真实业务流量**（数据面在进程内）。生产必须用 -datapath=tun")
-		return d, nil, nil
+		// 不经内核：整条数据面是进程内的用户态协议栈，内核转发开关与它无关。
+		return d, nil, false, nil
 
 	default:
-		return nil, nil, fmt.Errorf("-datapath=%q 无法识别：只支持 tun（生产）与 netstack（无 root 自检）", kind)
+		return nil, nil, false, fmt.Errorf("-datapath=%q 无法识别：只支持 tun（生产）与 netstack（无 root 自检）", kind)
 	}
 }
 

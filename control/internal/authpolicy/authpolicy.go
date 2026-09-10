@@ -73,7 +73,9 @@ func Capabilities() []Capability {
 		{Key: KeyAlways, Kind: "enhance", Label: "范围内一律二次认证", Available: true,
 			Effect: "命中本策略适用范围（组织含子树 / 用户组）的账号一律要求二次认证。取代了此前写死的「账号名以 ext 开头或含外包」启发式。"},
 		{Key: KeyWeakPwd, Kind: "enhance", Label: "弱密码", Available: true,
-			Effect: "判据为账号的口令强度标记（改密 / 建号时按明文判定并落库）。标记为「未知」的存量账号不命中——不可判定不等于不合规。"},
+			Effect: "判据为账号的口令强度标记：本地账号在改密 / 建号那一刻按明文判定并落库；" +
+				"LDAP / AD / RADIUS 这类口令认证源的账号，在每次认证成功那一刻按同一套判据判定（只落强度标记，绝不落外部口令）。" +
+				"OIDC 等重定向式登录白帝拿不到口令，那类账号恒为「未知」。标记为「未知」的账号不命中——不可判定不等于不合规。"},
 		{Key: KeyOffHours, Kind: "enhance", Label: "非工作时段", Available: true,
 			Effect: "按服务器时间与本策略配置的工作日 + 工作时段判定，落在时段之外即命中。"},
 		{Key: KeyGeoAnomaly, Kind: "enhance", Label: "异地登录", Available: false,

@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"baidi.dev/control/internal/auth"
 	"baidi.dev/control/internal/authsrc"
 	"baidi.dev/control/internal/authsrc/ldapsrc"
 	"baidi.dev/control/internal/authsrc/oidcsrc"
@@ -19,7 +20,11 @@ import (
 	"baidi.dev/control/internal/store"
 )
 
-// 登录链路的认证源编排：本地目录优先，未命中再按优先级问外部源。
+// 登录链路的认证源编排：本地目录优先，未命中再问**认证域路由挑中的那一个**外部源。
+//
+// ★「按优先级依次询问」这个说法已经不成立（wave8 行动 12 起）：routeDirectory 的返回值
+// 长度恒 ≤1，一次登录只把口令交给一台服务器。auth_sources.priority 现在只决定
+// 列表/下拉的排列顺序，不是询问顺序——见 store.AuthSourceRec.Priority 的注释。
 //
 // # 这一层的全部安全语义都在注释里，改之前请读完
 //
@@ -39,6 +44,10 @@ type authSourceStore interface {
 	AuthSourceSecret(ctx context.Context, id string) (store.AuthSourceSecret, bool, error)
 	UserBySubject(ctx context.Context, sourceID, subject string) (store.Credential, bool, error)
 	BindExternalUser(ctx context.Context, sourceID string, ext store.ExternalIdentity) (store.Credential, error)
+	// SetExternalPwStrength 落一次外部口令认证判出的强度标记（只写 pw_strength 一列）。
+	// 放进这个接口而不是通用 store 接口，是为了让它**只能**从外部认证这条链路上被调到：
+	// 它接受的入参里有一个是外部目录的明文口令判定结果，别的地方没有理由碰它。
+	SetExternalPwStrength(ctx context.Context, account, strength string) error
 }
 
 // authSrcStore 取 store 的认证源能力；未实现（如纯 Memory）时返回 nil。
@@ -543,7 +552,36 @@ func (s *Server) finishExternalAuth(r *http.Request, rec store.AuthSourceRec, as
 		// 真的建了号才记（已存在的绑定不记，否则每次登录都是一条）。
 		s.auditExtUserCreated(r, rec, id, cred.Account)
 	}
+	// FR-AUTH-21：外部目录账号的口令强度**只有这一刻**判得出来（明文由客户端提交、
+	// 白帝拿它去 bind / 发 Access-Request；下一秒它就只剩对方目录里的一个哈希）。
+	// 落在这里而不是 handlePortalLogin，是因为本函数是「口令认证源」这条链的唯一出口
+	// （OIDC 的 passwordAuthOf 返回 nil，结构上进不来），拿不到口令的源不会误落一个假判定。
+	//
+	// **每次登录都判**，不是只在建号那次：外部目录里改口令白帝完全不知情，只判首次
+	// 等于把一个可能早就变了的结论一直用下去。
+	//
+	// 顺序上它排在 externalSessionCredential 的重读之前（调用方 handlePortalLogin），
+	// 所以本次登录的 secondFactor 用的就是刚落下的这个值——弱口令在**当次**就要求二次认证，
+	// 而不是"下次登录才开始生效"。
+	s.noteExternalPwStrength(ctx, as, cred.Account, password)
 	return cred, true, elapsed, nil
+}
+
+// noteExternalPwStrength 把一次外部口令认证的强度判定落库。
+//
+// ★写失败只记日志、不打断登录：口令是对的、准入闸也过了，用一次库写抖动把人挡在门外
+// 是明显更坏的方向。代价是那次登录的「弱密码」规则不会命中（标记停在上一次的值），
+// 这是 fail-open，但它与「登录整个失败」的量级不在一个数量级上，且日志里说得出来。
+//
+// ★account 传的是**白帝账号**（撞名时带源后缀）而不是用户输入的用户名：
+// `auth.PasswordWeakness` 的「口令中包含账号名」那条判据要与本地路径同口径
+// （`accountCore` 会在 `@` 处截断，所以 `alice@as-ldap` 比对的仍是 alice）。
+func (s *Server) noteExternalPwStrength(ctx context.Context, as authSourceStore, account, password string) {
+	strength := auth.PasswordStrength(account, password)
+	if err := as.SetExternalPwStrength(ctx, account, strength); err != nil {
+		slog.Error("外部账号口令强度标记落库失败（本次登录的「弱密码」规则将按上一次的标记判定）",
+			"账号", account, "err", err.Error())
+	}
 }
 
 // SetAuthTimeouts 注入外部认证的超时预算（NFR-PERF-03）。由 main 从 config 传入；

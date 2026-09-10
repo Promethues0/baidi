@@ -23,7 +23,16 @@ type AuthSourceRec struct {
 	Name    string `json:"name"`
 	Kind    string `json:"kind"`    // local | ldap | ad | oidc
 	Enabled bool   `json:"enabled"` // 管理意图
-	// Priority 多个源时的询问顺序，小的先问。本地目录恒为最高优先级，不参与排序。
+	// Priority 认证源的**排列顺序**（小的靠前）。本地目录恒排最前，不参与排序。
+	//
+	// ★它曾经是"多个源时的询问顺序"，wave8 行动 12（认证域路由）之后**那个语义已经不存在**：
+	// `api.routeDirectory` 的返回值长度恒 ≤1，一次登录只问被路由到的那一个源，
+	// 遍历式询问整段被删掉了。全仓对这一列的唯一消费方是 `ORDER BY … priority, id`。
+	//
+	// 保留它而不是删列，是因为它仍有一个真实作用：认证源列表卡片、用户目录页的身份源
+	// 选项卡、**登录页的认证域下拉**（`externalDomains` 按本查询的顺序产出）都按它排。
+	// 多目录部署里"把最多人用的那个域排在第一个"是有意义的。
+	// 但**不要**再据此写出任何与"先问谁"有关的判定或文案——那是一条已经不存在的行为。
 	Priority int `json:"priority"`
 	// Config 该类型的非敏感配置 JSON（地址、BaseDN、issuer、client_id…）。
 	// 敏感项一律不在这里——放进来就等于绕开了上面那道分表。

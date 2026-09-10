@@ -199,24 +199,39 @@
                 <li><icon-info-circle />在攻击者视角下，网关与业务<b>等同于不存在</b></li>
               </ul>
               <ul v-else class="bd-cmp__list">
-                <!-- 敞着 L7 口时，「隐身没生效」与「隐身生效了但另有一个口是敞的」
-                     是两种不同的处境，处置也不同（前者去查 nft 规则，后者是取舍问题）。 -->
+                <!-- 「隐身没生效」与「隐身生效了、但另有别的口是敞的」是两种不同的处境，
+                     处置也不同（前者去查 nft 规则，后者是取舍问题），文案必须分开。
+                     ★三次握手/open 那两条只在**内核态隐身未生效**时成立：隐身生效时
+                     隧道口已经是 filtered，那两句会把方向说反。 -->
+                <template v-if="!kernelArmed">
+                  <li><icon-info-circle />当前<b>未确认内核态隐身生效</b>（{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台）</li>
+                  <li><icon-info-circle />未敲门的 TCP 连接会<b>先完成三次握手</b>，再由用户态立即断开</li>
+                  <li><icon-info-circle />隧道口对扫描器表现为 <b>open</b> 而非 filtered：能确认这里有服务在监听</li>
+                </template>
+                <li v-else>
+                  <icon-info-circle />敲门口与隧道口的内核态隐身<b>已实测生效</b>（{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台），
+                  但它<b>只护住这两个口</b>
+                </li>
                 <li v-if="webExposed > 0">
                   <icon-info-circle />有 <b>{{ webExposed }}</b> 台网关开着<b>七层 Web 代理</b>，该端口<b>不受 SPA 隐身保护</b>
                   <span class="bd-cmp__ep">{{ (bundle.webEndpoints ?? []).join('、') }}</span>
                 </li>
-                <li v-else><icon-info-circle />当前<b>未确认内核态隐身生效</b>（{{ bundle.stealthArmed }} / {{ bundle.stealth.length }} 台）</li>
-                <li><icon-info-circle />未敲门的 TCP 连接会<b>先完成三次握手</b>，再由用户态立即断开</li>
-                <li><icon-info-circle />端口对扫描器表现为 <b>open</b> 而非 filtered：能确认这里有服务在监听</li>
-                <li><icon-info-circle />业务仍<b>接入不了</b>（无 SPA 授权即断连），但网关本身并未隐身</li>
+                <li v-if="natExposed > 0">
+                  <icon-info-circle />有 <b>{{ natExposed }}</b> 个<b>地址转换（DNAT）发布端点</b>已灌入内核，正在网关的公网地址上开着端口——
+                  隐身规则写在 filter 表上，<b>管不到 nat 表</b>
+                  <span class="bd-cmp__ep">{{ natEndpoints.join('、') }}</span>
+                </li>
+                <li v-if="natUnknown.length > 0">
+                  <icon-info-circle />有启用中的 DNAT，但这些网关的运行态<b>判不出来</b>，无从确认它们此刻有没有在公网上开着端口
+                  <span class="bd-cmp__ep">{{ natUnknown.join('、') }}</span>
+                </li>
+                <li v-if="!natKnown">
+                  <icon-info-circle />控制面<b>没有给出</b>地址转换敞口的结论（策略表读取失败，或控制面版本较旧）：
+                  无从判断有没有 DNAT 在公网上开着端口
+                </li>
+                <li><icon-info-circle />业务仍<b>接入不了</b>（无 SPA 授权即断连）</li>
               </ul>
-              <div class="bd-cmp__foot bad">
-                {{ allArmed
-                  ? '攻击面 = 0 · 先认证后连接'
-                  : (webExposed > 0
-                    ? '七层入口可见 · 隧道口按实测态 —— B/S 免客户端与端口隐身是一组取舍，不能同时成立'
-                    : '端口可见 · 业务不可达 —— 先认证后连接成立，隐身尚未成立') }}
-              </div>
+              <div class="bd-cmp__foot bad">{{ exposureFoot }}</div>
             </div>
 
             <div class="bd-card bd-cmp__c bd-cmp__c--good">
@@ -644,23 +659,54 @@ const totalTunnels = computed(() => nodes.value.filter((n) => n.online).reduce((
 
 /* ── 内核态隐身回执 ── */
 
-/* allArmed 是否**全部**在线网关都实测生效。
- * ★零台在线时为 false：那时没有任何事实支撑「攻击面 = 0」，
- * 空集恒真会让一台网关都没有的部署把最强的那段断言画出来。 */
-const allArmed = computed(() => {
+/** kernelArmed **只**看内核态隐身这一个前提（全部在线网关实测 armed，且至少一台）。
+ *  它只用来挑该显示哪几条说明——「隐身没生效」与「隐身生效了、但另有别的口敞着」
+ *  处置完全不同（前者去查 nft 规则集，后者是取舍问题），合成一个布尔会让页面
+ *  在隐身已生效时照样宣称「未敲门的连接会先完成三次握手」，把方向说反。
+ *  ★它**不是**安全断言的判据，那个见 allArmed。 */
+const kernelArmed = computed(() => {
   const rs = bundle.value.stealth ?? [];
-  if (rs.length === 0 || !rs.every((r) => r.status === 'armed')) return false;
-  // ★第二个前提：**没有敞着的七层 Web 代理口**。内核态隐身只护住敲门口与隧道口，
-  //   L7 监听不受 SPA 隐身保护，是一个对全世界敞着的 TCP 端口。少了这一条，
-  //   一台开着 `-web` 且 nft 规则装好的网关会同时显示「无任何端口可探测」与
-  //   「攻击面 = 0」，而 nmap 对着 18444 一扫一个准。
-  //   这是整页唯一一句**正向安全断言**，必须把已知敞着的口算进去。
-  return (bundle.value.webExposed ?? 0) === 0;
+  return rs.length > 0 && (bundle.value.stealthArmed ?? 0) === rs.length;
 });
+
+/** allArmed 「攻击面 = 0」这句**正向安全断言**成不成立——**由后端一处判定**
+ *  （api.stealthClaim），前端只渲染。
+ *  ★为什么不在这里算：这句话的前提集已经有三条（内核态隐身逐台实测生效 /
+ *  没有敞着的七层 Web 口 / 没有 DNAT 在网关公网地址上开着端口，且后两者都判得出来），
+ *  前端各算一遍的话，下一次加前提必然漏改其中一条轨，而漏改的那条恰好是整页最强的
+ *  那句话。同一条理由已经写在 stealthWarnings 上（安全结论的文案由后端下发）。
+ *  ★`=== true`：后端不下发这个字段（版本较旧）时按**不可判定**处理，不下结论。 */
+const allArmed = computed(() => bundle.value.stealthClaimOk === true);
 
 /** 七层 Web 代理敞口台数（旧后端不下发 → undefined，按"不可判定"处理：不改变断言，
  *  但下面那条说明照样出——不知道有没有敞口时，同样不该说"攻击面 = 0"）。 */
 const webExposed = computed(() => bundle.value.webExposed ?? 0);
+
+/* ── DNAT 敞口（「攻击面 = 0」的第三个前提）── */
+/** 已**确认灌进内核**的 DNAT 端点数。判据是网关回执 applied，不是库里 enabled——
+ *  网关没带 -nat 启动时规则一条都不会进内核，算成敞口是另一个方向的假事实。 */
+const natExposed = computed(() => bundle.value.natExposed ?? 0);
+const natEndpoints = computed(() => bundle.value.natEndpoints ?? []);
+/** 有启用中的 DNAT、却判不出规则在没在内核里的网关。不可判定单列，既不算敞口也不背书。 */
+const natUnknown = computed(() => bundle.value.natUnknown ?? []);
+/** 策略表读到了吗。★undefined 与 false 同样按不可判定处理（见 allArmed 的注释）。 */
+const natKnown = computed(() => bundle.value.natKnown === true);
+
+/** 「未装专属客户端」那张卡的结论行。文案在这里收一处：模板里嵌三层三元式时，
+ *  新增一个前提（本波的 DNAT）必然漏改其中一支，而漏改的那支正是最强的那句断言。 */
+const exposureFoot = computed(() => {
+  if (allArmed.value) return '攻击面 = 0 · 先认证后连接';
+  const open: string[] = [];
+  if (webExposed.value > 0) open.push('七层 Web 入口');
+  if (natExposed.value > 0) open.push('地址转换发布端点');
+  if (open.length > 0) {
+    return `${open.join('与')}可见 · 隧道口按实测态 —— 把网关同时当作 B/S 入口或发布路由设备，与端口隐身是一组取舍，不能同时成立`;
+  }
+  // ★这一支必须排在"不可判定"之前：隐身没生效是更要紧、也更确定的那件事，
+  //   被一句「敞口不可判定」盖住会让人去查地址转换，而真正该查的是 nft 规则集。
+  if (!kernelArmed.value) return '端口可见 · 业务不可达 —— 先认证后连接成立，隐身尚未成立';
+  return '敞口不可判定 —— 控制面无从确认公网上还开着哪些端口，因此不给出「攻击面 = 0」的结论';
+});
 
 /* ★后端 stealth.go 的每一种状态都必须在这里有名字。漏一个的后果不是报错，
    而是那一态显示成生英文 key + 走兜底的灰色样式——灰色在本项目里专表

@@ -89,7 +89,7 @@ func (s *Server) handleSaveNATPolicy(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	created := strings.TrimSpace(p.ID) == ""
-	saved, err := s.nat.SaveNATPolicy(r.Context(), p)
+	saved, err := s.nat.SaveNATPolicy(r.Context(), p, s.natListenOf(strings.TrimSpace(p.GatewayID)))
 	if err != nil {
 		s.writeNATErr(w, r, err, p)
 		return
@@ -103,6 +103,27 @@ func (s *Server) handleSaveNATPolicy(w http.ResponseWriter, r *http.Request) {
 		// 每次保存都把告警一并回给前端：管理员最需要看到「这条 DNAT 让 SPA 对该端口失效」
 		// 的时刻，就是他刚刚点下保存的时刻，而不是下次打开页面时。
 		"warnings": store.NATWarnings([]store.NATPolicy{saved})})
+}
+
+// natListenOf 取一台网关**自报**的监听地址快照，喂给 DNAT 自伤闸。
+//
+// ★判据只能来自这里（注册心跳），不能写死 18201/18443/18444：管理员用 -proxy
+// 换了端口，写死的闸保护的就是别人——既放过真正把隧道口发布出去的那条 DNAT，
+// 又把一条正常发布 18443 业务的规则拦下来。
+// 取不到时回 Reported=false（**不可判定**，不是"没有监听口"），由 store 侧退守
+// 出厂默认端口并把这一点写进拒绝文案。这个状态是真会出现的：监听地址只在内存里，
+// 控制面重启后到下一次心跳（≤15s）之间就是空的。
+func (s *Server) natListenOf(gwID string) store.NATListen {
+	if gwID == "" {
+		return store.NATListen{}
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	g, ok := s.gateways[gwID]
+	if !ok {
+		return store.NATListen{}
+	}
+	return store.NATListen{Reported: true, Proxy: g.Proxy, SPA: g.SPA, Web: g.Web}
 }
 
 func (s *Server) handleDeleteNATPolicy(w http.ResponseWriter, r *http.Request) {
@@ -159,7 +180,10 @@ func (s *Server) writeNATErr(w http.ResponseWriter, r *http.Request, err error, 
 		httpx.Error(w, http.StatusNotFound, "策略不存在")
 	case errors.Is(err, store.ErrNATIfaceUnknown),
 		errors.Is(err, store.ErrNATIfaceUntyped),
-		errors.Is(err, store.ErrNATIfaceWrongDir):
+		errors.Is(err, store.ErrNATIfaceWrongDir),
+		// 自伤闸与方向闸同档：都是「入口 200 OK、数据面照灌、页面全绿」的那一类，
+		// 拒绝本身是产品的一部分，必须落审计（管理员试过什么是排障线索）。
+		errors.Is(err, store.ErrNATSelfPublish):
 		s.audit(r, "system", "保存地址转换策略「"+p.Name+"」被拒："+err.Error(), "fail")
 		httpx.Error(w, http.StatusBadRequest, err.Error())
 	default:

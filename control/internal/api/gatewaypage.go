@@ -77,6 +77,51 @@ type GatewayPageBundle struct {
 	WebExposed int `json:"webExposed"`
 	// WebEndpoints 那几台网关的 L7 监听地址（页面据此点名说清哪台、哪个口）。
 	WebEndpoints []string `json:"webEndpoints"`
+	// ── DNAT 敞口：「攻击面 = 0」的第三个前提（wave11 行动 13-②）──
+	//
+	// 一条启用中的 DNAT **本身就是**在网关的公网地址上开一个端口，而它同样不受
+	// SPA 隐身保护（隐身是 filter 表上按隧道口/敲门口写死的规则，与 nat 表无关）。
+	// 此前那段断言的前提集里只有七层 Web 口，于是一台发布了三个内网业务的网关
+	// 照样能显示「无任何端口可探测 / 攻击面 = 0」，而 nmap 一扫三个。
+	//
+	// NATExposed 已**确认灌进内核**（网关回执 applied）的 DNAT 端点数。
+	NATExposed int `json:"natExposed"`
+	// NATEndpoints 那些端点，形如 "gw-1 tcp 203.0.113.9:9443 → 10.0.0.5:8080"。
+	NATEndpoints []string `json:"natEndpoints"`
+	// NATUnknown 有启用中的 DNAT、但**判不出**规则在没在内核里的网关（离线 / 旧网关不上报）。
+	// ★单列而不是并进 NATExposed：不可判定既不能算敞口，也不能拿去支撑正向断言。
+	NATUnknown []string `json:"natUnknown"`
+	// NATKnown 地址转换策略表读到了吗。false = 读失败，本页对 DNAT 敞口一无所知。
+	// ★「字段缺席」也当 false（不可判定）：这是一句正向安全断言，
+	// 缺证据时的正确姿态是不下结论，而不是默认没有敞口。
+	NATKnown bool `json:"natKnown"`
+	// StealthClaimOK 「攻击面 = 0」这句**正向安全断言**此刻成不成立。
+	//
+	// ★判定收在后端一处、前端只渲染：这句话的前提集已经有三条（内核态隐身逐台实测
+	// 生效 / 没有敞着的七层 Web 口 / 没有 DNAT 在网关公网地址上开着端口，且后两者
+	// 都判得出来），本波正是在给它加第三条。前提集分散在两条轨上时，加一条必然漏改
+	// 其中一处，而漏改的那处恰好是整页最强的那句断言——与 stealthWarnings 的文案
+	// 由后端下发是同一条理由。
+	StealthClaimOK bool `json:"stealthClaimOk"`
+}
+
+// stealthClaim 「攻击面 = 0」的前提集，一处判定。
+//
+// 零台在线网关时为 false：那时没有任何事实支撑这句话，空集恒真会让一台网关都没有的
+// 部署把最强的断言画出来。三条前提全部要求**确定的好结论**——不可判定一律不给背书。
+func stealthClaim(receipts []StealthReceipt, webExposed int, natExposed, natUnknown []string, natKnown bool) bool {
+	if len(receipts) == 0 {
+		return false
+	}
+	for _, r := range receipts {
+		if !r.Armed() {
+			return false
+		}
+	}
+	if webExposed > 0 {
+		return false
+	}
+	return natKnown && len(natExposed) == 0 && len(natUnknown) == 0
 }
 
 // GatewayNodeView 一台已注册网关的页面投影。字段与注册心跳一一对应。
@@ -170,6 +215,20 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	}
 	s.mu.Unlock()
 	sort.Strings(out.WebEndpoints)
+	// DNAT 敞口（同属「攻击面 = 0」的前提集，与七层口并列而不是合并：
+	// 两者的处置完全不同——七层口是 B/S 接入的取舍，DNAT 是把网关当发布路由设备用）。
+	natExposed, natUnknown, natKnown := s.natExposure(r.Context())
+	out.NATEndpoints, out.NATUnknown, out.NATKnown = natExposed, natUnknown, natKnown
+	out.NATExposed = len(natExposed)
+	if out.NATEndpoints == nil {
+		out.NATEndpoints = []string{}
+	}
+	if out.NATUnknown == nil {
+		out.NATUnknown = []string{}
+	}
+	if w := natExposureWarning(natExposed, natUnknown, natKnown); w != "" {
+		out.StealthWarnings = append(out.StealthWarnings, w)
+	}
 	if out.WebExposed > 0 {
 		out.StealthWarnings = append(out.StealthWarnings, fmt.Sprintf(
 			"有 %d 台在线网关开着七层 Web 代理（%s）。**该监听口不受 SPA 隐身保护**："+
@@ -178,6 +237,9 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 				"B/S 免客户端接入与端口隐身是一组取舍，不能同时成立。",
 			out.WebExposed, strings.Join(out.WebEndpoints, "、")))
 	}
+	// 「攻击面 = 0」的最终判定：三条前提齐了才成立（见 stealthClaim 的注释）。
+	// 必须排在 WebExposed / natExposure 都算完之后。
+	out.StealthClaimOK = stealthClaim(out.Stealth, out.WebExposed, natExposed, natUnknown, natKnown)
 	// 确定性排序（在线优先、其次 id 字典序）：map 遍历顺序随机，
 	// 每次刷新节点跳位会让人以为拓扑真的在变。
 	sort.Slice(out.Nodes, func(i, j int) bool {

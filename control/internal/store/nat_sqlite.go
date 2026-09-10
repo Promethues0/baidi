@@ -39,7 +39,10 @@ func (s *SQLiteStore) NATPolicies(ctx context.Context) ([]NATPolicy, error) {
 //
 // 校验用的网卡清单在事务内现读：管理员改网卡类型与建策略是两个并发操作，
 // 用事务外读到的旧清单校验，会放过一条方向已经不成立的规则。
-func (s *SQLiteStore) SaveNATPolicy(ctx context.Context, p NATPolicy) (NATPolicy, error) {
+//
+// listen 由调用方从心跳登记里取（网关自报的监听地址，不落库），供 DNAT 自伤闸判定；
+// 零值即"该网关没上报过"，闸会退守出厂默认端口并在拒绝文案里说清楚。
+func (s *SQLiteStore) SaveNATPolicy(ctx context.Context, p NATPolicy, listen NATListen) (NATPolicy, error) {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return NATPolicy{}, err
@@ -50,7 +53,7 @@ func (s *SQLiteStore) SaveNATPolicy(ctx context.Context, p NATPolicy) (NATPolicy
 	if err != nil {
 		return NATPolicy{}, err
 	}
-	p, err = normNATPolicy(p, ifaces)
+	p, err = normNATPolicy(p, ifaces, listen)
 	if err != nil {
 		return NATPolicy{}, err
 	}

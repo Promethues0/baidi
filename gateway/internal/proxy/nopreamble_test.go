@@ -44,6 +44,10 @@ func startBackend(t *testing.T) net.Listener {
 }
 
 // noPreambleRun 已敲门的连接直接发一个普通 HTTP 请求（无前导），返回读到的字节与上报记录。
+//
+// ★这条路径一律用**逃生舱姿态**的 TunnelID：无前导的连接结构上带不了身份票据，
+// 于是 `-allow-no-preamble` 只在 BAIDI_GW_TUNNEL_ID_STRICT=0 时才真的可达
+// （网关启动时会当面把这条互斥说出来）。用严格姿态跑这里，测的就不是无前导那件事了。
 func noPreambleRun(t *testing.T, allowNoPreamble bool) (string, *capture) {
 	t.Helper()
 	backend := startBackend(t)
@@ -60,7 +64,7 @@ func noPreambleRun(t *testing.T, allowNoPreamble bool) (string, *capture) {
 	cap := &capture{}
 	cli, srv := tcpPair(t)
 	done := make(chan struct{})
-	go func() { handle(srv, reg, al, secevent.New(cap.sink)); close(done) }()
+	go func() { handle(srv, reg, al, secevent.New(cap.sink), looseTunnelID(t)); close(done) }()
 
 	_ = cli.SetWriteDeadline(time.Now().Add(3 * time.Second))
 	_, _ = cli.Write([]byte("GET / HTTP/1.1\r\nHost: x\r\n\r\n")) // 首字节 'G'

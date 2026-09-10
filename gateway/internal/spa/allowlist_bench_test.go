@@ -32,7 +32,7 @@ func benchAllowedParallel(b *testing.B, n int) {
 	b.ResetTimer()
 	b.RunParallel(func(pb *testing.PB) {
 		for pb.Next() {
-			if _, _, ok := al.Allowed(ip); !ok {
+			if !al.Allowed(ip) {
 				b.Fatal("应命中放行窗口")
 			}
 		}

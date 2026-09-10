@@ -50,7 +50,7 @@ func Test并发到顶拒绝新连接并留痕(t *testing.T) {
 		t.Fatalf("起监听失败：%v", err)
 	}
 	defer ln.Close()
-	go func() { _ = serve(ln, reg, al, secevent.New(cap.sink), 1) }()
+	go func() { _ = serve(ln, reg, al, secevent.New(cap.sink), looseTunnelID(t), 1) }()
 
 	// 第一条：占住唯一 slot。
 	c1, err := net.Dial("tcp", ln.Addr().String())

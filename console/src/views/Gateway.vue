@@ -152,6 +152,12 @@
             </div>
           </div>
 
+          <!-- L4 隧道身份姿态（wave11）。★与隐身分开成两段：那一格讲的是端口可见性，
+               这一格讲的是「进来的这条连接是谁」。文案同样全部由后端下发。 -->
+          <div v-for="(w, i) in bundle.tunnelIdWarnings || []" :key="'tw' + i" class="bd-notice bd-notice--warn">
+            <icon-exclamation-circle-fill /><span>{{ w }}</span>
+          </div>
+
           <!-- 隐身实测回执。★文案全部由后端下发：这是安全结论，
                前端自己编就会与后端实际判定脱节（与 Nat.vue 的 warnings 同纪律）。 -->
           <div class="bd-section-title">

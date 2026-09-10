@@ -11,8 +11,14 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK=/tmp/baidi-e2e
-CONTROL=http://127.0.0.1:8090
-MTLS=https://127.0.0.1:8092
+# 控制面的两个口同样可覆盖。★理由与下面那段逐字相同，只是踩到得更晚：
+#   开发机上常常已经跑着一个 baidi-control（`cd control && go run ./cmd/baidi-control`），
+#   而这两个端口此前写死——自检会在端口预检那一步直接停下，且**没有可用的出路**
+#   （提示里只给了 SPA/隧道两个覆盖项）。
+CONTROL_PORT="${BAIDI_E2E_CONTROL_PORT:-8090}"
+MTLS_PORT="${BAIDI_E2E_MTLS_PORT:-8092}"
+CONTROL=http://127.0.0.1:$CONTROL_PORT
+MTLS=https://127.0.0.1:$MTLS_PORT
 # 端口可覆盖：开发机上 18201/18443 这类常用端口常被别的项目占着，
 # 撞port 时的表象是「握手报 protocol version not supported」之类完全不相干的错误，
 # 极易被误判成白帝自身的 bug。故既允许覆盖，也在下面做显式预检。
@@ -60,7 +66,8 @@ preflight_port() {
   holder=$(lsof -nP -i"$proto":"$port" 2>/dev/null | awk 'NR==2{print $1" (pid "$2")"}')
   if [ -n "$holder" ]; then
     echo "   ✗ $label 端口 $port 已被占用：$holder"
-    echo "     换端口重跑，例如：BAIDI_E2E_PROXY_PORT=28443 BAIDI_E2E_SPA_PORT=28201 $0"
+    echo "     换端口重跑，例如：BAIDI_E2E_PROXY_PORT=28443 BAIDI_E2E_SPA_PORT=28201 \\"
+    echo "                        BAIDI_E2E_CONTROL_PORT=28090 BAIDI_E2E_MTLS_PORT=28092 $0"
     return 1
   fi
   return 0
@@ -79,19 +86,24 @@ trap cleanup EXIT
 
 mkdir -p "$WORK"
 
-# ★自检必须跑在**独立的库与密钥材料**上：BAIDI_DB / BAIDI_PKI_DIR / 两把签名密钥
+# ★自检必须跑在**独立的库与密钥材料**上：BAIDI_DB / BAIDI_PKI_DIR / 四把签名密钥
 # 全部指向 ${WORK}。否则自检会改写使用者 control/baidi.db 里的演示资源后端
-# （下面要把 oa/git 指向本机端口才能观测路由），把人家的演示环境搞坏。
+# （下面要把两个演示资源指向本机端口才能观测路由），把人家的演示环境搞坏。
+# 四把都显式写出，而不是靠「control 的 cwd 恰好是 $WORK」那条隐式依赖：
+# 有人改了启动目录就会静默把使用者的密钥卷进来，而症状要到很后面才显形。
 export BAIDI_DB="$WORK/e2e.db"
 export BAIDI_PKI_DIR="$WORK/pki"
 export BAIDI_JWT_KEY="$WORK/jwt-ed25519.pem"
 export BAIDI_JWT_KNOCK_KEY="$WORK/jwt-ed25519-knock.pem"
-export BAIDI_MTLS_ADDR=127.0.0.1:8092
+export BAIDI_JWT_WEB_KEY="$WORK/jwt-ed25519-web.pem"
+export BAIDI_JWT_TUNNEL_KEY="$WORK/jwt-ed25519-tunnel.pem"
+export BAIDI_ADDR="127.0.0.1:$CONTROL_PORT"
+export BAIDI_MTLS_ADDR="127.0.0.1:$MTLS_PORT"
 
 echo "==> 端口预检"
 RC=0
-preflight_port TCP 8090  "控制面"      || RC=1
-preflight_port TCP 8092  "网关 mTLS"   || RC=1
+preflight_port TCP "$CONTROL_PORT" "控制面"    || RC=1
+preflight_port TCP "$MTLS_PORT"    "网关 mTLS" || RC=1
 preflight_port TCP "$PROXY_PORT" "隧道代理" || RC=1
 preflight_port UDP "$SPA_PORT"   "SPA 敲门"  || RC=1
 preflight_port TCP "$BE1_PORT"   "后端 A"    || RC=1
@@ -153,8 +165,12 @@ echo "==> 起网关（暗；mTLS 注册到控制面并上报隧道证书指纹�
 # 敲门公钥是控制面首启自动生成的（私钥同名 .pub），自检用 $WORK 下这套独立密钥
 PUB="${BAIDI_GW_JWT_PUBKEY:-$WORK/jwt-ed25519-knock.pem.pub}"
 [ -f "$PUB" ] || { echo "   ✗ 找不到 control 的敲门公钥：$PUB"; exit 1; }
+# 隧道身份票据的公钥（wave11 行动 3）：每条隧道连接都要在 CONNECT 前导上自带一张
+# use=tunnel 票据，网关用这把公钥验签取身份。严格模式默认开，缺这把网关会拒绝启动。
+TPUB="${BAIDI_GW_TUNNEL_JWT_PUBKEY:-$WORK/jwt-ed25519-tunnel.pem.pub}"
+[ -f "$TPUB" ] || { echo "   ✗ 找不到 control 的隧道票据公钥：$TPUB"; exit 1; }
 nohup "$WORK/baidi-gateway" -spa "127.0.0.1:$SPA_PORT" -proxy "127.0.0.1:$PROXY_PORT" \
-  -backend "127.0.0.1:$BE1_PORT" -ttl 60s -jwt-pubkey "$PUB" \
+  -backend "127.0.0.1:$BE1_PORT" -ttl 60s -jwt-pubkey "$PUB" -jwt-tunnel-pubkey "$TPUB" \
   -control "$MTLS" -gwid gw-1 \
   -mtls-cert "$WORK/gw.crt" -mtls-key "$WORK/gw.key" -mtls-ca "$WORK/ca.crt" \
   >"$WORK/gateway.log" 2>&1 &
@@ -164,7 +180,10 @@ echo "   ✓ 网关已注册（指纹：$(grep -o 'fp=[0-9a-f]*' "$WORK/gateway.
 
 echo ""
 echo "════════ 全链路自检 ════════"
-"$WORK/baidi-e2e"
+# ★把控制面地址显式传给自检客户端。它此前写死 http://127.0.0.1:8090——
+#   开发机上另跑着一个 baidi-control 时，自检会连到**别人的**控制面上，
+#   登录照样成功（种子口令相同），然后在第 ② 步报「控制面认为网关离线」。
+BAIDI_E2E_CONTROL="$CONTROL" "$WORK/baidi-e2e"
 RC=$?
 echo ""
 [ $RC -eq 0 ] && echo "日志：$WORK/{control,gateway}.log" || echo "✗ 自检失败，日志：$WORK/{control,gateway}.log"

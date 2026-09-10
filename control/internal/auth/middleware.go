@@ -42,8 +42,8 @@ func Middleware(keys *Keys, isOpen func(method, path string) bool) func(http.Han
 			// 票据可以直接当 Bearer 用——一张本该"只开一扇门 60s"的资源级票据，
 			// 等价于该账号 60s 的全量 API 会话（admin 的票就是 60s 全权管理台），
 			// 而且能拿它再调一次 /portal/web-ticket 自我续签，"短时效"被结构性抵消。
-			// 数据面那两条路径各有自己的 use 闸（spa.checkKnock / webproxy.VerifyTicket），
-			// 这一侧此前是缺的那一半，且爆炸半径最大。
+			// 数据面那三条路径各有自己的 use 闸（spa.checkKnock / webproxy.VerifyTicket /
+			// proxy.checkTunnelTicket），这一侧此前是缺的那一半，且爆炸半径最大。
 			//
 			// 默认拒绝还有个作用：将来新增任何用途的票据，默认进不了控制面，不会漏。
 			switch c.Use {
@@ -60,7 +60,7 @@ func Middleware(keys *Keys, isOpen func(method, path string) bool) func(http.Han
 			default:
 				w.Header().Set("Content-Type", "application/json; charset=utf-8")
 				w.WriteHeader(http.StatusForbidden)
-				_, _ = w.Write([]byte(`{"error":{"message":"该令牌只用于数据面入场（敲门 / 七层访问票据），不能调用控制面接口"}}`))
+				_, _ = w.Write([]byte(`{"error":{"message":"该令牌只用于数据面入场（敲门 / 隧道身份票据 / 七层访问票据），不能调用控制面接口"}}`))
 				return
 			}
 			next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), ctxKey{}, c)))

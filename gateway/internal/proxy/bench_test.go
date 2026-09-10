@@ -238,7 +238,7 @@ func startProxy(tb testing.TB, ln net.Listener, backend string, limit int) {
 	al := spa.NewAllowlist()
 	al.Allow("127.0.0.1", "bench.user", "user", time.Hour)
 	rep := secevent.New(func(string, string, string, int, bool) {})
-	go func() { _ = serve(ln, reg, al, rep, limit) }()
+	go func() { _ = serve(ln, reg, al, rep, looseTunnelID(tb), limit) }()
 }
 
 // dialer 是一种加密形态的客户端拨号（返回已完成握手的连接）。

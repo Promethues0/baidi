@@ -192,7 +192,7 @@ func (s *Server) handleIssueGatewayCert(w http.ResponseWriter, r *http.Request) 
 	// CN 前缀是温备同步端点的**唯一分权判据**（standbyCNOnly 就是 HasPrefix），
 	// 而这里对 gatewayId 原样当 CN 签。不拦的话，持 PermSystem 的系统管理员可以
 	// 签一张 CN=standby-任意 的证书，凭它 GET /api/v1/standby/backup 拉走整套信任材料
-	// （CA 私钥 + 三把签名私钥 + 审计链密钥 + 整个库）——那是备机专属的出口。
+	// （CA 私钥 + 四把签名私钥 + 审计链密钥 + 整个库）——那是备机专属的出口。
 	// 备机证书的正路是**离线 CLI**（baidi-control -issue-gateway-cert standby-1 -out …，
 	// 见 deploy/README.md）：要有这台机器的文件系统访问权，不是一次 HTTP 调用。
 	// `ipsec-` 不拦：组网网关的证书本来就走这条 HTTP 路（gateway/ipsec-e2e.sh），

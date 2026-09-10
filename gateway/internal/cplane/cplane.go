@@ -62,7 +62,10 @@ type Client struct {
 	// 但新网关**无论开没开 -nat 都要装上它**，见 NATState.Enabled 的注释。
 	natState func() NATState
 	stealth  func() StealthState
-	httpc    *http.Client
+	// tunnelIDStrict L4 隧道身份严格模式姿态。nil = 未装（不上报），
+	// 但新网关的 main 一律会调 SetTunnelIDStrict——见那里的注释。
+	tunnelIDStrict *bool
+	httpc          *http.Client
 
 	// lastNAT/natPresent 上一次策略响应里的地址转换策略，以及控制面**是否下发了**该字段。
 	// 两者分开存是必须的：nil（旧控制面不认识 NAT）与空数组（本网关无策略）
@@ -160,6 +163,13 @@ type StealthState struct {
 
 // SetStealth 装上内核态隐身回执源。**新网关一律要调它**，理由见 StealthState 注释。
 func (c *Client) SetStealth(fn func() StealthState) { c.stealth = fn }
+
+// SetTunnelIDStrict 上报本网关的 **L4 隧道身份严格模式**姿态（wave11 行动 3）。
+//
+// ★**新网关一律要调它**（哪怕值是 true）：控制面据此区分「这台网关的逃生舱开着」
+// 与「这台网关根本不会报」。少了这一项，一台停在旧信任模型上的网关，在网关页上
+// 与已收口的那些长得完全一样——而它正按源 IP 定身份，同出口他人可继承授权。
+func (c *Client) SetTunnelIDStrict(v bool) { c.tunnelIDStrict = &v }
 
 // SetNAT 装上地址转换运行态快照源。
 //
@@ -396,6 +406,9 @@ func (c *Client) Register(clients, tunnels int, uptimeSec int64, sessions []Sess
 	}
 	// 内核态隐身实测回执（wave8 行动 7）：同款三态兼容。★新网关一律上报，
 	// 没开 -pf 时报 wanted=false——控制面必须分得出「没开」与「旧网关不会报」。
+	if c.tunnelIDStrict != nil {
+		payload["tunnelIdStrict"] = *c.tunnelIDStrict
+	}
 	if c.stealth != nil {
 		payload["stealth"] = c.stealth()
 	}

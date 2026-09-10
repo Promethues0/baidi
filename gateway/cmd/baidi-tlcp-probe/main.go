@@ -32,7 +32,10 @@ func main() {
 		os.Exit(2)
 	}
 	// ① 换短时效一次性敲门令牌（网关 strict 模式只认它，会话令牌敲不开）
-	knockTok, err := knock.FetchToken(*control, *token, *device)
+	// 取 Grant：敲门令牌 + 隧道身份票据。后者要挂在 CONNECT 前导上，
+	// 否则严格模式的网关会以「连接未携带身份票据」拒掉这次探测，而那与"隧道坏了"同形。
+	grant, err := knock.NewFetcher(nil).FetchGrant(*control, *token, *device)
+	knockTok := grant.Knock
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "获取短时效敲门令牌失败:", err)
 		os.Exit(1)
@@ -81,7 +84,11 @@ func main() {
 	// ③ 经国密隧道取后端业务响应；如指定资源先发目标前导
 	_ = conn.SetDeadline(time.Now().Add(4 * time.Second))
 	if *resource != "" {
-		_, _ = conn.Write([]byte("CONNECT " + *resource + "\n"))
+		preamble := "CONNECT " + *resource
+		if grant.Tunnel != "" {
+			preamble += " " + grant.Tunnel
+		}
+		_, _ = conn.Write([]byte(preamble + "\n"))
 	}
 	_, _ = conn.Write([]byte("GET / HTTP/1.0\r\nHost: baidi\r\n\r\n"))
 	buf := make([]byte, 512)

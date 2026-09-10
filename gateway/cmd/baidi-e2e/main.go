@@ -64,7 +64,13 @@ func die(f string, a ...any) { fmt.Printf("   ✗ "+f+"\n", a...); os.Exit(1) }
 func ok(f string, a ...any)  { fmt.Printf("   ✓ "+f+"\n", a...) }
 
 func main() {
-	const control = "http://127.0.0.1:8090"
+	// 控制面地址可由 e2e.sh 覆盖（默认与它的默认端口一致）。
+	//
+	// ★为什么必须能覆盖：写死 8090 时，开发机上另跑着一个 baidi-control 就会让本自检
+	// **连到别人的控制面上**——登录照样成功（种子账号口令相同），然后在第 ② 步报
+	// 「控制面认为网关离线」，而真正的原因是自检起的那台网关注册在另一个进程里。
+	// 那句错误指向信任链，把人支去查 mTLS 与证书，实测踩过一次。
+	control := envOr("BAIDI_E2E_CONTROL", "http://127.0.0.1:8090")
 
 	fmt.Println("① 门户登录（真实凭据校验）")
 	body, _ := json.Marshal(map[string]string{"username": "li.fang", "password": "baidi@123"})
@@ -124,10 +130,16 @@ func main() {
 	ok("被拒绝（隐身）")
 
 	fmt.Println("④ 经控制面换短时效一次性敲门令牌 → SPA 敲门")
-	tok, err := knock.FetchToken(control, lr.Token, e2eDevice)
+	// ★取的是 Grant 而不是单一令牌：同一次调用还带回 use=tunnel 身份票据，
+	// 隧道前导要挂它——网关默认严格，不带票据的连接会被拒（那正是 wave11 行动 3 的闸）。
+	grant, err := knock.NewFetcher(nil).FetchGrant(control, lr.Token, e2eDevice)
 	if err != nil {
 		die("取敲门令牌失败: %v", err)
 	}
+	if grant.Tunnel == "" {
+		die("控制面没有下发隧道身份票据（tunnelTicket）：严格网关会拒掉每一条隧道连接")
+	}
+	tok := grant.Knock
 	uc, err := net.Dial("udp", p.Gateway.Host+":"+p.Gateway.SPAPort)
 	if err != nil {
 		die("SPA 拨号失败: %v", err)
@@ -136,7 +148,7 @@ func main() {
 	uc.Write(sealed)
 	uc.Close()
 	time.Sleep(800 * time.Millisecond)
-	ok("敲门包已发送（use=knock 短时效一次性令牌）")
+	ok("敲门包已发送（use=knock 短时效一次性令牌，并已取到 use=tunnel 隧道身份票据）")
 
 	fmt.Println("⑤ 用剖面下发的指纹钉扎握手（验证隧道已「加密 + 认证」）")
 	pinned := &tls.Config{
@@ -191,7 +203,7 @@ func main() {
 		if err != nil {
 			die("隧道拨号失败: %v", err)
 		}
-		fmt.Fprintf(conn, "CONNECT %s\n", rid)
+		fmt.Fprintf(conn, "CONNECT %s %s\n", rid, grant.Tunnel)
 		fmt.Fprintf(conn, "GET / HTTP/1.0\r\nHost: x\r\n\r\n")
 		conn.SetReadDeadline(time.Now().Add(3 * time.Second))
 		var got string
@@ -214,7 +226,7 @@ func main() {
 	if err != nil {
 		die("拨号失败: %v", err)
 	}
-	fmt.Fprintf(conn, "CONNECT finance\nGET / HTTP/1.0\r\n\r\n")
+	fmt.Fprintf(conn, "CONNECT finance %s\nGET / HTTP/1.0\r\n\r\n", grant.Tunnel)
 	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
 	buf := make([]byte, 64)
 	n, _ := conn.Read(buf)
@@ -225,4 +237,12 @@ func main() {
 	ok("网关拒绝（授权权威在数据面，剖面只是路由提示）")
 
 	fmt.Println("\n✅ 全链路通过")
+}
+
+// envOr 取环境变量，空则回落默认值。
+func envOr(k, def string) string {
+	if v := strings.TrimSpace(os.Getenv(k)); v != "" {
+		return v
+	}
+	return def
 }

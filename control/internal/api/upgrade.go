@@ -371,7 +371,7 @@ func (s *Server) groupsOf(r *http.Request, account string) []string {
 //
 // ★权限是 `PermSystem ∩ PermAdmins`（实际只有 root），不是单 PermSystem。
 //
-// 这份备份**就是**温备端点吐出来的那一份（同一个 backupSources）：CA 私钥 + 三把
+// 这份备份**就是**温备端点吐出来的那一份（同一个 backupSources）：CA 私钥 + 四把
 // 签名私钥 + 审计链密钥 + 认证源凭据 + IPSec PSK + 整个库。口令还由导出者自己指定，
 // 也就是他随手就能解开。于是单 PermSystem 时三权分立可以被一条直路绕开：
 // 系统管理员导出备份 → 解出 BAIDI_JWT_KEY → 自签一张 Name=某 root 的会话令牌 →
@@ -502,7 +502,7 @@ func (s *Server) backupSources(ctx context.Context) ([]upgrade.BackupSource, fun
 		return nil, func() {}, err
 	}
 	add("baidi.db", snap)
-	// ★内部 CA 与三把签名私钥：问**真正在用它们的那个对象**要路径，绝不重读环境变量。
+	// ★内部 CA 与四把签名私钥：问**真正在用它们的那个对象**要路径，绝不重读环境变量。
 	//
 	//   此前这里是 os.Getenv("BAIDI_PKI_DIR") 与三个 BAIDI_JWT_*_KEY，而这四项在
 	//   config 里**都有非空默认值**（pki / jwt-ed25519{,-knock,-web}.pem）——标准部署
@@ -510,14 +510,18 @@ func (s *Server) backupSources(ctx context.Context) ([]upgrade.BackupSource, fun
 	//   备份照样"成功"，备机校验（解得开 + 含 baidi.db）照样通过，页面显示同步新鲜。
 	//   只在真正恢复的那天暴露：
 	//     - 内部 CA 丢了 → 签不出网关 mTLS 证书、也验不了已签发的那些 → 网关全部连不上控制面；
-	//     - 三把私钥丢了 → control 重新生成，而各网关装的还是旧公钥 → 敲门令牌验不过
-	//       （全员无法接入）、web 票据验不过（B/S 全挂）。
+	//     - 四把私钥丢了 → control 重新生成，而各网关装的还是旧公钥 → 敲门令牌验不过
+	//       （全员无法接入）、web 票据验不过（B/S 全挂）、隧道身份票据验不过（C/S 全挂）。
 	//   同一个函数里审计链密钥那条早就改成问 store 要真路径了（见下），这四项是漏网的那半。
 	if s.ca != nil {
 		add("pki", s.ca.Dir())
 	}
 	kp := s.keys.Paths()
-	for _, k := range []string{kp.Sess, kp.Knock, kp.Web} {
+	// ★新增一把密钥就必须同批加进这个清单。web 那把此前正是漏在这里：备份解得开、
+	//   含 baidi.db、备机校验通过，只在恢复那天暴露成「B/S 全挂而隧道一切正常」。
+	//   tunnel 这把漏掉的话症状是它的镜像——B/S 正常而**所有 C/S 隧道连接被拒**
+	//   （网关装的还是旧公钥，新签的隧道票 kid 查不到）。
+	for _, k := range []string{kp.Sess, kp.Knock, kp.Web, kp.Tunnel} {
 		if k == "" {
 			continue
 		}

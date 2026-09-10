@@ -1,7 +1,8 @@
 // Package proxy 是受 SPA 门控的隧道代理：
 // 仅当来源 IP 在 SPA 放行窗口内才终止 TLS/TLCP 并转发到后端；否则立即断开（隐身）。
-// 支持按目的多资源路由：隧道内首行 "CONNECT <resource-id>\n" 选择后端（查注册表 + 授权），
-// 无前导则回退默认后端（兼容旧客户端）。防 SSRF：后端地址只来自注册表，绝不取自客户端。
+// 支持按目的多资源路由：隧道内首行 "CONNECT <资源id> <身份票据>\n" 既选后端（查注册表 + 授权）
+// 也自证身份（use=tunnel 票据，控制面签、本机公钥验；见 tunnelid.go）。
+// 防 SSRF：后端地址只来自注册表，绝不取自客户端；账号同理，绝不取自客户端自报。
 package proxy
 
 import (
@@ -82,8 +83,16 @@ func KillUser(user string) int {
 }
 
 const (
-	preamblePrefix  = "CONNECT " // 8 字节
-	preambleMax     = 256        // 前导单行最长，防滥用/无界缓冲
+	preamblePrefix = "CONNECT " // 8 字节
+	// preambleMax 前导单行最长，防滥用/无界缓冲。
+	//
+	// ★从 256 提到 1024 是因为前导现在要带一张 Ed25519 JWT（约 330~500 字节，
+	// 账号名越长越大）。留够余量是刻意的：卡得太紧的话，一个邮箱形态的长账号
+	// 会让这台机器上**部分用户**接入失败，而症状（"前导不完整"）与网络截断同形。
+	// 上界仍由 bufio 缓冲（preambleBufSize）硬封顶，不存在无界缓冲。
+	preambleMax = 1024
+	// preambleBufSize 读缓冲大小；ReadSlice 的行长受它硬封顶，必须 > preambleMax。
+	preambleBufSize = 4096
 	preambleTimeout = 3 * time.Second
 	// maxConcurrent 单台网关**同时活跃的隧道连接**上限，封顶内存/goroutine。
 	//
@@ -96,29 +105,32 @@ const (
 
 // Serve 启动通用 TLS 代理监听。reg.Default 为默认回退后端。
 // rep 为安全事件上报器（nil 安全）：拒绝除本机日志外，经节流上报控制面留痕。
-func Serve(addr string, cert tls.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
+// id 为隧道身份材料（见 tunnelid.go）：连接的身份只从前导票据来，绝不从源 IP 反查。
+func Serve(addr string, cert tls.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, id TunnelID) error {
 	ln, err := tls.Listen("tcp", addr, &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12})
 	if err != nil {
 		return err
 	}
-	slog.Info("SSL 隧道代理监听（通用 TLS）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al, rep, maxConcurrent)
+	slog.Info("SSL 隧道代理监听（通用 TLS）", "addr", addr, "default_backend", reg.Default,
+		"resources", reg.Count(), "身份严格", id.Strict)
+	return serve(ln, reg, al, rep, id, maxConcurrent)
 }
 
 // ServeTLCP 启动国密 TLCP 代理监听（SM2 双证书 + SM3/SM4 套件）。
-func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) error {
+func ServeTLCP(addr string, certs []tlcp.Certificate, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, id TunnelID) error {
 	ln, err := tlcp.Listen("tcp", addr, &tlcp.Config{Certificates: certs})
 	if err != nil {
 		return err
 	}
-	slog.Info("SSL 隧道代理监听（国密 TLCP）", "addr", addr, "default_backend", reg.Default, "resources", reg.Count())
-	return serve(ln, reg, al, rep, maxConcurrent)
+	slog.Info("SSL 隧道代理监听（国密 TLCP）", "addr", addr, "default_backend", reg.Default,
+		"resources", reg.Count(), "身份严格", id.Strict)
+	return serve(ln, reg, al, rep, id, maxConcurrent)
 }
 
 // serve 是两种监听共享的接受循环（门控/路由逻辑与加密层无关）；信号量封顶并发。
 // limit 由调用方传入（生产恒为 maxConcurrent）：用例要真的把并发打满才能证明
 // 「到顶时拒绝并留痕」，而 1024 条真连接在单测里既慢又不稳。
-func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, limit int) error {
+func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, id TunnelID, limit int) error {
 	sem := make(chan struct{}, limit)
 	for {
 		c, err := ln.Accept()
@@ -141,38 +153,36 @@ func serve(ln net.Listener, reg *resource.Registry, al *spa.Allowlist, rep *sece
 		}
 		go func() {
 			defer func() { <-sem }()
-			handle(c, reg, al, rep)
+			handle(c, reg, al, rep, id)
 		}()
 	}
 }
 
-func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter) {
+// handle 处理一条隧道连接。
+//
+// ★三段式，顺序即安全语义：
+//
+//	① 端口闸   al.Allowed(ip)——这个源地址上**有没有人**敲开过窗（隐身）。它不再回身份。
+//	② 身份     前导票据自证（use=tunnel，控制面签、本机公钥验）。绝不接受客户端自报账号名。
+//	③ 窗口复核 al.AllowedFor(ip, 账号)——票据上这个人**自己**从这个源地址敲开过窗吗。
+//
+// ②③ 缺一不可：只有 ② 的话，被强制下线撤窗的账号仍能凭手里没过期的票，借同出口
+// 任何人的窗口继续新建连接；只有 ③ 的话就退回了"共享源 IP 即继承授权"的原缺陷。
+func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent.Reporter, id TunnelID) {
 	ip := hostOf(c.RemoteAddr().String())
-	user, role, ok := al.Allowed(ip)
-	if !ok {
+	if !al.Allowed(ip) {
 		// 未敲门 → 立即断开（业务对未授权者隐身；内核态 DROP 见 -pf）
 		slog.Warn("代理拒绝（无 SPA 授权）", "src", ip)
 		rep.Report("proxy-unauth", ip, "隧道代理拒绝（无 SPA 授权，直连被断）")
 		_ = c.Close()
 		return
 	}
-	// 已授权连接计入活跃隧道数（供上报控制面）并按账号登记（强制下线可按账号切断）；handle 返回即回落
+	// 计入活跃隧道数（供上报控制面）；handle 返回即回落。
+	// ★按账号登记（track）挪到身份确定之后——身份未定时登记不出正确的键，
+	// 而"登记到某个猜来的账号头上"正是这次要消灭的东西。握手/前导阶段的连接
+	// 不参与 KillUser：它还没转发过一个字节，且下面的 AllowedFor 复核会兜住竞态。
 	active.Add(1)
 	defer active.Add(-1)
-	track(user, c)
-	defer untrack(user, c)
-	// 登记后复核放行窗口：若在 Allowed→track 空档遭强制下线（applyRevoked 先撤窗再 KillUser，
-	// 本连接恰在 KillUser 扫描后落表则漏杀），此处 Allowed 已为 false → 立即断开，杜绝连接逃逸切断。
-	if _, _, ok := al.Allowed(ip); !ok {
-		slog.Warn("代理拒绝（登记后放行窗口已失效，疑似强制下线竞态）", "src", ip, "user", user)
-		rep.Report("proxy-revoked", ip, "隧道代理拒绝（账号 "+user+" 放行窗口已被撤销）")
-		_ = c.Close()
-		return
-	}
-	// 记一次业务活跃（FR-POLICY-30「无业务流量超时注销」的信号源）。
-	// ★位置刻意在**两道放行复核之后**：未授权连接不该刷新活跃时刻，
-	// 否则任何人往隧道口打一个包就能替别人的会话续命。
-	al.Touch(ip)
 
 	// 显式完成握手，与前导读取的短超时解耦：crypto/tls 与 gotlcp（v1.4.5 `listener.Accept` 只是
 	// `Server(c, cfg)` 包一层，同样不握手）的 Accept 都不在 Accept 内握手，若把握手推迟到带 3s deadline
@@ -188,15 +198,58 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 		_ = c.SetReadDeadline(time.Time{})
 	}
 
-	br := bufio.NewReaderSize(c, 4096) // 固定缓冲，前导用 ReadSlice 受此封顶（防无界缓冲 OOM）
-	rid, hasPreamble, good := readPreamble(c, br)
+	br := bufio.NewReaderSize(c, preambleBufSize) // 固定缓冲，前导用 ReadSlice 受此封顶（防无界缓冲 OOM）
+	rid, ticket, hasPreamble, good := readPreamble(c, br)
 	if !good {
 		// 疑似前导但未在预算内读全（截断/超时）→ fail-closed，绝不降级回退默认后端
-		slog.Warn("代理拒绝（前导不完整/超时，fail-closed）", "src", ip, "user", user)
-		rep.Report("proxy-preamble", ip, "隧道代理拒绝（前导不完整/超时，账号 "+user+"）")
+		slog.Warn("代理拒绝（前导不完整/超时，fail-closed）", "src", ip)
+		rep.Report("proxy-preamble", ip, "隧道代理拒绝（前导不完整/超时）")
 		_ = c.Close()
 		return
 	}
+
+	if !hasPreamble && !reg.AllowNoPreamble {
+		// ★fail-closed：无前导 = 不知道要访问哪个资源 = 无法鉴权，直接断。
+		//   与上面「前导不完整」那条同一条纪律（那里的注释写着"绝不降级回退默认后端"）。
+		//   放行的话，Lookup / Authorize / DenyUsers 一个都不执行，而参考部署里
+		//   Default 正是控制面自身的回环口——详见 resource.Registry.AllowNoPreamble。
+		//
+		// ★这一判排在身份解析**之前**：无前导的连接结构上也带不了身份票据，
+		//   两条理由同时成立时，「你没说要访问哪个资源」比「你没带票据」更能指向修法。
+		slog.Warn("代理拒绝（无 CONNECT 前导，fail-closed）", "src", ip,
+			"提示", "客户端未声明目标资源；若确需兼容无前导的老客户端，用 -allow-no-preamble 显式开启（该路径不做资源鉴权，且必须同时关掉隧道身份严格模式）")
+		rep.Report("proxy-nopreamble", ip, "隧道代理拒绝（未声明目标资源）")
+		_ = c.Close()
+		return
+	}
+
+	// ── ② 身份 ──
+	user, role, ok := resolveIdentity(ip, ticket, al, rep, id)
+	if !ok {
+		_ = c.Close()
+		return
+	}
+	// ── ③ 窗口复核 ──
+	if !al.AllowedFor(ip, user) {
+		slog.Warn("代理拒绝（票据有效，但该账号未从本源地址敲开过窗）", "src", ip, "user", user)
+		rep.Report("proxy-nowindow", ip, "隧道代理拒绝（账号 "+user+" 未从该源地址敲门，或窗口已被撤销）")
+		_ = c.Close()
+		return
+	}
+	track(user, c)
+	defer untrack(user, c)
+	// 登记后再复核一次：若在复核→track 的空档遭强制下线（applyRevoked 先撤窗再 KillUser，
+	// 本连接恰在 KillUser 扫描后落表则漏杀），此处已为 false → 立即断开，杜绝连接逃逸切断。
+	if !al.AllowedFor(ip, user) {
+		slog.Warn("代理拒绝（登记后放行窗口已失效，疑似强制下线竞态）", "src", ip, "user", user)
+		rep.Report("proxy-revoked", ip, "隧道代理拒绝（账号 "+user+" 放行窗口已被撤销）")
+		_ = c.Close()
+		return
+	}
+	// 记一次业务活跃（FR-POLICY-30「无业务流量超时注销」的信号源）。
+	// ★位置刻意在**两道放行复核之后**：未授权连接不该刷新活跃时刻，
+	// 否则任何人往隧道口打一个包就能替别人的会话续命。
+	al.Touch(ip, user)
 
 	backend := reg.Default
 	if hasPreamble {
@@ -220,16 +273,6 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 		// 节流键是 (账号,资源) 而不是源 IP：同一个人访问三个资源是三件事。
 		rep.ReportAllow("tunnel-allow", ip, user+"|"+rid,
 			"隧道放行：账号 "+user+" 经隧道访问资源 "+rid+"（后端 "+backend+"）")
-	} else if !reg.AllowNoPreamble {
-		// ★fail-closed：无前导 = 不知道要访问哪个资源 = 无法鉴权，直接断。
-		//   与上面「前导不完整」那条同一条纪律（那里的注释写着"绝不降级回退默认后端"）。
-		//   放行的话，Lookup / Authorize / DenyUsers 一个都不执行，而参考部署里
-		//   Default 正是控制面自身的回环口——详见 resource.Registry.AllowNoPreamble。
-		slog.Warn("代理拒绝（无 CONNECT 前导，fail-closed）", "src", ip, "user", user,
-			"提示", "客户端未声明目标资源；若确需兼容无前导的老客户端，用 -allow-no-preamble 显式开启（该路径不做资源鉴权）")
-		rep.Report("proxy-nopreamble", ip, "隧道代理拒绝（未声明目标资源，账号 "+user+"）")
-		_ = c.Close()
-		return
 	} else {
 		// 兼容模式（-allow-no-preamble）：**必须留痕**。此前这里只有一行本机 slog，
 		// 网关一重启即灭失——「谁在用这条不鉴权的路」在中心侧完全查不到。
@@ -251,13 +294,64 @@ func handle(c net.Conn, reg *resource.Registry, al *spa.Allowlist, rep *secevent
 	_ = c.Close()
 }
 
-// readPreamble 解析隧道首部是否带 "CONNECT <id>\n" 前导。
-// 返回 good=false 表示"疑似前导但未读全"，调用方必须 fail-closed（不得降级默认后端）。
+// resolveIdentity 定这条隧道连接的身份。返回 ok=false 时已完成日志与留痕，调用方直接断开。
+//
+// ★严格模式（默认）下**只有一条路**：前导票据验签。没票、票坏、用途不符一律拒。
+// 逃生舱（BAIDI_GW_TUNNEL_ID_STRICT=0）下才允许按源 IP 猜，且只在**恰好一个账号**
+// 持窗时才算数——两个及以上就是不可判定，拒绝而不是随手挑一个（挑一个正是原缺陷）。
+func resolveIdentity(ip, ticket string, al *spa.Allowlist, rep *secevent.Reporter, id TunnelID) (user, role string, ok bool) {
+	if ticket != "" {
+		// ★票据一旦出现就必须验过：验不过是**错误**，不是"老客户端"，
+		// 因此无论严不严格都不回落——否则关掉严格模式时，伪造一张烂票反而比不带票更容易过。
+		u, r, err := id.verifyTunnelTicket(ticket)
+		if err != nil {
+			slog.Warn("代理拒绝（隧道身份票据无效）", "src", ip, "err", err.Error())
+			rep.Report("proxy-ticket", ip, "隧道代理拒绝（身份票据无效："+err.Error()+"）")
+			return "", "", false
+		}
+		return u, r, true
+	}
+	if id.Strict {
+		slog.Warn("代理拒绝（前导未带隧道身份票据，严格模式）", "src", ip,
+			"提示", "客户端需升级到会在前导上附带 use=tunnel 票据的版本；过渡期可用 BAIDI_GW_TUNNEL_ID_STRICT=0，"+
+				"但那条路上身份按源 IP 猜，同出口多人时不可判定")
+		rep.Report("proxy-noticket", ip, "隧道代理拒绝（连接未携带身份票据，无法确定这是谁）")
+		return "", "", false
+	}
+	// ── 逃生舱回落：按源 IP 猜身份 ──
+	live := al.LiveOn(ip)
+	if len(live) != 1 {
+		// 0 条不该出现（端口闸刚判过），除非恰好在这几微秒里过期/被撤；
+		// ≥2 条是同出口多人，**身份不可判定**——这正是本次要消灭的形态，不能挑一个。
+		slog.Error("代理拒绝（身份不可判定：该源地址上有多个账号持窗，而连接未带票据）",
+			"src", ip, "持窗账号数", len(live))
+		rep.Report("proxy-idambig", ip,
+			"隧道代理拒绝（该源地址上有 "+strconv.Itoa(len(live))+" 个账号持窗，连接未带身份票据，无法判定这是谁）")
+		return "", "", false
+	}
+	// 回落成功也**每次留痕**：只写本机日志的话，这个逃生舱会永久开着而没人知道它还在用。
+	// 用 ReportAllow（verdict=allow、不进攻击源统计）——归因是我方配置而不是攻击者，
+	// 与 proxy-capacity 同一条纪律：数错方向的统计比没有统计更坏。
+	slog.Warn("⚠ 隧道身份回落（BAIDI_GW_TUNNEL_ID_STRICT=0）：连接未带票据，身份按源 IP 推断",
+		"src", ip, "user", live[0].User,
+		"风险", "同出口任意主机在放行窗内直连隧道口即继承该账号授权")
+	rep.ReportAllow("tunnel-idfallback", ip, live[0].User+"|"+ip,
+		"隧道身份回落：连接未携带票据，按源 IP 推断为账号 "+live[0].User+
+			"（逃生舱 BAIDI_GW_TUNNEL_ID_STRICT=0 开着，同出口他人可继承该授权）")
+	return live[0].User, live[0].Role, true
+}
+
+// readPreamble 解析隧道首部是否带 "CONNECT <资源id> [身份票据]\n" 前导。
+//
+// ★格式向后兼容：老客户端只发 "CONNECT <资源id>\n"（两段），此时 ticket 为空串，
+// 由调用方按严格与否处置——解析层不替它决定，也不猜。
+//
+// 返回 good=false 表示"疑似前导但未读全/格式不认识"，调用方必须 fail-closed（不得降级默认后端）。
 // 按"已收字节是否仍是 CONNECT 前缀"决策，避免正常 TCP 分段把慢到达的前导误判为无前导：
 //   - 首字节非 'C' → 立即判无前导（不阻塞 server-speaks-first 协议）
 //   - 收到的是 CONNECT 真前缀但在预算内没凑齐 → fail-closed
-//   - 凑齐 "CONNECT " → 限长读取该行解析 id
-func readPreamble(c net.Conn, br *bufio.Reader) (rid string, hasPreamble, good bool) {
+//   - 凑齐 "CONNECT " → 限长读取该行解析 id 与票据
+func readPreamble(c net.Conn, br *bufio.Reader) (rid, ticket string, hasPreamble, good bool) {
 	_ = c.SetReadDeadline(time.Now().Add(preambleTimeout))
 	defer func() { _ = c.SetReadDeadline(time.Time{}) }()
 
@@ -266,28 +360,39 @@ func readPreamble(c net.Conn, br *bufio.Reader) (rid string, hasPreamble, good b
 		if err != nil {
 			switch {
 			case len(p) == 0:
-				return "", false, true // 无任何字节（空闲）→ 视作无前导，回退默认
+				return "", "", false, true // 无任何字节（空闲）→ 视作无前导，回退默认
 			case string(p) == preamblePrefix[:len(p)]:
-				return "", false, false // 是 CONNECT 真前缀但没凑齐 → fail-closed
+				return "", "", false, false // 是 CONNECT 真前缀但没凑齐 → fail-closed
 			default:
-				return "", false, true // 已分叉，非前导业务流
+				return "", "", false, true // 已分叉，非前导业务流
 			}
 		}
 		if string(p) != preamblePrefix[:n] {
-			return "", false, true // 第 n 字节分叉 → 无前导
+			return "", "", false, true // 第 n 字节分叉 → 无前导
 		}
 	}
 
 	// 凑齐 "CONNECT "：限长读这一行（ReadSlice 受 br 固定缓冲封顶，超长即拒）
 	line, err := br.ReadSlice('\n')
 	if err != nil || len(line) > preambleMax {
-		return "", false, false // 行过长/读错 → fail-closed
+		return "", "", false, false // 行过长/读错 → fail-closed
 	}
-	rid = strings.TrimSpace(strings.TrimPrefix(string(line), preamblePrefix))
+	fields := strings.Fields(strings.TrimPrefix(string(line), preamblePrefix))
+	switch len(fields) {
+	case 1: // 老客户端：只有资源 id
+		rid = fields[0]
+	case 2: // 新客户端：资源 id + 隧道身份票据
+		rid, ticket = fields[0], fields[1]
+	default:
+		// 0 段 = 空 id；≥3 段 = 不认识的格式。两者都 fail-closed：
+		// 前导是安全前置，多出来的字段可能是将来的协议版本，也可能是有人在试探解析器，
+		// 「忽略多余字段继续放行」是这两种情况下都错的处置。
+		return "", "", false, false
+	}
 	if rid == "" {
-		return "", false, false // 空 id → fail-closed
+		return "", "", false, false // 空 id → fail-closed
 	}
-	return rid, true, true
+	return rid, ticket, true, true
 }
 
 func hostOf(addr string) string {

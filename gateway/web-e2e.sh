@@ -21,8 +21,12 @@ set -uo pipefail
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
 WORK=/tmp/baidi-web-e2e
-CONTROL=http://127.0.0.1:8090
-MTLS=https://127.0.0.1:8092
+# 控制面两个口可覆盖（与 e2e.sh 同款）：开发机上常已跑着一个 baidi-control，
+# 端口写死时自检会停在预检那一步且没有出路。
+CONTROL_PORT="${BAIDI_E2E_CONTROL_PORT:-8090}"
+MTLS_PORT="${BAIDI_E2E_MTLS_PORT:-8092}"
+CONTROL=http://127.0.0.1:$CONTROL_PORT
+MTLS=https://127.0.0.1:$MTLS_PORT
 SPA_PORT="${BAIDI_E2E_SPA_PORT:-18301}"
 PROXY_PORT="${BAIDI_E2E_PROXY_PORT:-18343}"
 WEB_PORT="${BAIDI_E2E_WEB_PORT:-18344}"
@@ -96,7 +100,11 @@ export BAIDI_PKI_DIR="$WORK/pki"
 export BAIDI_JWT_KEY="$WORK/jwt-ed25519.pem"
 export BAIDI_JWT_KNOCK_KEY="$WORK/jwt-ed25519-knock.pem"
 export BAIDI_JWT_WEB_KEY="$WORK/jwt-ed25519-web.pem"
-export BAIDI_MTLS_ADDR=127.0.0.1:8092
+# 第四把（L4 隧道身份票据）：本自检不走 L4，但网关默认严格启动时必须装得上它的公钥，
+# 显式写出以免依赖「control 的 cwd 恰好是 $WORK」。
+export BAIDI_JWT_TUNNEL_KEY="$WORK/jwt-ed25519-tunnel.pem"
+export BAIDI_ADDR="127.0.0.1:$CONTROL_PORT"
+export BAIDI_MTLS_ADDR="127.0.0.1:$MTLS_PORT"
 # ★七层入口基址显式指到本机：控制面对「推导出来的」回环/通配入口地址如实报「无法确定」
 #   并拒绝签票（参考部署 -web 127.0.0.1:18444 正是这个形态），而网关页登记接入地址
 #   又拒收回环——本机自检只能走这条显式统一入口（此时票据不绑网关，与生产统一入口同形）。
@@ -104,8 +112,8 @@ export BAIDI_WEB_ENTRY_BASE="http://127.0.0.1:$WEB_PORT"
 
 echo "==> 端口预检"
 RC=0
-preflight_port TCP 8090 "控制面"      || RC=1
-preflight_port TCP 8092 "网关 mTLS"   || RC=1
+preflight_port TCP "$CONTROL_PORT" "控制面"    || RC=1
+preflight_port TCP "$MTLS_PORT"    "网关 mTLS" || RC=1
 preflight_port TCP "$WEB_PORT" "七层 Web 代理" || RC=1
 preflight_port TCP "$BE_PORT"  "业务后端"      || RC=1
 [ $RC -ne 0 ] && exit 1
@@ -203,6 +211,7 @@ WEBPUB="$WORK/jwt-ed25519-web.pem.pub"
 nohup "$WORK/baidi-gateway" -spa "127.0.0.1:$SPA_PORT" -proxy "127.0.0.1:$PROXY_PORT" \
   -backend "127.0.0.1:$BE_PORT" -ttl 60s \
   -jwt-pubkey "$WORK/jwt-ed25519-knock.pem.pub" -web-jwt-pubkey "$WEBPUB" \
+  -jwt-tunnel-pubkey "$WORK/jwt-ed25519-tunnel.pem.pub" \
   -web "127.0.0.1:$WEB_PORT" -poll 2s \
   -control "$MTLS" -gwid gw-1 \
   -mtls-cert "$WORK/gw.crt" -mtls-key "$WORK/gw.key" -mtls-ca "$WORK/ca.crt" \

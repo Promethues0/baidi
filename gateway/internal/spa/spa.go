@@ -21,12 +21,30 @@ import (
 // "换大小写/加空格重登即绕过强制下线"。放行表仍存原始显示名，仅键规范化。
 func normUser(s string) string { return strings.ToLower(strings.TrimSpace(s)) }
 
-// Allowlist 源 IP → 放行到期时间 的并发安全表。
+// Allowlist 放行表：键是 **(源 IP, 账号)**，不是源 IP。
+//
+// ★为什么键必须带账号（wave11 行动 3）：原来 `map[源IP]entry` 且 entry 直接携带
+// user/role，`Allow()` 是整条覆盖——同一出口（企业 NAT / CGNAT / 咖啡厅 / 云主机
+// 同公网 IP）下两个账号交替敲门，会互相刷写对方的身份，于是
+//
+//	① proxy 按源 IP 取到的"身份"是**最后一个敲门的人**，与这条 TCP 连接毫无关系；
+//	② RevokeUser(A) 按 e.user 匹配，末次敲门者是 B 时整条不匹配 → 强制下线漏撤窗；
+//	③ Reap / -pf 回收 / Sessions() / ActiveCount() 全部把同出口两个人混成一条。
+//
+// 现在身份由隧道前导上的票据自证（见 proxy.handle），放行表退回它本来的职责：
+// **端口闸**——"这个 (源IP, 账号) 此刻有没有敲开过窗"。两个维度都在，撤谁就只撤谁。
+//
+// 结构选嵌套 map（源IP → 规范化账号 → 条目）而不是复合键 map：proxy 每条连接都要问
+// 一次「这个 IP 上有没有任何窗口」（隐身闸），扁平键得整表扫，而同一 IP 上的账号数很小。
 type Allowlist struct {
 	mu   sync.RWMutex
-	m    map[string]entry
+	m    map[string]map[string]entry
 	deny map[string]time.Time // 账号 → 封禁截止（强制下线：封禁期内拒绝敲门）
 	// OnAllow 在放行某 IP 时回调（如向防火墙 pf 表写入 pass 规则）。可空。
+	//
+	// ★内核放行是 **IP 粒度**的（pf/nft 的表里只有地址），账号维度到不了内核。
+	// 于是同一 IP 上第二个账号敲门会重复写一次同样的 pass 规则（幂等，无害），
+	// 而回收必须等该 IP 上**最后一条**窗口消失——回收前的 `Allowed(ip)` 复核就是那道闸。
 	OnAllow func(ip, user string)
 }
 
@@ -40,7 +58,7 @@ type entry struct {
 	// 而敲门保活（Allow 续窗）**刻意不刷新它**——客户端只要不退出就每 15s 敲一次门，
 	// 拿保活当活跃的话那条规则永远不会触发，等于又造一条永不生效的假开关。
 	lastActive time.Time
-	user       string
+	user       string // 原始显示形态的账号（键是它的 normUser 规范化形式）
 	role       string
 }
 
@@ -55,7 +73,7 @@ type Session struct {
 }
 
 func NewAllowlist() *Allowlist {
-	return &Allowlist{m: map[string]entry{}, deny: map[string]time.Time{}}
+	return &Allowlist{m: map[string]map[string]entry{}, deny: map[string]time.Time{}}
 }
 
 // DenyUser 封禁某账号至 until（强制下线：封禁期内拒绝后续敲门）。返回是否为新封禁/延长封禁。
@@ -91,40 +109,59 @@ func (a *Allowlist) UserDenied(user string) bool {
 	return true
 }
 
-// RevokeUser 撤销某账号的全部放行窗口，返回被撤的源 IP（供 -pf 模式回收内核放行规则）。
+// RevokeUser 撤销某账号的全部放行窗口，返回受影响的源 IP（供 -pf 模式回收内核放行规则）。
+//
+// ★只删这个账号的条目。同出口另一个账号的窗口原样保留——这正是键带账号维度的意义：
+// 从前 `RevokeUser(A)` 在末次敲门者是 B 时整条匹配不上（漏撤），而一旦匹配上又会把
+// B 的窗口一起删掉（误伤）。两种错法此前都存在，方向相反、都不报错。
+//
+// 返回的是「该账号曾在这些 IP 上有窗口」，**不等于这些 IP 现在可以从内核放行集里摘掉**：
+// 调用方（main.go 的 -pf 回收）必须再问一次 Allowed(ip)，因为同一 IP 上可能还有别人在用。
 func (a *Allowlist) RevokeUser(user string) []string {
 	key := normUser(user)
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	var ips []string
-	for ip, e := range a.m {
-		if normUser(e.user) == key {
-			ips = append(ips, ip)
+	for ip, byUser := range a.m {
+		if _, ok := byUser[key]; !ok {
+			continue
+		}
+		delete(byUser, key)
+		if len(byUser) == 0 {
 			delete(a.m, ip)
 		}
+		ips = append(ips, ip)
 	}
 	return ips
 }
 
-// Allow 放行某源 IP 一段时间（记录身份 user/role）。重复敲门刷新 until 但保留首次 since。
+// Allow 放行 (源 IP, 账号) 一段时间（记录 role）。重复敲门刷新 until 但保留首次 since。
 // 封禁期内的账号一律拒绝放行（返回 false）——封禁检查与写入放行表在同一把锁内完成，
 // 杜绝"UserDenied 检查通过 → 并发封禁 → 仍写入放行窗口"的重开窗竞态。
 func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) bool {
+	key := normUser(user)
 	a.mu.Lock()
-	if until, ok := a.deny[normUser(user)]; ok {
+	if until, ok := a.deny[key]; ok {
 		if time.Now().Before(until) {
 			a.mu.Unlock()
 			return false
 		}
-		delete(a.deny, normUser(user)) // 懒清理过期封禁
+		delete(a.deny, key) // 懒清理过期封禁
 	}
 	since := time.Now()
 	var lastActive time.Time
-	if prev, ok := a.m[ip]; ok && time.Now().Before(prev.until) {
+	byUser := a.m[ip]
+	if byUser == nil {
+		byUser = map[string]entry{}
+		a.m[ip] = byUser
+	}
+	// ★续窗只认**同一个账号**的上一条：从前按 IP 取，于是 B 首次敲门会继承 A 的 since，
+	// 控制面看到的"在线时长"就是别人的。
+	if prev, ok := byUser[key]; ok && time.Now().Before(prev.until) {
 		since = prev.since           // 保活续窗：保留首次敲门时刻
 		lastActive = prev.lastActive // ★同样保留：保活不是业务流量，见 entry.lastActive
 	}
-	a.m[ip] = entry{until: time.Now().Add(ttl), since: since, lastActive: lastActive, user: user, role: role}
+	byUser[key] = entry{until: time.Now().Add(ttl), since: since, lastActive: lastActive, user: user, role: role}
 	cb := a.OnAllow
 	a.mu.Unlock()
 	if cb != nil {
@@ -137,36 +174,58 @@ func (a *Allowlist) Allow(ip, user, role string, ttl time.Duration) bool {
 //
 // 窗口不存在或已过期时什么都不做——那种情况下这个连接本来也进不来，
 // 凭空建一条 lastActive 会让「从未有过业务流量」与「刚活跃过」混成一谈。
-func (a *Allowlist) Touch(ip string) {
+//
+// ★按 (IP, 账号) 打点。只按 IP 的话，同出口 A 在用而 B 空闲时，B 的会话会被 A 的流量
+// 一路续命，「无业务流量超时注销」对 B 永不触发。
+func (a *Allowlist) Touch(ip, user string) {
+	key := normUser(user)
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	e, ok := a.m[ip]
+	byUser := a.m[ip]
+	if byUser == nil {
+		return
+	}
+	e, ok := byUser[key]
 	if !ok || time.Now().After(e.until) {
 		return
 	}
 	e.lastActive = time.Now()
-	a.m[ip] = e
+	byUser[key] = e
 }
 
-// Reap 删除并返回已过期的源 IP（供防火墙模式回收 pf 放行规则）。
+// Reap 删除已过期的条目，返回受影响的源 IP（供防火墙模式回收 pf 放行规则）。
+// 同 RevokeUser：返回值只是"这些 IP 上刚清掉过东西"，能不能摘内核规则由调用方复核。
 func (a *Allowlist) Reap() []string {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	now := time.Now()
 	var expired []string
-	for ip, e := range a.m {
-		if now.After(e.until) {
-			expired = append(expired, ip)
+	for ip, byUser := range a.m {
+		hit := false
+		for key, e := range byUser {
+			if now.After(e.until) {
+				delete(byUser, key)
+				hit = true
+			}
+		}
+		if len(byUser) == 0 {
 			delete(a.m, ip)
+		}
+		if hit {
+			expired = append(expired, ip)
 		}
 	}
 	return expired
 }
 
-// Allowed 返回该源 IP 是否在有效放行窗口内（及对应身份 user/role）。
-func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
+// Allowed 报告该源 IP 上**是否还有任何**有效放行窗口——这是隐身端口闸，不是身份来源。
+//
+// ★签名从 (user, role, ok) 收窄成 ok 是 wave11 行动 3 的核心：拿它的返回值当身份，
+// 就是把"共享源 IP"当成了"持有白帝账号"。隧道连接的身份现在只有一个来源——
+// 前导上那张 use=tunnel 票据（proxy.handle）。
+func (a *Allowlist) Allowed(ip string) bool {
 	// ★读锁：本方法判过期但**不删**（回收统一由 Reap 做），是纯读。
-	// proxy.handle 每条隧道连接要摸这把锁三次（Allowed 两次 + Touch 一次）。
+	// proxy.handle 每条隧道连接要摸这把锁三次（Allowed + AllowedFor 两次 + Touch 一次）。
 	//
 	// 实测（BenchmarkAllowedParallel_*，8 核）：独占锁 204ns → 读锁 175ns，
 	// **只快了 14%**，且都远高于单线程的 53ns。别把这条读成"锁竞争解决了"——
@@ -176,11 +235,44 @@ func (a *Allowlist) Allowed(ip string) (user, role string, ok bool) {
 	// 那是另一件事，眼下的量级不值得。
 	a.mu.RLock()
 	defer a.mu.RUnlock()
-	e, found := a.m[ip]
-	if !found || time.Now().After(e.until) {
-		return "", "", false
+	now := time.Now()
+	for _, e := range a.m[ip] {
+		if now.Before(e.until) {
+			return true
+		}
 	}
-	return e.user, e.role, true
+	return false
+}
+
+// AllowedFor 报告 (源 IP, 账号) 是否在有效放行窗口内。
+//
+// ★这是隧道票据落地时的第二道复核：票据证明"控制面刚刚放行过这个账号"，
+// 这道闸证明"这个账号真的从**这个源地址**敲开过窗"。少了它，强制下线只撤窗不断票，
+// 被撤销的账号仍能凭手里那张没过期的票，借同出口任何人的窗口继续新建连接。
+func (a *Allowlist) AllowedFor(ip, user string) bool {
+	key := normUser(user)
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	e, ok := a.m[ip][key]
+	return ok && time.Now().Before(e.until)
+}
+
+// LiveOn 返回该源 IP 上当前有效的全部会话。
+//
+// ★唯一调用方是 proxy 的**逃生舱**回落路径（BAIDI_GW_TUNNEL_ID_STRICT=0，老客户端
+// 不带票据时按源 IP 猜身份）。它刻意返回**全部**而不是"最近那条"：只有恰好一条时
+// 身份才是确定的，两条及以上就是不可判定，回落路径必须据此拒绝而不是随手挑一个。
+func (a *Allowlist) LiveOn(ip string) []Session {
+	a.mu.RLock()
+	defer a.mu.RUnlock()
+	now := time.Now()
+	var out []Session
+	for _, e := range a.m[ip] {
+		if now.Before(e.until) {
+			out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since, LastActive: e.lastActive})
+		}
+	}
+	return out
 }
 
 // Sessions 返回当前仍在放行窗口内的活跃会话（供网关向控制面上报真实在线用户）。
@@ -189,23 +281,30 @@ func (a *Allowlist) Sessions() []Session {
 	defer a.mu.RUnlock()
 	now := time.Now()
 	out := make([]Session, 0, len(a.m))
-	for ip, e := range a.m {
-		if now.Before(e.until) {
-			out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since, LastActive: e.lastActive})
+	for ip, byUser := range a.m {
+		for _, e := range byUser {
+			if now.Before(e.until) {
+				out = append(out, Session{IP: ip, User: e.user, Role: e.role, Since: e.since, LastActive: e.lastActive})
+			}
 		}
 	}
 	return out
 }
 
-// ActiveCount 返回当前仍在放行窗口内的源 IP 数（已授权客户端数，供网关向控制面上报）。
+// ActiveCount 返回当前有效的放行窗口数，即**已授权客户端数**（供网关向控制面上报）。
+//
+// ★此前它数的是**源 IP 数**，却被上报成"已授权客户端数"：同一出口下 20 个人在线，
+// 控制台上显示 1。键带上账号维度之后这个数才名副其实。
 func (a *Allowlist) ActiveCount() int {
 	a.mu.RLock()
 	defer a.mu.RUnlock()
 	now := time.Now()
 	n := 0
-	for _, e := range a.m {
-		if now.Before(e.until) {
-			n++
+	for _, byUser := range a.m {
+		for _, e := range byUser {
+			if now.Before(e.until) {
+				n++
+			}
 		}
 	}
 	return n

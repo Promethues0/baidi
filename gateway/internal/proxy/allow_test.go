@@ -124,14 +124,15 @@ func TestTunnelRouteHitReportsAllow(t *testing.T) {
 
 	cap := &capture{}
 	rep := secevent.New(cap.sink)
+	id, sign := newTestTunnelID(t)
 
 	cli, srv := tcpPair(t)
 	done := make(chan struct{})
-	go func() { handle(srv, reg, al, rep); close(done) }()
+	go func() { handle(srv, reg, al, rep, id); close(done) }()
 
-	// 前导：CONNECT <资源 id>\n
+	// 前导：CONNECT <资源 id> <身份票据>\n
 	_ = cli.SetWriteDeadline(time.Now().Add(3 * time.Second))
-	if _, err := cli.Write([]byte("CONNECT res-git\n")); err != nil {
+	if _, err := cli.Write([]byte("CONNECT res-git " + sign("zhang.wei", "user") + "\n")); err != nil {
 		t.Fatalf("写前导失败：%v", err)
 	}
 	_ = cli.SetReadDeadline(time.Now().Add(3 * time.Second))
@@ -166,10 +167,11 @@ func TestUnauthorizedTunnelReportsDenyNotAllow(t *testing.T) {
 	al := spa.NewAllowlist() // 谁都没敲过门
 	cap := &capture{}
 	rep := secevent.New(cap.sink)
+	id, _ := newTestTunnelID(t)
 
 	cli, srv := tcpPair(t)
 	done := make(chan struct{})
-	go func() { handle(srv, reg, al, rep); close(done) }()
+	go func() { handle(srv, reg, al, rep, id); close(done) }()
 	_ = cli.SetReadDeadline(time.Now().Add(2 * time.Second))
 	_, _ = cli.Read(make([]byte, 1))
 	_ = cli.Close()

@@ -8,6 +8,7 @@ package api
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 )
 
@@ -86,5 +87,51 @@ func TestGatewayPageRequiresAdmin(t *testing.T) {
 	h := newTestServer(t)
 	if code, _ := doJSON(t, h, "GET", "/api/v1/gateway", userToken("li.fang"), nil); code != http.StatusForbidden {
 		t.Errorf("普通用户读网关页应 403，得到 %d", code)
+	}
+}
+
+// ── wave11 行动 3：L4 隧道身份姿态的三态必须在网关页上分得开 ──
+//
+// ★三种姿态在页面上长得一样是最坏的结果：一台停在旧信任模型上的网关（按源 IP 定身份）
+// 与一台已收口的网关如果都不出告警，管理员永远不会去升级它——而在它上面，
+// 同一出口下任意主机在放行窗内直连隧道口就继承别人的授权。
+func TestGatewayPageTunnelIDPosture(t *testing.T) {
+	warn := func(t *testing.T, body string) []string {
+		t.Helper()
+		h, _ := gwReceiptServer(t)
+		if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), body); w.Code != http.StatusOK {
+			t.Fatalf("注册返回 %d：%s", w.Code, w.Body.String())
+		}
+		code, out := doJSON(t, h, "GET", "/api/v1/gateway", adminToken(), nil)
+		if code != http.StatusOK {
+			t.Fatalf("读网关页 http %d：%v", code, out)
+		}
+		arr, _ := out["tunnelIdWarnings"].([]any)
+		got := make([]string, 0, len(arr))
+		for _, v := range arr {
+			got = append(got, v.(string))
+		}
+		return got
+	}
+
+	// ① 已收口（明确 true）：不出告警——这一页不为正常态加噪声。
+	if got := warn(t, `{"id":"gw-strict","proxy":":18443","spa":":18201","tunnelIdStrict":true}`); len(got) != 0 {
+		t.Errorf("严格模式开着时不该出告警，实得 %v", got)
+	}
+	// ② 逃生舱开着（明确 false）：必须点名网关并说清风险与关回的路。
+	got := warn(t, `{"id":"gw-loose","proxy":":18443","spa":":18201","tunnelIdStrict":false}`)
+	if len(got) != 1 || !strings.Contains(got[0], "gw-loose") {
+		t.Fatalf("逃生舱开着必须逐台点名告警，实得 %v", got)
+	}
+	for _, want := range []string{"源 IP", "继承"} {
+		if !strings.Contains(got[0], want) {
+			t.Errorf("告警要说清后果（含 %q），实得：%s", want, got[0])
+		}
+	}
+	// ③ 旧网关根本不报（字段缺席）：**不可判定**，同样要出一条——
+	// 静默通过等于替一台按旧模型在跑的网关背书。
+	got = warn(t, `{"id":"gw-old","proxy":":18443","spa":":18201"}`)
+	if len(got) != 1 || !strings.Contains(got[0], "gw-old") || !strings.Contains(got[0], "无从判断") {
+		t.Fatalf("旧网关不上报姿态时应如实报「不可判定」，实得 %v", got)
 	}
 }

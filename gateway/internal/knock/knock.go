@@ -60,6 +60,23 @@ func NewFetcher(tlsCfg *tls.Config) *Fetcher {
 // defaultFetcher 是 FetchToken 这条包级快捷方式用的客户端（系统信任库）。
 var defaultFetcher = NewFetcher(nil)
 
+// Grant 一次 /knock-token 调用换回的**全部**入场材料。
+//
+// ★两样东西必须来自同一次调用：它们由控制面在跑完同一套闸（封禁 / 账号状态 / 终端合规 /
+// 设备准入 / 接入策略）之后一起签出。分成两个端点去取的话，客户端会为每条业务 TCP 流
+// 各取一次票，把控制面塞进数据路径——理由与网关侧「隧道票据不做一次性」同源，
+// 见 gateway/internal/proxy 的 checkTunnelTicket。
+type Grant struct {
+	// Knock 短时效一次性敲门令牌（use=knock + jti），发给网关的 SPA UDP 口。
+	Knock string
+	// Tunnel L4 隧道身份票据（use=tunnel），挂在隧道前导上自证身份。
+	//
+	// ★空串 = **控制面还没升级到会发它**（旧版本不认识这个字段），不是"不需要"。
+	// 调用方照旧接入即可：网关那侧的严格模式才是决定收不收的地方，客户端不替它判。
+	// 猜一个值或退回拿敲门令牌顶替，都会把「控制面没升级」伪装成「一切正常」。
+	Tunnel string
+}
+
 // FetchToken 用会话令牌向 baidi-control 换取短时效一次性敲门令牌（带 jti + use=knock）。
 // 遇 403 返回包裹 ErrDenied 的错误并带出服务端原因；其余非 200 视为瞬时错误。
 //
@@ -68,19 +85,29 @@ var defaultFetcher = NewFetcher(nil)
 // 控制面在观察模式下照常签发并留痕，严格模式下拒——**不带指纹不是错误，是一种状态**，
 // 因此这里不校验也不兜底猜一个值。猜一个（比如拿主机名 hash）会让管理员在设备台账里
 // 看到一台与 posture 上报对不上的幽灵设备，而两处本该是同一台机器。
+//
+// 只要敲门令牌的调用方用它（只敲门、不拨隧道的 baidi-knock / knock-agent）；
+// 要拨隧道的一律走 FetchGrant，否则拿不到身份票据、在严格网关上必被拒。
 func FetchToken(control, sessionToken, device string) (string, error) {
-	return defaultFetcher.Fetch(control, sessionToken, device)
+	g, err := defaultFetcher.FetchGrant(control, sessionToken, device)
+	return g.Knock, err
 }
 
 // Fetch 同 FetchToken，但用本 Fetcher 的信任材料。
 func (f *Fetcher) Fetch(control, sessionToken, device string) (string, error) {
+	g, err := f.FetchGrant(control, sessionToken, device)
+	return g.Knock, err
+}
+
+// FetchGrant 取回敲门令牌 + 隧道身份票据（同一次调用、同一套闸）。
+func (f *Fetcher) FetchGrant(control, sessionToken, device string) (Grant, error) {
 	body, err := json.Marshal(map[string]string{"device": device})
 	if err != nil {
-		return "", err
+		return Grant{}, err
 	}
 	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(control, "/")+"/api/v1/knock-token", bytes.NewReader(body))
 	if err != nil {
-		return "", err
+		return Grant{}, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+sessionToken)
@@ -89,30 +116,34 @@ func (f *Fetcher) Fetch(control, sessionToken, device string) (string, error) {
 		// ★这条错误会经数据面健康行一路走到用户界面上（移动端 wave10 起直接展示），
 		// 故在**唯一的产生点**上就翻成人话，而不是让每个消费方各翻一遍——
 		// 各翻各的必然分家，且新加的消费方会安静地退回英文原文。认不出的原样返回。
-		return "", ClassifyControlErr(err)
+		return Grant{}, ClassifyControlErr(err)
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode == http.StatusForbidden {
-		return "", fmt.Errorf("%w：%s", ErrDenied, decodeErrMsg(resp.Body))
+		return Grant{}, fmt.Errorf("%w：%s", ErrDenied, decodeErrMsg(resp.Body))
 	}
 	if resp.StatusCode != http.StatusOK {
 		// 认得出的状态码翻成人话（同 ClassifyControlErr 的理由：这句会上到界面）；
 		// 认不出的保留状态码原样——泛泛兜底会把唯一的线索也抹掉。
 		if msg := ClassifyControlStatus(resp.StatusCode); msg != "" {
-			return "", fmt.Errorf("%s（HTTP %d）", msg, resp.StatusCode)
+			return Grant{}, fmt.Errorf("%s（HTTP %d）", msg, resp.StatusCode)
 		}
-		return "", fmt.Errorf("control 返回 %d", resp.StatusCode)
+		return Grant{}, fmt.Errorf("control 返回 %d", resp.StatusCode)
 	}
 	var r struct {
-		Token string `json:"token"`
+		Token        string `json:"token"`
+		TunnelTicket string `json:"tunnelTicket"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&r); err != nil {
-		return "", err
+		return Grant{}, err
 	}
 	if r.Token == "" {
-		return "", errors.New("control 返回空令牌")
+		return Grant{}, errors.New("control 返回空令牌")
 	}
-	return r.Token, nil
+	// ★tunnelTicket 缺席**不报错**：那是旧控制面，敲门这件事照样成立。
+	// 在这里 fail-closed 会让「控制面还没升级」表现为客户端整体连不上，
+	// 而真正该 fail-closed 的地方是网关（它知道自己的严格姿态，客户端不知道）。
+	return Grant{Knock: r.Token, Tunnel: r.TunnelTicket}, nil
 }
 
 // decodeErrMsg 从 control 统一错误信封 {"error":{"message":...}} 取原因，取不到给兜底文案。

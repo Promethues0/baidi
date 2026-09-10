@@ -20,7 +20,7 @@ var now = time.Date(2026, 8, 11, 12, 0, 0, 0, time.Local)
 // 而那正是需要它的那天才会被发现。
 func TestEvaluateThreeStates(t *testing.T) {
 	t.Run("未配置备机", func(t *testing.T) {
-		v := Evaluate(nil, now, 0)
+		v := Evaluate(nil, now, 0, Self{})
 		if v.Deployed || v.Mode != ModeSingle || v.Status != "skip" {
 			t.Fatalf("未配置备机应回 single/skip/未部署，得到 %+v", v)
 		}
@@ -37,7 +37,7 @@ func TestEvaluateThreeStates(t *testing.T) {
 			NodeID: "standby-1", Addr: "10.0.0.2", IntervalSec: 600,
 			LastSyncAt: now.Add(-3 * time.Minute).Unix(), LastPullAt: now.Add(-3 * time.Minute).Unix(),
 			LastStatus: "ok", BackupVersion: "0.3.0",
-		}}, now, 15*time.Minute)
+		}}, now, 15*time.Minute, Self{})
 		if !v.Deployed || v.Mode != ModeWarm || v.Status != "pass" {
 			t.Fatalf("新鲜备机应回 warm-standby/pass，得到 %+v", v)
 		}
@@ -53,7 +53,7 @@ func TestEvaluateThreeStates(t *testing.T) {
 		v := Evaluate([]Node{{
 			NodeID: "standby-1", IntervalSec: 600, LastStatus: "ok",
 			LastSyncAt: now.Add(-90 * time.Minute).Unix(),
-		}}, now, 15*time.Minute)
+		}}, now, 15*time.Minute, Self{})
 		if v.Status != "warn" || v.Nodes[0].State != StateStale {
 			t.Fatalf("落后 90 分钟（阈值 30 分钟）应判 stale/warn，得到 %+v", v)
 		}
@@ -71,7 +71,7 @@ func TestEvaluateNeverSyncedIsNotZeroLag(t *testing.T) {
 		NodeID: "standby-1", IntervalSec: 600,
 		LastPullAt: now.Add(-time.Minute).Unix(), // 来拉过
 		LastStatus: "fail", LastDetail: "校验失败：备份解密失败",
-	}}, now, 15*time.Minute)
+	}}, now, 15*time.Minute, Self{})
 	if v.Status != "warn" {
 		t.Fatalf("从未成功同步应判 warn，得到 %q", v.Status)
 	}
@@ -96,7 +96,7 @@ func TestEvaluateFreshButLastRoundFailed(t *testing.T) {
 	v := Evaluate([]Node{{
 		NodeID: "standby-1", IntervalSec: 600, LastSyncAt: now.Add(-time.Minute).Unix(),
 		LastStatus: "fail", LastDetail: "主机回 503",
-	}}, now, 15*time.Minute)
+	}}, now, 15*time.Minute, Self{})
 	if v.Status != "warn" || v.Nodes[0].State != StateFresh {
 		t.Fatalf("新鲜但最近一轮失败应判 fresh+warn，得到 status=%q node=%+v", v.Status, v.Nodes[0])
 	}
@@ -113,7 +113,7 @@ func TestThresholdCappedAgainstSelfReportedInterval(t *testing.T) {
 	if got := thresholdFor(huge, 15*time.Minute); got != MaxStaleAfter {
 		t.Fatalf("阈值应封顶到 %s，得到 %s", MaxStaleAfter, got)
 	}
-	v := Evaluate([]Node{huge}, now, 15*time.Minute)
+	v := Evaluate([]Node{huge}, now, 15*time.Minute, Self{})
 	if v.Nodes[0].State != StateStale {
 		t.Fatalf("自报一个巨大的间隔不该让备机免于落后判定：%+v", v.Nodes[0])
 	}
@@ -123,7 +123,7 @@ func TestThresholdCappedAgainstSelfReportedInterval(t *testing.T) {
 	if got := thresholdFor(n, 15*time.Minute); got != 90*time.Minute {
 		t.Fatalf("阈值应取 max(全局, 3×间隔)=90m，得到 %s", got)
 	}
-	if Evaluate([]Node{n}, now, 15*time.Minute).Nodes[0].State != StateFresh {
+	if Evaluate([]Node{n}, now, 15*time.Minute, Self{}).Nodes[0].State != StateFresh {
 		t.Error("30 分钟间隔的备机落后 40 分钟还不到三轮，不该判落后")
 	}
 }
@@ -281,13 +281,13 @@ func corrupt(b []byte) []byte {
 func TestNeverConnectedStandbyIsNotSilentSkip(t *testing.T) {
 	now := time.Now()
 	// 没签过任何备机证书：确实是单机形态，skip 是对的（不该因为"没有备机"被扣健康分）
-	v := Evaluate(nil, now, 0)
+	v := Evaluate(nil, now, 0, Self{})
 	if v.Status != "skip" || v.Deployed {
 		t.Fatalf("无备机证书时应 skip 单机形态，得 %+v", v)
 	}
 
 	// 签过证书却没有任何台账行：warn，且必须说清是"从未同步"而不是"未配置"
-	v2 := Evaluate(nil, now, 0, "standby-1", "standby-2")
+	v2 := Evaluate(nil, now, 0, Self{}, "standby-1", "standby-2")
 	if v2.Status != "warn" {
 		t.Fatalf("★签过备机证书却零台账必须 warn，得 %q", v2.Status)
 	}

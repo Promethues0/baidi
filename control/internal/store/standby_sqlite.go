@@ -30,8 +30,17 @@ type StandbyStore interface {
 	SaveStandbyStatus(ctx context.Context, n standby.Node, ok bool, syncedAt int64) error
 }
 
+// standbyCols 台账的读列表。
+//
+// ★后四列（备机版本身份，wave11 行动 18）是**补列**，且**刻意不回填**——
+// 这不是漏了那条「补列迁移必须配回填」的纪律，而是它的正确应用：
+// 回填的方向必须是"不生效 / 不下结论"，而这四列的空串语义恰好就是**不可判定**
+// （见 standby.versionVerdict 的三态）。任何回填值都是替一台还没说过话的备机
+// 宣布它是哪一版——而这四列存在的全部意义就是发现"它和主机不是同一版"。
+// 既有行读出 NULL → sql.NullString → "" → 判定停在 unknown，正是要的行为。
 const standbyCols = `node_id,addr,interval_sec,last_pull_at,last_sync_at,
-backup_version,backup_created_at,backup_sha256,last_status,last_detail,updated_at`
+backup_version,backup_created_at,backup_sha256,last_status,last_detail,updated_at,
+node_semver,node_build,control_semver,control_build`
 
 // StandbyNodes 全部已登记备机，按 node_id 排序（顺序稳定，页面不跳）。
 func (s *SQLiteStore) StandbyNodes(ctx context.Context) ([]standby.Node, error) {
@@ -49,12 +58,18 @@ func (s *SQLiteStore) StandbyNodes(ctx context.Context) ([]standby.Node, error) 
 		// 但 0 在 standby.Node 的契约里就是"从未"，两者语义一致，不存在补 0 掩盖事实的问题。
 		var iv, pull, sync, upd sql.NullInt64
 		var addr, ver, created, sha, st, detail sql.NullString
+		var nsem, nbld, csem, cbld sql.NullString
 		if err := rows.Scan(&n.NodeID, &addr, &iv, &pull, &sync,
-			&ver, &created, &sha, &st, &detail, &upd); err != nil {
+			&ver, &created, &sha, &st, &detail, &upd,
+			&nsem, &nbld, &csem, &cbld); err != nil {
 			return nil, err
 		}
 		n.Addr, n.BackupVersion, n.BackupCreatedAt = addr.String, ver.String, created.String
 		n.BackupSHA256, n.LastStatus, n.LastDetail = sha.String, st.String, detail.String
+		// NULL（补列前的既有行）与 ""（新备机报了空）在这里折成同一个空串是**有意的**：
+		// 两者都是"不可判定"，判定层对它们的处置逐字相同，分开只会多一个说不出区别的分支。
+		n.NodeSemver, n.NodeBuild = nsem.String, nbld.String
+		n.ControlSemver, n.ControlBuild = csem.String, cbld.String
 		n.IntervalSec = int(iv.Int64)
 		n.LastPullAt, n.LastSyncAt, n.UpdatedAt = pull.Int64, sync.Int64, upd.Int64
 		out = append(out, n)
@@ -93,11 +108,21 @@ func (s *SQLiteStore) SaveStandbyStatus(ctx context.Context, n standby.Node, ok 
 	}
 	_, err := s.db.ExecContext(ctx, `
 INSERT INTO standby_nodes(node_id,addr,interval_sec,last_sync_at,
-  backup_version,backup_created_at,backup_sha256,last_status,last_detail,updated_at)
-VALUES(?,?,?,?,?,?,?,?,?,?)
+  backup_version,backup_created_at,backup_sha256,last_status,last_detail,updated_at,
+  node_semver,node_build,control_semver,control_build)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(node_id) DO UPDATE SET
   addr=excluded.addr,
   interval_sec=excluded.interval_sec,
+  -- 版本身份**每轮覆写、包括覆写成空**（与上面备份头那三列刻意相反）：
+  -- 那三列在失败轮次里没有新值可报，保留旧值才不会把"上次备份是 0.3.0 的"抹掉；
+  -- 而版本身份是**每轮实测**的（备机跑一次 baidi-control -version），
+  -- 这一轮探不到就是这一轮探不到——留着上一轮的好值，会让"备机上的 baidi-control
+  -- 被删了/换成了一个跑不起来的二进制"在页面上永远显示成上次那个正常版本。
+  node_semver=excluded.node_semver,
+  node_build=excluded.node_build,
+  control_semver=excluded.control_semver,
+  control_build=excluded.control_build,
   -- 失败回报传 NULL：保留上一次成功的时间戳，页面才能如实显示「上次成功是 X，之后一直在失败」
   last_sync_at=COALESCE(excluded.last_sync_at, standby_nodes.last_sync_at),
   -- 备份头信息同理：失败那次没有新的头可报，不能用空串把上一次的抹成"未知版本"
@@ -108,6 +133,7 @@ ON CONFLICT(node_id) DO UPDATE SET
   last_detail=excluded.last_detail,
   updated_at=excluded.updated_at`,
 		nodeID, n.Addr, n.IntervalSec, sync,
-		n.BackupVersion, n.BackupCreatedAt, n.BackupSHA256, status, n.LastDetail, syncedAt)
+		n.BackupVersion, n.BackupCreatedAt, n.BackupSHA256, status, n.LastDetail, syncedAt,
+		n.NodeSemver, n.NodeBuild, n.ControlSemver, n.ControlBuild)
 	return err
 }

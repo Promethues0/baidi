@@ -116,6 +116,54 @@ func TestPromoteDryRunOnGoodBackup(t *testing.T) {
 	}
 }
 
+// TestPromoteListsTerminalSideTakeover 干跑必须当面列出「终端侧还指着旧主机」的清单
+// （wave11 行动 18-④）。
+//
+// ★为什么用一条用例钉住一屏文案：这一段是**这个功能的全部**——白帝没有让终端发现
+// 新主机的服务（无 DNS SRV、无引导端点），所以这里既做不了自动接管，
+// 也不该假装做了。清单本身就是交付物，它被谁顺手删掉时必须有人知道。
+// 改造前脚本末尾只交代了「各网关的 -control」，而桌面端地址是本机手填的单值、
+// 移动端地址与信任锚都**编译进安装包**——切换完成那一刻这两类终端全都指着旧主机。
+func TestPromoteListsTerminalSideTakeover(t *testing.T) {
+	bin := buildStandbyBin(t)
+	script := promoteScript(t)
+
+	dir := t.TempDir()
+	// primary 用一个本机绝不会持有的地址：脚本据此判定"地址会变"，走"必须人工改"那一屏。
+	if _, err := Adopt(dir, makeBackup(t, true), testPass, "standby-1",
+		"https://198.51.100.7:8092", 600, now); err != nil {
+		t.Fatalf("准备本地备份: %v", err)
+	}
+	prefix := filepath.Join(t.TempDir(), "opt-baidi")
+	code, out := runPromote(t, script, []string{"BAIDI_STANDBY_PASSPHRASE=" + testPass},
+		"--dry-run", "--dir", dir, "--bin", bin, "--prefix", prefix)
+	if code != 0 {
+		t.Fatalf("干跑应成功，退出码 %d：\n%s", code, out)
+	}
+	// 旧主机地址要从 latest.json 里读出来并回显——它是"要不要改终端"的唯一判据。
+	if !strings.Contains(out, "198.51.100.7") {
+		t.Errorf("要回显终端此前指向的主机地址：\n%s", out)
+	}
+	// 三类终端各自的接管动作都不同，一条都不能少：
+	//   网关能改配置重启；桌面端要每台手工改；移动端**只能重新出包**。
+	//   少了最后一条，运维会以为改配置就够了。
+	for _, want := range []string{
+		"网关", "桌面客户端", "重新出包", "HTTPS 证书", "不在备份",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("终端侧接管清单里应写明 %q：\n%s", want, out)
+		}
+	}
+	// 本机没装 baidi-control 时必须说出来——提升的最后一步就是启动它。
+	if !strings.Contains(out, "baidi-control") {
+		t.Errorf("要检查本机 baidi-control 的存在与版本：\n%s", out)
+	}
+	// 干跑仍然一个现网文件都不碰。
+	if _, err := os.Stat(prefix); !os.IsNotExist(err) {
+		t.Fatalf("干跑不得在目标前缀下造出任何东西（%s 竟然存在）", prefix)
+	}
+}
+
 // TestPromoteRefusesBrokenBackup 备份坏掉时**在碰现网文件之前**就停住。
 // 这条比"能恢复"更重要：先停服务再发现备份解不开，等于亲手制造一次停机。
 func TestPromoteRefusesBrokenBackup(t *testing.T) {

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/standby"
 	"baidi.dev/control/internal/store"
 )
@@ -140,7 +141,7 @@ func TestStandbyBackupIsRealAndVerifiable(t *testing.T) {
 	if err != nil {
 		t.Fatalf("主机产出的备份必须能通过备机侧同一条校验：%v", err)
 	}
-	if meta.Version != Version || !strings.Contains(meta.Note, "standby-1") {
+	if meta.Version != buildinfo.Current().Semantic || !strings.Contains(meta.Note, "standby-1") {
 		t.Errorf("备份头应记录版本与拉取方：%+v", meta)
 	}
 	if len(files) == 0 {

@@ -81,9 +81,23 @@ type Node struct {
 	BackupVersion   string
 	BackupCreatedAt string
 	BackupSHA256    string
-	LastStatus      string // ok | fail；"" = 从未回报
-	LastDetail      string
-	UpdatedAt       int64
+	// 备机侧的**版本身份**，两组分别回答两个不同的问题（wave11 行动 18）：
+	//
+	//	NodeSemver/NodeBuild       —— 备机上跑的 baidi-standby 是哪一版。
+	//	ControlSemver/ControlBuild —— 备机上那份 **baidi-control** 是哪一版，
+	//	    由备机跑 `baidi-control -version` 实测得来。**它才是切换后真正被启动的进程**，
+	//	    也是唯一该拿去与主机比对的那个值。
+	//
+	// ★四项都可能是空串 = **不可判定**（旧备机不上报 / 二进制未注入版本 / 探不到）。
+	// 绝不在任何一层补成主机的版本——那等于替一台还没说话的备机宣布"我们一致"，
+	// 而这条信息存在的全部意义就是发现"不一致"。
+	NodeSemver    string
+	NodeBuild     string
+	ControlSemver string
+	ControlBuild  string
+	LastStatus    string // ok | fail；"" = 从未回报
+	LastDetail    string
+	UpdatedAt     int64
 }
 
 // NodeView 一台备机的展示态（System 页 / /diag 共用）。
@@ -102,9 +116,29 @@ type NodeView struct {
 	BackupVersion   string `json:"backupVersion"`
 	BackupCreatedAt string `json:"backupCreatedAt"`
 	BackupSHA256    string `json:"backupSha256"`
-	LastStatus      string `json:"lastStatus"`
-	LastDetail      string `json:"lastDetail"`
+	// 备机侧版本身份（见 Node 上同名字段的注释）。空串 = 不可判定。
+	NodeSemver    string `json:"nodeSemver"`
+	NodeBuild     string `json:"nodeBuild"`
+	ControlSemver string `json:"controlSemver"`
+	ControlBuild  string `json:"controlBuild"`
+	// VersionState 备机上那份 baidi-control 与主机的版本关系：
+	// unknown（不可判定）| match（一致）| mismatch（确定不一致）。
+	VersionState string `json:"versionState"`
+	// VersionText 上面那个结论的人话，页面原样显示（后端不让前端自己编）。
+	VersionText string `json:"versionText"`
+	LastStatus  string `json:"lastStatus"`
+	LastDetail  string `json:"lastDetail"`
 }
+
+// 备机版本一致性的三态取值。
+const (
+	// VersionUnknown 判不出来：备机没报、或两侧任一未注入版本。
+	// **不翻状态**，只如实呈现——它与 VersionMismatch 的处置完全不同
+	// （前者去升级/重建备机的包，后者是切换那天真会出事的事实）。
+	VersionUnknown  = "unknown"
+	VersionMatch    = "match"
+	VersionMismatch = "mismatch"
+)
 
 // ClusterView 集群区块的完整答案。System 页与 /diag checkCluster 读的是同一个它，
 // 两处口径不可能再分叉（此前是两份各自写死的文案）。
@@ -208,6 +242,16 @@ func Unknown(reason string) ClusterView {
 	}
 }
 
+// Self 主机自身的版本身份，用于与备机上那份 baidi-control 比对。
+//
+// ★为什么必须由调用方传进来而不是在这里读 buildinfo：Evaluate 是纯函数，
+// 判定条件写反在集成环境里与"一切正常"无法区分（同 alerting.Evaluate 的理由），
+// 而一个直接读进程全局的函数，测试里就永远造不出"版本不一致"这个场景。
+type Self struct {
+	Semver string // "" = 主机自己也未注入版本 → 一致性不可判定
+	Build  string
+}
+
 // Evaluate 按主机侧登记算出集群视图。纯函数：吃快照吐结论，条件写反在集成环境里
 // 与"一切正常"无法区分，只有纯函数测得住（同 alerting.Evaluate 的理由）。
 //
@@ -215,7 +259,7 @@ func Unknown(reason string) ClusterView {
 // 用来把「配了备机但它一次都没连上来」与「根本没配备机」区分开——见 evaluateNeverSeen。
 //
 // staleAfter <= 0 时取 DefaultStaleAfter。
-func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs ...string) ClusterView {
+func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, self Self, issuedCNs ...string) ClusterView {
 	if staleAfter <= 0 {
 		staleAfter = DefaultStaleAfter
 	}
@@ -230,8 +274,9 @@ func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs .
 	v.Mode, v.Deployed = ModeWarm, true
 	worst, fresh, minInterval := "pass", 0, 0
 	var worstNode NodeView
+	var mismatched []string
 	for _, n := range nodes {
-		nv := evalNode(n, now, staleAfter)
+		nv := evalNode(n, now, staleAfter, self)
 		v.Nodes = append(v.Nodes, nv)
 		if nv.IntervalSec > 0 && (minInterval == 0 || nv.IntervalSec < minInterval) {
 			minInterval = nv.IntervalSec
@@ -243,6 +288,14 @@ func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs .
 		case nv.LastStatus == "fail":
 			// 盘上那份还新鲜，但最近一轮同步失败了：现在没事，再失败两轮就有事。
 			st = "warn"
+		case nv.VersionState == VersionMismatch:
+			// ★版本**确定**不一致才翻 warn；不可判定不翻（见 VersionUnknown 的注释）。
+			// 切换后启动的是备机上那份 baidi-control，它读的是主机版本迁移过的库——
+			// 版本对不上时最好的结局是进程起不来，最坏是起来了、库被旧版半迁回去。
+			st = "warn"
+		}
+		if nv.VersionState == VersionMismatch {
+			mismatched = append(mismatched, nv.NodeID)
 		}
 		if st == "pass" {
 			fresh++
@@ -255,6 +308,9 @@ func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs .
 	case worst == "pass":
 		v.Summary = fmt.Sprintf("温备就绪：%d 台备机同步新鲜（最近一次落盘 %s）",
 			fresh, freshestText(v.Nodes))
+	case len(mismatched) > 0 && worstNode.VersionState == VersionMismatch:
+		v.Summary = fmt.Sprintf("备机 %s 上的 baidi-control 是 %s，主机是 %s：切换后会跨版本恢复",
+			worstNode.NodeID, worstNode.ControlSemver, self.Semver)
 	case worstNode.State == StateNever:
 		v.Summary = fmt.Sprintf("备机 %s 从未成功同步过：切换时手上没有可用备份", worstNode.NodeID)
 	case worstNode.State == StateStale:
@@ -275,7 +331,7 @@ func Evaluate(nodes []Node, now time.Time, staleAfter time.Duration, issuedCNs .
 }
 
 // evalNode 单台备机的判定。
-func evalNode(n Node, now time.Time, staleAfter time.Duration) NodeView {
+func evalNode(n Node, now time.Time, staleAfter time.Duration, self Self) NodeView {
 	th := thresholdFor(n, staleAfter)
 	nv := NodeView{
 		NodeID: n.NodeID, Addr: n.Addr, IntervalSec: n.IntervalSec,
@@ -285,9 +341,14 @@ func evalNode(n Node, now time.Time, staleAfter time.Duration) NodeView {
 		BackupVersion:   n.BackupVersion,
 		BackupCreatedAt: n.BackupCreatedAt,
 		BackupSHA256:    n.BackupSHA256,
+		NodeSemver:      n.NodeSemver,
+		NodeBuild:       n.NodeBuild,
+		ControlSemver:   n.ControlSemver,
+		ControlBuild:    n.ControlBuild,
 		LastStatus:      n.LastStatus,
 		LastDetail:      n.LastDetail,
 	}
+	nv.VersionState, nv.VersionText = versionVerdict(n, self)
 	if n.LastSyncAt <= 0 {
 		nv.State, nv.LagSeconds = StateNever, -1
 		nv.LagText = "从未成功同步"
@@ -304,6 +365,42 @@ func evalNode(n Node, now time.Time, staleAfter time.Duration) NodeView {
 		nv.State = StateStale
 	}
 	return nv
+}
+
+// versionVerdict 「切换到这台备机之后，跑起来的会是哪一版」的三态判定（wave11 行动 18）。
+//
+// 判据是**备机上那份 baidi-control 的语义版本**，不是 baidi-standby 自己的：
+// 提升脚本最后一步 `systemctl start baidi-control` 启动的是前者，而两个二进制
+// 由同一次构建产出只是部署脚本的约定，不是可核实的事实（手工替换过其中一个、
+// 或上一次部署只覆盖了一半，恰恰是最该在切换前发现的形态）。
+//
+// ★三态里最容易被写坏的是 unknown：任一侧为空就必须停在"不可判定"，
+// 绝不能让 `"" == ""` 走进 match 分支——那会把「两台机器都不知道自己是哪一版」
+// 显示成「版本一致，可以切」，方向正好相反，而它恰恰是升级到本版本之前
+// 所有存量部署的形态。
+func versionVerdict(n Node, self Self) (string, string) {
+	cur := strings.TrimSpace(self.Semver)
+	got := strings.TrimSpace(n.ControlSemver)
+	switch {
+	case got == "" && strings.TrimSpace(n.NodeSemver) == "":
+		return VersionUnknown, "备机未回报版本身份（baidi-standby 版本过旧）：" +
+			"切换后会启动哪一版 baidi-control 无从判断。升级备机上的白帝交付包即可回报。"
+	case got == "":
+		return VersionUnknown, "备机报了自身版本（baidi-standby " + n.NodeSemver +
+			"），但探不到同机 baidi-control 的版本：可能这台机器上没装它（那样提升流程最后一步会失败），" +
+			"也可能它未注入版本身份。到备机上跑一次 `baidi-control -version` 即可分辨。"
+	case cur == "":
+		return VersionUnknown, "主机自身未注入语义版本，无法与备机的 baidi-control（" + got + "）比对。"
+	case cur == got:
+		return VersionMatch, "备机上的 baidi-control 与主机同为 " + cur + "。" +
+			"★版本号相同不等于同一次构建：确认构建标识也一致才是真的同一批（主机 " +
+			orDash(self.Build) + " / 备机 " + orDash(n.ControlBuild) + "）。"
+	default:
+		return VersionMismatch, "备机上的 baidi-control 是 " + got + "，主机是 " + cur +
+			"：切换后那台会用 " + got + " 打开一个被 " + cur + "迁移过的库。" +
+			"最好的结局是进程起不来（切换失败但数据还在），最坏是它起来了并把库按旧结构半迁回去。" +
+			"切换前先把备机上的白帝交付包升到与主机同一版。"
+	}
 }
 
 // thresholdFor 逐节点的落后阈值 = max(全局阈值, 3×备机自报间隔)，并封顶到 MaxStaleAfter。

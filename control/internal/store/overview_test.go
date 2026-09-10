@@ -59,14 +59,29 @@ func TestOverviewAuditAggregatesReal(t *testing.T) {
 	if verdictSum == 0 {
 		t.Error("Verdicts 聚合为空，应来自真实 audit_log")
 	}
-	// 账号防线 TOP 应含真实高危用户（种子 li.fang / ext.zhou 为 high）
-	var acct *DefenseLine
-	for i := range ov.Defense {
-		if ov.Defense[i].Key == "account" {
-			acct = &ov.Defense[i]
+	// ★这里原本断言「账号防线 TOP 非空」，理由写的是"种子 li.fang / ext.zhou 为 high"——
+	// 而那个 high 是 users.risk 那一列建号时 INSERT 下去的死值（全仓无 UPDATE）。
+	// 那条断言把「拿建号那天写的标签当此刻的风险」钉成了预期行为，与 wave10 里
+	// zhang.wei 被四条用例钉住是同一族的错。现在正面钉住相反的事实：
+	// 一份 posture 上报都没有时，账号防线不许列出任何风险实体。
+	acct := defenseOf(t, ov, "account")
+	if len(acct.Top) != 0 {
+		t.Fatalf("没有任何 posture 上报时账号防线不该有风险实体（种子 users.risk 是死列），实得 %v", acct.Top)
+	}
+	if acct.Unknown != ov.Users.Total {
+		t.Fatalf("全体账号都没上报过终端环境，Unknown 应等于账号总数 %d，实得 %d",
+			ov.Users.Total, acct.Unknown)
+	}
+}
+
+// defenseOf 取某一条防线（找不到直接 Fatal——防线缺席是回归，不是空值）。
+func defenseOf(t *testing.T, ov Overview, key string) DefenseLine {
+	t.Helper()
+	for _, d := range ov.Defense {
+		if d.Key == key {
+			return d
 		}
 	}
-	if acct == nil || len(acct.Top) == 0 {
-		t.Fatal("账号防线应存在且 TOP 非空")
-	}
+	t.Fatalf("防线 %q 缺席：%+v", key, ov.Defense)
+	return DefenseLine{}
 }

@@ -77,16 +77,25 @@
           </span>
         </div>
         <div class="bd-line__risk">
-          <span class="bd-line__score" :class="`bd-line__score--${riskTone(d.risk)}`">{{ d.risk }}</span>
-          <span class="bd-line__unit">风险分</span>
+          <!-- ★风险分三态：后端下发 null = 这条防线一份判定材料都没有。画「—」而不是 0——
+               0 会被这条进度条与下方标签渲染成绿色的「良好」，那是一句没有证据的安全断言。 -->
+          <span class="bd-line__score" :class="`bd-line__score--${riskTone(d.risk)}`">
+            {{ riskKnown(d.risk) ? d.risk : '—' }}
+          </span>
+          <span class="bd-line__unit">{{ riskKnown(d.risk) ? '风险分' : '风险分不可判定' }}</span>
         </div>
-        <a-progress :percent="d.risk / 100" :show-text="false" size="mini" :color="riskHex(d.risk)" />
+        <a-progress :percent="riskPct(d.risk)" :show-text="false" size="mini" :color="riskHex(d.risk)" />
         <div class="bd-line__top">
-          <div class="bd-line__top-h">TOP 风险实体</div>
+          <div class="bd-line__top-h">{{ topTitle(d) }}</div>
           <div v-for="(e, i) in d.top" :key="e" class="bd-line__top-row">
             <span class="bd-line__rank">{{ i + 1 }}</span><span class="bd-line__ent">{{ e }}</span>
           </div>
-          <div v-if="!d.top.length" class="bd-line__none">暂无风险实体</div>
+          <!-- 「没有风险实体」与「没有判定材料」必须分得开：后者的下一步动作是去把
+               客户端铺开 / 查为什么不上报，前者才是"面上很干净"。 -->
+          <div v-if="!d.top.length" class="bd-line__none">
+            {{ unknownOf(d) ? `暂无可判定的风险实体（另有 ${unknownOf(d)} ${unknownUnit(d)}不可判定）` : '暂无风险实体' }}
+          </div>
+          <div v-else-if="unknownOf(d)" class="bd-line__none">另有 {{ unknownOf(d) }} {{ unknownUnit(d) }}不可判定，未计入</div>
         </div>
         <div v-if="d.note" class="bd-line__note">{{ d.note }}</div>
       </div>
@@ -157,7 +166,7 @@
 
 <script setup lang="ts">
 import { ref, computed, onMounted } from 'vue';
-import { api, failReason, type Overview } from '@/lib/api';
+import { api, failReason, type DefenseLine, type Overview } from '@/lib/api';
 import PageHeader from '@/components/PageHeader.vue';
 import StatCard from '@/components/StatCard.vue';
 import SkeletonBlock from '@/components/SkeletonBlock.vue';
@@ -182,9 +191,11 @@ const MOCK: Overview = {
   windowHours: 24,
   windowNote: '（降级演示数据）审计派生统计按最近 24 小时聚合；账号与终端两条防线是当前状态，与时间窗无关',
   defense: [
-    { key: 'attack', name: '隐身防线', risk: 28, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'] , scope: 'window', note: '按所选时间窗聚合' },
-    { key: 'account', name: '账号防线', risk: 41, top: ['li.fang', '外包-zhao', 'svc-bot-04'] , scope: 'current', note: '当前状态，与所选时间窗无关' },
-    { key: 'endpoint', name: '终端防线', risk: 19, top: ['WIN-诊室-12', 'MAC-研发-08'] , scope: 'current', note: '当前状态，与所选时间窗无关' }
+    { key: 'attack', name: '隐身防线', risk: 28, unknown: 0, top: ['203.0.113.7 · 敲门令牌无效 ×41', '198.51.100.4 · 未敲门直连隧道口 ×9'], scope: 'window', note: '按所选时间窗聚合' },
+    { key: 'account', name: '账号防线', risk: 41, unknown: 12, top: ['li.fang', 'ext.zhou'], scope: 'current', note: '当前状态，与所选时间窗无关' },
+    // ★终端防线是**设备**维度：平台 · 指纹短码 · 判定档 · 账号。演示数据也照这个形状写，
+    //   否则改坏了两条线的聚合单位、页面在降级态下仍然"看起来对"。
+    { key: 'endpoint', name: '终端防线', risk: 19, unknown: 2, top: ['Windows 11 · 指纹 9f2ac1b40d3e… · 已阻断 · li.fang', 'macOS 15.1 · 指纹 3b71ee0a92c4… · 已降权 · ext.zhou'], scope: 'current', note: '当前状态，与所选时间窗无关' }
   ],
   attack: {
     sources: 6, denies: 87,
@@ -229,11 +240,28 @@ function pct(v: number, max: number) { return `${Math.round((v / max) * 100)}%`;
 /** 攻击趋势柱高（相对窗口内最大桶；零桶给 2px 底线示意"这一小时确实没有"）。 */
 const atkMax = computed(() => Math.max(...(ov.value.attack?.trend ?? []).map((k) => k.value), 1));
 function colH(v: number) { return v ? `${Math.max(8, Math.round((v / atkMax.value) * 100))}%` : '2px'; }
-function riskColor(r: number) { return r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
-function riskHex(r: number) { return r >= 40 ? '#F53F3F' : r >= 25 ? '#FF7D00' : '#00B42A'; }
+/** 风险分三态守卫：null / undefined = 后端说这条防线一份判定材料都没有。
+ *  ★下面四个渲染函数**全部**先过它，绝不写 `r ?? 0`——那会把「不可判定」
+ *  在前端塌回一个确定的 0 分，而 0 分在这套阈值下就是绿色的「良好」。 */
+function riskKnown(r: number | null | undefined): r is number { return typeof r === 'number'; }
+function riskColor(r: number | null | undefined) { return !riskKnown(r) ? 'gray' : r >= 40 ? 'red' : r >= 25 ? 'orange' : 'green'; }
+function riskHex(r: number | null | undefined) { return !riskKnown(r) ? '#86909C' : r >= 40 ? '#F53F3F' : r >= 25 ? '#FF7D00' : '#00B42A'; }
 /** 风险分的语义档（与 riskColor / riskLabel 同阈值），供 class 走 --bd-* 语义色而不写十六进制。 */
-function riskTone(r: number) { return r >= 40 ? 'danger' : r >= 25 ? 'warning' : 'success'; }
-function riskLabel(r: number) { return r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
+function riskTone(r: number | null | undefined) { return !riskKnown(r) ? 'unknown' : r >= 40 ? 'danger' : r >= 25 ? 'warning' : 'success'; }
+function riskLabel(r: number | null | undefined) { return !riskKnown(r) ? '不可判定' : r >= 40 ? '高风险' : r >= 25 ? '关注' : '良好'; }
+/** 进度条百分比：不可判定时画空条（0 长度），配合灰色与「—」一起表达"没有数"。 */
+function riskPct(r: number | null | undefined) { return riskKnown(r) ? r / 100 : 0; }
+/** 这条防线的不可判定实体数（后端 0 也有意义，缺席才当 0 处理）。 */
+function unknownOf(d: DefenseLine) { return d.unknown ?? 0; }
+/** TOP 列表的标题按**聚合单位**取名：账号防线数的是人、终端防线数的是机器。
+ *  三张卡都叫「TOP 风险实体」正是改造前那两张卡能长期显示同一份数据还没人发现的原因。 */
+function topTitle(d: DefenseLine) {
+  return d.key === 'endpoint' ? 'TOP 风险终端（按设备指纹）'
+    : d.key === 'account' ? 'TOP 风险账号'
+      : 'TOP 攻击源';
+}
+/** 不可判定计数的量词，跟随聚合单位。 */
+function unknownUnit(d: DefenseLine) { return d.key === 'endpoint' ? '台' : '个'; }
 function verdictColor(name: string) {
   return name === '拒绝' ? '#F53F3F' : name === '二次鉴权' ? '#FF7D00' : name === '降权' ? '#FF9A2E' : '#165DFF';
 }
@@ -279,6 +307,9 @@ onMounted(load);
 .bd-line__score--danger { color: var(--bd-danger); }
 .bd-line__score--warning { color: var(--bd-warning); }
 .bd-line__score--success { color: var(--bd-success); }
+/* 不可判定：中性灰。刻意不给它任何语义色——绿色会被读成"良好"，红色会被读成"有事"，
+   而这一格的意思是"没有数据可以下结论"。 */
+.bd-line__score--unknown { color: var(--bd-t3); }
 .bd-line__unit { font-size: var(--bd-fs-sm); color: var(--bd-t3); }
 .bd-line__none { font-size: var(--bd-fs-sm); color: var(--bd-t3); padding: 3px 0; }
 .bd-line__top { margin-top: 14px; }

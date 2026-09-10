@@ -95,7 +95,16 @@ async function errText(res: Response): Promise<string> {
 export interface KV { name: string; value: number }
 /** 三道防线之一。刻意没有 trend：趋势要有历史快照才算得出来，后端一张历史态势表都没有。 */
 export interface DefenseLine {
-  key: string; name: string; risk: number; top: string[];
+  key: string; name: string; top: string[];
+  /** 0-100 风险分。★**null = 不可判定**（这条防线一份判定材料都没有）。
+   *  绝不写 `risk ?? 0`：终端防线在"一台终端都没上报过环境"时正是 null，
+   *  补成 0 会被仪表渲染成绿色的「良好」——那是一句没有证据的安全断言，
+   *  而它恰恰是全新部署、客户端还没铺开时的常态形状。 */
+  risk: number | null;
+  /** 这条防线维度下**不可判定**的实体数（账号线：从未上报过终端环境的账号；
+   *  终端线：登记在授信台账却没有任何合规判定的终端；隐身线恒 0）。
+   *  ★TOP 为空时它是唯一能区分「真的没有风险实体」与「压根没有判定材料」的数。 */
+  unknown?: number;
   /** 这条防线的数是**窗口内累计**（window）还是**当前状态**（current）。
    *  ★只有隐身防线真按时间窗算：账号防线读 users 当前状态、终端防线读 posture_reports
    *  最新一份，时间选择器对后两条不生效，不逐条标出来就是一个悄悄失效的筛选。 */

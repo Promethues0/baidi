@@ -259,3 +259,45 @@ func TestOverviewDefenseScopeReachesAPI(t *testing.T) {
 		}
 	}
 }
+
+// TestOverviewDefenseUnknownReachesAPI 「不可判定」必须原样穿过 JSON 到达页面（wave11 行动 12）。
+//
+// ★两个键都不许 omitempty：
+//   - risk 缺席的话前端只能 `?? 0`，而 0 分在那套阈值下就是绿色的「良好」——
+//     一句没有证据的安全断言，且它正是"客户端还没铺开"的常态形状；
+//   - unknown 缺席的话，"确实没有不可判定的"与"后端根本没算这一项"同形，
+//     而 TOP 为空时它是唯一能区分「面上很干净」与「没有判定材料」的数。
+func TestOverviewDefenseUnknownReachesAPI(t *testing.T) {
+	h := newTestServer(t)
+	_, out := doJSON(t, h, "GET", "/api/v1/overview", adminToken(), nil)
+	lines, _ := out["defense"].([]any)
+	for _, it := range lines {
+		m, _ := it.(map[string]any)
+		if _, has := m["unknown"]; !has {
+			t.Fatalf("防线 %q 少了 unknown 键", str(m["key"]))
+		}
+		riskRaw, has := m["risk"]
+		if !has {
+			t.Fatalf("防线 %q 少了 risk 键（缺席会被前端补成 0 分 = 绿色良好）", str(m["key"]))
+		}
+		switch str(m["key"]) {
+		case "endpoint":
+			// 测试服起来时一份 posture 上报都没有 → 终端维度不可判定。
+			if riskRaw != nil {
+				t.Fatalf("没有任何终端上报时终端防线 risk 应为 null，实得 %v", riskRaw)
+			}
+			if m["unknown"].(float64) != 0 {
+				t.Fatalf("测试库里没有台账孤儿终端，unknown 应为 0，实得 %v", m["unknown"])
+			}
+		case "account":
+			// 全体账号都没上报过 → 全部不可判定，而不是"全员无风险"。
+			if m["unknown"].(float64) == 0 {
+				t.Fatal("全体账号都没上报过终端环境，账号防线 unknown 不该是 0")
+			}
+		case "attack":
+			if riskRaw == nil {
+				t.Fatal("隐身防线的判定材料恒在，risk 不该是 null")
+			}
+		}
+	}
+}

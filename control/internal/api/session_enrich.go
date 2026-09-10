@@ -162,15 +162,18 @@ func (s *Server) riskOfAccount(ctx context.Context, account string) (string, str
 	if why == "" {
 		why = "无失败项"
 	}
+	// ★风险档只由 store.RiskOfDisposal 折算，这里只负责把"为什么"写成人话。
+	// 这个 switch 曾经自带一份折算表，而态势总览的账号防线读的是 users.risk 死列——
+	// 同一个账号在两页上给出相反的结论。折算表现在只有一份，两处必须同真同假。
 	switch rep.Verdict {
 	case store.DisposalBlock:
-		return store.SessionRiskHigh, "终端合规判定 block（已拒发敲门令牌 / 撤窗断隧道）：" + why
+		return store.RiskOfDisposal(rep.Verdict), "终端合规判定 block（已拒发敲门令牌 / 撤窗断隧道）：" + why
 	case store.DisposalDegrade:
-		return store.SessionRiskHigh, "终端合规判定 degrade（高敏资源已暂停）：" + why
+		return store.RiskOfDisposal(rep.Verdict), "终端合规判定 degrade（高敏资源已暂停）：" + why
 	case store.DisposalGray:
-		return store.SessionRiskLow, "终端合规判定 gray（观察中，访问权未变更）：" + why
+		return store.RiskOfDisposal(rep.Verdict), "终端合规判定 gray（观察中，访问权未变更）：" + why
 	case store.DisposalAllow:
-		return store.SessionRiskNone, "终端合规判定 allow：" + why
+		return store.RiskOfDisposal(rep.Verdict), "终端合规判定 allow：" + why
 	}
-	return store.SessionRiskUnknown, "终端合规判定取值未知：" + rep.Verdict
+	return store.RiskOfDisposal(rep.Verdict), "终端合规判定取值未知：" + rep.Verdict
 }

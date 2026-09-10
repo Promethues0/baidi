@@ -39,6 +39,47 @@ var disposalRank = map[string]int{
 // DisposalRank 处置严厉度排序值（block 最严）；未知处置视为 allow。
 func DisposalRank(d string) int { return disposalRank[d] }
 
+// RiskOfDisposal 把终端合规处置档折算成风险档（none | low | high | unknown）的**唯一定义处**。
+//
+// ★这张折算表此前只活在 api.riskOfAccount 的一个 switch 里，而态势总览的账号防线
+// 走的是另一条路——`users.risk` 那一列。那列全仓**只有 INSERT、没有一处 UPDATE**
+// （建号那一刻写下的死值），于是同一个账号在「用户与角色」页显示 unknown、
+// 在安全概览的「TOP 风险账号」里却按种子里那个 high 稳定挂着；反过来，一个刚被判
+// block 的账号在概览上是干净的。CLAUDE.md 立的规矩「在线在控制台上只有一个判据」
+// 对风险同样成立，这里就是那个判据。
+//
+// **未识别的处置值折成 unknown 而不是 none**：那是"我不认识这个判定"，
+// 塌成"无风险"等于替一台状态未知的机器背书（与 posture 采集三态同一条纪律）。
+func RiskOfDisposal(disposal string) string {
+	switch disposal {
+	case DisposalBlock, DisposalDegrade:
+		return SessionRiskHigh
+	case DisposalGray:
+		return SessionRiskLow
+	case DisposalAllow:
+		return SessionRiskNone
+	}
+	return SessionRiskUnknown
+}
+
+// DisposalLabel 处置四档的中文名（页面展示用）的**唯一定义处**。
+// 用户状态页的分桶标签（userStateBuckets）与态势总览的终端防线 TOP 共用它——
+// 两处各写一份的话，同一个 degrade 会在一页叫「已降权」、在另一页叫别的名字，
+// 管理员无从判断两处说的是不是同一件事（monitor.go 顶部那条注释记的就是这个教训）。
+func DisposalLabel(d string) string {
+	switch d {
+	case DisposalBlock:
+		return "已阻断"
+	case DisposalDegrade:
+		return "已降权"
+	case DisposalGray:
+		return "灰度观察"
+	case DisposalAllow:
+		return "放行"
+	}
+	return "判定未知"
+}
+
 // ErrPostureDeviceCap 新设备写入超出单账号上限。上限判定与写入在同一条 SQL 里原子完成
 // （见 SQLiteStore.SavePostureReport），而非 handler 层 check-then-act——后者在并发突发下会越过上限。
 //

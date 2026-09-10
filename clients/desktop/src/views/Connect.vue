@@ -23,6 +23,18 @@
           <div class="ck-pwrule">{{ PW_RULE_HINT }}</div>
         </template>
         <template v-else-if="!needMfa && !needTotp">
+          <!--
+            认证域选择：只有配了 ≥2 个外部认证源时才出现（GET /auth/domains 在单源时回空）。
+            ★它不是"多一个可选项"——不选的话服务端**拒绝登录**（一次登录只把口令交给一台
+            目录服务器）。桌面端此前没有这个控件，后端那句「请在下方选择所属认证域」
+            只能原样显示成一条错误，而下方无处可选：接了两个及以上外部源的部署里，
+            桌面端的外部目录账号 100% 登不进去，且本地账号照常能登（管理员自己试不出来）。
+          -->
+          <a-select v-if="domains.length" v-model="form.directory" size="large" class="ck-inp ck-sel"
+            placeholder="选择你所属的认证域">
+            <template #prefix><icon-apps /></template>
+            <a-option v-for="d in domains" :key="d.id" :value="d.id">{{ d.name }}（{{ d.kind.toUpperCase() }}）</a-option>
+          </a-select>
           <a-input v-model="form.username" size="large" placeholder="企业账号" class="ck-inp"><template #prefix><icon-user /></template></a-input>
           <a-input-password v-model="form.password" size="large" placeholder="登录口令" class="ck-inp" @keyup.enter="doLogin(false)"><template #prefix><icon-lock /></template></a-input-password>
         </template>
@@ -257,7 +269,7 @@
 <script setup lang="ts">
 import { ref, reactive, computed, watch, onMounted, onBeforeUnmount } from 'vue';
 import { Message } from '@arco-design/web-vue';
-import { api, fetchProfile, checkClientUpdate, ApiError, failReason, failStatus, type PortalLoginResp, type ClientUpdateResp } from '@/lib/api';
+import { api, fetchProfile, fetchAuthDomains, checkClientUpdate, ApiError, failReason, failStatus, type PortalLoginResp, type ClientUpdateResp, type AuthDomainOption } from '@/lib/api';
 import { PW_RULE_HINT, checkNewPassword } from '@/lib/pwchange';
 import { session, login, authed, validateConfig, profile, setProfile, setProfileError, config } from '@/lib/store';
 import { knock } from '@/lib/knock';
@@ -281,7 +293,10 @@ const controlCa = ref<ControlCaInfo | null>(null);
 const controlCaLine = computed(() => controlCaSay(controlCa.value, config.control));
 
 /* 登录 */
-const form = reactive({ username: 'li.fang', password: '', mfaCode: '' });
+const form = reactive({ username: 'li.fang', password: '', mfaCode: '', directory: '' });
+/** 可选认证域（只在配了 ≥2 个外部认证源时非空）。取不到不阻断登录——单源部署本来就该是空的。 */
+const domains = ref<AuthDomainOption[]>([]);
+async function loadDomains(): Promise<void> { domains.value = await fetchAuthDomains(); }
 const needMfa = ref(false);
 const needTotp = ref(false);
 const totpTicket = ref(''); // 「口令已验」一次性票据（3min），TOTP 第二回合凭它绑定账号
@@ -385,7 +400,10 @@ async function doLogin(withMfa: boolean) {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         username: form.username, password: form.password,
-        mfaCode: withMfa ? form.mfaCode : '', deviceId: await localDeviceID()
+        mfaCode: withMfa ? form.mfaCode : '', deviceId: await localDeviceID(),
+        // 空串 = 未指定。单源部署与本地账号都不需要它，服务端只在"配了 ≥2 个外部源
+        // 且本地未命中"时才要求（见 api.routeDirectory 的四档判定）。
+        directory: form.directory
       })
     });
     // ★这一支必须排在 `r.ok && r.token` 前面：首登强制改密的应答同样带 ok=true + token，
@@ -399,6 +417,16 @@ async function doLogin(withMfa: boolean) {
     else if (r.needTotp && r.ticket) { needTotp.value = true; totpTicket.value = r.ticket; mfaReason.value = r.reason || ''; form.mfaCode = ''; err.value = ''; }
     else if (r.needWebauthn) { err.value = '该账号已启用 passkey 二次认证：客户端无法完成断言，请改用浏览器门户，或在门户「我的安全」改用 TOTP。'; }
     else if (r.needMfa) { needMfa.value = true; mfaReason.value = r.reason || ''; err.value = ''; }
+    else if (r.needDirectory) {
+      // ★服务端带回了候选就**装进下拉**，别把「请先选择所属认证域」显示成一条无从执行的
+      //   错误——那正是改造前桌面端的形态（下方没有那个控件）。
+      //   两种情况的下一步动作完全不同：有候选 → 选一个重试；没候选（免认证列表读失败等）
+      //   → 只能找管理员，此时原样转述后端那句话，不编一个"请选择"的假指引。
+      domains.value = r.domains ?? [];
+      err.value = domains.value.length
+        ? '本系统配置了多个认证域，请在上方选择你所属的认证域后重试'
+        : (r.reason || '需要指定认证域，但服务端未返回候选，请联系管理员');
+    }
     else { err.value = r.reason || '登录失败'; }
   } catch (e) {
     // ★不要再统一说「检查地址」：最常见的那种失败地址恰恰是对的（自签证书被系统拒）。
@@ -794,7 +822,12 @@ onMounted(async () => {
   // 那一行会永远显示「—」，而重开 app 的人反倒看得到——一个只在部分路径上生效的显示项，
   // 正是本项目要消灭的那类静默偏差。
   if (isTauri) void controlCaInfo().then((v) => { controlCa.value = v; });
-  if (!authedNow.value) return;
+  if (!authedNow.value) {
+    // 认证域清单只在登录页用得上，登录之后不必再拉。不 await：拿不到就是空数组，
+    // 登录表单照常可用（单目录部署本来就该是空的）。
+    void loadDomains();
+    return;
+  }
   // 令牌存在 localStorage：重开 app 是直接落在已登录态的，登录那条路径根本不跑。
   // 少了这一句，只有"当次输过密码"的人才看得到新版提示，而常驻用户几乎从不重新登录。
   void checkUpdate();
@@ -840,6 +873,9 @@ onBeforeUnmount(() => { pollGen++; clearInterval(pollTimer); clearTimeout(connec
 .ck-login__t { font-size: 17px; font-weight: 700; margin-top: 14px; }
 .ck-login__s { font-size: 12px; color: var(--bd-t3); margin: 5px 0 20px; }
 .ck-inp { margin-bottom: 13px; }
+/* 认证域下拉：与上下两个输入框同宽同高（a-select 默认按内容宽，不对齐会像漏了一格）。
+   文本左对齐——登录卡整体 text-align:center，继承过来会让选项文字居中，与输入框不齐。 */
+.ck-sel { width: 100%; text-align: left; }
 .ck-mfa-tip { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-warning); background: var(--bd-tag-gold-bg); border-radius: 7px; padding: 8px 10px; margin-bottom: 12px; }
 .ck-err { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--bd-danger); margin: -4px 0 10px; }
 .ck-login__btn { width: 100%; height: 40px; justify-content: center; font-size: 14px; letter-spacing: 2px; margin-top: 2px; }

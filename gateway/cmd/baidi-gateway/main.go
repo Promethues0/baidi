@@ -319,6 +319,9 @@ func main() {
 		secRep.Bind(cp.QueueSecEvent)
 		secRep.StartFlusher(time.Minute)
 		cp.SetVersion(version) // 版本随心跳上报：控制面此前连网关跑的什么版本都不知道
+		// 隧道身份姿态随心跳上报（**开着也报**）：控制面据此在网关页区分
+		// 「这台的逃生舱开着」与「这台根本不会报」，后者才是真正会被忽略的那种。
+		cp.SetTunnelIDStrict(*tunnelIDStrict)
 		if !*tunnelIDStrict {
 			// ★逃生舱在**中心侧**也要看得见。本机 slog 会随日志轮转灭失，而这个开关一旦
 			// 打开就倾向于永久开着（"先临时关掉，回头再说"）。一条开机回执落进审计，

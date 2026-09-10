@@ -294,6 +294,13 @@ type GatewayInfo struct {
 	// 塌缩成 0 会让一台从不上报的网关永远显示"时钟一致"，而它可能正因漂移拒掉所有敲门。
 	// 数值含约半个 RTT 的系统性误差（网关在发送时刻盖章），对 10s 级阈值可忽略。
 	SkewSec *int64 `json:"skewSec"`
+	// TunnelIDStrict 该网关的 **L4 隧道身份严格模式**姿态（wave11 行动 3）。
+	//
+	// ★指针三态：nil = 旧网关不上报 = **不可判定**（不是"关着"，也不是"开着"）；
+	// &true = 每条隧道连接都必须自带 use=tunnel 票据；&false = 逃生舱开着，
+	// 不带票据的连接按**源 IP** 推断身份——同出口他人可继承该账号的资源授权。
+	// 塌缩成 bool 会让一台还没升级的网关显示成"已开启"，而它正按旧模型在跑。
+	TunnelIDStrict *bool `json:"tunnelIdStrict"`
 }
 
 // GwSession 网关上报的一条活跃会话（真实敲门放行记录）。
@@ -1721,6 +1728,11 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 		// 旧网关，它对隐身什么都没说；非 nil 且 wanted=false = 新网关明确说「我没带 -pf」。
 		// 后者正是参考部署的默认形态，而页面上此前写着「攻击面 = 0」。
 		Stealth *gwStealthState `json:"stealth"`
+		// TunnelIDStrict L4 隧道身份严格模式姿态（wave11 行动 3）。★同款三态：
+		// nil（字段缺席）= 旧网关，它对隧道身份什么都没说；&false = 新网关明确说
+		// 「我的逃生舱开着，不带票据的连接按源 IP 推断身份」。两者必须分得开——
+		// 塌缩成 bool 会让还没升级的网关显示成"已开启"，而它正按旧模型在跑。
+		TunnelIDStrict *bool `json:"tunnelIdStrict"`
 	}
 	// ★解码前先限体：events/sessions 是数组，64 条截断发生在整包解析完之后，
 	// 拦不住解码期内存——一张失陷网关证书发多 GB 心跳就能耗尽控制面内存。
@@ -1763,7 +1775,7 @@ func (s *Server) handleGatewayRegister(w http.ResponseWriter, r *http.Request) {
 	s.gateways[id] = GatewayInfo{
 		ID: id, Proxy: b.Proxy, SPA: b.SPA, LastSeen: time.Now().Unix(),
 		Clients: b.Clients, Tunnels: b.Tunnels, Uptime: b.Uptime, Version: b.Version,
-		Web: b.Web, WebTLS: b.WebTLS, SkewSec: skew,
+		Web: b.Web, WebTLS: b.WebTLS, SkewSec: skew, TunnelIDStrict: b.TunnelIDStrict,
 	}
 	s.gwSess[id] = b.Sessions
 	s.gwTunnelFP[id] = b.TunnelFP

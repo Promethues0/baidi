@@ -56,6 +56,15 @@ type GatewayPageBundle struct {
 	StealthArmed int `json:"stealthArmed"`
 	// StealthWarnings 要顶到页面上的隐身告警（文案由后端下发，前端不自己编）。
 	StealthWarnings []string `json:"stealthWarnings"`
+	// TunnelIDWarnings L4 隧道身份姿态的告警（wave11 行动 3），同样由后端下发文案。
+	//
+	// ★为什么必须顶到页面上：`BAIDI_GW_TUNNEL_ID_STRICT=0` 是逃生舱，一旦为了让存量
+	// 客户端过渡而打开，就倾向于永久开着（"先临时关掉，回头再说"）。而它开着时，
+	// 不带票据的连接按**源 IP** 推断身份——同一出口下任意主机在放行窗内直连隧道口，
+	// 即继承那个账号的全部资源授权。本机日志会随轮转灭失，审计里的回落留痕要主动去查；
+	// 网关页是管理员每天会看的那一屏，这条姿态必须在这里说得出来。
+	// 单列而不是并进 StealthWarnings：那一格讲的是端口可见性，与身份不是一回事。
+	TunnelIDWarnings []string `json:"tunnelIdWarnings"`
 	// WebExposed 有几台**在线**网关开着七层 Web 代理（`-web`）。
 	//
 	// ★这一格是「攻击面 = 0」那段断言的第二个前提，而它此前根本不存在。
@@ -147,6 +156,8 @@ func (s *Server) handleGateway(w http.ResponseWriter, r *http.Request) {
 	if out.StealthWarnings == nil {
 		out.StealthWarnings = []string{}
 	}
+	// L4 隧道身份姿态（只看在线网关：离线那台的上报是陈旧读数）。
+	out.TunnelIDWarnings = s.tunnelIDWarnings(now)
 	// 七层 Web 代理的敞口（只看在线网关：离线那台的上报是陈旧读数）。
 	out.WebEndpoints = []string{}
 	s.mu.Lock()
@@ -233,4 +244,50 @@ func (s *Server) handleSetGatewayAccess(w http.ResponseWriter, r *http.Request) 
 	}
 	s.audit(r, "policy", "设置网关「"+id+"」的对外接入地址："+desc, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "access": saved})
+}
+
+// tunnelIDWarnings 汇总在线网关的 L4 隧道身份姿态告警（wave11 行动 3）。
+//
+// 三态各有各的话要说，**绝不合并**：
+//   - &false = 逃生舱明确开着 → 这是一条真实的授权继承风险，逐台点名；
+//   - nil    = 旧网关根本不上报 → **不可判定**，不是"没问题"。升级期这条会短暂出现，
+//     但把它藏起来的代价是：一台永远不升级的网关会安静地停在旧信任模型上，
+//     而页面上与已收口的网关长得一模一样。
+//   - &true  = 已收口，不出告警（无消息就是好消息，这一页不为正常态加噪声）。
+func (s *Server) tunnelIDWarnings(now time.Time) []string {
+	var loose, unknown []string
+	s.mu.Lock()
+	for id, g := range s.gateways {
+		if !gatewayFresh(g.LastSeen, now) {
+			continue
+		}
+		switch {
+		case g.TunnelIDStrict == nil:
+			unknown = append(unknown, id)
+		case !*g.TunnelIDStrict:
+			loose = append(loose, id)
+		}
+	}
+	s.mu.Unlock()
+	sort.Strings(loose)
+	sort.Strings(unknown)
+	out := []string{}
+	if len(loose) > 0 {
+		out = append(out, fmt.Sprintf(
+			"网关 %s 的**隧道身份严格模式已关闭**（BAIDI_GW_TUNNEL_ID_STRICT=0）："+
+				"不携带身份票据的隧道连接会按**源 IP** 推断身份，于是同一出口"+
+				"（企业 NAT / CGNAT / 公共 Wi-Fi / 同公网 IP 的云主机）下任意主机，"+
+				"只要有人处在放行窗内，直连隧道口就继承那个账号的全部资源授权。"+
+				"这是过渡逃生舱，存量客户端升级完成后请关回（每次回落都在审计里留痕，"+
+				"类别 tunnel-idfallback）。",
+			strings.Join(loose, "、")))
+	}
+	if len(unknown) > 0 {
+		out = append(out, fmt.Sprintf(
+			"网关 %s 未上报隧道身份姿态（版本较旧）：控制面**无从判断**它是按票据定身份、"+
+				"还是仍按源 IP 反查。请升级这些网关并分发隧道票据公钥"+
+				"（<BAIDI_JWT_TUNNEL_KEY>.pub → -jwt-tunnel-pubkey）。",
+			strings.Join(unknown, "、")))
+	}
+	return out
 }

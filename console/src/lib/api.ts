@@ -442,6 +442,10 @@ export interface GatewayBundle {
   /** 要顶到页面上的隐身告警。文案由后端下发——这是安全结论，前端自己编就会与
    *  后端实际判定脱节（与 Nat.vue 的 warnings 同一条纪律）。 */
   stealthWarnings: string[];
+  /** L4 隧道身份姿态的告警（wave11）：逃生舱开着的网关、以及**不上报**姿态的旧网关，
+   *  各出一条。旧后端不下发 → undefined → 页面什么都不画（不是"没问题"，
+   *  而是这个后端还不会报；升级后自然出现）。文案同样由后端下发。 */
+  tunnelIdWarnings?: string[];
 }
 
 /** StealthReceipt 一台网关的隐身回执。status 六态见后端 api/stealth.go。 */

@@ -26,6 +26,13 @@ func (s *Server) requireUser(w http.ResponseWriter, r *http.Request) (auth.Claim
 		httpx.Error(w, http.StatusForbidden, "需要用户身份")
 		return auth.Claims{}, false
 	}
+	// ★会话有效性现算（wave11 行动 4）。改造前这里是纯令牌判定：禁用 / 锁定 /
+	// 强制下线 / 闲置自动锁定四条处置对已签发的 8h 令牌全部无效——数据面当场断了
+	// （entryGates 查 accountBlocked、撤销通道下发到网关），而 JIT 申请、客户端剖面、
+	// 门户端点这一侧还开着。判据与取数见 session_guard.go。
+	if !s.guardSession(w, r, c) {
+		return auth.Claims{}, false
+	}
 	return c, true
 }
 

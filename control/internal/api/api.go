@@ -46,6 +46,12 @@ const (
 	// 测试夹具若要一把可预期的口令，用 testStrongPw，别把这个常量加回来。
 )
 
+// kickMark 一次强制下线的处置说明与处置时刻（Unix 秒）。
+type kickMark struct {
+	Reason string
+	At     int64
+}
+
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
 type Server struct {
 	store        store.Store
@@ -156,7 +162,15 @@ type Server struct {
 	gwNAT map[string]gwNATInfo
 	// gwStealth 各网关最近心跳捎带的内核态隐身实测态（wave8 行动 7；同 gwNAT 不落库）。
 	gwStealth map[string]gwStealthInfo
-	kicked    map[string]string     // 已被强制下线的会话 id → 处置说明（监控中心 · 在线用户显示层）
+	// kicked 已被强制下线的会话 id → 处置说明与处置时刻（监控中心 · 在线用户显示层）。
+	//
+	// ★带上处置时刻是必需的（wave11 行动 4）：id 是 `网关id:源IP`，用户自动重连后
+	// 网关会用**同一个 id** 重新上报一条新会话，而这张覆盖表此前只增不减——
+	// 于是那个人明明已经回来了，页面上仍写着「已下线」，「强制下线」按钮也因为
+	// 状态是 offline 而点不到；管理员想再踢一次都没有入口。
+	// 现在按「这条会话的建立时刻是否晚于处置时刻」判定：晚于即是重连后的新会话，
+	// 覆盖层自动失效。
+	kicked    map[string]kickMark
 	revoked   map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// knockIssued 敲门令牌签发审计的节流水位：(账号|指纹) → 上次落审计的 Unix 秒。
 	// 敲门是 15s 一次的保活热路径，不节流会把审计冲成噪声（见 auditKnockIssued）。
@@ -312,7 +326,7 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		ca: ca, gwPlaintextCompat: gwPlaintextCompat,
 		postureStrict:  os.Getenv("BAIDI_POSTURE_ENFORCE") == "strict",
 		trustedProxies: parseTrustedProxies(os.Getenv("BAIDI_TRUSTED_PROXIES")),
-		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked: map[string]string{},
+		gateways:       map[string]GatewayInfo{}, gwSess: map[string][]GwSession{}, kicked:    map[string]kickMark{},
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
 		gwNAT:           map[string]gwNATInfo{},
 		gwStealth:       map[string]gwStealthInfo{},
@@ -1280,6 +1294,20 @@ func (s *Server) handleSetUserStatus(w http.ResponseWriter, r *http.Request) {
 			delete(s.revoked, key)
 		}
 		s.mu.Unlock()
+		// ★禁用/锁定必须同时注销控制面会话令牌（wave11 行动 4）。
+		// 改造前这里只做数据面撤窗：隧道当场断了，而那张 8h 令牌在管理 API 上毫发无损——
+		// 管理员账号被盗后点「禁用」，控制台显示已禁用、审计也记了一条，
+		// 攻击者却在最长八小时里仍是完整管理员。
+		//
+		// **恢复成 active 时刻意不清 tokens_valid_after**：清掉等于让攻击者手里那张旧令牌
+		// 在账号解禁的同一刻复活。解除只有一次完整的重新登录（新令牌 iat 自然更大）。
+		if body.Status == "disabled" || body.Status == "locked" {
+			if err := s.writer.RevokeUserSessions(r.Context(), u.Account, time.Now()); err != nil {
+				detail += "（⚠ 控制面会话令牌注销失败：" + err.Error() + "，该账号手里的令牌可能仍可调用管理接口）"
+			} else {
+				detail += "（已注销其控制面会话令牌）"
+			}
+		}
 	}
 	s.audit(r, "admin", "用户 "+id+" 状态置「"+zh+"」"+detail, "ok")
 	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "status": body.Status})

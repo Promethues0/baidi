@@ -133,6 +133,12 @@ func (s *Server) RecheckExternalAccounts(ctx context.Context) (checked, acted in
 				Display: b.Account,
 			}
 			s.mu.Unlock()
+			// 控制面会话令牌一并注销（wave11 行动 4）：目录侧已经把这个人停用/删除了，
+			// 只断隧道而留着他的 8h 令牌，等于"外部目录说他走了，白帝的管理接口还认他"。
+			if err := s.writer.RevokeUserSessions(ctx, b.Account, time.Now()); err != nil {
+				slog.Error("外部账号回验：控制面会话令牌注销失败（隧道已断，但其令牌可能仍可调用接口）",
+					"账号", b.Account, "err", err.Error())
+			}
 			s.auditBG(ctx, "security",
 				"外部账号回验：「"+b.Account+"」（源 "+rec.Name+"）"+zh+
 					"，已禁用本地账号并撤窗断隧道（恢复须管理员手工启用）", "ok")

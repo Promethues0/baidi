@@ -124,6 +124,16 @@ type Credential struct {
 	MustChangePw bool
 	// PwStrength 口令强度标记 weak | strong | unknown（auth.Pw*），认证策略「弱密码」规则的判据。
 	PwStrength string
+	// TokensValidAfter 该账号的会话令牌下限：签发时刻（Claims.Iat）早于它的令牌一律不再受理。
+	//
+	// ★这是「禁用/锁定/强制下线/闲置自动锁定」四条处置**唯一**能作用到已签发令牌上的东西。
+	// 改造前 auth.Middleware 只验签名与用途白名单、不查任何库，AdminRoleFor 的 SQL 也只筛
+	// role='admin' 而不筛 status——于是管理员账号被盗后的标准处置（点「禁用」）点完之后，
+	// 控制台显示已禁用、审计也记了一条，而攻击者手里那张 8h 令牌在最长八小时里仍是完整管理员。
+	//
+	// **0 = 不限**（不是"1970 年之后的都无效"）。补列必须回填 0：回填成 now 就是升级那一刻
+	// 全员掉线，而那种故障在现场表现为"升级把系统弄坏了"，没人会想到是一条安全修复。
+	TokensValidAfter int64
 }
 
 func (m *Memory) Users(_ context.Context) (UserDirBundle, error) {

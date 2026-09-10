@@ -49,6 +49,10 @@ type Writer interface {
 	SaveDeviceTrustSetting(ctx context.Context, st DeviceTrustSetting) (DeviceTrustSetting, error)
 	CreateUser(ctx context.Context, u DirUser) (DirUser, error)
 	SetUserStatus(ctx context.Context, id, status string) error
+	// RevokeUserSessions 把该账号的会话令牌下限推到 at（已签发令牌失效）。见 revoke.go。
+	// ★四条处置（禁用 / 锁定 / 强制下线 / 闲置自动锁定）**必须**都走它——
+	// 「自动」不是绕开守卫的第二条路，同 lockIdleAccount 那条纪律。
+	RevokeUserSessions(ctx context.Context, account string, at time.Time) error
 	// SetUserPassword 落口令哈希 + 首登改密标志 + 口令强度标记（strength 见 auth.PasswordStrength）。
 	SetUserPassword(ctx context.Context, id, hash string, mustChange bool, strength string) error
 	SaveResource(ctx context.Context, r Resource) error
@@ -913,6 +917,11 @@ CREATE TABLE IF NOT EXISTS standby_nodes (
 		// PRD 的 ApprovalFlow 本来就有 requestType「申请/续期」，只是从没实现过。
 		// 回填 'request'：存量单子全都是首次申请（续期在此之前结构上不可能提交）。
 		{"access_requests", "kind", "TEXT"},
+		// 会话令牌下限（wave11 行动 4）：签发早于它的令牌一律不再受理。
+		// ★回填 0 = 不限。**绝不能回填成 now**——那是升级那一刻全员掉线，
+		// 而现场表现为"升级把系统弄坏了"，没人会想到是一条安全修复。
+		// INTEGER 列的默认值是 NULL，读侧一律 COALESCE(...,0)，两处同口径。
+		{"users", "tokens_valid_after", "INTEGER"},
 	} {
 		if e := s.addColumnIfMissing(c.table, c.col, c.typ); e != nil {
 			return e
@@ -1719,10 +1728,12 @@ func (s *SQLiteStore) Credential(ctx context.Context, account string) (Credentia
 	key := strings.ToLower(strings.TrimSpace(account))
 	row := s.db.QueryRowContext(ctx,
 		`SELECT id,name,account,COALESCE(role,''),status,COALESCE(pass_hash,''),COALESCE(must_change_pw,0),
-  COALESCE(NULLIF(pw_strength,''),?) FROM users WHERE lower(trim(account))=? LIMIT 1`, auth.PwUnknown, key)
+  COALESCE(NULLIF(pw_strength,''),?),COALESCE(tokens_valid_after,0)
+   FROM users WHERE lower(trim(account))=? LIMIT 1`, auth.PwUnknown, key)
 	var c Credential
 	var mustChange int
-	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash, &mustChange, &c.PwStrength); err {
+	switch err := row.Scan(&c.ID, &c.Name, &c.Account, &c.Role, &c.Status, &c.PassHash, &mustChange,
+		&c.PwStrength, &c.TokensValidAfter); err {
 	case nil:
 		c.MustChangePw = mustChange == 1
 		if c.Role == "" {

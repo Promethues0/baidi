@@ -86,6 +86,13 @@ func (s *Server) currentAdminRole(w http.ResponseWriter, r *http.Request) (store
 		httpx.Error(w, http.StatusForbidden, "需要管理员权限")
 		return store.AdminRole{}, false
 	}
+	// ★会话有效性排在角色判定**之前**（wave11 行动 4）：AdminRoleFor 的 SQL 只筛
+	// role='admin' 不筛 status，于是"禁用某个管理员"此前完全作用不到他手里那张令牌。
+	// 顺序要紧——放在后面的话，一个被禁用的管理员仍会先拿到角色、再被拒，
+	// 审计里会多出一条看起来他还有角色的记录。
+	if !s.guardSession(w, r, c) {
+		return store.AdminRole{}, false
+	}
 	role, found, err := s.store.AdminRoleFor(r.Context(), c.Sub)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to load admin role")

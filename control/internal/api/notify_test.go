@@ -91,7 +91,7 @@ func TestNotifyChannels_权限归系统权(t *testing.T) {
 	if code, out := doJSON(t, f.h, "GET", "/api/v1/notify/channels", sysTok, nil); code != http.StatusOK {
 		t.Fatalf("系统管理员应能读通道: %d %v", code, out)
 	}
-	for name, tok := range map[string]string{"安全管理员": secTok, "审计管理员": audTok, "普通用户": userToken("zhang.san")} {
+	for name, tok := range map[string]string{"安全管理员": secTok, "审计管理员": audTok, "普通用户": userToken("zhang.wei")} {
 		if code, _ := doJSON(t, f.h, "GET", "/api/v1/notify/channels", tok, nil); code != http.StatusForbidden {
 			t.Errorf("%s 读通道应 403，实得 %d", name, code)
 		}
@@ -408,7 +408,7 @@ func TestNotify_终端判block只在转入时通知一次(t *testing.T) {
 	url, got := hookServer(t, http.StatusOK)
 	createHookChannel(t, f, tok, "SOC webhook", url, true)
 
-	utok := userToken("zhang.san")
+	utok := userToken("zhang.wei")
 	bad := map[string]any{
 		"device": "MBP-01", "platform": "macOS", "os": "macOS 15", "clientVersion": "1.0.0",
 		"checks": []map[string]any{{"key": "disk_encrypted", "ok": false}},

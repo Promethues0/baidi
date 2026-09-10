@@ -169,7 +169,14 @@ func (s *Server) lockIdleAccount(ctx context.Context, id string, adminsOK bool,
 	s.mu.Lock()
 	s.revoked[key] = revokeInfo{Reason: "账号已锁定（闲置治理）", Until: time.Now().Add(kickBanTTL).Unix(), Display: target.Account}
 	s.mu.Unlock()
-	auditf("admin", "闲置治理：锁定账号「"+target.Account+"」（数据面撤窗断隧道）", "ok")
+	// 控制面会话令牌同批注销（wave11 行动 4）——「自动锁定」与手工锁定共用同一条路径，
+	// 这条纪律在 lockIdleAccount 顶部已经写过一遍（自动不是绕开守卫的第二条路），
+	// 令牌注销是它的第三件事，漏了就是"闲置账号被锁了，他的令牌还能调管理接口"。
+	note := "（数据面撤窗断隧道；已注销其控制面会话令牌）"
+	if err := s.writer.RevokeUserSessions(ctx, target.Account, time.Now()); err != nil {
+		note = "（数据面撤窗断隧道；⚠ 控制面会话令牌注销失败：" + err.Error() + "）"
+	}
+	auditf("admin", "闲置治理：锁定账号「"+target.Account+"」"+note, "ok")
 	return target.Account, nil
 }
 

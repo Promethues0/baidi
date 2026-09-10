@@ -85,7 +85,7 @@ func TestLoginLockoutFlow(t *testing.T) {
 	if m := arr[0].(map[string]any); m["kind"] != "account" || m["key"] != "li.fang" {
 		t.Fatalf("锁定条目: %v", m)
 	}
-	utok := userToken("zhang.san")
+	utok := userToken("zhang.wei")
 	if code, _ := doJSON(t, h, "GET", "/api/v1/security/lockouts", utok, nil); code != http.StatusForbidden {
 		t.Fatalf("user 列锁应 403, got %d", code)
 	}

@@ -67,6 +67,12 @@ func portalLogin(t *testing.T, h http.Handler, user, mfa string) map[string]any 
 	return out
 }
 
+// userToken 造一张普通用户会话令牌。
+//
+// ★name 必须是**库里真实存在**的账号（种子里的 zhang.wei / li.fang…，或用例自己建出来的）。
+// wave11 行动 4 之后，requireUser 会现算会话有效性，其中一条就是「令牌主体还在不在」——
+// 给一个不存在的账号造令牌会 403。这不是用例变娇气了：改造前"账号删了、令牌还能用"
+// 正是那个洞的一部分（删除是 License 席位的释放路径，留着令牌等于人删了权限还在）。
 func userToken(name string) string {
 	return testKeys.Sign(auth.Claims{Sub: name, Role: "user", Name: name}, tokenTTL)
 }
@@ -282,7 +288,42 @@ func TestDisableUserRevokesDataPlaneAndEnableLifts(t *testing.T) {
 	if revokedUsers(t, h)["li.fang"] {
 		t.Fatalf("li.fang still in gateway revoked list after re-enable")
 	}
-	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", userToken("li.fang"), nil); code != http.StatusOK {
-		t.Fatalf("knock-token after re-enable http %d, want 200", code)
+
+	// ★恢复启用之后，**处置前签发的那张令牌不会复活**（wave11 行动 4）：
+	// 账号当初被禁就是因为出了问题，恢复不该把攻击者手里那张旧令牌一起放回来。
+	// 解除的唯一方式是一次完整的重新登录——新令牌的 iat 更大，自然越过下限。
+	//
+	// tokens_valid_after 与 JWT 的 iat 都是**秒**粒度，所以「与处置同一秒内签发」的
+	// 令牌也会被拒（判据用 <=，理由见 checkSessionValid）。生产里那是一个一秒宽的
+	// 窗口，客户端下一秒重试即可；用例里所有动作都挤在同一秒内，必须显式跨过它，
+	// 否则验的是这个窗口而不是"重新登录能恢复"。
+	time.Sleep(1100 * time.Millisecond)
+	if code, out := doJSON(t, h, "POST", "/api/v1/knock-token", userToken("li.fang"), nil); code != http.StatusOK {
+		t.Fatalf("恢复启用后重新登录取得的令牌应能敲门，http %d：%v", code, out)
+	}
+}
+
+// TestReEnableDoesNotResurrectPreDisposalToken 恢复启用不得让处置前的令牌复活。
+//
+// 与上一条互为两面：上一条验"重新登录能恢复"，这一条验"旧令牌仍然是死的"。
+// 少了这一条，把 tokens_valid_after 在恢复时清零的实现会全绿通过。
+func TestReEnableDoesNotResurrectPreDisposalToken(t *testing.T) {
+	h := newTestServer(t)
+	admin := adminToken()
+	stale := userToken("li.fang") // 处置**之前**签发的那张
+
+	if code, _ := doJSON(t, h, "POST", "/api/v1/knock-token", stale, nil); code != http.StatusOK {
+		t.Fatal("前置条件不成立：处置前这张令牌就敲不动，后面的断言证明不了任何事")
+	}
+	for _, st := range []string{"disabled", "active"} {
+		if code, _ := doJSON(t, h, "POST", "/api/v1/users/u2/status", admin,
+			map[string]string{"status": st}); code != http.StatusOK {
+			t.Fatalf("置状态 %s 应成功", st)
+		}
+	}
+	time.Sleep(1100 * time.Millisecond) // 跨过秒粒度窗口，确保验的不是那个窗口
+	if code, out := doJSON(t, h, "POST", "/api/v1/knock-token", stale, nil); code != http.StatusForbidden {
+		t.Fatalf("处置前签发的令牌在账号恢复后仍必须失效，实得 %d %v——"+
+			"否则攻击者手里那张令牌会在解禁的同一刻复活", code, out)
 	}
 }

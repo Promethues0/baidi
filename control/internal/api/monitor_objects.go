@@ -33,6 +33,8 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 
 	// 聚合在线网关上报的真实会话（离线网关的会话不计入）
 	sessions := []store.OnlineSession{}
+	// sessionSince 会话 id → 网关上报的建立时刻，供下面判定「这条是不是重连后的新会话」。
+	sessionSince := map[string]int64{}
 	s.mu.Lock()
 	for id, sess := range s.gwSess {
 		gw, ok := s.gateways[id]
@@ -41,6 +43,7 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 		}
 		for _, se := range sess {
 			loginT := time.Unix(se.Since, 0)
+			sessionSince[id+":"+se.IP] = se.Since
 			sessions = append(sessions, store.OnlineSession{
 				ID: id + ":" + se.IP, User: se.User, Account: se.User,
 				IP: se.IP, Auth: "SPA 敲门 + 隧道", Gateway: id,
@@ -58,9 +61,15 @@ func (s *Server) handleOnline(w http.ResponseWriter, r *http.Request) {
 
 	s.mu.Lock()
 	for i := range sessions {
-		if reason, ok := s.kicked[sessions[i].ID]; ok {
+		if mk, ok := s.kicked[sessions[i].ID]; ok {
+			if sessionSince[sessions[i].ID] > mk.At {
+				// 这条会话是处置之后**重新**建立的：人已经回来了，覆盖层必须让位，
+				// 否则页面永远写着「已下线」而「强制下线」按钮因状态为 offline 点不到。
+				delete(s.kicked, sessions[i].ID)
+				continue
+			}
 			sessions[i].Status = "offline"
-			sessions[i].KickReason = reason
+			sessions[i].KickReason = mk.Reason
 		}
 	}
 	s.mu.Unlock()
@@ -105,13 +114,31 @@ func (s *Server) handleKickSession(w http.ResponseWriter, r *http.Request) {
 	if reason == "" {
 		reason = "管理员强制下线"
 	}
-	until := time.Now().Add(kickBanTTL).Unix()
+	now := time.Now()
+	until := now.Add(kickBanTTL).Unix()
 	s.mu.Lock()
-	s.kicked[id] = reason
+	s.kicked[id] = kickMark{Reason: reason, At: now.Unix()}
 	s.revoked[normUser(user)] = revokeInfo{Reason: reason, Until: until, Display: user}
 	s.mu.Unlock()
-	s.audit(r, "security", "强制下线 "+user+"（会话 "+id+" · "+reason+"；封禁接入至 "+time.Unix(until, 0).Format("15:04")+"）", "deny")
-	httpx.JSON(w, http.StatusOK, map[string]any{"ok": true, "id": id, "user": user, "status": "offline", "reason": reason, "banUntil": until})
+	// ★同时注销他手里那张控制面会话令牌（wave11 行动 4）。
+	// 改造前「强制下线」只做两件事：数据面撤窗断隧道 + 页面上打一个 offline 标记。
+	// 而那个人的 8h 令牌毫发无损——隧道断了，管理 API / 门户 / JIT 申请全都还开着，
+	// 「强制下线」这四个字在控制面这一侧完全没有兑现。
+	revokeNote := ""
+	if err := s.writer.RevokeUserSessions(r.Context(), user, now); err != nil {
+		// 不因此失败：数据面处置已经生效了，回执要如实说清哪一半没做到，
+		// 而不是回一个笼统的 500 让管理员以为整个动作都没发生。
+		revokeNote = "；⚠ 控制面会话令牌注销失败（" + err.Error() + "），该账号手里的令牌可能仍可调用管理接口"
+	}
+	s.audit(r, "security", "强制下线 "+user+"（会话 "+id+" · "+reason+"；封禁接入至 "+
+		time.Unix(until, 0).Format("15:04")+"；已注销其控制面会话令牌"+revokeNote+"）", "deny")
+	httpx.JSON(w, http.StatusOK, map[string]any{
+		"ok": true, "id": id, "user": user, "status": "offline", "reason": reason, "banUntil": until,
+		// sessionRevoked 让回执把「真切断了什么」说全：数据面撤窗 + 控制面令牌注销是两件事，
+		// 只报一件会让管理员以为另一件也做了（本仓「撤销回执只在真切断了什么时才报」同源）。
+		"sessionRevoked": revokeNote == "",
+		"note":           revokeNote,
+	})
 }
 
 // handleUserState 返回用户态势（分桶聚合 + 受关注用户清单）。

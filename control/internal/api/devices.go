@@ -249,19 +249,12 @@ func (s *Server) deviceTrustPolicy(ctx context.Context, account string) store.De
 // 不写"已拦截""已限制"——观察模式下什么都没拦。
 func (s *Server) auditDeviceObserved(r *http.Request, account, fingerprint, what string) {
 	key := normUser(account) + "|" + fingerprint
-	now := time.Now().Unix()
 	s.mu.Lock()
 	// ★水位表的键含**客户端自报**的指纹，是攻击者可控的：持一个合法会话每次换一个随机
 	// 指纹敲门，就能让这张表无界增长（grayObserved 按账号计键，没有这个面）。
-	// 超过上界整张清空——最坏结果只是接下来多记几条 observing 审计，而那本来就是该被看见的。
-	if len(s.deviceObserved) > deviceObserveMaxKeys {
-		s.deviceObserved = map[string]int64{}
-	}
-	last, seen := s.deviceObserved[key]
-	due := !seen || now-last >= int64(deviceObserveInterval.Seconds())
-	if due {
-		s.deviceObserved[key] = now
-	}
+	// 上界与清空策略收在 throttleAdmit 里，四处节流共用同一份。
+	due, suppressed := throttleAdmit(s.deviceObserved, key, deviceObserveInterval,
+		deviceObserveMaxKeys, time.Now().Unix())
 	s.mu.Unlock()
 	if !due {
 		return
@@ -271,7 +264,8 @@ func (s *Server) auditDeviceObserved(r *http.Request, account, fingerprint, what
 		fp = "指纹 " + shortFP(fingerprint)
 	}
 	s.auditAs(r, account, "security", "授信终端观察模式：已为 "+account+" 签发敲门令牌，"+what+
-		"（"+fp+"）。切换为严格模式后此类接入将被拒绝", "observing")
+		"（"+fp+"）。切换为严格模式后此类接入将被拒绝"+
+		throttleNote(suppressed, deviceObserveInterval), "observing")
 }
 
 // ── ③ 管理端点 ──
@@ -639,19 +633,11 @@ const knockIssuedInterval = 5 * time.Minute
 // 由网关的 tunnel-allow 回执另记一条。
 func (s *Server) auditKnockIssued(r *http.Request, account, fingerprint string) {
 	key := normUser(account) + "|" + fingerprint
-	now := time.Now().Unix()
 	s.mu.Lock()
 	// 水位表的键含**客户端自报**的指纹，攻击者可控（同 auditDeviceObserved）：
-	// 持一个合法会话每次换随机指纹敲门就能让表无界增长。超上界整张清空——
-	// 最坏结果只是接下来多记几条放行审计，而那本来就是该被看见的。
-	if len(s.knockIssued) > deviceObserveMaxKeys {
-		s.knockIssued = map[string]int64{}
-	}
-	last, seen := s.knockIssued[key]
-	due := !seen || now-last >= int64(knockIssuedInterval.Seconds())
-	if due {
-		s.knockIssued[key] = now
-	}
+	// 持一个合法会话每次换随机指纹敲门就能让表无界增长。上界与清空策略在 throttleAdmit 里。
+	due, suppressed := throttleAdmit(s.knockIssued, key, knockIssuedInterval,
+		deviceObserveMaxKeys, time.Now().Unix())
 	s.mu.Unlock()
 	if !due {
 		return
@@ -662,5 +648,6 @@ func (s *Server) auditKnockIssued(r *http.Request, account, fingerprint string) 
 	}
 	s.auditAs(r, account, "access", "已签发敲门令牌："+account+"（"+fp+"，有效期 "+
 		strconv.Itoa(int(knockTTL.Seconds()))+"s、一次性）。"+
-		"后续「经哪台网关访问了哪个资源」由网关的放行回执另记", "allow")
+		"后续「经哪台网关访问了哪个资源」由网关的放行回执另记"+
+		throttleNote(suppressed, knockIssuedInterval), "allow")
 }

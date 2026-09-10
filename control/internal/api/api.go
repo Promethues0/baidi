@@ -72,7 +72,7 @@ type Server struct {
 	// nil = 当前后端不支持（纯 Memory），此时接入策略整块不生效并在页面上如实说明。
 	devSess store.DevSessionStore
 	// accessDenied 并发上限拒绝的节流表（键 = 账号|指纹）。
-	accessDenied map[string]int64
+	accessDenied map[string]throttleMark
 	// lockout 登录防爆破守卫：账号/源 IP 滑动窗计数 + 限时锁定（锁定落库，重启不丢）。
 	lockout *lockout.Guard
 	// extAuthTimeout 一次**外部认证调用**的总预算（NFR-PERF-03，见 config.ExtAuthTimeout）。
@@ -174,13 +174,19 @@ type Server struct {
 	revoked   map[string]revokeInfo // 强制下线封禁：账号 → {原因, 截止}（拒发敲门令牌 + 经网关策略下发数据面处置）
 	// knockIssued 敲门令牌签发审计的节流水位：(账号|指纹) → 上次落审计的 Unix 秒。
 	// 敲门是 15s 一次的保活热路径，不节流会把审计冲成噪声（见 auditKnockIssued）。
-	knockIssued map[string]int64
+	knockIssued map[string]throttleMark
 	// grayObserved 灰度观察审计的节流水位：账号 → 上次落审计的 Unix 秒。
+	//
+	// ★这一处**刻意不做**被折叠次数的披露（wave11 行动 16 只改另外三处）：
+	// 它的"事件"是每台网关每 15s 一轮的策略轮询，不是一次独立发生的事。
+	// 记成「另有 N 次同类事件被合并」会写出一个看着像信息、其实是轮询次数的数字，
+	// 还随网关台数相乘——那比不写更容易误导。这里的语义本来就是
+	// 「这个人在这段时间里持续处于 gray」，一条即可。
 	// 内存态、重启即失（最坏结果是重启后多记一条 observing，无害）。
 	grayObserved map[string]int64
 	// deviceObserved 授信终端「观察模式放行」审计的节流水位："账号|指纹" → 上次落审计的 Unix 秒。
 	// 与 grayObserved 同一条理由：敲门令牌是每 15s 一次的保活热路径，不节流会把审计冲垮。
-	deviceObserved map[string]int64
+	deviceObserved map[string]throttleMark
 	// deviceTrustSeen 最近一次**成功**读到的设备准入设置（Mode 为空 = 从未读到过）。
 	//
 	// ★存在的理由是方向性：设备闸对 DeviceByFingerprint 的读失败在 strict 下 fail-closed，
@@ -330,12 +336,12 @@ func New(st store.Store, wr store.Writer, keys *auth.Keys, env string, downloads
 		revoked: map[string]revokeInfo{}, gwTunnelFP: map[string]string{}, gwReach: map[string]gwReachInfo{},
 		gwNAT:           map[string]gwNATInfo{},
 		gwStealth:       map[string]gwStealthInfo{},
-		knockIssued:     map[string]int64{},
+		knockIssued:     map[string]throttleMark{},
 		grayObserved:    map[string]int64{},
-		deviceObserved:  map[string]int64{},
+		deviceObserved:  map[string]throttleMark{},
 		standbyAudited:  map[string]int64{},
 		fwdDropReported: map[string]int64{}, fwdDropReportAt: map[string]int64{},
-		accessDenied: map[string]int64{}}
+		accessDenied: map[string]throttleMark{}}
 	if v, ok := wr.(store.DevSessionStore); ok {
 		s.devSess = v
 	}

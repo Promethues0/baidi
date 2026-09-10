@@ -2,8 +2,10 @@ package api
 
 import (
 	"net/http"
+	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"baidi.dev/control/internal/auth"
 )
@@ -153,4 +155,53 @@ func auditDetails(t *testing.T, out map[string]any) []string {
 		}
 	}
 	return ds
+}
+
+// TestThrottledAuditDisclosesSuppressedCount 被节流折叠掉的次数必须写进正文。
+//
+// ★改造前控制面侧的节流是**丢弃式**：水位表只记「上次落审计的时刻」，窗口内被抑制的
+// 次数直接扔掉、正文一字不提，而审计导出页逐字写着「导出全量审计日志」。
+// 同一功能族的网关侧（gateway/internal/secevent）已经做对了聚合补报，两种记录并排
+// 躺在同一张 audit_log 表里，读的人分不出哪条带了聚合、哪条没带。
+//
+// ★变异：把 auditKnockIssued 正文里的 throttleNote(...) 去掉 → 本用例变红。
+func TestThrottledAuditDisclosesSuppressedCount(t *testing.T) {
+	tab := map[string]throttleMark{}
+	const iv = 5 * time.Minute
+	base := int64(1_700_000_000)
+
+	// 第一次：立即落条，此前无折叠。
+	due, sup := throttleAdmit(tab, "k", iv, 10, base)
+	if !due || sup != 0 {
+		t.Fatalf("首次必须落条且无折叠，实得 due=%v suppressed=%d", due, sup)
+	}
+	// 窗口内又来 7 次：全部折叠，一条都不落。
+	for i := 1; i <= 7; i++ {
+		if due, _ := throttleAdmit(tab, "k", iv, 10, base+int64(i)); due {
+			t.Fatalf("窗口内第 %d 次不该单独落条", i)
+		}
+	}
+	// 窗口到期：落条，并**如实报出**这 7 次。
+	due, sup = throttleAdmit(tab, "k", iv, 10, base+int64(iv.Seconds()))
+	if !due {
+		t.Fatal("窗口到期必须落条")
+	}
+	if sup != 7 {
+		t.Fatalf("到期那一条必须报出窗口内被折叠的 7 次，实得 %d——"+
+			"丢弃式节流会让这 7 次在系统里不留任何痕迹，而审计导出页写着「全量」", sup)
+	}
+	if note := throttleNote(sup, iv); !strings.Contains(note, "7 次") || !strings.Contains(note, "5 分钟") {
+		t.Fatalf("正文后缀要同时说清次数与窗口长度（不写窗口就无从判断密集还是稀疏），实得 %q", note)
+	}
+	// 报过之后清零：下一条不该重复报同一批。
+	if _, sup2 := throttleAdmit(tab, "k", iv, 10, base+int64(2*iv.Seconds())); sup2 != 0 {
+		t.Fatalf("已报过的折叠数必须清零，否则同一批会被反复计入，实得 %d", sup2)
+	}
+	// 键数上界：超出即整张清空（键含客户端自报的指纹，攻击者可控）。
+	for i := 0; i < 12; i++ {
+		throttleAdmit(tab, "flood"+strconv.Itoa(i), iv, 10, base)
+	}
+	if len(tab) > 11 {
+		t.Fatalf("水位表必须有上界（键含客户端自报指纹），实得 %d 键", len(tab))
+	}
 }

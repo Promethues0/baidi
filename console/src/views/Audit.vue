@@ -134,7 +134,12 @@
          只暴露后端真支持的条件：类别 + 账号 + 源 IP + 关键词 + 时间范围。 -->
     <a-modal v-model:visible="exp.open" :width="520" :footer="false" title="导出审计日志（CSV）" unmount-on-close>
       <div>
-        <div class="bd-wdesc">按条件从 baidi-control 导出全量审计日志（不限于页面上最近 200 条）。</div>
+        <div class="bd-wdesc">
+          按条件从 baidi-control 导出审计日志（不限于页面上最近 200 条）。
+          <br />
+          热路径事件（敲门令牌签发、观察模式放行、接入上限拒绝）按 5 分钟窗口<strong>聚合</strong>后落库：
+          导出的是库里真实存在的每一条，被合并的次数写在该条正文里——不是逐次全量。
+        </div>
         <div class="bd-fld">
           <label>日志类别</label>
           <a-select v-model="exp.category">

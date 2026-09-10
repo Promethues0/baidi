@@ -135,19 +135,23 @@ func (s *Server) devicePlatform(ctx context.Context, account, fingerprint string
 	return dv.Platform
 }
 
+// accessDeniedInterval 并发上限拒绝的审计节流窗口。
+const accessDeniedInterval = 5 * time.Minute
+
 // auditAccessDenied 并发上限拒绝的节流审计（5min/(账号,指纹)）。
+// 被折叠掉的次数经 throttleNote 写进正文——丢弃式节流会让"这个人被挡了 40 次"
+// 在系统里不留任何痕迹，而那正是接入策略是否配得过严的唯一判据。
 func (s *Server) auditAccessDenied(r *http.Request, account, fingerprint, reason string) {
 	key := "access:" + account + "|" + fingerprint
-	now := time.Now().Unix()
 	s.mu.Lock()
-	last := s.accessDenied[key]
-	if now-last < 300 {
-		s.mu.Unlock()
+	due, suppressed := throttleAdmit(s.accessDenied, key, accessDeniedInterval,
+		deviceObserveMaxKeys, time.Now().Unix())
+	s.mu.Unlock()
+	if !due {
 		return
 	}
-	s.accessDenied[key] = now
-	s.mu.Unlock()
-	s.audit(r, "security", "拒发敲门令牌："+account+" 的终端 "+shortFp(fingerprint)+"（"+reason+"）", "deny")
+	s.audit(r, "security", "拒发敲门令牌："+account+" 的终端 "+shortFp(fingerprint)+"（"+reason+"）"+
+		throttleNote(suppressed, accessDeniedInterval), "deny")
 }
 
 // shortFp 指纹截断展示（审计正文里放全长既没用又难读）。

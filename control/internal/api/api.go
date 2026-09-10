@@ -1064,10 +1064,15 @@ func (e *extAuthRounds) active(account string) bool {
 
 // PortalTile 应用门户卡片。
 type PortalTile struct {
-	ID          string `json:"id"`
-	Name        string `json:"name"`
-	Mode        string `json:"mode"`
-	Addr        string `json:"addr"`
+	ID   string `json:"id"`
+	Name string `json:"name"`
+	Mode string `json:"mode"`
+	// Addr 磁贴上那行地址。**读侧现算**，不是 apps.addr 的直发（wave11 行动 15）——
+	// 取哪一份由 AddrSource 说明，判据只有 portalAddr 一处。
+	Addr string `json:"addr"`
+	// AddrSource 上面那行地址是**哪来的**，决定它能不能被当成"要连的地址"读。
+	// 取值见 addrSource* 三个常量；旧控制台不读它，缺席即按老行为渲染。
+	AddrSource  string `json:"addrSource,omitempty"`
 	Sensitivity string `json:"sensitivity"` // low | normal | high，取自关联资源的 Sensitivity
 	Accessible  bool   `json:"accessible"`  // false = 未获授权（可申请），或已被终端风险降权
 	ResourceID  string `json:"resourceId"`  // 关联受控资源（JIT 申请用；空=不接入自助申请）
@@ -1179,8 +1184,12 @@ func (s *Server) handlePortalApps(w http.ResponseWriter, r *http.Request) {
 		if a.Status != "running" {
 			continue
 		}
-		_, st := appAccessState(user, c.Role, a, byRes, subjects, granted, degraded)
-		tile := PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: a.Addr,
+		res, st := appAccessState(user, c.Role, a, byRes, subjects, granted, degraded)
+		// 地址读侧现算：关联了资源就发资源的真实后端（网关拨的就是它），
+		// 直连书签发它自己的链接，都没有才回落到管理员手填的那份并如实标注来源。
+		// 判据只有 portalAddr 一处，见那里的注释。
+		addr, addrSrc := portalAddr(a, res)
+		tile := PortalTile{ID: a.ID, Name: a.Name, Mode: a.Mode, Addr: addr, AddrSource: addrSrc,
 			Sensitivity: st.Sensitivity, Accessible: st.Accessible, ResourceID: a.ResourceID,
 			Degraded: st.Degraded, Unavailable: st.Unavailable, UnavailableReason: st.Reason}
 		if a.Mode == "web" {
@@ -2408,8 +2417,17 @@ func (s *Server) handleCreateApp(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var a store.App
-	if err := json.NewDecoder(r.Body).Decode(&a); err != nil || a.Name == "" || a.Mode == "" {
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 16<<10)).Decode(&a); err != nil {
 		httpx.Error(w, http.StatusBadRequest, "invalid app payload")
+		return
+	}
+	// ★入口校验与 PUT /apps/{id} **同一个函数**（wave11 行动 15）：改造前这里只查
+	// `name != "" && mode != ""`，mode 不查白名单、addr 不查非空、status 不查枚举，
+	// 而 validAppMode 就放在 apps.go 里。三种字典外的值的后果逐条写在 normalizeAppInput 上，
+	// 共同点是**接口回 201 而功能静默不生效**。两处各写一份校验的话，下一次改动
+	// 只会改到其中一处，于是「发布」与「编辑」对同一份请求体给出相反的答案。
+	if err := normalizeAppInput(&a); err != nil {
+		httpx.Error(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	created, err := s.writer.CreateApp(r.Context(), a)

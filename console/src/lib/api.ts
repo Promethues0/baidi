@@ -1257,6 +1257,13 @@ export interface TotpStatus { enrolled: boolean; confirmed: boolean; createdAt?:
 export interface TotpEnrollResp { secret: string; uri: string }
 export interface PortalTile {
   id: string; name: string; mode: 'tunnel' | 'web' | 'global'; addr: string;
+  /** 上面那行 addr 是**哪来的**（服务端 portalAddr 现算，wave11 行动 15②）：
+   *   - `resource`  取自关联受控资源的 backend —— 网关真正拨号的那个地址；
+   *   - `bookmark`  直连书签自己的链接（那一档 addr 是**执行值**，「打开链接」开的就是它）；
+   *   - `declared`  管理员在发布向导里手填、**没有任何执行方**的展示值（应用没关联资源时只剩它）。
+   *  ★缺省（旧后端不下发）= 判不出来：此时不许贴任何一种标注——说它「来自资源」是编，
+   *  说它「只是手填」也是编，而两句话会把用户支去两个相反的方向。 */
+  addrSource?: 'resource' | 'bookmark' | 'declared';
   sensitivity: 'low' | 'normal' | 'high';
   /** 服务端算出的授权结论：静态 ACL ∪ 组织/用户组展开 ∪ 有效 JIT 授予，减去终端降权否决。
    *  ★与客户端剖面、七层票据同一个判定函数（control 侧 appAccessState）。前端不得再按
@@ -1341,7 +1348,14 @@ export interface DownloadsResp { clients: ClientDownload[] }
 /* ── 运维诊断（store/api.DiagBundle，控制面真实自检）── */
 /* skip = 该能力未部署（如集群），不参与健康分；渲染时对未知枚举兜底为中性样式，别让页面崩 */
 export type DiagStatus = 'pass' | 'warn' | 'fail' | 'skip';
-export type DiagCategory = 'control' | 'storage' | 'dataplane' | 'stealth' | 'cluster' | 'identity' | 'posture' | 'security';
+/** ★这份联合类型必须与后端 DiagCheck.Category 的实际取值一一对上（api/diag.go 那批
+ *  `DiagCheck{Key: …, Category: …}`）。少一个的后果不是报错而是**降级成英文原文**：
+ *  Diag.vue 的 catLabel 兜底是 `CAT[c]?.label ?? c`，于是那一类的卡片副标题会显示
+ *  `audit` / `system` 这种给不了任何信息的字样，而导出的 Markdown 报告里也一样——
+ *  `audit-forward`（wave9 补的）与 `notify`（本波补的）此前/此刻正是这两类。 */
+export type DiagCategory =
+  | 'control' | 'storage' | 'audit' | 'dataplane' | 'stealth'
+  | 'system' | 'cluster' | 'identity' | 'posture' | 'security';
 export interface DiagItem { label: string; value: string; status?: DiagStatus }
 export interface DiagCheck {
   key: string; category: DiagCategory; name: string;

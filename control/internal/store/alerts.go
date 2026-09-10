@@ -117,6 +117,23 @@ const (
 	// 队列本身是可靠的（成功才出队、失败退避重试），但它有上界——
 	// 积压到顶就开始丢新的，那时才发现已经晚了。
 	AlertKindAuditForwardFail = "audit_forward_fail"
+	// AlertKindNotifyChannelFail 消息通道最近一次发送失败（wave11 行动 17①，FR-SYSCFG-19）。
+	//
+	// ★这条此前不存在，而通道失效的信号面**只有系统页深处那一格 last_status**：
+	// 没有告警规则、没有 /diag 项，进程日志里那行 slog.Error 也没人盯。后果是
+	// 「你以为已经通知到了、其实没有」——爆破锁定、终端判 block、业务告警三条链路
+	// 全都压在通道上，通道一坏，页面上一切正常而管理员从此再收不到任何东西。
+	//
+	// ★它与「通道被停用 / 被删除」**不是一回事**，绝不能合成一条：后者是管理员的
+	// 显式动作、本身就有审计（handleSaveNotifyChannel / handleDeleteNotifyChannel），
+	// 对着一次正常的运维操作报警只会训练人忽略这条规则。所以这条只判**启用中**通道，
+	// 停用/删除那一面由 /diag 的「消息通道」项与 notifyAlert 的「点名的通道已停用/已删除」
+	// 审计承担。
+	//
+	// ★自指的那一环要写下来：这条告警本身也会经消息通道外发（notifyAlert），
+	// 于是它十有八九发不出去。这不是设计缺陷——它照常落库进告警页、发失败照常落审计，
+	// 而"能发出去"本来就不该是"能被发现"的前提。冷却期（默认 30min）把重复量压住。
+	AlertKindNotifyChannelFail = "notify_channel_fail"
 )
 
 // 冷却期边界（秒）。默认 30 分钟。
@@ -289,6 +306,17 @@ var alertKindSpecs = []AlertKindSpec{
 			ThreshWithinMin:      "多久没有成功投递过才报（分钟）",
 			ThreshBacklogPercent: "队列积压占上界多少比例才报（%）",
 		},
+	},
+	{
+		Kind: AlertKindNotifyChannelFail, Name: "消息通道发送失败", Category: AlertCategorySecurity,
+		Severity: AlertSevCritical,
+		Signal: "notify_channels 里**启用中**通道的 last_status / last_detail / last_at——" +
+			"那四列只由**真正发出那一次**写入（api.sendVia），保存配置与翻转开关都不碰它。" +
+			"★只判启用中的通道，且「从未发送过」（last_status 为空）不产生候选：那是不可判定，" +
+			"不是「发不出去」；★通道被**停用或删除**不在这条规则里——那是管理员的显式动作、" +
+			"本身有审计，看 /diag 的「消息通道」项",
+		Thresholds:  map[string]float64{},
+		ThresholdZh: map[string]string{},
 	},
 	{
 		Kind: AlertKindAuditChain, Name: "审计防篡改链校验失败", Category: AlertCategorySecurity,

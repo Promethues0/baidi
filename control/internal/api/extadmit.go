@@ -105,6 +105,19 @@ func (s *Server) admitExternal(ctx context.Context, rec store.AuthSourceRec,
 		}
 		return admitVerdict{Reason: why, ApprovalID: adm.ApprovalID}
 	}
+	// 审批类通知（wave11 行动 17②）：**只在真的新建了一张单子那次**发。
+	// 判据与 auditAdmitDenied 的 `!v.Pending || v.NewTicket` 同源——登录可以无限重试，
+	// 按"每次被拒都发"的话，一个反复登录的外部账号就能把管理员的邮箱刷爆，
+	// 而真正的新事件（又一个人在等批准）被淹掉。
+	if created {
+		s.notifyApprovalPending(ctx, "外部身份准入审批", orElse(id.Username, id.Subject),
+			"【白帝】待审批：外部身份准入 "+orElse(id.Username, id.Subject),
+			"认证源「"+rec.Name+"」上有一个身份认证通过，但该源配置为「需管理员批准后建号」。\n\n"+
+				"审批单："+adm.ApprovalID+"\n用户名："+orElse(id.Username, "—")+
+				"\nsubject："+shortSubject(id.Subject)+"\n邮箱："+orElse(id.Email, "—")+"\n\n"+
+				"在批准之前该用户登不进白帝（账号也还没有被创建——批准本身不建号，"+
+				"账号在他下一次登录时才建）。请到管理台「安全防护 → 审批」处置。")
+	}
 	return admitVerdict{
 		Reason:  "该账号尚未获准接入白帝，已提交准入申请，请联系管理员批准（申请单 " + adm.ApprovalID + "）",
 		Pending: true, NewTicket: created, ApprovalID: adm.ApprovalID,

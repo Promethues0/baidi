@@ -509,7 +509,15 @@ func (s *Server) deliverNotice(ctx context.Context, m notify.Message) {
 			continue
 		}
 		sent++
-		detail, err := s.sendVia(ctx, ns, rec, m, nil)
+		// ★Message.To 只喂给 smtp：它装的是**邮箱地址**（审批人邮箱，见 notify.Message.To）。
+		// 短信通道的 to 是手机号，塞邮箱进去就是发一条谁也收不到的短信；webhook 的 to
+		// 会原样进载荷，让对接方的转发脚本突然收到一批它不认识的地址。
+		// 其余通道仍会收到这条通知（发给它们自己配置的收件人），只是不额外点名收件人。
+		var extra []string
+		if notify.Kind(rec.Kind) == notify.KindSMTP {
+			extra = m.To
+		}
+		detail, err := s.sendVia(ctx, ns, rec, m, extra)
 		if err != nil {
 			// ★发送失败必须落审计：这是"你以为已经通知到了、其实没有"的唯一痕迹。
 			slog.Error("安全事件通知发送失败", "channel", rec.Name, "kind", rec.Kind, "event", m.Event, "err", err.Error())
@@ -551,6 +559,16 @@ func notifyEventSpecs() []notifyEventSpec {
 		{Event: "posture-block", Name: "终端合规判定转入阻断", Wired: true,
 			Signal: "posture 上报后账号级判定**转入** block 的那一次（不是「当前是 block」——" +
 				"按后者发会随上报频率刷爆邮箱），与审计里那条转换记录同一判据"},
+		{Event: "approval-pending", Name: "审批单待处置", Wired: true,
+			Signal: "三处审批单**新建**那一次：JIT 访问申请（handlePortalCreateAccessRequest）、" +
+				"终端绑定待批（EnrollDevice 首次登记且设置为「审批绑定」）、" +
+				"外部身份准入待批（RequestExtAdmission 返回 created=true）。" +
+				"★重复提交/重复登录不再发（三处都只在真的新建了一张单子时发），" +
+				"否则一个反复重试的用户就能把邮箱刷爆。" +
+				"★收件人 = 持「安全策略」权限的管理员（那三类单子的处置端点都收在这一权上），" +
+				"取自 users.email；一个邮箱都取不到时通知仍发给通道自身配置的收件人，" +
+				"并落一条 fail 审计说明没点到名",
+		},
 		{Event: "geo-anomaly", Name: "非常用地点登录", Wired: false,
 			Signal: "需要按源 IP 判定常用地点",
 			Reason: "本版本无 IP 地理库，判不了——与认证策略里 geoAnomaly 同一条冻结理由。" +

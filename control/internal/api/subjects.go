@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net"
+	"strings"
 
 	"baidi.dev/control/internal/store"
 )
@@ -213,6 +214,47 @@ func appAccessState(user, role string, a store.App, byRes map[string]store.Resou
 		Accessible:  accessibleFor(user, role, res, ix, granted[res.ID], degraded),
 		Degraded:    degraded && res.HighSensitivity(),
 	}
+}
+
+// ── 磁贴上那行地址是哪来的（wave11 行动 15②，FR-TUN-02）──
+//
+// `apps.addr` 是与 `resources.backend` **并存的第二个地址真相来源**：管理员在发布向导里
+// 手填、入口从不校验形态、也永不与资源同步，而门户与移动端把它当作「这个应用的地址」
+// 直接渲染给终端用户看。两者分家时（填错一位数字、后来资源改了后端、或者干脆填的是
+// 一句说明文字），用户会照着一个**白帝任何地方都不会去拨**的地址去连——SSH/RDP 这类
+// 隧道应用尤其致命，用户要照着它填自己的客户端——而连不上的同时门户、剖面、网关三处
+// 全部显示正常。这正是本项目反复指认的静默失效形态。
+//
+// ★取舍：**面向用户的两个端（门户 / 移动端）读侧现算，面向管理员的应用页如实标注**。
+// 不一刀切成"全部现算"，是因为管理员是唯一能改这一栏的人：把他填错的值在页面上
+// 悄悄换成资源的真后端，他永远不会知道自己填错过，那一栏会一直错下去。
+// 也不一刀切成"全部只加个注解"：终端用户没有资源策略页的入口，对他说
+// 「这个地址可能不准」等于把一个他解决不了的问题丢给他。
+//
+// ★`mode=global`（直连书签）**必须走另一档**：它不经网关、没有关联资源，`apps.addr`
+// 在那一档是**执行值**——门户「打开链接」点下去开的就是它（PortalApps.vue 的
+// bookmarkURL）。把它一起换成资源后端会让那个按钮从此打不开任何东西。
+const (
+	// addrSourceResource 取自关联受控资源的 backend —— 网关真正拨号的那个地址。
+	addrSourceResource = "resource"
+	// addrSourceBookmark 直连书签的链接本身（apps.addr 在这一档是执行值，不是展示值）。
+	addrSourceBookmark = "bookmark"
+	// addrSourceDeclared 管理员手填、**没有任何执行方**的展示值：应用没关联资源
+	// （或关联的资源没有后端地址）时只剩它，此时磁贴另有「配置缺口 · 不可用」标记，
+	// 两处要一起读——地址不准与"这条路根本不通"是同一件事的两半。
+	addrSourceDeclared = "declared"
+)
+
+// portalAddr 决定门户/移动端磁贴上显示哪个地址，并说清它的来源。
+// res 是 appAccessState 解析到的受控资源（未关联时为零值）。
+func portalAddr(a store.App, res store.Resource) (addr, source string) {
+	if a.Mode == "global" {
+		return a.Addr, addrSourceBookmark
+	}
+	if b := strings.TrimSpace(res.Backend); b != "" {
+		return b, addrSourceResource
+	}
+	return a.Addr, addrSourceDeclared
 }
 
 // authorizeRes 静态 ACL ∪ 组织/用户组展开的判定（不含降权与 JIT，见 accessibleFor）：

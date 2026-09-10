@@ -24,10 +24,22 @@ import (
 // 返回那一刻就被取消，异步 worker 拿着它发信只会立刻拿到 context canceled——
 // 而这类失败发生在主流程之外，没人会注意到通知其实一条都没发出去。
 type Message struct {
-	// Event 事件键（lockout / posture-block / test…）。进审计与 webhook 载荷。
+	// Event 事件键（lockout / posture-block / approval-pending / test…）。进审计与 webhook 载荷。
 	Event   string
 	Subject string
 	Body    string
+	// To 这条通知**额外**要送达的收件人邮箱（在通道自身配置的收件人之外）。
+	//
+	// ★存在的理由：审批类通知是**有责任人**的——它要送到能去点「批准」的那批人手里，
+	// 而不是只送到某个通道配置里写死的地址。白帝没有「审批人」这个字段，可行的
+	// 近似是"持 PermSecurity 的管理员"（审批的执行权就在那一权）。
+	//
+	// ★它装的是**邮箱地址**，所以只有 smtp 通道消费它（分流在 api.deliverNotice）：
+	// 短信通道的 to 是**手机号**，把一串邮箱塞进 mobiles 就是发一条谁也收不到的短信；
+	// webhook 的 to 会原样进载荷，让对接方的转发脚本突然收到一批它不认识的地址。
+	// 不在这里按类型分流，是因为 notify 包不该知道"哪一档 to 是什么语义"——
+	// 它只负责投递，语义在调用方。
+	To []string
 }
 
 // Sink 真正的投递动作。由上层（api 层）注入：它知道怎么读通道配置、解凭据、

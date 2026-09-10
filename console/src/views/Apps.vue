@@ -60,7 +60,16 @@
                   <span class="bd-appic" :style="{ background: modeMeta(a.mode).bg }">
                     <component :is="modeMeta(a.mode).icon" :style="{ color: modeMeta(a.mode).color }" />
                   </span>
-                  <span><b>{{ a.name }}</b><i class="bd-mono">{{ a.addr }}</i></span>
+                  <!-- ★这一栏显示的是管理员**手填**的 apps.addr，它与 resources.backend 是
+                       两个并存的地址真相来源：白帝任何地方都不会按它拨号（网关拨的是关联资源
+                       的 backend），也永不与资源同步。面向用户的门户/移动端已改成读侧现算，
+                       管理台这半**刻意保留手填值并当面比对**——管理员是唯一能改它的人，
+                       在他眼前把错值悄悄换成资源后端，他永远不会知道自己填错过。 -->
+                  <span>
+                    <b>{{ a.name }}</b>
+                    <i class="bd-mono">{{ a.addr }}</i>
+                    <i v-if="addrNote(a)" class="bd-appaddr__note" :class="{ bad: addrNote(a)!.bad }">{{ addrNote(a)!.text }}</i>
+                  </span>
                 </div>
               </td>
               <td><span class="bd-tg" :style="tagStyle(modeMeta(a.mode).color)">{{ modeMeta(a.mode).label }}</span></td>
@@ -356,6 +365,27 @@ function authTitle(a: App) {
 }
 function tagStyle(color: string) { return { color, background: color + '14' }; }
 
+/** 地址栏的限定语：这一列显示的是管理员手填的 apps.addr，而真正被拨号的是关联资源的 backend。
+ *
+ *  三种结论，缺一不可：
+ *   - 直连书签（mode=global）不经网关、没有资源，addr 就是执行值 —— 不加任何限定语；
+ *   - 未关联资源 —— 手填值没有任何执行方，如实说；
+ *   - 已关联资源：读到了就比对（不一致要点名真后端，那是用户实际会被路由到的地方），
+ *     **读不到就说读不到**（resLoaded=false 是不可判定，不是"一致"也不是"不一致"）。 */
+function addrNote(a: App): { text: string; bad: boolean } | null {
+  if (a.mode === 'global') return null;
+  if (!a.resourceId) return { text: '· 手填展示地址（未关联资源，无执行方）', bad: false };
+  if (!resLoaded.value) {
+    return { text: `· 手填展示地址（资源清单未读取${resErr.value ? '：' + resErr.value : ''}，无法比对）`, bad: false };
+  }
+  const r = resources.value.find((x) => x.id === a.resourceId);
+  if (!r) return { text: `· 手填展示地址；关联的资源 ${a.resourceId} 已不存在`, bad: true };
+  if ((r.backend ?? '').trim() !== a.addr.trim()) {
+    return { text: `· 手填展示地址；网关实际拨的是 ${r.backend}`, bad: true };
+  }
+  return null;
+}
+
 // ★向导只收集会真正提交后端的字段：收集了却静默丢弃的控件比没有更糟。
 // DLP / 水印 / 浏览器管控 / 负载均衡等暂无执行方，故不提供入口，别在这里加回来。
 const STEPS = ['发布模式', '基础配置', '确认发布'];
@@ -383,6 +413,11 @@ const canNext = computed(() => {
 });
 const publishing = ref(false);
 const resources = ref<Resource[]>([]);
+/** /resources 这一路读到了没有。false = **不可判定**（不是"没有资源"）：
+ *  地址栏的比对结论依赖它，读不到就只说"手填值，无法比对"，不敢说"与资源不一致"。 */
+const resLoaded = ref(false);
+/** 资源清单读取失败时的后端原话（进地址栏的 hover 提示，不编归因）。 */
+const resErr = ref('');
 // 选中资源时回填它已有的七层配置：不回填的话，发布第二个引用同一资源的应用
 // 会用表单默认值把管理员配好的入口静默覆盖掉。
 watch(() => wz.f.resourceId, (id) => {
@@ -406,7 +441,13 @@ async function load() {
   try {
     const r = await api<ResourcesResp>('/resources');
     resources.value = r.resources ?? [];
-  } catch { resources.value = []; }
+    resLoaded.value = true;
+  } catch (e) {
+    // ★这一路失败必须留成**不可判定**而不是空表：地址栏那句比对（手填值 vs 资源真实后端）
+    //   在资源清单读不到时得不出任何结论，而空表会让每条已关联应用都被判成「资源不存在」——
+    //   一次读库抖动就会把整页染成告警。转述后端原话，不编归因（守卫规则三）。
+    resources.value = []; resLoaded.value = false; resErr.value = failReason(e);
+  }
 }
 async function next() {
   if (!canNext.value) return;
@@ -653,6 +694,11 @@ onMounted(load);
 .bd-wz__summary { margin-top: var(--bd-sp-2); margin-bottom: var(--bd-sp-4); background: var(--bd-primary-1); border: 1px solid var(--bd-primary-b); border-radius: var(--bd-radius-s); padding: var(--bd-sp-3) 14px; font-size: var(--bd-fs-md); }
 .bd-wz__summary b { display: block; margin-bottom: 6px; }
 .bd-wz__summary div { color: var(--bd-t2); font-size: var(--bd-fs-sm); }
+
+/* 地址栏的限定语（`.bd-cellname i` 是 display:block，故它自成一行）：
+   bad = 手填值与资源真实后端已经不是一回事，用告警色，因为那是"用户看到的地址连不上"的成因 */
+.bd-appaddr__note { font-style: normal; font-size: var(--bd-fs-xs); color: var(--bd-t3); }
+.bd-appaddr__note.bad { color: var(--bd-warning); }
 
 /* 1280 视口：左栏收窄，搜索框跟随 */
 @media (max-width: 1320px) {

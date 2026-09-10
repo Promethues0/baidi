@@ -238,6 +238,24 @@ func (s *Server) alertSnapshot(ctx context.Context, withChain bool) alerting.Sna
 			slog.Warn("告警评估：读审计外送出口失败，本轮跳过该规则", "err", err.Error())
 		}
 	}
+	// 安全 ⑦：消息通道最近一次发送的结果（wave11 行动 17①）。
+	//
+	// ★只取**启用中**的通道：停用是管理员的显式动作（本身有审计），不是故障——
+	// 给它报警只会训练人忽略这条规则。「通道被停用/删除」那一面由 /diag 的
+	// checkNotifyChannels 与 notifyAlert 里那两条「点名的通道已停用/已删除」审计承担。
+	//
+	// ★读失败跳过而不是编一条：与相邻几路降级方向一致（少报，不误报）。
+	if ns, ok := s.store.(notifyStore); ok {
+		if chans, err := ns.NotifyChannels(ctx); err == nil {
+			for _, c := range chans {
+				if c.Enabled {
+					snap.NotifyChannels = append(snap.NotifyChannels, c)
+				}
+			}
+		} else {
+			slog.Warn("告警评估：读消息通道清单失败，本轮跳过该规则", "err", err.Error())
+		}
+	}
 	return snap
 }
 

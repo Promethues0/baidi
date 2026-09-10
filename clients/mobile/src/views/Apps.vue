@@ -22,7 +22,13 @@
       <button v-for="a in apps" :key="a.id" class="ap__tile" :class="{ locked: !a.accessible }" @click="open(a)">
         <span class="ap__ic" :style="{ background: iconBg(a.mode) }"><component :is="modeIcon(a.mode)" /></span>
         <div class="ap__name">{{ a.name }}</div>
-        <div class="ap__addr m-mono">{{ a.addr }}</div>
+        <!-- 地址由服务端现算（addrSource）：关联了受控资源就是资源真实后端，直连书签是它
+             自己的链接，两者都没有才回落到管理员手填的那份。★只有 declared 那一档要当面说明
+             ——那是白帝任何地方都不会去拨的值；缺席（旧后端）判不出来，什么都不贴。 -->
+        <div class="ap__addr m-mono">
+          {{ a.addr }}
+          <span v-if="a.addrSource === 'declared'" class="ap__addrnote">· 管理员填写</span>
+        </div>
         <!-- ★徽标按**服务端的授权结论**画，不按 sensitivity 自己推。
              按 sensitivity 推的老写法有两个方向都错：已授权的高敏应用照样挂着「需申请」
              （用户会去为自己已有的权限提审批单），而未授权的普通应用一个提示都没有、
@@ -96,6 +102,8 @@ onMounted(load);
   color: #fff; font-size: 21px; margin-bottom: 6px; }
 .ap__name { font-size: 14px; font-weight: 600; color: var(--bd-t1); }
 .ap__addr { font-size: 11px; color: var(--bd-t3); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 「管理员填写」是对地址的限定语、不是另一条信息：同一行、更弱一档 */
+.ap__addrnote { color: var(--bd-t4); }
 /* 金 = 还有下一步可做（去门户提申请）；红 = 此路不通，做什么都没用（先修终端 / 找管理员）。
    与门户 PortalApps.vue 的配色约定一致，两端对同一状态给同一个视觉信号。 */
 .ap__tag { margin-top: 4px; align-self: flex-start; font-size: 10px; padding: 1px 7px; border-radius: 4px;

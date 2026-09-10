@@ -286,11 +286,15 @@ const verdictText = computed(() => {
 });
 const envLabel = computed(() => (bundle.value.env === 'prod' ? '生产' : '开发'));
 
+/* ★键集必须覆盖后端 DiagCheck.Category 的全部取值（见 api.ts 的 DiagCategory 注释）：
+   漏一个不会报错，只会让那一类的卡片副标题与导出报告里显示英文原文。 */
 const CAT: Record<DiagCategory, { label: string; icon: string }> = {
   control: { label: '控制面', icon: 'IconDashboard' },
   storage: { label: '存储', icon: 'IconStorage' },
+  audit: { label: '审计', icon: 'IconFile' },
   dataplane: { label: '数据面', icon: 'IconLink' },
   stealth: { label: '服务隐身', icon: 'IconSafe' },
+  system: { label: '系统运维', icon: 'IconSettings' },
   cluster: { label: '温备', icon: 'IconApps' },
   identity: { label: '身份', icon: 'IconUserGroup' },
   posture: { label: '态势', icon: 'IconExclamationCircle' },

@@ -104,6 +104,21 @@ func (s *Server) enrollReportingDevice(r *http.Request, account, fingerprint, pl
 			"当前状态："+zh+"\n\n"+
 			"若这不是本人操作，请立即修改口令并在「终端管理」中吊销该设备。\n"+
 			"本条只在该终端**首次**登记时发送一次。")
+	// 审批类通知（wave11 行动 17②）：pending 那一档另发一条**给管理员**的待办。
+	//
+	// ★与上面那条 device-first-seen 刻意分开，两者的读者与动作都不同：
+	// 那条是「你的账号在一台新机器上登录了」（给账号本人看的账号安全信号，
+	// 两种绑定方式下都发）；这条是「有一张单子在等你批」（给持 security 权的
+	// 管理员看的待办，只在 approval 模式下才存在）。合成一条的话，自动绑定的部署
+	// 会天天收到一条不存在的"待办"，而真的待办被淹在同一种主题里。
+	if dev.Status != store.DeviceStatusTrusted {
+		s.notifyApprovalPending(r.Context(), "终端绑定审批", account,
+			"【白帝】待审批：终端绑定 "+account+" / "+dev.Name,
+			"账号 "+account+" 的一台新终端已登记，按当前「审批绑定」设置需要管理员批准后才能接入。\n\n"+
+				"审批单："+dev.ApprovalID+"\n终端："+dev.Name+"（"+platform+"）\n指纹："+shortFP(fingerprint)+"\n\n"+
+				"在批准之前，严格模式下该终端拿不到敲门令牌（观察模式下放行但会持续记审计）。"+
+				"请到管理台「安全防护 → 终端管理」处置。")
+	}
 	return dev, true, nil
 }
 

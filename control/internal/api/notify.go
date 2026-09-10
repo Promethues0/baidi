@@ -526,13 +526,12 @@ func (s *Server) deliverNotice(ctx context.Context, m notify.Message) {
 	}
 }
 
-
 // notifyEventSpec 一类安全事件通知的元信息（是否已接线 + 触发源的事实描述）。
 type notifyEventSpec struct {
 	Event  string `json:"event"`
 	Name   string `json:"name"`
-	Wired  bool   `json:"wired"`  // 是否真的有代码在发它
-	Signal string `json:"signal"` // 触发源：写给排障的人看
+	Wired  bool   `json:"wired"`            // 是否真的有代码在发它
+	Signal string `json:"signal"`           // 触发源：写给排障的人看
 	Reason string `json:"reason,omitempty"` // 未接线时说清为什么
 }
 

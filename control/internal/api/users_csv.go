@@ -120,7 +120,7 @@ type userImportResult struct {
 	// InitialPassword 该行的初始口令由系统随机生成时，在**这一次回执**里交还给管理员。
 	// CSV 里填了口令的行不带这个字段。绝不入审计、绝不入日志——审计留存 180 天且可外送 SIEM。
 	InitialPassword string `json:"initialPassword,omitempty"`
-	Reason  string `json:"reason,omitempty"`
+	Reason          string `json:"reason,omitempty"`
 }
 
 // handleUsersImport POST /api/v1/users/import（PermSecurity）：CSV 批量建普通用户。

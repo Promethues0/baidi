@@ -26,10 +26,10 @@ func TestIpsecSuiteValidation(t *testing.T) {
 		}
 	}
 	cases := []struct {
-		name              string
-		suite, e, h, d    string
-		wantOK            bool
-		note              string
+		name           string
+		suite, e, h, d string
+		wantOK         bool
+		note           string
 	}{
 		// 数据面：suiteAllowsPrivate(standard)=false → 私有码点全拒
 		{"标准全 RFC", "standard", "AES256-GCM", "SHA256", "group19", true, "全 RFC 码点"},

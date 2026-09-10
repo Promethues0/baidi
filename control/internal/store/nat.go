@@ -106,11 +106,12 @@ const NATWarnBandwidth = "网关同时承担零信任隧道与地址转换转发
 const NATWarnRoute = "启用 NAT 后网关以路由设备形态工作：内网 PC 需把网关 LAN 口设为网关地址，" +
 	"被发布的业务系统需把回程路由指向网关 LAN 口，否则转换成功但回包丢失（表现为连接超时且网关侧无报错）。"
 
-// normNATPolicy 归一化并校验一条策略。ifaces 是该网关**实测上报**的网卡清单。
+// normNATPolicy 归一化并校验一条策略。ifaces 是该网关**实测上报**的网卡清单，
+// listen 是它**自报**的监听地址快照（DNAT 自伤闸的判据，见 nat_selfpublish.go）。
 //
 // 校验必须在控制面做完：网关侧只负责把规则灌进内核，灌之前它没有「这条策略合不合理」
 // 的判断依据；等到内核拒绝再报错，管理员看到的是一串 nft 语法错误。
-func normNATPolicy(p NATPolicy, ifaces []GatewayIface) (NATPolicy, error) {
+func normNATPolicy(p NATPolicy, ifaces []GatewayIface, listen NATListen) (NATPolicy, error) {
 	p.Name = strings.TrimSpace(p.Name)
 	if p.Name == "" {
 		return p, errors.New("策略名称不能为空")
@@ -187,6 +188,11 @@ func normNATPolicy(p NATPolicy, ifaces []GatewayIface) (NATPolicy, error) {
 		p.TranslatedPort = p.DstPort // 不改端口是常见用法，缺省即同端口
 	}
 	if err := checkPort(p.TranslatedPort, "转换后端口"); err != nil {
+		return p, err
+	}
+	// ★自伤闸放在**最后**：它读的 TranslatedPort 可能是上面那两行刚补出来的默认值。
+	// 提到前面去，「发布端口 = 隧道口、转换端口留空」这条最省事的写法就绕过去了。
+	if err := natSelfPublish(p, listen, ifaces); err != nil {
 		return p, err
 	}
 	return p, nil
@@ -282,7 +288,10 @@ func NATForGateway(policies []NATPolicy, gwID string) []NATPolicy {
 // 避免给 coverage_guard 的种子豁免逻辑增加无谓的表面积）。
 type NATStore interface {
 	NATPolicies(ctx context.Context) ([]NATPolicy, error)
-	SaveNATPolicy(ctx context.Context, p NATPolicy) (NATPolicy, error)
+	// SaveNATPolicy 落一条策略。listen 是目标网关**自报**的监听地址快照，
+	// 由调用方（api 层，持有心跳登记）传入——DNAT 自伤闸靠它判「这条规则有没有
+	// 把网关自己的接入口卷进来」，零值即"网关未上报"，按出厂默认端口保守判。
+	SaveNATPolicy(ctx context.Context, p NATPolicy, listen NATListen) (NATPolicy, error)
 	DeleteNATPolicy(ctx context.Context, id string) error
 	GatewayIfaces(ctx context.Context) ([]GatewayIface, error)
 	ReplaceGatewayIfaces(ctx context.Context, gwID string, ifaces []GatewayIface) error

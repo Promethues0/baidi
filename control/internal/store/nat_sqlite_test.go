@@ -7,6 +7,12 @@ import (
 	"testing"
 )
 
+// natTestListen 一份「网关已上报监听地址」的快照，供 DNAT 自伤闸判定。
+// 端口取参考部署的默认值：既有夹具用的是 9999/8081，与它们不冲突。
+func natTestListen() NATListen {
+	return NATListen{Reported: true, Proxy: "127.0.0.1:18443", SPA: "127.0.0.1:18201"}
+}
+
 func natSeedIfaces(t *testing.T, s *SQLiteStore) {
 	t.Helper()
 	ctx := context.Background()
@@ -37,7 +43,7 @@ func TestSaveSnatAndDnatRoundTrip(t *testing.T) {
 	ctx := context.Background()
 	natSeedIfaces(t, s)
 
-	got, err := s.SaveNATPolicy(ctx, snatFixture())
+	got, err := s.SaveNATPolicy(ctx, snatFixture(), natTestListen())
 	if err != nil {
 		t.Fatalf("保存 SNAT: %v", err)
 	}
@@ -51,7 +57,7 @@ func TestSaveSnatAndDnatRoundTrip(t *testing.T) {
 		DstIface: "eth2", DstAddr: "5.5.10.102", Protocol: NATProtoTCP,
 		DstPort: 9999, TranslatedAddr: "155.155.235.212", TranslatedPort: 8081, Enabled: true,
 	}
-	if _, err := s.SaveNATPolicy(ctx, dnat); err != nil {
+	if _, err := s.SaveNATPolicy(ctx, dnat, natTestListen()); err != nil {
 		t.Fatalf("保存 DNAT: %v", err)
 	}
 	ps, err := s.NATPolicies(ctx)
@@ -69,7 +75,7 @@ func TestWrongDirectionRejected(t *testing.T) {
 
 	p := snatFixture()
 	p.SrcIface, p.DstIface = "eth3", "eth2" // SNAT 却把 WAN 当源口
-	_, err := s.SaveNATPolicy(ctx, p)
+	_, err := s.SaveNATPolicy(ctx, p, natTestListen())
 	if !errors.Is(err, ErrNATIfaceWrongDir) {
 		t.Fatalf("SNAT 源口用 WAN 应被拒，实际 err=%v", err)
 	}
@@ -85,7 +91,7 @@ func TestUnknownAndUntypedIfaceRejected(t *testing.T) {
 
 	p := snatFixture()
 	p.SrcIface = "eth9" // 网关没上报过
-	if _, err := s.SaveNATPolicy(ctx, p); !errors.Is(err, ErrNATIfaceUnknown) {
+	if _, err := s.SaveNATPolicy(ctx, p, natTestListen()); !errors.Is(err, ErrNATIfaceUnknown) {
 		t.Errorf("未上报的网卡应被拒，实际 %v", err)
 	}
 
@@ -98,7 +104,7 @@ func TestUnknownAndUntypedIfaceRejected(t *testing.T) {
 	_ = s.SetGatewayIfaceType(ctx, "gw-1", "eth3", IfaceWAN)
 	p2 := snatFixture()
 	p2.SrcIface = "eth4"
-	if _, err := s.SaveNATPolicy(ctx, p2); !errors.Is(err, ErrNATIfaceUntyped) {
+	if _, err := s.SaveNATPolicy(ctx, p2, natTestListen()); !errors.Is(err, ErrNATIfaceUntyped) {
 		t.Errorf("未定性的网卡应被拒，实际 %v", err)
 	}
 }
@@ -130,7 +136,7 @@ func TestIfaceTypeSurvivesHeartbeatReplace(t *testing.T) {
 		t.Fatalf("心跳替换后管理员定的类型必须保留，实际 %+v", types)
 	}
 	// 保留了定性，策略也必须还能存
-	if _, err := s.SaveNATPolicy(ctx, snatFixture()); err != nil {
+	if _, err := s.SaveNATPolicy(ctx, snatFixture(), natTestListen()); err != nil {
 		t.Fatalf("定性仍在时策略应可保存：%v", err)
 	}
 }
@@ -156,7 +162,7 @@ func TestNATValidation(t *testing.T) {
 		t.Run(c.name, func(t *testing.T) {
 			p := snatFixture()
 			c.mut(&p)
-			_, err := s.SaveNATPolicy(ctx, p)
+			_, err := s.SaveNATPolicy(ctx, p, natTestListen())
 			if err == nil || !strings.Contains(err.Error(), c.want) {
 				t.Fatalf("应因「%s」被拒，实际 err=%v", c.want, err)
 			}
@@ -170,7 +176,7 @@ func TestNATValidation(t *testing.T) {
 		SrcIface: "eth3", SrcAddr: "0.0.0.0/0", DstIface: "eth2", DstAddr: "5.5.10.102",
 		Protocol: NATProtoICMP, DstPort: 80, TranslatedAddr: "10.0.0.9",
 	}
-	if _, err := s.SaveNATPolicy(ctx, icmp); err == nil || !strings.Contains(err.Error(), "ICMP") {
+	if _, err := s.SaveNATPolicy(ctx, icmp, natTestListen()); err == nil || !strings.Contains(err.Error(), "ICMP") {
 		t.Fatalf("ICMP 带端口应被拒，实际 %v", err)
 	}
 }
@@ -183,7 +189,7 @@ func TestSnatStripsDnatOnlyFields(t *testing.T) {
 
 	p := snatFixture()
 	p.TranslatedAddr, p.TranslatedPort, p.DstPort = "1.2.3.4", 8080, 9999
-	got, err := s.SaveNATPolicy(ctx, p)
+	got, err := s.SaveNATPolicy(ctx, p, natTestListen())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -201,7 +207,7 @@ func TestCidrIsMasked(t *testing.T) {
 
 	p := snatFixture()
 	p.SrcAddr = "5.5.10.102/16"
-	got, err := s.SaveNATPolicy(ctx, p)
+	got, err := s.SaveNATPolicy(ctx, p, natTestListen())
 	if err != nil {
 		t.Fatal(err)
 	}

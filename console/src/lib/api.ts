@@ -439,6 +439,21 @@ export interface GatewayBundle {
   webExposed?: number;
   /** 那几台网关的 L7 监听地址（`网关id 监听地址`），页面据此点名。 */
   webEndpoints?: string[];
+  /** 「攻击面 = 0」那段断言的**第三个**前提：已确认灌进内核的 DNAT 端点数。
+   *  一条启用中的 DNAT 本身就是在网关的公网地址上开一个端口，而 SPA 隐身是
+   *  filter 表上按隧道口/敲门口写死的规则，与 nat 表无关——扫描器直接看得到。 */
+  natExposed?: number;
+  /** 那些端点（`网关id 协议 公网:端口 → 内网:端口`），页面据此点名。 */
+  natEndpoints?: string[];
+  /** 有启用中的 DNAT、但**判不出**规则在没在内核里的网关（离线 / 旧网关不上报）。 */
+  natUnknown?: string[];
+  /** 地址转换策略表读到了吗。★undefined（旧后端不下发）与 false 同样按
+   *  **不可判定**处理：这是一句正向安全断言，缺证据时不下结论，而不是默认没有敞口。 */
+  natKnown?: boolean;
+  /** 「攻击面 = 0」这句正向安全断言此刻成不成立——**后端一处判定**（api.stealthClaim），
+   *  前端只渲染。前提集分散在两条轨上时，加一条必然漏改其中一处，而漏改的那处
+   *  恰好是整页最强的那句话。undefined（旧后端不下发）按不可判定处理：不下结论。 */
+  stealthClaimOk?: boolean;
   /** 要顶到页面上的隐身告警。文案由后端下发——这是安全结论，前端自己编就会与
    *  后端实际判定脱节（与 Nat.vue 的 warnings 同一条纪律）。 */
   stealthWarnings: string[];

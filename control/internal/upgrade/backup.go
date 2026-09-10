@@ -46,8 +46,16 @@ var (
 // 看清「这份备份是哪台机器、哪个版本、什么时候做的」。
 // 里面绝不放任何凭据——头部是明文的，放什么都等于公开。
 type BackupMeta struct {
-	Magic     string   `json:"magic"`
-	Version   string   `json:"version"`   // 备份时的控制面版本（恢复时比对，防跨版本乱恢复）
+	Magic string `json:"magic"`
+	// Version 备份时的控制面**语义版本**（恢复时比对，防跨版本乱恢复）。
+	// **可能为空**——那意味着做这份备份的控制面二进制没注入版本身份，
+	// 于是"这份备份能不能恢复到当前版本"不可判定。空与空**不构成"版本一致"**，
+	// 比对方必须先判空（见 api.handleBackupInspect）。
+	Version string `json:"version"`
+	// Build 备份时的控制面**构建标识**（git 短哈希 · 构建时间）。
+	// 语义版本相同的两份二进制可以差着几十次提交，恢复出问题时要靠它对代码。
+	// 旧备份没有这个键，读出来是空串（不可判定）。
+	Build     string   `json:"build,omitempty"`
 	CreatedAt string   `json:"createdAt"` // 由调用方注入，避免包内取时间不可测
 	Note      string   `json:"note,omitempty"`
 	Files     []string `json:"files"` // 归档内相对路径清单（便于恢复前预览）

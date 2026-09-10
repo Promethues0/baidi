@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"baidi.dev/control/internal/auth"
+	"baidi.dev/control/internal/buildinfo"
 	"baidi.dev/control/internal/pki"
 	"baidi.dev/control/internal/store"
 	"baidi.dev/control/internal/upgrade"
@@ -31,8 +32,8 @@ func TestUpgradeBundleStatesBoundaries(t *testing.T) {
 	if code != http.StatusOK {
 		t.Fatalf("GET /upgrade http %d", code)
 	}
-	if out["control"] != Version {
-		t.Errorf("应回控制面真实版本 %s，实际 %v", Version, out["control"])
+	if out["control"] != buildinfo.Current().Semantic {
+		t.Errorf("应回控制面真实语义版本 %q，实际 %v", buildinfo.Current().Semantic, out["control"])
 	}
 	b, _ := out["boundaries"].([]any)
 	if len(b) == 0 {
@@ -198,7 +199,7 @@ func TestBackupContainsDatabase(t *testing.T) {
 	if err != nil {
 		t.Fatalf("导出的备份应能被同一口令解开：%v", err)
 	}
-	if meta.Version != Version {
+	if meta.Version != buildinfo.Current().Semantic {
 		t.Errorf("备份头部应记当时的控制面版本：%q", meta.Version)
 	}
 	db, ok := files["baidi.db"]
@@ -222,10 +223,12 @@ func keysOf(m map[string][]byte) []string {
 // TestBackupContainsAuditChainKeyAndSigningKeys 备份必须含审计链密钥与**四把**签名私钥。
 //
 // 回归背景（温备落地时发现）：
+//
 //   - 审计链 HMAC 密钥原先按 `os.Getenv("BAIDI_AUDIT_HMAC_KEY_FILE")` 收集，而该变量
 //     **默认为空**（默认路径由 OpenSQLite 按库文件目录推导），于是标准部署导出的备份里
 //     根本没有它。恢复后 control 重新生成一把新的 → **全链校验永久失败**：
 //     审计数据都在、每一条都验不过，且只在有人点「审计链校验」的那天才发现。
+//
 //   - BAIDI_JWT_WEB_KEY 那把（七层 Web 代理票据）整个漏掉了。恢复后 control 重生成，
 //     而各网关 L7 监听装的还是旧的 web.pub → 所有 B/S 应用点开都验不过票，
 //     而隧道路径一切正常（最难往"备份缺了个文件"上想的一种失效）。

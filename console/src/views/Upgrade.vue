@@ -24,8 +24,16 @@
         <div class="bd-card__h">当前版本</div>
         <SkeletonBlock v-if="!loaded" kind="card" :rows="4" />
         <div v-else class="bd-card__b">
-          <div class="bd-vers__big bd-mono">{{ bundle.control || '—' }}</div>
+          <!-- ★未注入时显示「未注入」而不是任何数字：这一格此前读的是源码里的常量，
+               而 -ldflags -X 对常量静默无效——它显示的版本与这台机器上装的是哪次构建无关。 -->
+          <div class="bd-vers__big bd-mono">{{ bundle.control || '未注入' }}</div>
           <div class="bd-vers__sub">控制面 baidi-control</div>
+          <!-- 构建标识是与语义版本**并列**的第二个字段：同一个 0.4.0 可以是几十次不同的构建，
+               出事那天要拿它去对代码。 -->
+          <div class="bd-vers__build bd-mono">构建 {{ bundle.controlBuild || '未注入' }}</div>
+          <div v-if="bundle.controlNote" class="bd-notice bd-notice--warn bd-up__vnote">
+            <icon-exclamation-circle-fill /><span>{{ bundle.controlNote }}</span>
+          </div>
 
           <div class="bd-sec2">网关组件</div>
           <!-- ★读取失败时不许再说「暂无网关注册」：那是一句确定结论，而此刻的事实是没读到。 -->
@@ -34,13 +42,12 @@
           <EmptyState v-else-if="!gwList.length" size="sm" tone="warn" title="暂无网关注册" />
           <div v-for="g in gwList" :key="g.id" class="bd-gwrow">
             <b class="bd-mono">{{ g.id }}</b>
-            <span v-if="g.version" class="bd-tg" :class="g.version === bundle.control ? 'bd-tg--green' : 'bd-tg--gold'">
-              {{ g.version }}
-            </span>
-            <!-- 不上报版本的旧网关如实标「无法校验」，绝不当成一致 -->
-            <span v-else class="bd-tg bd-tg--grey bd-up__unk" title="该网关版本低于 v0.4，不上报版本号——无法校验组件一致性">
-              无法校验
-            </span>
+            <span v-if="gwVerState(g.version) === 'match'" class="bd-tg bd-tg--green">{{ g.version }}</span>
+            <span v-else-if="gwVerState(g.version) === 'stale'" class="bd-tg bd-tg--gold"
+              :title="`与控制面 ${bundle.control} 不一致`">{{ g.version }}</span>
+            <!-- 不可判定单成一档：它与「确定不一致」的下一步动作完全不同（去升级构建 vs 去同步版本） -->
+            <span v-else class="bd-tg bd-tg--grey bd-up__unk" :title="gwVerTitle(g.version)">不可判定</span>
+            <span v-if="g.build" class="bd-up__gwbuild bd-mono" :title="`构建标识：${g.build}`">{{ g.build }}</span>
           </div>
         </div>
       </div>
@@ -306,7 +313,32 @@ const signBlocked = computed(() => bundle.value.signKeysConfigured === false);
 const rules = reactive<UpgradeRules>({ allowDowngrade: false, requireComponentMatch: true, hops: [] });
 
 const gwList = computed(() => Object.entries(bundle.value.gateways ?? {})
-  .map(([id, version]) => ({ id, version })).sort((a, b) => a.id.localeCompare(b.id)));
+  .map(([id, version]) => ({ id, version, build: bundle.value.gatewayBuilds?.[id] ?? '' }))
+  .sort((a, b) => a.id.localeCompare(b.id)));
+
+/**
+ * 网关版本与控制面的关系，**三态**。
+ *
+ * ★`unknown` 与 `stale` 必须分开：改造前 deploy/build.sh 往语义版本那一格注的是
+ * git 短哈希，解析不出来与"解析出来了但确实不等于控制面"被合并成同一种黄色标签——
+ * 于是每一台按脚本装出来的网关都常年挂着「版本不一致」，一条永远为真的提示等于没有提示。
+ * ★控制面自己未注入时也是 `unknown`：拿一个不可判定的基准去宣布别人"一致"是空话。
+ */
+function isSemver(v: string): boolean { return /^v?\d+\.\d+\.\d+(-[\w.]+)?$/.test(v.trim()); }
+function gwVerState(v: string): 'unknown' | 'match' | 'stale' {
+  const cur = bundle.value.control.trim();
+  const got = v.trim();
+  if (!got || !isSemver(got) || !cur || !isSemver(cur)) return 'unknown';
+  return got.replace(/^v/, '') === cur.replace(/^v/, '') ? 'match' : 'stale';
+}
+/** 不可判定那一档的悬停解释——三种成因的下一步动作不同，不能只说"无法校验"。 */
+function gwVerTitle(v: string): string {
+  const got = v.trim();
+  if (!bundle.value.control.trim()) return '控制面自身的版本未注入，无从比对';
+  if (!got) return '该网关未上报语义版本（版本过旧，或二进制未注入版本身份）';
+  if (!isSemver(got)) return `该网关上报的是 ${got}，不是语义版本——多半是构建时把提交哈希注进了版本那一格`;
+  return '';
+}
 
 const chk = reactive({ manifest: '', sig: '', busy: false, result: null as UpgradeCheckResult | null });
 const bk = reactive({ pass: '', note: '', busy: false });
@@ -509,10 +541,16 @@ onMounted(load);
 .bd-vers { width: 300px; flex: none; align-self: flex-start; }
 .bd-vers__big { font-size: var(--bd-fs-2xl); font-weight: 700; color: var(--bd-primary); line-height: 1.2; }
 .bd-vers__sub { font-size: var(--bd-fs-sm); color: var(--bd-t3); margin-top: 2px; }
+/* 构建标识排在语义版本下方、比它弱一档：两者是并列事实，但只有语义版本参与判定。 */
+.bd-vers__build { font-size: var(--bd-fs-xs); color: var(--bd-t3); margin-top: 6px; word-break: break-all; }
+.bd-up__vnote { margin-top: var(--bd-sp-3); }
 .bd-gwrow {
   display: flex; align-items: center; justify-content: space-between; gap: var(--bd-sp-2); padding: 7px 0;
-  border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm);
+  border-top: 1px solid var(--bd-border-2); font-size: var(--bd-fs-sm); flex-wrap: wrap;
 }
+/* 网关构建标识：整行已被 space-between 撑开，它挤在中间会把版本标签推到边上，
+   所以整行换行放到第二行去（flex-basis:100%）。 */
+.bd-up__gwbuild { flex: 0 0 100%; font-size: var(--bd-fs-xs); color: var(--bd-t3); word-break: break-all; }
 
 .bd-sec2 {
   font-size: var(--bd-fs-sm); font-weight: 600; color: var(--bd-t2); margin: var(--bd-sp-4) 0 var(--bd-sp-2);

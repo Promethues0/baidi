@@ -627,6 +627,9 @@
               <th>落后</th>
               <th>同步间隔（RPO）</th>
               <th>盘上那份备份</th>
+              <!-- ★这一列问的是「切换后跑起来的会是哪一版」，判据是备机上那份
+                   **baidi-control**（提升脚本最后一步启动的就是它），不是同步进程自己的版本。 -->
+              <th>切换后的服务端版本</th>
               <th>最近一轮</th>
             </tr>
           </thead>
@@ -657,6 +660,17 @@
                   从未成功同步——现在提升它只会得到一套空系统
                   <i v-if="n.lastPullAt" class="bd-mono bd-sys__sub">但来拉过：{{ n.lastPullAt }}</i>
                 </span>
+              </td>
+              <td>
+                <!-- 三态各自成一档。★unknown 绝不能画成绿色：两台都不知道自己是哪一版时
+                     显示「一致」，方向与事实正好相反，而那恰恰是升级到本版本之前所有存量部署的形态。 -->
+                <span class="bd-tg" :class="versionTagClass(n.versionState)">{{ versionStateText(n.versionState) }}</span>
+                <i class="bd-mono bd-sys__sub">baidi-control {{ n.controlSemver || '不可判定' }}</i>
+                <i v-if="n.controlBuild" class="bd-mono bd-lastdetail">构建 {{ n.controlBuild }}</i>
+                <i v-if="n.nodeSemver" class="bd-mono bd-sys__sub">同步进程 baidi-standby {{ n.nodeSemver }}</i>
+                <!-- 结论那句人话由后端下发，页面原样显示：三种不可判定的下一步动作完全不同
+                     （升级备机的包 / 到备机上跑一次 -version / 主机自己也没注入），前端编不出来。 -->
+                <i v-if="n.versionText" class="bd-hint bd-sys__sub">{{ n.versionText }}</i>
               </td>
               <td>
                 <span v-if="!n.lastStatus" class="bd-hint">从未回报</span>
@@ -891,6 +905,28 @@ function stateText(state: string) {
     case 'stale': return '落后';
     case 'never': return '从未成功同步';
     default: return state || '—';
+  }
+}
+/**
+ * 备机上那份 baidi-control 与主机的版本关系（wave11 行动 18-③）。
+ *
+ * ★三档必须各有各的说法与颜色，尤其**不可判定不能画成绿色**：
+ * 两台机器都不知道自己是哪一版时，一句「版本一致」的方向与事实正好相反，
+ * 而那恰恰是升级到本版本之前所有存量部署的形态（旧备机根本不上报这几项）。
+ * 旧后端不下发 versionState → undefined → 同样走不可判定这一档。
+ */
+function versionStateText(s?: string) {
+  switch (s) {
+    case 'match': return '与主机同版';
+    case 'mismatch': return '与主机不同版';
+    default: return '不可判定';
+  }
+}
+function versionTagClass(s?: string) {
+  switch (s) {
+    case 'match': return 'bd-tg--green';
+    case 'mismatch': return 'bd-tg--red';
+    default: return 'bd-tg--grey';
   }
 }
 /** 头像底色按姓名散列到五档语义色之一（类名，颜色在样式里走 --bd-* token）。 */

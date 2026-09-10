@@ -110,7 +110,10 @@
         </div>
         <div class="dg-hero__meta">
           <div class="mrow"><span>组件</span><b>{{ bundle.component }}</b></div>
-          <div class="mrow"><span>版本</span><b>v{{ bundle.version }} · {{ envLabel }}</b></div>
+          <!-- ★不再硬拼 "v" 前缀：未注入时那会渲染成一个孤零零的 "v"，
+               看起来像取数出了 bug，而事实是这个二进制没有版本身份（见 checkVersion 那一项）。 -->
+          <div class="mrow"><span>版本</span><b>{{ versionText }} · {{ envLabel }}</b></div>
+          <div class="mrow"><span>构建</span><b>{{ bundle.build || '未注入' }}</b></div>
           <div class="mrow"><span>运行时长</span><b>{{ bundle.uptime }}</b></div>
           <div class="mrow"><span>体检时间</span><b>{{ bundle.generatedAt || '—' }}</b></div>
         </div>
@@ -208,9 +211,12 @@ function fmtUptime(sec: number): string {
 
 /* 降级演示数据（对齐后端 DiagBundle，便于无后端时预览） */
 const MOCK: DiagBundle = {
-  generatedAt: '', component: 'baidi-control · 控制中心', version: '0.3.0', env: 'dev', uptime: '—',
-  score: 81, pass: 5, warn: 3, fail: 0, skip: 1,
+  // ★演示占位的版本身份**故意留空**：这份数据只在连不上后端时出现，
+  // 而连不上后端恰恰不该被渲染成一个言之凿凿的版本号（页顶已有降级横幅）。
+  generatedAt: '', component: 'baidi-control · 控制中心', version: '', build: '', env: 'dev', uptime: '—',
+  score: 81, pass: 5, warn: 4, fail: 0, skip: 1,
   checks: [
+    { key: 'version', category: 'control', name: '服务端版本身份', status: 'warn', summary: '控制面的语义版本未注入：当前版本不可判定', metric: '未注入 · 未注入', hint: '用 deploy/build.sh 重新构建并部署（语义版本取自仓库根的 VERSION 文件）。' },
     { key: 'control', category: 'control', name: '控制面 baidi-control', status: 'pass', summary: '控制中心进程运行正常，API 响应中', metric: 'v0.3.0 · 运行 —', hint: '' },
     { key: 'db', category: 'storage', name: '管理数据库 SQLite', status: 'pass', summary: '数据库连接正常，读写可用', metric: '往返 —', hint: '' },
     { key: 'audit-disk', category: 'storage', name: '审计日志留存', status: 'pass', summary: '审计日志留存正常，磁盘水位健康', metric: '审计 2040 行 · 库文件 1.6MB · 磁盘余 212.3GB / 494.4GB（占用 57%）· 留存 180 天', hint: '' },
@@ -285,6 +291,14 @@ const verdictText = computed(() => {
   return '全部检查通过，系统健康';
 });
 const envLabel = computed(() => (bundle.value.env === 'prod' ? '生产' : '开发'));
+/**
+ * 控制面语义版本的展示文案。
+ *
+ * ★空 = 未注入（这个二进制不是 deploy/build.sh 产出的交付件），不是取数失败，
+ * 也不是某个数字——所以既不能补 "v" 前缀凑出个 "v"，也不能回落到任何常量。
+ * 「服务端版本身份」那一项会把成因与处置说全，这里只负责不撒谎。
+ */
+const versionText = computed(() => (bundle.value.version ? 'v' + bundle.value.version : '未注入'));
 
 const CAT: Record<DiagCategory, { label: string; icon: string }> = {
   control: { label: '控制面', icon: 'IconDashboard' },
@@ -376,7 +390,8 @@ function exportReport() {
   }
   lines.push(
     `- 组件：${b.component}`,
-    `- 版本：v${b.version}（${envLabel.value}）`,
+    `- 版本：${versionText.value}（${envLabel.value}）`,
+    `- 构建：${b.build || '未注入'}`,
     `- 运行时长：${b.uptime}`,
     `- 体检时间：${b.generatedAt || '—'}`,
     // 与屏幕上那个「—」同源：81 分是内置演示常量，印在一份会被存档的报告里最像实测值。

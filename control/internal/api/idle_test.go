@@ -25,7 +25,7 @@ import (
 func makeIdleAdminFixture(t *testing.T, h http.Handler, account string) {
 	t.Helper()
 	code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(), map[string]any{
-		"account": account, "roleKey": "audit",
+		"account": account, "roleKey": "audit", "password": testStrongPw,
 	})
 	if code != http.StatusOK && code != http.StatusCreated {
 		t.Fatalf("提权夹具 %s 失败 http %d: %v", account, code, out)

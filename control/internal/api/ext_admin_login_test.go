@@ -346,7 +346,7 @@ func promoteWithTotpEnrolled(t *testing.T, h http.Handler, account, sec, roleKey
 		t.Fatalf("受限令牌改密应成功：%d %v", code, o)
 	}
 	if code, o := doJSON(t, h, "POST", "/api/v1/admins", adminToken(),
-		map[string]any{"account": account, "roleKey": roleKey}); code != http.StatusOK {
+		map[string]any{"account": account, "roleKey": roleKey, "password": testStrongPw}); code != http.StatusOK {
 		t.Fatalf("有本地口令后提权应 200，got %d %v", code, o)
 	}
 }

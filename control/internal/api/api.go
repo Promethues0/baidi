@@ -38,8 +38,12 @@ const (
 	kickBanTTL = 5 * time.Minute
 	// pwResetTTL 首登强制改密受限令牌（Use=pwreset）的有效期：够完成一次改密，不够当会话用。
 	pwResetTTL = 15 * time.Minute
-	// seedInitialPassword 新建用户未指定初始口令时的 demo 默认口令。
-	seedInitialPassword = "baidi@123"
+	// ★seedInitialPassword 已删除（wave11 行动 5）。它是「新建用户未指定初始口令时的
+	// demo 默认口令」= 公开的 baidi@123，被 handleCreateUser / handleCreateAdmin /
+	// CSV 批量导入三条路径共用，而控制台的占位符还当面写着「留空则用默认 baidi@123」。
+	// 于是"新账号在本人首登之前持有一把公开口令"成了产品的推荐路径。
+	// 留空现在改为 auth.GenerateInitialPassword 逐账号生成随机强口令并在回执里交还。
+	// 测试夹具若要一把可预期的口令，用 testStrongPw，别把这个常量加回来。
 )
 
 // Server 持有依赖（store 读 + writer 写 + JWT 密钥），按模块注册路由。
@@ -1146,11 +1150,23 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = json.Unmarshal(raw, &extra)
 	pw := extra.Password
+	// ★留空不再回落成 demo 默认口令。此前这里是 `pw = seedInitialPassword`（= 公开的
+	// baidi@123），而控制台的占位符还当面写着「留空则用默认 baidi@123」——于是产品自己
+	// 把「新账号在首登之前持有一把公开口令」做成了推荐路径。MustChangePw 只保证
+	// 「谁先登谁改」，拦不住知道账号刚建好的人抢先登进去。
+	//
+	// 留空改为**逐账号生成一把随机强口令**并在回执里交还（不是直接拒绝）：
+	// 硬拒会让「导出 → 迁库 → 导入」这条路整段走不通，而那正是批量导入存在的理由。
+	generated := ""
 	if pw == "" {
-		pw = seedInitialPassword // 未指定初始口令时给 demo 默认，保证新用户可登录
-	}
-	if len(pw) < 6 {
-		httpx.Error(w, http.StatusBadRequest, "初始口令至少 6 位")
+		g, gerr := auth.GenerateInitialPassword(u.Account)
+		if gerr != nil {
+			// fail-closed：绝不回落到常量口令。
+			httpx.Error(w, http.StatusInternalServerError, "生成初始口令失败："+gerr.Error())
+			return
+		}
+		pw, generated = g, g
+	} else if !requireStrongPassword(w, u.Account, pw) {
 		return
 	}
 	hash, err := auth.HashPassword(pw)
@@ -1184,7 +1200,20 @@ func (s *Server) handleCreateUser(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "admin", "新增用户「"+created.Name+"」("+created.Account+"，组织 "+
-		pickStr(created.OrgID, "无归属")+")，已置首登改密", "ok")
+		pickStr(created.OrgID, "无归属")+")，已置首登改密"+
+		pickStr(map[bool]string{true: "，初始口令由系统随机生成"}[generated != ""], ""), "ok")
+	// ★生成的初始口令只在这一次回执里出现，且**绝不入审计、绝不入日志**——
+	// 审计是留存 180 天并可外送 SIEM 的，把一次性口令写进去等于给它一份长期副本。
+	if generated != "" {
+		body := map[string]any{}
+		if raw, mErr := json.Marshal(created); mErr == nil {
+			_ = json.Unmarshal(raw, &body)
+		}
+		body["initialPassword"] = generated
+		body["initialPasswordNote"] = auth.InitialPasswordNote()
+		httpx.JSON(w, http.StatusCreated, body)
+		return
+	}
 	httpx.JSON(w, http.StatusCreated, created)
 }
 
@@ -1265,20 +1294,30 @@ func (s *Server) handleResetUserPassword(w http.ResponseWriter, r *http.Request)
 	var body struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || len(body.Password) < 6 {
-		httpx.Error(w, http.StatusBadRequest, "口令至少 6 位")
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body.Password == "" {
+		httpx.Error(w, http.StatusBadRequest, "口令不能为空")
+		return
+	}
+	// ★目录查询提到强度判定之前：判据要带**目标账号名**（"口令中包含账号名" 是
+	// PasswordWeakness 的三条规则之一），而这个 handler 此前直到算完哈希才去查目标是谁。
+	u, found, uerr := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
+	if uerr != nil {
+		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
+		return
+	}
+	if !found {
+		httpx.Error(w, http.StatusNotFound, "用户不存在")
+		return
+	}
+	// 管理员重置口令与自助改密走同一条强度线。此前这里只查 len>=6：安全管理员
+	// 给人重置成 `123456` 接口照回 200，而那个账号的 pw_strength 老老实实标着 weak——
+	// 判定器算得好好的，却没有任何一处拦过它。
+	if !requireStrongPassword(w, u.Account, body.Password) {
 		return
 	}
 	hash, err := auth.HashPassword(body.Password)
 	if err != nil {
 		httpx.Error(w, http.StatusInternalServerError, "failed to hash password")
-		return
-	}
-	// 口令强度只能在这一刻判（登录时只有 bcrypt 哈希）——判定结果随口令同语句落库，
-	// 供认证策略的「弱密码」增强规则消费。
-	u, found, uerr := s.lookupDirUser(r.Context(), func(du store.DirUser) bool { return du.ID == id })
-	if uerr != nil {
-		httpx.Error(w, http.StatusInternalServerError, "failed to load user")
 		return
 	}
 	// ★重置管理员的口令 = 拿到那名管理员的全部权限：新口令是操作者自己定的，

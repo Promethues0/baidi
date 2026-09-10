@@ -278,11 +278,18 @@ func (s *Server) handleCreateAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	pw := body.Password
+	// 同 handleCreateUser：留空不再回落成公开的 demo 口令，改为逐账号生成随机强口令
+	// 并在回执里交还。管理员账号上这条尤其要紧——一个刚建出来、口令是 baidi@123 的
+	// 管理员，在他本人首登之前是一把全权钥匙。
+	generated := ""
 	if pw == "" {
-		pw = seedInitialPassword
-	}
-	if len(pw) < 6 {
-		httpx.Error(w, http.StatusBadRequest, "初始口令至少 6 位")
+		g, gerr := auth.GenerateInitialPassword(body.Account)
+		if gerr != nil {
+			httpx.Error(w, http.StatusInternalServerError, "生成初始口令失败："+gerr.Error())
+			return
+		}
+		pw, generated = g, g
+	} else if !requireStrongPassword(w, body.Account, pw) {
 		return
 	}
 	hash, err := auth.HashPassword(pw)
@@ -304,8 +311,14 @@ func (s *Server) handleCreateAdmin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.audit(r, "admin", "新建管理员「"+created.Name+"」("+created.Account+"，角色 "+
-		body.RoleKey+")，已置首登改密", "ok")
-	httpx.JSON(w, http.StatusCreated, map[string]any{"ok": true, "account": created.Account, "roleKey": body.RoleKey})
+		body.RoleKey+")，已置首登改密"+pickStr(map[bool]string{true: "，初始口令由系统随机生成"}[generated != ""], ""), "ok")
+	resp := map[string]any{"ok": true, "account": created.Account, "roleKey": body.RoleKey}
+	// 一次性初始口令只在回执里出现一次；绝不入审计（留存 180 天且可外送 SIEM）、绝不入日志。
+	if generated != "" {
+		resp["initialPassword"] = generated
+		resp["initialPasswordNote"] = auth.InitialPasswordNote()
+	}
+	httpx.JSON(w, http.StatusCreated, resp)
 }
 
 // handleSetAdminRole 改派管理员角色（PermAdmins）。降走最后一名超管时 409。

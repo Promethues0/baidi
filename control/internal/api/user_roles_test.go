@@ -41,7 +41,7 @@ func TestRoleDerivedGroupGetsMembers(t *testing.T) {
 
 	// 建一个用户
 	code, out = doJSON(t, f.h, "POST", "/api/v1/users", adminToken(), map[string]any{
-		"name": "周敏", "account": "zhou.min", "org": "安全部",
+		"name": "周敏", "account": "zhou.min", "org": "安全部", "password": testStrongPw,
 	})
 	if code != http.StatusOK && code != http.StatusCreated {
 		t.Fatalf("建用户 %d: %v", code, out)

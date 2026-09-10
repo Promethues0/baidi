@@ -117,6 +117,9 @@ type userImportResult struct {
 	Account string `json:"account,omitempty"`
 	Name    string `json:"name,omitempty"`
 	ID      string `json:"id,omitempty"`
+	// InitialPassword 该行的初始口令由系统随机生成时，在**这一次回执**里交还给管理员。
+	// CSV 里填了口令的行不带这个字段。绝不入审计、绝不入日志——审计留存 180 天且可外送 SIEM。
+	InitialPassword string `json:"initialPassword,omitempty"`
 	Reason  string `json:"reason,omitempty"`
 }
 
@@ -268,11 +271,21 @@ func (s *Server) handleUsersImport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		pw := strings.TrimSpace(userCell(row.rec, cols.password))
+		// ★与 handleCreateUser 同一条线：留空不再回落成公开的 demo 口令，
+		// 改为**逐行**生成随机强口令并在该行回执里交还。
+		// 批量导入曾是这条洞最坏的形态——一次几百个账号共用同一把公开口令，
+		// 而页面上看不出这批人与别人有什么不同；而用户目录的 CSV 导出**不含口令**
+		// （也不该含），所以"留空即拒"会让「导出 → 迁库 → 导入」整段走不通。
+		genPw := ""
 		if pw == "" {
-			pw = seedInitialPassword // 与 handleCreateUser 同一默认：留空也保证新账号可登录
-		}
-		if len(pw) < 6 {
-			fail("初始口令至少 6 位")
+			g, gerr := auth.GenerateInitialPassword(acct)
+			if gerr != nil {
+				fail("生成初始口令失败：" + gerr.Error()) // fail-closed，绝不回落到常量口令
+				continue
+			}
+			pw, genPw = g, g
+		} else if why := weakPasswordReason(acct, pw); why != "" {
+			fail(why)
 			continue
 		}
 		// License 席位闸逐行判：导入若不判，它就是绕开容量限制最省事的一条路
@@ -294,11 +307,13 @@ func (s *Server) handleUsersImport(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		res.ID = out.ID
+		res.InitialPassword = genPw
 		created = append(created, res)
 		// 逐账号落审计：批量导入建出来的账号与手工建的账号在库里没有任何区别，
 		// 审计里也不该有——每一个新身份都要能被单独追溯到是谁、什么时候建的。
 		s.audit(r, "admin", "批量导入：新增用户「"+out.Name+"」("+out.Account+"，组织 "+
-			pickStr(out.Org, "无归属")+")，已置首登改密", "ok")
+			pickStr(out.Org, "无归属")+")，已置首登改密"+
+			pickStr(map[bool]string{true: "，初始口令由系统随机生成"}[genPw != ""], ""), "ok")
 	}
 	s.audit(r, "admin", "用户批量导入完成：成功 "+strconv.Itoa(len(created))+" 条、失败 "+
 		strconv.Itoa(len(failed))+" 条（共 "+strconv.Itoa(len(rows))+" 行）", "ok")

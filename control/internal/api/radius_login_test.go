@@ -405,7 +405,7 @@ func TestRadiusExternalCannotBecomeAdmin(t *testing.T) {
 	portalLoginRaw(t, h, "zhou", "pw")
 
 	code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(),
-		map[string]string{"account": "zhou", "name": "周", "roleKey": "security"})
+		map[string]string{"account": "zhou", "name": "周", "roleKey": "security", "password": testStrongPw})
 	if code != http.StatusBadRequest {
 		t.Fatalf("外部账号提权应 400，得到 %d：%v", code, out)
 	}

@@ -713,7 +713,7 @@
           </a-select>
         </a-form-item>
         <a-form-item label="初始口令" help="留空用演示默认口令；新账号一律置首登强制改密">
-          <a-input-password v-model="adminForm.password" placeholder="至少 6 位" />
+          <a-input-password v-model="adminForm.password" placeholder="留空则由系统生成一次性强口令；自填需至少 10 位含三类字符" />
         </a-form-item>
       </a-form>
     </a-modal>
@@ -754,6 +754,27 @@
       </a-form>
     </a-modal>
   </div>
+
+  <!-- 建管理员留空口令时后端生成的一次性强口令，只显示这一次。 -->
+  <a-modal v-model:visible="genAdminPw.open" title="管理员初始口令（只显示这一次）" :footer="false" width="520px">
+    <a-alert type="warning" style="margin-bottom:12px">
+      这把口令<strong>只在此处出现一次</strong>，关闭后无法再次查看。它是一个<strong>管理员账号</strong>的钥匙，请立即转交本人。
+    </a-alert>
+    <a-descriptions :column="1" bordered size="medium">
+      <a-descriptions-item label="账号">{{ genAdminPw.account }}</a-descriptions-item>
+      <a-descriptions-item label="初始口令">
+        <span style="font-family:var(--bd-font-mono,monospace);font-size:15px;user-select:all">{{ genAdminPw.password }}</span>
+      </a-descriptions-item>
+    </a-descriptions>
+    <p v-if="genAdminPw.note" style="margin:12px 0 0;color:var(--color-text-3);font-size:13px">{{ genAdminPw.note }}</p>
+    <div style="margin-top:16px;text-align:right">
+      <a-space>
+        <a-button @click="copyGenAdminPw">复制口令</a-button>
+        <a-button type="primary" @click="genAdminPw.open = false">我已记下</a-button>
+      </a-space>
+    </div>
+  </a-modal>
+
 </template>
 
 <script setup lang="ts">
@@ -1347,18 +1368,39 @@ function openAdmin() {
   adminForm.roleKey = roles.value[0]?.key ?? '';
   adminOpen.value = true;
 }
+/* 系统生成的一次性初始口令（建管理员留空时）。 */
+const genAdminPw = reactive({ open: false, account: '', password: '', note: '' });
+async function copyGenAdminPw() {
+  try {
+    await navigator.clipboard.writeText(genAdminPw.password);
+    Message.success('已复制到剪贴板');
+  } catch {
+    Message.warning('复制失败，请手动选中上面的口令复制');
+  }
+}
+
 async function submitAdmin() {
   if (!adminForm.account.trim() || !adminForm.roleKey) { Message.warning('账号与角色不能为空'); return; }
   saving.value = true;
   try {
-    await api('/admins', {
+    const created: any = await api('/admins', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         account: adminForm.account.trim(), name: adminForm.name.trim(),
         roleKey: adminForm.roleKey, password: adminForm.password
       })
     });
-    Message.success(`管理员「${adminForm.account.trim()}」已落库`);
+    // ★留空口令时后端生成一把随机强口令，只在这一次回执里出现。
+    // 管理员账号上尤其不能用 toast 一闪而过——这是一把带权限的钥匙，
+    // 没抄下来就等于建了一个谁也登不进去、却真实持有权限的账号。
+    if (created?.initialPassword) {
+      genAdminPw.account = adminForm.account.trim();
+      genAdminPw.password = created.initialPassword;
+      genAdminPw.note = created.initialPasswordNote || '';
+      genAdminPw.open = true;
+    } else {
+      Message.success(`管理员「${adminForm.account.trim()}」已落库`);
+    }
     adminOpen.value = false;
     await load();
   } catch (e) { opError(e, '保存失败'); } finally { saving.value = false; }

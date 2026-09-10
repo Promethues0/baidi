@@ -17,11 +17,23 @@ func adminTokenFor(account string) string {
 	return testKeys.Sign(auth.Claims{Sub: account, Role: "admin", Name: account}, tokenTTL)
 }
 
+// testStrongPw 夹具用的强口令：必须真的过得了 auth.PasswordWeakness
+// （>=10 位、含三类字符、不含账号名、不在弱口令表里）。
+//
+// ★不要为了省事把它改短或改成含账号名的形式——建号与建管理员的口令闸
+// （wave11 行动 5）正是靠这些夹具在跑真实路径；夹具一放水，闸就等于没测。
+const testStrongPw = "Fixture#Pw9x"
+
+// seedDemoPassword 种子库里那批演示账号的口令（store.seedPassword）。
+// ★它只用于「登录种子账号」，**不是**建号时的默认值——那个默认值
+// （原 api.seedInitialPassword）已在 wave11 行动 5 删除，留空现在会生成随机强口令。
+const seedDemoPassword = "baidi@123"
+
 // makeAdmin 用超管身份建一名指定角色的管理员，返回其会话令牌。
 func makeAdmin(t *testing.T, h http.Handler, account, roleKey string) string {
 	t.Helper()
 	code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(), map[string]any{
-		"account": account, "name": account, "roleKey": roleKey,
+		"account": account, "name": account, "roleKey": roleKey, "password": testStrongPw,
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("建 %s 管理员 http %d: %v", roleKey, code, out)
@@ -56,7 +68,7 @@ func TestAdminPowerSeparationMatrix(t *testing.T) {
 		{
 			name: "新建用户（安全权）", method: "POST", path: "/api/v1/users",
 			bodyPerRole: map[string]any{
-				"root":     map[string]any{"name": "u-root", "account": "probe.root"},
+				"root":     map[string]any{"name": "u-root", "account": "probe.root"}, "password": testStrongPw,
 				"system":   map[string]any{"name": "u-sys", "account": "probe.sys"},
 				"security": map[string]any{"name": "u-sec", "account": "probe.sec"},
 				"audit":    map[string]any{"name": "u-aud", "account": "probe.aud"},
@@ -262,7 +274,7 @@ func TestSecurityAdminCannotResetAdminPassword(t *testing.T) {
 		t.Fatal("被拒的重置竟然生效了：攻击者口令能登录超管")
 	}
 	if code, out := doJSON(t, h, "POST", "/api/v1/auth/login", "",
-		map[string]any{"username": "admin", "password": seedInitialPassword}); code != http.StatusOK || out["ok"] != true {
+		map[string]any{"username": "admin", "password": seedDemoPassword}); code != http.StatusOK || out["ok"] != true {
 		t.Fatalf("超管原口令应仍可登录，得到 %d %v", code, out)
 	}
 	// 持 admins 权的超管照常可以重置管理员口令（应急重置不能被这道闸堵死）

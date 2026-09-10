@@ -369,7 +369,7 @@
         </span>
       </div>
       <div class="bd-fld"><label>初始登录口令</label>
-        <a-input-password v-model="form.password" placeholder="留空则用默认 baidi@123（至少 6 位）" />
+        <a-input-password v-model="form.password" placeholder="留空则由系统生成一次性强口令（建号后当场交还）" />
       </div>
       <div class="bd-drawer__foot">
         <div class="bd-drawer__foot-spacer" />
@@ -577,7 +577,7 @@
     <a-modal v-model:visible="resetOpen" title="重置登录口令" :width="420" :footer="false">
       <div class="bd-notice bd-notice--plain"><icon-info-circle /><span class="bd-notice__body">为「{{ sel?.name }}」({{ sel?.account }}) 设置新的登录口令，立即生效、旧口令失效。</span></div>
       <div class="bd-fld"><label>新口令</label>
-        <a-input-password v-model="newPw" placeholder="至少 6 位" @keyup.enter="doReset" />
+        <a-input-password v-model="newPw" placeholder="至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上长口令" @keyup.enter="doReset" />
       </div>
       <div class="bd-drawer__foot">
         <div class="bd-drawer__foot-spacer" />
@@ -586,6 +586,28 @@
       </div>
     </a-modal>
   </div>
+
+  <!-- 系统生成的一次性初始口令：留空建号时后端生成，只在这一次回执里出现。
+       用 Message toast 一闪而过会让这个账号变成没人知道口令的死账号。 -->
+  <a-modal v-model:visible="genPw.open" title="初始口令（只显示这一次）" :footer="false" width="520px">
+    <a-alert type="warning" style="margin-bottom:12px">
+      这把口令<strong>只在此处出现一次</strong>，关闭后无法再次查看。请立即转交本人。
+    </a-alert>
+    <a-descriptions :column="1" bordered size="medium">
+      <a-descriptions-item label="账号">{{ genPw.account }}</a-descriptions-item>
+      <a-descriptions-item label="初始口令">
+        <span style="font-family:var(--bd-font-mono,monospace);font-size:15px;user-select:all">{{ genPw.password }}</span>
+      </a-descriptions-item>
+    </a-descriptions>
+    <p v-if="genPw.note" style="margin:12px 0 0;color:var(--color-text-3);font-size:13px">{{ genPw.note }}</p>
+    <div style="margin-top:16px;text-align:right">
+      <a-space>
+        <a-button @click="copyGenPw">复制口令</a-button>
+        <a-button type="primary" @click="genPw.open = false">我已记下</a-button>
+      </a-space>
+    </div>
+  </a-modal>
+
 </template>
 
 <script setup lang="ts">
@@ -1004,16 +1026,42 @@ function openCreateUser() {
     ? [groupSel.value] : [];
   createOpen.value = true;
 }
+/* 系统生成的一次性初始口令：只在建号回执里出现一次，必须停在屏幕上等管理员抄走。 */
+const genPw = reactive({ open: false, account: '', password: '', note: '' });
+async function copyGenPw() {
+  try {
+    await navigator.clipboard.writeText(genPw.password);
+    Message.success('已复制到剪贴板');
+  } catch (e) {
+    // 不编造归因：剪贴板在非安全上下文/无权限时会真的失败，此时口令仍然显示在屏幕上。
+    Message.warning('复制失败，请手动选中上面的口令复制');
+  }
+}
+
 async function createUser() {
   if (!form.name || !form.account) { Message.warning('请填写姓名与账号'); return; }
-  if (form.password && form.password.length < 6) { Message.warning('初始口令至少 6 位'); return; }
+  // 只做「明显够不着」的预检，真闸在后端（auth.PasswordWeakness）。
+  // 此前这里写死 6 位——比不检查更坏：它当面给了管理员一条**错误的**规则，
+  // 照它填的口令会被后端拒掉，而拒绝理由与页面提示对不上。
+  if (form.password && form.password.length < 10 && form.password.length > 0) {
+    Message.warning('初始口令至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上长口令'); return;
+  }
   creating.value = true;
   try {
-    await api('/users', {
+    const created: any = await api('/users', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ ...form, orgId: form.orgId ?? '', device: '未登记', ip: '—', roles: [] })
     });
-    Message.success(`已新增用户「${form.name}」并落库`);
+    // ★留空口令时后端生成一把随机强口令，**只在这一次回执里出现**。
+    // 用 Message 一闪而过会让这个账号变成没人知道口令的死账号——必须停在屏幕上等人抄走。
+    if (created?.initialPassword) {
+      genPw.account = form.account;
+      genPw.password = created.initialPassword;
+      genPw.note = created.initialPasswordNote || '';
+      genPw.open = true;
+    } else {
+      Message.success(`已新增用户「${form.name}」并落库`);
+    }
     createOpen.value = false;
     form.name = ''; form.account = ''; form.password = '';
     await load();
@@ -1031,7 +1079,9 @@ const newPw = ref('');
 function openReset() { newPw.value = ''; resetOpen.value = true; }
 async function doReset() {
   if (!sel.value) return;
-  if (newPw.value.length < 6) { Message.warning('口令至少 6 位'); return; }
+  if (newPw.value.length < 10) {
+    Message.warning('新口令至少 10 位且含大写/小写/数字/符号中的三类；或 16 位以上长口令'); return;
+  }
   resetting.value = true;
   try {
     await api(`/users/${sel.value.id}/password`, {

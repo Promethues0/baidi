@@ -397,7 +397,7 @@ func TestAuditForwardRequiresSystemPerm(t *testing.T) {
 	f := newFwdFixture(t)
 	// 造一个只有 audit 权的管理员（审计管理员读得到日志，但改不了外送去向）。
 	if code, out := doJSON(t, f.h, "POST", "/api/v1/admins", adminToken(), map[string]any{
-		"account": "aud.wang", "name": "审计管理员王", "roleKey": "audit",
+		"account": "aud.wang", "name": "审计管理员王", "roleKey": "audit", "password": testStrongPw,
 	}); code != http.StatusCreated {
 		t.Fatalf("建审计管理员 http %d: %v", code, out)
 	}
@@ -423,7 +423,7 @@ func TestAuditForwardWritesRequireSystemAndAudit(t *testing.T) {
 	root := adminToken()
 	// 只持 system 的系统管理员。
 	if code, out := doJSON(t, f.h, "POST", "/api/v1/admins", root, map[string]any{
-		"account": "sys.zhang", "name": "系统管理员张", "roleKey": "system",
+		"account": "sys.zhang", "name": "系统管理员张", "roleKey": "system", "password": testStrongPw,
 	}); code != http.StatusCreated {
 		t.Fatalf("建系统管理员 http %d: %v", code, out)
 	}
@@ -457,7 +457,7 @@ func TestAuditForwardWritesRequireSystemAndAudit(t *testing.T) {
 		t.Fatalf("建自定义角色 http %d: %v", code, out)
 	}
 	if code, out := doJSON(t, f.h, "POST", "/api/v1/admins", root, map[string]any{
-		"account": "soc.liu", "name": "SOC 刘", "roleKey": "soc",
+		"account": "soc.liu", "name": "SOC 刘", "roleKey": "soc", "password": testStrongPw,
 	}); code != http.StatusCreated {
 		t.Fatalf("建 SOC 管理员 http %d: %v", code, out)
 	}

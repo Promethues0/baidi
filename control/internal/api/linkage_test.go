@@ -147,12 +147,12 @@ func TestAdminResetsUserPassword(t *testing.T) {
 	admin := adminToken()
 
 	// 重置 u2(li.fang) 口令
-	code, _ := doJSON(t, h, "POST", "/api/v1/users/u2/password", admin, map[string]string{"password": "Reset-9x!"})
+	code, _ := doJSON(t, h, "POST", "/api/v1/users/u2/password", admin, map[string]string{"password": "Reset-9x!Pw"})
 	if code != http.StatusOK {
 		t.Fatalf("重置口令 http %d, want 200", code)
 	}
 	// 新口令登录成功
-	if !mustLogin(t, h, "li.fang", "Reset-9x!") {
+	if !mustLogin(t, h, "li.fang", "Reset-9x!Pw") {
 		t.Fatal("新口令应能登录")
 	}
 	// 旧口令失效

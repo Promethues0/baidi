@@ -71,7 +71,7 @@ func errMsgOf(out map[string]any) string {
 func TestCreateUserDuplicateAccountSaysWhy(t *testing.T) {
 	h := newTestServer(t)
 	code, out := doJSON(t, h, "POST", "/api/v1/users", adminToken(), map[string]any{
-		"name": "重名探针", "account": "li.fang",
+		"name": "重名探针", "account": "li.fang", "password": testStrongPw,
 	})
 	if code != http.StatusConflict {
 		t.Fatalf("撞已存在账号应回 409，got %d %v", code, out)
@@ -81,7 +81,7 @@ func TestCreateUserDuplicateAccountSaysWhy(t *testing.T) {
 	}
 	// 反向：不重复的账号照常建得出来。
 	if code, out := doJSON(t, h, "POST", "/api/v1/users", adminToken(), map[string]any{
-		"name": "新同事", "account": "brand.new",
+		"name": "新同事", "account": "brand.new", "password": testStrongPw,
 	}); code != http.StatusCreated {
 		t.Fatalf("不重复的账号应建得出来，got %d %v", code, out)
 	}

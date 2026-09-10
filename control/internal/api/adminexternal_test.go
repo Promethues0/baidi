@@ -29,7 +29,7 @@ func TestExternalAccountCannotBePromotedToAdmin(t *testing.T) {
 
 	// ① 经「新建管理员」提权（账号已存在 → 走 SetAdminRole 那一支）
 	code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(), map[string]any{
-		"account": "ad.zhangsan", "roleKey": "audit",
+		"account": "ad.zhangsan", "roleKey": "audit", "password": testStrongPw,
 	})
 	if code != http.StatusBadRequest {
 		t.Fatalf("外部账号提权应被拒（400），got %d %v —— 提上去他也登不进管理台，"+
@@ -63,7 +63,7 @@ func TestExternalAccountCannotBePromotedToAdmin(t *testing.T) {
 		t.Fatalf("重置本地口令 http %d: %v", code, out)
 	}
 	if code, out := doJSON(t, h, "POST", "/api/v1/admins", adminToken(), map[string]any{
-		"account": "ad.zhangsan", "roleKey": "audit",
+		"account": "ad.zhangsan", "roleKey": "audit", "password": testStrongPw,
 	}); code != http.StatusOK {
 		t.Fatalf("有本地口令之后应提得上去，got %d %v", code, out)
 	}

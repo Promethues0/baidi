@@ -209,7 +209,7 @@ func TestUsersImportPerRowResults(t *testing.T) {
 	}
 	// 逐行原因对得上行号（行号是文件物理行号，含表头）
 	wantReason := map[float64]string{
-		4: "文件内账号重复", 5: "账号已存在", 6: "组织", 7: "用户组", 8: "不能为空", 9: "至少 6 位",
+		4: "文件内账号重复", 5: "账号已存在", 6: "组织", 7: "用户组", 8: "不能为空", 9: "长度不足 10 位",
 	}
 	for _, raw := range failed {
 		m := raw.(map[string]any)
@@ -257,11 +257,30 @@ func TestUsersImportPerRowResults(t *testing.T) {
 	if lo["mustChangePassword"] != true {
 		t.Fatalf("导入账号首登应强制改密，实得 %v", lo)
 	}
-	// 留空口令的那个走默认口令，同样能登进来（不是一个建了却登不进的死账号）
+	// ★留空口令的那一行：系统逐行生成随机强口令，并在**该行回执**里交还。
+	// 改造前这里回落成编译进二进制的公开常量 baidi@123（wave11 行动 5）——
+	// 一次导入几百个账号就是几百把同样的、写在源码里的钥匙。
+	// 断言两件事：回执里真的带回了口令，且用它真的能登进来
+	// （只断言"带回了字段"的话，生成一个登不进去的死账号也会全绿）。
+	sunPw := ""
+	for _, c := range created {
+		if m := mapOf(t, c); m["account"] == "sun.ba" {
+			sunPw, _ = m["initialPassword"].(string)
+		}
+	}
+	if sunPw == "" {
+		t.Fatalf("留空口令的行必须在回执里交还系统生成的初始口令，实得 created=%v", created)
+	}
+	if sunPw == "baidi@123" {
+		t.Fatalf("生成的初始口令不得是那个公开常量：%q", sunPw)
+	}
 	_, lo2 := doJSON(t, h, "POST", "/api/v1/portal/login", "",
-		map[string]string{"username": "sun.ba", "password": seedInitialPassword})
+		map[string]string{"username": "sun.ba", "password": sunPw})
 	if lo2["ok"] != true {
-		t.Fatalf("留空口令应回落默认口令，实得 %v", lo2)
+		t.Fatalf("用回执里交还的初始口令应能登入（否则这是个建了却登不进的死账号），实得 %v", lo2)
+	}
+	if lo2["mustChangePassword"] != true {
+		t.Fatalf("系统生成的初始口令是一次性的，首登必须强制改密，实得 %v", lo2)
 	}
 }
 

@@ -181,14 +181,14 @@ func TestUsersCarryOrgAndGroups(t *testing.T) {
 
 	// 新建用户直接带 org + group
 	code, out = doJSON(t, h, "POST", "/api/v1/users", adm, map[string]any{
-		"name": "钱七", "account": "qian.qi", "orgId": "sales", "groups": []string{gid},
+		"name": "钱七", "account": "qian.qi", "orgId": "sales", "groups": []string{gid}, "password": testStrongPw,
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("新建用户 http %d: %v", code, out)
 	}
 	// 组织不存在 → 404（不是 500）
 	if code, _ = doJSON(t, h, "POST", "/api/v1/users", adm,
-		map[string]any{"name": "错组织", "account": "bad.org", "orgId": "nope"}); code != http.StatusNotFound {
+		map[string]any{"name": "错组织", "account": "bad.org", "orgId": "nope", "password": testStrongPw}); code != http.StatusNotFound {
 		t.Errorf("组织不存在应 404，得到 %d", code)
 	}
 

@@ -119,11 +119,11 @@ func TestResetPasswordSetsMustChange(t *testing.T) {
 
 	// admin 重置自己 → 管理台登录口同样降级
 	if code, _ := doJSON(t, h, "POST", "/api/v1/users/u-admin/password", adm,
-		map[string]string{"password": "admin-reset-3"}); code != http.StatusOK {
+		map[string]string{"password": "Rst-7Kq!mZ2"}); code != http.StatusOK {
 		t.Fatalf("重置 admin 口令应 200, got %d", code)
 	}
 	code, out = doJSON(t, h, "POST", "/api/v1/auth/login", "", map[string]string{
-		"username": "admin", "password": "admin-reset-3"})
+		"username": "admin", "password": "Rst-7Kq!mZ2"})
 	if code != http.StatusOK || out["mustChangePassword"] != true {
 		t.Fatalf("管理台登录口也应降级为受限令牌: %d %v", code, out)
 	}

@@ -75,7 +75,7 @@ func importLic(t *testing.T, h http.Handler, token string, blob []byte) (int, ma
 func mkUser(t *testing.T, h http.Handler, account string) int {
 	t.Helper()
 	code, _ := doJSON(t, h, "POST", "/api/v1/users", adminToken(),
-		map[string]any{"name": account, "account": account})
+		map[string]any{"name": account, "account": account, "password": testStrongPw})
 	return code
 }
 
@@ -138,13 +138,13 @@ func TestLicenseUserSeats(t *testing.T) {
 	}
 	// 第 2 个：409，且理由把数字说全。
 	code, o := doJSON(t, h, "POST", "/api/v1/users", adminToken(),
-		map[string]any{"name": "seat.two", "account": "seat.two"})
+		map[string]any{"name": "seat.two", "account": "seat.two", "password": testStrongPw})
 	if code != http.StatusConflict {
 		t.Fatalf("席位满建号应 409，实得 %d %v", code, o)
 	}
 	// 新建管理员同样占席位 → 409。
 	if code, _ := doJSON(t, h, "POST", "/api/v1/admins", adminToken(),
-		map[string]any{"account": "seat.admin", "roleKey": "audit"}); code != http.StatusConflict {
+		map[string]any{"account": "seat.admin", "roleKey": "audit", "password": testStrongPw}); code != http.StatusConflict {
 		t.Error("席位满建管理员应 409")
 	}
 	// ★提权已有账号不占新席位：席位满也必须成功——这条是"提权分支早已 return"的回归。
@@ -205,7 +205,7 @@ func TestLicenseInvalidBlobFailsClosed(t *testing.T) {
 		t.Fatalf("坏 blob 应 invalid，实得 %v", out["mode"])
 	}
 	if code, o := doJSON(t, h, "POST", "/api/v1/users", adminToken(),
-		map[string]any{"name": "x", "account": "x.invalid"}); code != http.StatusConflict {
+		map[string]any{"name": "x", "account": "x.invalid", "password": testStrongPw}); code != http.StatusConflict {
 		t.Fatalf("invalid 态建号应 409（fail-closed），实得 %d %v", code, o)
 	}
 }

@@ -288,6 +288,14 @@ type tunneler struct {
 	ticketMu sync.RWMutex
 	ticket   string
 
+	// dialSPA 拨 SPA UDP 口。**只为可测**：默认 net.Dial，用例注入一个 Write 必失败的 conn。
+	//
+	// ★为什么非注入不可：敲门包发不出去这件事，在真实网络上取决于内核有没有把上一次的
+	// ICMP 端口不可达挂回这个已连接 socket——那是 OS 相关、时序相关的行为，
+	// 用真 UDP 端口写出来的用例必然是间歇红。而这条路径正是 wave11 行动 11-② 要修的地方
+	// （错误此前被整个吞掉），没有能把它变红的用例，下一次"顺手简化"就会把它吞回去。
+	dialSPA func(addr string) (net.Conn, error)
+
 	// ── 真实健康状态（供客户端展示与移动端绑定层读取）──
 	// 状态本体搬去 health.go 的 HealthState（那里有完整的来龙去脉）。这里用**内嵌指针**，
 	// 于是 t.markKnock() / t.knockOK 这些既有写法一字不改地继续可用；而同一份状态又能
@@ -310,7 +318,8 @@ func newTunneler(cfg *Config) *tunneler {
 	// 取令牌客户端在这里建一次（而不是每轮 knock 现建）：它内部有连接池，
 	// 每次新建会让保活敲门每 15s 重做一次 TLS 完全握手。cfg.ControlTLS 为 nil 即系统信任库。
 	return &tunneler{cfg: cfg, pick: newPicker(cfg.endpoints()), deny: make(chan error, 1),
-		HealthState: h, fetch: knock.NewFetcher(cfg.ControlTLS)}
+		HealthState: h, fetch: knock.NewFetcher(cfg.ControlTLS),
+		dialSPA: func(addr string) (net.Conn, error) { return net.Dial("udp", addr) }}
 }
 
 // knock 向**全部**落点各发一次 SPA 敲门：逐个向 control 换取短时效一次性令牌
@@ -362,18 +371,41 @@ func (t *tunneler) knockOne(ep Endpoint) (denied bool) {
 		t.markKnockFail("取敲门令牌失败：" + err.Error())
 		return false
 	}
-	uc, err := net.Dial("udp", ep.SPAAddr)
+	uc, err := t.dialSPA(ep.SPAAddr)
 	if err != nil {
 		slog.Warn("SPA 拨号失败", "gateway", ep.Label(), "err", err.Error())
 		t.markKnockFail("SPA 拨号失败：" + err.Error())
 		return false
 	}
 	defer uc.Close()
-	if sealed, e := knock.Seal(grant.Knock); e == nil {
-		if _, werr := uc.Write(sealed); werr == nil {
-			t.markKnock() // 真的发出去了才算——此前界面只看"保活 ticker 起来了没有"
-		}
+	// ★封装与发送的失败**必须有执行方**（wave11 行动 11-②）。
+	//
+	// 改造前这两处是 `if e == nil { if werr == nil { markKnock() } }`——两个错误都被
+	// **整个吞掉**：不打日志、不记 knockErr、也不清 knockOK。于是发不出去的那一轮在
+	// 健康行上与"什么都没发生"完全同形，界面停在上一次成功的 `knock=true err=-`
+	// 绿色「已接入」，用户看到的是隧道莫名其妙不通而客户端一句话都不说。
+	//
+	// 「UDP 的 Write 不会失败」是个错觉：这是 net.Dial 出来的**已连接** socket，
+	// 内核会把上一次发包收到的 ICMP 端口不可达/主机不可达挂回来，下一次 Write 直接返回
+	// ECONNREFUSED / EHOSTUNREACH；本地路由不通时也当场 "no route to host"。
+	// 这些恰恰是最该说出来的形态——「网关没在听 SPA 口」「路由到不了那台落点」。
+	//
+	// ★而「发出去了」到此为止就是终点：**SPA 刻意不回包**（回包等于向扫描者确认端口存在，
+	// 隐身就没了），所以客户端在协议上永远无法确认"门开了"。因此 markKnock 的语义只能是
+	// "包真的发出去了"，绝不能被读成"已获准接入"——界面上那两件事必须分开陈述，
+	// 见 clients/desktop/src/views/Connect.vue 的「SPA 敲门 / 加密隧道」两行。
+	sealed, err := knock.Seal(grant.Knock)
+	if err != nil {
+		slog.Warn("SPA 敲门包封装失败", "gateway", ep.Label(), "err", err.Error())
+		t.markKnockFail("SPA 敲门包发送失败：封装失败：" + err.Error())
+		return false
 	}
+	if _, err := uc.Write(sealed); err != nil {
+		slog.Warn("SPA 敲门包发送失败", "gateway", ep.Label(), "err", err.Error())
+		t.markKnockFail("SPA 敲门包发送失败：" + err.Error())
+		return false
+	}
+	t.markKnock() // 真的发出去了才算——此前界面只看"保活 ticker 起来了没有"
 	return false
 }
 

@@ -339,6 +339,13 @@ func checkKnock(c auth.Claims, protected bool, maxTTL time.Duration) error {
 	return nil
 }
 
+// skew 允许的时钟偏移 / 被动重放窗口。
+//
+// ★它同时是「敲门包时间戳能差多少」的判据（knock.Open）与 nonce 去重窗的一半，
+// 是个**协议常量**而不是配置项：客户端不知道网关配了多少，配置化只会让
+// 「为什么我这台敲不开」多一个查不到的变量。
+const skew = 30 * time.Second
+
 // Serve 启动 SPA UDP 监听；每个有效敲门包放行其源 IP。
 // strict=true 时只接受 control /knock-token 签发的短时效一次性敲门令牌（见 checkKnock）；
 // false 为过渡兼容姿态，仅告警不拒绝——生产务必开启。
@@ -351,71 +358,103 @@ func Serve(addr string, v *auth.Verifier, ttl time.Duration, al *Allowlist, stri
 	}
 	slog.Info("SPA 敲门监听", "addr", addr, "ttl", ttl.String(), "strict", strict,
 		"knockMaxTTL", knockMaxTTL.String(), "pubkey", v.HasPublicKey(), "acceptHS256", v.AcceptsLegacy())
-	cache := knock.NewCache()
-	const skew = 30 * time.Second // 允许时钟偏移 / 重放窗口
+	h := &handler{v: v, ttl: ttl, al: al, strict: strict, knockMaxTTL: knockMaxTTL, rep: rep, cache: knock.NewCache()}
 	buf := make([]byte, 8192)
 	for {
 		n, src, err := conn.ReadFrom(buf)
 		if err != nil {
 			continue
 		}
-		ip := hostOf(src.String())
-		token, protected, err := knock.Open(buf[:n], skew, cache)
-		if errors.Is(err, knock.ErrCacheFull) {
-			// ★表满不是「对方在重放」，是我方记不下了：只可能由洪泛造成，而被它挡下的
-			// 这个包很可能来自**正常用户**。类别单列，并归在攻击源统计之外
-			// （store.AttackExemptCats）——把正常用户的 IP 列进「攻击源 TOP」，
-			// 管理员会去封他，而真正该做的是查洪泛来源。同 proxy-capacity 的处置。
-			entries, rejected := cache.Stats()
-			slog.Error("SPA 敲门拒绝（去重表已满，正被洪泛）", "src", ip,
-				"表内条目", entries, "累计被拒", rejected)
-			rep.Report("knock-cache-full", ip, "SPA 敲门拒绝（去重表已满，正被洪泛；本次被拒的来源未必是洪泛者）")
-			continue
-		}
-		if err != nil {
-			slog.Warn("SPA 敲门拒绝（重放/信封无效）", "src", ip, "err", err.Error())
-			rep.Report("knock-envelope", ip, "SPA 敲门拒绝（重放/信封无效）")
-			continue
-		}
-		claims, err := v.Verify(token)
-		if err != nil {
-			slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
-			rep.Report("knock-token", ip, "SPA 敲门拒绝（令牌无效）")
-			continue
-		}
-		// 用途闸：只认 control 签发的短时效一次性敲门令牌。
-		if err := checkKnock(claims, protected, knockMaxTTL); err != nil {
-			if strict {
-				slog.Warn("SPA 敲门拒绝（令牌用途不符）", "src", ip, "user", claims.Name,
-					"role", claims.Role, "use", claims.Use, "err", err.Error())
-				rep.Report("knock-use", ip, "SPA 敲门拒绝（令牌用途不符，账号 "+claims.Name+"）")
-				continue
-			}
-			slog.Warn("SPA 敲门放行了非规范令牌（strict 已关闭，长效会话令牌可绕过控制面三道闸——仅限过渡）",
-				"src", ip, "user", claims.Name, "err", err.Error())
-		}
-		// 一次性敲门令牌（带 jti）：同一 jti 只放行一次——杜绝令牌被解出后用新信封主动重放。
-		// 去重窗按令牌实际剩余寿命 + 偏移，不再固定 10min 上界（敲门令牌只有 90s，
-		// 固定上界会让每张用过的令牌在缓存里多躺 8 分半，放大 UDP 洪泛的内存占用）。
-		if claims.Jti != "" {
-			dedupTTL := time.Until(time.Unix(claims.Exp, 0)) + skew
-			if max := knockMaxTTL + skew; dedupTTL > max {
-				dedupTTL = max
-			}
-			if dedupTTL > 0 && cache.Seen("j:"+claims.Jti, dedupTTL) {
-				slog.Warn("SPA 敲门拒绝（一次性令牌已用，主动重放被拒）", "src", ip, "jti", claims.Jti)
-				rep.Report("knock-replay", ip, "SPA 敲门拒绝（一次性令牌已用，主动重放被拒，账号 "+claims.Name+"）")
-				continue
-			}
-		}
-		// Allow 内在同一把锁下复核封禁：即便与并发强制下线相撞，也不会重开放行窗口。
-		if !al.Allow(ip, claims.Name, claims.Role, ttl) {
-			slog.Warn("SPA 敲门拒绝（用户已被强制下线，封禁期内）", "src", ip, "user", claims.Name)
-			rep.Report("knock-banned", ip, "SPA 敲门拒绝（账号 "+claims.Name+" 已被强制下线，封禁期内）")
-			continue
-		}
-		slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", ttl.String())
+		h.handle(buf[:n], hostOf(src.String()))
 	}
+}
+
+// handler 是 Serve 的循环体状态，抽出来只为一件事：**让「哪一类拒绝上报了哪个类别」可测**。
+//
+// ★Serve 本身是「真 UDP 监听 + 无限循环 + 不返回端口」，用例够不着它的分支；
+// 而本波（行动 11-①）要改的正是分类，改错的症状是安全概览把正常员工列成攻击源——
+// 那是页面上的一行文字，编译、集成、e2e 全绿。抽成方法后每一类拒绝都能直接驱动。
+type handler struct {
+	v           *auth.Verifier
+	ttl         time.Duration
+	al          *Allowlist
+	strict      bool
+	knockMaxTTL time.Duration
+	rep         *secevent.Reporter
+	cache       *knock.Cache
+}
+
+// handle 处理一个敲门包（ip 为源地址）。
+func (h *handler) handle(pkt []byte, ip string) {
+	token, protected, err := knock.Open(pkt, skew, h.cache)
+	switch {
+	case errors.Is(err, knock.ErrCacheFull):
+		// ★表满不是「对方在重放」，是我方记不下了：只可能由洪泛造成，而被它挡下的
+		// 这个包很可能来自**正常用户**。类别单列，并归在攻击源统计之外
+		// （store.AttackExemptCats）——把正常用户的 IP 列进「攻击源 TOP」，
+		// 管理员会去封他，而真正该做的是查洪泛来源。同 proxy-capacity 的处置。
+		entries, rejected := h.cache.Stats()
+		slog.Error("SPA 敲门拒绝（去重表已满，正被洪泛）", "src", ip,
+			"表内条目", entries, "累计被拒", rejected)
+		h.rep.Report("knock-cache-full", ip, "SPA 敲门拒绝（去重表已满，正被洪泛；本次被拒的来源未必是洪泛者）")
+		return
+	case errors.Is(err, knock.ErrClockSkew):
+		// ★时钟超窗与「重放」分开报（wave11 行动 11-①）。合在一起的后果不是措辞不精确，
+		// 而是**归因反了**：客户端保活每 15s 敲一次、每轮敲全部落点，一台时钟偏了 31 秒的
+		// 正常员工机一天稳定产出几千次这种拒绝，必然把安全概览的「攻击源 TOP」顶到第一名，
+		// 而类别中文名写着「敲门信封无效/重放」——管理员照着去封的是自己的员工，
+		// 且真正该做的（给那台机器校时）在页面上一个字都没有。
+		// 同批归入 store.AttackExemptCats：它不是攻击信号，判据见那里。
+		// ★判读法：单一来源超窗 = 那台终端的钟；多个来源同时超窗且方向一致 = 怀疑
+		// **网关自己**的钟（那半由控制面告警规则 clock_skew 覆盖：网关自报时钟 vs 控制面）。
+		slog.Warn("SPA 敲门拒绝（时间戳超窗，多半是终端时钟偏差）", "src", ip, "err", err.Error())
+		h.rep.Report("knock-clockskew", ip, "SPA 敲门拒绝："+err.Error())
+		return
+	case err != nil:
+		// 剩下的两种都是真异常形态：nonce 缺失（信封不合规）与 nonce 重复（**被动重放**，
+		// 整包重发）。两者与时钟无关，照旧计入攻击源统计。
+		slog.Warn("SPA 敲门拒绝（信封无效/被动重放）", "src", ip, "err", err.Error())
+		h.rep.Report("knock-envelope", ip, "SPA 敲门拒绝（信封无效/被动重放）")
+		return
+	}
+	claims, err := h.v.Verify(token)
+	if err != nil {
+		slog.Warn("SPA 敲门拒绝（令牌无效）", "src", ip, "err", err.Error())
+		h.rep.Report("knock-token", ip, "SPA 敲门拒绝（令牌无效）")
+		return
+	}
+	// 用途闸：只认 control 签发的短时效一次性敲门令牌。
+	if err := checkKnock(claims, protected, h.knockMaxTTL); err != nil {
+		if h.strict {
+			slog.Warn("SPA 敲门拒绝（令牌用途不符）", "src", ip, "user", claims.Name,
+				"role", claims.Role, "use", claims.Use, "err", err.Error())
+			h.rep.Report("knock-use", ip, "SPA 敲门拒绝（令牌用途不符，账号 "+claims.Name+"）")
+			return
+		}
+		slog.Warn("SPA 敲门放行了非规范令牌（strict 已关闭，长效会话令牌可绕过控制面三道闸——仅限过渡）",
+			"src", ip, "user", claims.Name, "err", err.Error())
+	}
+	// 一次性敲门令牌（带 jti）：同一 jti 只放行一次——杜绝令牌被解出后用新信封主动重放。
+	// 去重窗按令牌实际剩余寿命 + 偏移，不再固定 10min 上界（敲门令牌只有 90s，
+	// 固定上界会让每张用过的令牌在缓存里多躺 8 分半，放大 UDP 洪泛的内存占用）。
+	if claims.Jti != "" {
+		dedupTTL := time.Until(time.Unix(claims.Exp, 0)) + skew
+		if max := h.knockMaxTTL + skew; dedupTTL > max {
+			dedupTTL = max
+		}
+		if dedupTTL > 0 && h.cache.Seen("j:"+claims.Jti, dedupTTL) {
+			slog.Warn("SPA 敲门拒绝（一次性令牌已用，主动重放被拒）", "src", ip, "jti", claims.Jti)
+			h.rep.Report("knock-replay", ip, "SPA 敲门拒绝（一次性令牌已用，主动重放被拒，账号 "+claims.Name+"）")
+			return
+		}
+	}
+	// Allow 内在同一把锁下复核封禁：即便与并发强制下线相撞，也不会重开放行窗口。
+	if !h.al.Allow(ip, claims.Name, claims.Role, h.ttl) {
+		slog.Warn("SPA 敲门拒绝（用户已被强制下线，封禁期内）", "src", ip, "user", claims.Name)
+		h.rep.Report("knock-banned", ip, "SPA 敲门拒绝（账号 "+claims.Name+" 已被强制下线，封禁期内）")
+		return
+	}
+	slog.Info("SPA 敲门放行", "src", ip, "user", claims.Name, "role", claims.Role, "ttl", h.ttl.String())
 }
 
 func hostOf(addr string) string {

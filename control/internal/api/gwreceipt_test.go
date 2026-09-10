@@ -261,3 +261,71 @@ func Test容量拒绝落审计但不进攻击源统计(t *testing.T) {
 		}
 	}
 }
+
+// 时钟超窗的敲门拒绝：落审计 deny，但**绝不进攻击源统计**（wave11 行动 11-①）。
+//
+// ★这一条与容量拒绝是同一族，但成因方向更刺眼：客户端保活每 15s 敲一次、
+// 每轮敲全部落点，一台时钟偏了 31 秒的**正常员工机**一天稳定产出几千次超窗拒绝——
+// 计进攻击源它必然是 TOP1，而此前它与真重放共用类别、中文名逐字写着
+// 「敲门信封无效/重放」，管理员照着面板去封的是自己的员工。
+// 真重放（knock-replay / knock-envelope 的 nonce 重复）照旧计入，本用例一起钉住。
+func Test时钟超窗落审计但不进攻击源统计(t *testing.T) {
+	h, st := gwReceiptServer(t)
+	body := `{
+		"id":"gw-1","proxy":":18443","spa":":18201",
+		"events":[
+			{"ts":1754800000,"kind":"sec-deny","detail":"SPA 敲门拒绝：敲门包时间戳比网关当前时间早 47 秒（超出允许的 ±30 秒）；多半是终端时钟慢了，也可能是延迟到达的旧包","src":"10.20.30.41","cat":"knock-clockskew","count":812},
+			{"ts":1754800001,"kind":"sec-deny","detail":"SPA 敲门拒绝（信封无效/被动重放）","src":"203.0.113.9","cat":"knock-envelope","count":4}
+		]}`
+	if w := postJSONWithToken(h, "/api/v1/gateways/register", gwSelfSignedToken(), body); w.Code != http.StatusOK {
+		t.Fatalf("注册返回 %d：%s", w.Code, w.Body.String())
+	}
+	var skewSeen bool
+	for _, e := range dataplaneAudits(t, st) {
+		if strings.Contains(e.Event, "时间戳比网关当前时间早") {
+			skewSeen = true
+			if e.Verdict != "deny" {
+				t.Fatalf("超窗拒绝的 verdict 应为 deny，实得 %q", e.Verdict)
+			}
+			// 偏移量必须原样进审计：这台机器一直连不上，运维要靠它知道该往哪调时钟。
+			if !strings.Contains(e.Event, "47 秒") {
+				t.Fatalf("超窗拒绝的审计正文应带实测偏移，实得 %q", e.Event)
+			}
+			if e.SrcIP != "10.20.30.41" {
+				t.Fatalf("应记网关报来的源 IP，实得 %q", e.SrcIP)
+			}
+		}
+	}
+	if !skewSeen {
+		t.Fatal("时钟超窗没有落审计——那台机器为什么连不上就再也查不到了")
+	}
+	atk, err := st.AttackStats(t.Context(), 24)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if atk.Sources != 1 || atk.Denies != 4 {
+		t.Fatalf("时钟超窗混进了攻击源统计：%+v（应只含 knock-envelope 的 4 次）", atk)
+	}
+	for _, top := range atk.Top {
+		if top.IP == "10.20.30.41" {
+			t.Fatalf("时钟不准的正常终端被列进攻击源 TOP：%+v——管理员会去封自己的员工，而该做的是给那台机器校时", atk.Top)
+		}
+	}
+}
+
+// 类别中文名是展示的唯一真相：新加的类别必须有名字，且不许再叫「重放」。
+//
+// ★没有名字时控制面原样显示 key（`attackCatLabel` 的兜底），页面上会出现一串英文——
+// 那是给「新网关先于控制面升级」的过渡期留的，不是给同批新增的类别用的。
+func Test时钟超窗类别有中文名且不写成重放(t *testing.T) {
+	zh, ok := store.AttackCatZh["knock-clockskew"]
+	if !ok {
+		t.Fatal("knock-clockskew 缺中文名——页面会直接显示英文 key")
+	}
+	if strings.Contains(zh, "重放") {
+		t.Fatalf("时钟偏差的中文名不许出现「重放」（那正是要消灭的错归因），实得 %q", zh)
+	}
+	if !strings.Contains(zh, "时钟") {
+		t.Fatalf("中文名必须点名「时钟」，否则管理员不知道该去做什么，实得 %q", zh)
+	}
+}

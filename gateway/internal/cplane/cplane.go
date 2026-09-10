@@ -186,12 +186,16 @@ type Event struct {
 	// 以下三个字段只有安全事件（sec-deny）携带；回执类事件缺省即零值不序列化。
 	// 旧控制面不认识它们也无碍——Detail 里已含同样的事实（人读），字段是给统计（机读）的。
 	Src string `json:"src,omitempty"` // 拒绝的来源 IP（secevent 溢出聚合时为「（多源聚合）」）
-	// Cat 细分类别（有限枚举，攻击源统计的分类键）：
-	//   knock-envelope|knock-token|knock-use|knock-replay|knock-banned（SPA 五种）
-	//   proxy-unauth|proxy-revoked|proxy-preamble|proxy-ssrf|proxy-authz（L4 五种）
-	//   web-ticket|web-ticket-replay|web-entry-banned|web-res-missing|web-entry-authz
-	//   web-cookie|web-cookie-cross|web-cross-origin|web-banned|web-authz（L7 十种）
-	// 控制面按 cat 落攻击源计数表；改枚举须同步 control/internal/store/attack.go 的中文名映射。
+	// Cat 细分类别（有限枚举，攻击源统计的分类键）：`knock-*`（SPA 敲门面）、
+	// `proxy-*`（L4 隧道面）、`web-*`（L7 Web 代理面）。
+	//
+	// ★**枚举的唯一真相是 `control/internal/store/AttackCatZh`**，这里刻意不再抄一份清单。
+	// 原先这段注释逐个列了「SPA 五种 / L4 五种 / L7 十种」，而 wave8~wave11 陆续加进的
+	// knock-cache-full / proxy-noticket / proxy-ticket / proxy-nowindow / proxy-idambig /
+	// proxy-capacity 一个都没补进来——一份**已经漂了的**清单比没有清单更坏：
+	// 照它去核对会得出「这个类别不存在」的结论。加类别时改那张映射表即可
+	// （网关报来未知类别时控制面原样显示 key，不会丢数据）。
+	// 另有一张 `AttackExemptCats` 决定哪些类别只落审计、不进攻击源统计。
 	Cat   string `json:"cat,omitempty"`
 	Count int    `json:"count,omitempty"` // 该 (Cat,Src) 在节流窗口内的聚合次数（见 internal/secevent）
 }

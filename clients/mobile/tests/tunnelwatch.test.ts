@@ -533,6 +533,14 @@ test('源码守卫：Connect.vue 不再写死「已开放行窗口」，未就�
   assert.ok(!/class="ok">\s*已完成 · 已开放行窗口/.test(codeOnly(connect)),
     'Connect.vue 不得写死「已完成 · 已开放行窗口」，必须按 healthKnock / healthErr 现算三态');
   assert.match(connect, /knockView/, 'SPA 敲门那一行必须由三态判定驱动');
+  // ★wave11 行动 11-②：判据改对之后，**措辞**这一半仍在替网关下结论。
+  //   healthKnock 的真实语义只有「敲门包写出去了」；SPA 刻意不回包（回包等于向扫描者
+  //   确认端口存在），本机在协议上永远无从确认网关开没开窗。时钟不准 / 网关没在听 SPA 口 /
+  //   令牌被网关拒，三种「敲了但没开」下 healthKnock 照样是 true。
+  assert.ok(!/已开放行窗口|放行窗口已开|窗口持续续期/.test(codeOnly(connect)),
+    'Connect.vue 不得断言网关「已开放行窗口」：SPA 不回包，这个结论本机拿不到任何证据');
+  assert.ok(!/已开放行窗口|放行窗口已开|窗口持续续期/.test(codeOnly(src('src/views/Profile.vue'))),
+    'Profile.vue 的链路诊断同理：只说得出「包已发出」');
   assert.match(connect, /healthObserved/, '三态必须先判「有没有读到健康行」再判真假');
   assert.match(connect, /session\.notReady/, 'Connect.vue 必须常驻显示未就绪原因（弹窗一闪而过不算「看见」）');
   assert.match(connect, /'unready'/, '大环必须有第四态');
